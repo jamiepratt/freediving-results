@@ -4,6 +4,7 @@
 (deftest owner-request-contract
   (let [r (shell/sh "node" "-e"
                     "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    assert.deepEqual(ui.comparison({raw:{fields:{performance:'012.50'}},parsed:{performance:12.5}}, {performance:13}),[['performance','012.50',12.5,13]]);
                     assert.equal(ui.scalar('number','12.5'),12.5);
                     assert.equal(ui.scalar('unknown',''),null);assert.throws(()=>ui.scalar('boolean','typo'));assert.equal(ui.scalar('boolean','false'),false);
                     assert.throws(()=>ui.scalar('number','NaN'));

@@ -40,7 +40,11 @@
       'review-revision':q['review-revision'],'policy-version':q['policy-version'],observation:q.observation,
       action:f.action,evidence:evidence(f),attestations:f.action==='validate'?{'source-visual-accuracy':true,'no-unresolved-substantive-errors':true}:{}};
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication}; return; }
+  function comparison(payload, effective) {
+    const raw=payload.raw?.fields||{}, parsed=payload.parsed||{};
+    return Object.keys({...raw,...parsed,...effective}).map(k=>[k,raw[k],parsed[k],effective[k]]);
+  }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison}; return; }
   const $=id=>document.getElementById(id);
   let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
@@ -86,10 +90,10 @@
     $('case-title').textContent=parsed['source-name']||'Missing parsed source name';
     $('revision').textContent='Review revision '+d.effective.revision+' · Extraction revision '+d.publication.revision+' · Identity '+readable(d.effective.identity);
     $('comparison').replaceChildren();
-    const table=node('table'),head=node('tr');['Field','Original parsed','Effective approved'].forEach(x=>head.append(node('th',x)));table.append(head);
-    Object.keys({...parsed,...fields}).forEach(k=>{const row=node('tr');[human(k),readable(parsed[k]),readable(fields[k])].forEach(x=>row.append(node('td',x)));table.append(row);});$('comparison').append(table);
+    const table=node('table'),head=node('tr');['Field','Raw source','Original parsed','Effective approved'].forEach(x=>head.append(node('th',x)));table.append(head);
+    comparison(t.payload,fields).forEach(([k,...values])=>{const row=node('tr');[human(k),...values.map(readable)].forEach(x=>row.append(node('td',x)));table.append(row);});$('comparison').append(table);
     $('evidence').replaceChildren(structure(e));
-    $('uncertainties').replaceChildren(structure(d.packet.uncertainties),expandable('Parser status and errors',{'parse-status':t.payload['parse-status'],errors:t.payload.errors}));
+    $('uncertainties').replaceChildren(structure(d.packet.uncertainties),structure({'parse-status':t.payload['parse-status'],'unresolved-reasons':t.payload['unresolved-reasons']||[],errors:t.payload.errors||[]}));
     $('candidates').replaceChildren();$('anchor').replaceChildren(new Option('Select an inspected candidate',''));
     (d.packet.candidates||[]).forEach((c,i)=>{
       const card=node('section',undefined,'candidate');card.append(node('h4',c.observations.map(o=>o.payload.parsed?.['source-name']||'Unknown name').join(' / ')),node('p','Retrieval signals: '+readable(c.signals)));
@@ -114,7 +118,9 @@
   async function openCase(t){if(busy)return;selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status('Inspect original evidence before proposing a change.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
   function fieldChanged(){const f=$('field').value,identity=f==='identity';$('scalar-fields').hidden=identity;$('identity-fields').hidden=!identity;if(!identity){const v=detail.effective.fields[f];$('value-type').value=v===null?'unknown':typeof v==='number'?'number':typeof v==='boolean'?'boolean':'text';$('value').value=v??'';}}
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
-  async function start(){const s=await api('/api/session');if(!s.authenticated){$('login-panel').hidden=false;$('workspace').hidden=true;return;}csrf=s.csrf;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';renderList();status('Select a comparison case to inspect its evidence.');}
+  function clearSession(){generation++;csrf=null;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
+  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';renderList();status('Select a comparison case to inspect its evidence.');}
+  $('logout').onclick=async()=>{if(busy)return;lock(true);try{await api('/api/logout',{});clearSession();status('Signed out. Owner session revoked.');$('capability').focus();}catch(e){if(e.status===401){clearSession();status('Session expired. Log in again.');}else status('Sign out failed: '+e.message,true);}finally{lock(false);}};
   $('login').onsubmit=async event=>{event.preventDefault();try{const capability=$('capability').value;$('capability').value='';const s=await api('/api/login',{capability});csrf=s.csrf;await start();status('Owner session established.');}catch(e){status(e.message,true);}};
   $('filter').oninput=renderList;$('outcome-filter').onchange=renderList;$('field').onchange=fieldChanged;
   $('proposal').onsubmit=event=>{event.preventDefault();try{const f=common(formData('proposal'));f.anchor=detail.packet.candidates[Number(f.anchor)]?.['local-identity-anchor'];if($('anchor').value==='')f.anchor=null;mutate('/api/proposals',proposal(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
