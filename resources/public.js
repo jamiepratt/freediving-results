@@ -150,7 +150,7 @@
         const pageLink = (text, page) => { const p = new URLSearchParams(location.search); p.set('page', page); return link(text, '/?' + p); };
         if (data.page > 1) nav.append(pageLink('← Previous', data.page - 1)); nav.append(el('span', 'Page ' + data.page + ' of ' + Math.max(1, data.pages))); if (data.page < data.pages) nav.append(pageLink('Next →', data.page + 1)); main.append(nav);
         status.textContent = data.total + ' matching public records. Page ' + data.page + '.';
-      } else if (path.startsWith('/results/')) { detail(data.result); status.textContent = 'Public result loaded.'; }
+      } else if (path.startsWith('/results/')) { detail({...data.result, correction: data.correction}); status.textContent = 'Public result loaded.'; }
       else {
         main.append(link('← Search results', '/', 'back-link'), el('p', 'APPROVED CONNECTIONS', 'eyebrow'), el('h1', 'Athlete result history'), el('p', 'Only currently eligible records with active approved identity links appear here. Source names are retained as recorded.', 'lead'));
         const names = [...new Set(data.results.map(r => (r.effective || {})['source-name']).filter(Boolean))]; main.append(el('p', 'Names in these sources: ' + names.join(' · '), 'source-names'), resultCards(data.results)); status.textContent = data.results.length + ' linked public records.';

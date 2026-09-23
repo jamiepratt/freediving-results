@@ -51,7 +51,7 @@ const events={};global.window={addEventListener:(k,v)=>events[k]=v};
 global.location={pathname:'/results/'+ 'a'.repeat(64),search:'',origin:'http://localhost'};
 global.history={pushState:()=>{throw Error('must not navigate')}};
 let post=null;
-global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({result:{'result-id':'a'.repeat(64),correction:{version:'v1'},effective:{'source-name':'Synthetic'}}})};
+global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({correction:{version:'v1'},result:{'result-id':'a'.repeat(64),effective:{'source-name':'Synthetic'}}})};
 require('./resources/public.js');
 function all(n){return [n,...n.children.flatMap(all)]}
 (async()=>{
