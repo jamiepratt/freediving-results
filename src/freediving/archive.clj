@@ -232,3 +232,85 @@
             (publish! root target #(with-open [out (io/output-stream %)] (.write out bytes)) digest))
           (verified-object! target digest)
           {:sha256 digest :path (str target)})))))
+
+(defn extraction-evidence
+  "Return verified retained evidence hashes. Snapshot includes original legacy lineage,
+   manifests and configs when present; no evidence bytes are copied into candidates."
+  [root]
+  (with-archive root false
+    (fn [root]
+      (let [dir (io/file root "evidence")]
+        (if-not (exists? dir) []
+                (do
+                  (private! dir true)
+                  (->> (.listFiles dir)
+                       (map (fn [file]
+                              (let [digest (.getName file)]
+                                (when-not (valid-hash? digest) (fail! "Invalid evidence filename"))
+                                (verified-object! file digest)
+                                digest)))
+                       sort vec)))))))
+
+(defn- read-one-edn [file]
+  (with-open [reader (java.io.PushbackReader. (io/reader file :encoding "UTF-8"))]
+    (let [eof (Object.) value (edn/read {:eof eof} reader)]
+      (when-not (identical? eof (edn/read {:eof eof} reader)) (fail! "Expected one EDN artifact"))
+      value)))
+
+(defn- complete-pr-str [value]
+  (binding [*print-length* nil *print-level* nil] (pr-str value)))
+
+(defn derive!
+  "Atomically cache a private derived EDN artifact by caller's deterministic job hash.
+   Pending receipts resume the same artifact after process interruption. Unreferenced
+   derived objects and recognized staging files are reclaimed under the archive lock."
+  [root job-id producer on-progress]
+  (when-not (valid-hash? job-id) (fail! "Invalid derivation job hash"))
+  (with-archive root true
+    (fn [root]
+      (let [dir (io/file root "derivations") artifacts (io/file root "derived-objects")
+            record (io/file dir (str job-id ".edn"))
+            pending (io/file dir (str job-id ".pending.edn"))]
+        (directory! dir)
+        (directory! artifacts)
+        (safe-path! record)
+        (safe-path! pending)
+        (doseq [file (.listFiles (io/file root "tmp"))]
+          (private! file false)
+          (when-not (re-matches #"pending-.*\.tmp" (.getName file)) (fail! "Unexpected staging entry"))
+          (Files/delete (path file)))
+        (let [referenced (set (map (fn [file]
+                                     (private! file false)
+                                     (when-not (re-matches #"[0-9a-f]{64}(?:\.pending)?\.edn" (.getName file))
+                                       (fail! "Unexpected derivation entry"))
+                                     (let [receipt (read-one-edn file)]
+                                       (when-not (valid-hash? (:artifact-sha256 receipt)) (fail! "Invalid derivation reference"))
+                                       (:artifact-sha256 receipt))) (.listFiles dir)))]
+          (doseq [file (.listFiles artifacts)]
+            (when-not (valid-hash? (.getName file)) (fail! "Unexpected derived object"))
+            (verified-object! file (.getName file))
+            (when-not (contains? referenced (.getName file)) (Files/delete (path file)))))
+        (let [existed? (exists? record)
+              receipt (cond
+                        existed? (do (private! record false) (read-one-edn record))
+                        (exists? pending) (do (private! pending false) (read-one-edn pending))
+                        :else
+                        (let [value (producer)
+                              bytes (.getBytes (complete-pr-str value) "UTF-8")
+                              digest (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes))
+                              artifact (io/file artifacts digest)
+                              receipt {:job-id job-id :artifact-sha256 digest}]
+                          (if (exists? artifact) (verified-object! artifact digest)
+                              (publish! root artifact #(with-open [out (io/output-stream %)] (.write out bytes)) digest))
+                          (publish! root pending #(spit % (complete-pr-str receipt) :encoding "UTF-8") nil)
+                          receipt))]
+          (when-not (and (= job-id (:job-id receipt)) (valid-hash? (:artifact-sha256 receipt)))
+            (fail! "Malformed derivation receipt"))
+          (let [artifact (io/file artifacts (:artifact-sha256 receipt))]
+            (verified-object! artifact (:artifact-sha256 receipt))
+            (when-not (= job-id (:job-id (read-one-edn artifact))) (fail! "Derivation identity mismatch"))
+            (when-not existed?
+              (when on-progress (on-progress {:phase :extraction-artifact-ready :job-id job-id :artifact-sha256 (:artifact-sha256 receipt)}))
+              (publish! root record #(spit % (complete-pr-str receipt) :encoding "UTF-8") nil))
+            (when (exists? pending) (Files/delete (path pending)))
+            (assoc receipt :artifact-path (str artifact) :run-status (if existed? :skipped :created))))))))
