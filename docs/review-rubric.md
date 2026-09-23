@@ -8,13 +8,13 @@ Implementation guidance awaiting owner review. These are not owner labels, ident
 | Normalization | Explicit reversible rule for a name format; original spelling remains in the observation; no inferred identity or nationality | `:name-normalization` |
 | Identity match | Meaningful local observation anchor, registered cross-source references, and contextual evidence beyond matching names; inspect contradictory context | `:identity-matching` |
 | Substantive correction | Exact source-backed reason for altering a substantive value, before/after values, unresolved contradictions | `:substantive-correction` |
-| Abstain / no-match | Describe missing, ambiguous or conflicting evidence; no supported candidate in this corpus does not establish distinct identity | Identity outcome `:unknown` or `:unmatched`, when an owner elects to propose one |
+| Abstain / no-match | Describe missing, ambiguous or conflicting evidence; no supported candidate in this corpus does not establish distinct identity | Identity outcome `{:outcome :unknown}` or `{:outcome :no-match}`, when an owner elects to propose one |
 
 A candidate comparison bucket is not a person. Case, diacritic, spacing, token-order, and shared-token signals only retrieve candidates. Preserve all exact source names, including damaged glyphs. A damaged name resembling a complete name may be reviewed as a candidate, never silently repaired or merged. Missing parsed names require abstention. CMAS1/AIN and representation codes do not establish nationality.
 
 Duplicate acquisitions of identical source bytes, repeated listings, and extraction versions remain grouped as source evidence. Their row count is not a corroboration count. Distinct source documents may share upstream data and are not automatically independent truth. Review exact hashes, acquisitions, observation versions, original values, page/line evidence, comparison configuration, and uncertainty details.
 
-Owner review prompts are approve, reject, no-match, and needs-more-evidence. These prompts are not stored decisions in exported packets. The review API records approve/reject against an explicit proposal; no-match is an identity outcome, and needs-more-evidence means withhold approval and gather evidence. A rejected identity proposal retains its proposed local anchor. Existing approval reversals remain append-only. Review database capability, not possession of an HTML file, controls decisions.
+Owner review prompts are approve, reject, no-match, and needs-more-evidence. These prompts are not stored decisions in exported packets. The review API records approve/reject against an explicit proposal; no-match is an identity outcome, and needs-more-evidence means leave the case unreviewed, or reject an existing proposal with an explanatory reason and gather evidence; it is not a decision enum. A rejected identity proposal retains its proposed local anchor. Existing approval reversals remain append-only. Review database capability, not possession of an HTML file, controls decisions.
 
 ## Offline export
 

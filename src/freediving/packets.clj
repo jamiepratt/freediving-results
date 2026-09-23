@@ -31,7 +31,7 @@
 (defn- render-case [i packet]
   (str "<article><h2>" (inc i) ". " (escape-html (source-name (:target packet))) "</h2>"
        "<p>Outcome: <strong>" (escape-html (:outcome packet)) "</strong>. Unreviewed candidate signals only.</p>"
-       "<p>Grouped target listings: " (count (:target-observations packet))
+       "<p>Comparison bucket, not a person. Grouped target listings: " (count (:target-observations packet))
        ". Candidate groups: " (count (:candidates packet))
        ". Distinct source documents: " (escape-html (:distinct-source-document-count packet))
        ". Independent corroboration: not established.</p>"
@@ -55,7 +55,7 @@
   (str "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Private candidate review</title>"
        "<style>body{font:17px system-ui;max-width:1000px;margin:2rem auto;padding:1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f2f2;padding:1rem}article{border-top:2px solid #888;margin-top:2rem}h1,h2{line-height:1.2}</style>"
        "<h1>Private review packets</h1><p><strong>Candidate only. Awaiting owner review.</strong> Retrieval does not approve, merge, or establish an identity. No calibrated confidence is claimed.</p>"
-       "<p>Owner choices: approve, reject, no-match, needs-more-evidence. These are review prompts, not recorded decisions. Inspect exact source references and uncertainties before proposing a review.</p>"
+       "<p>Owner choices: approve, reject, no-match, needs-more-evidence. These are review prompts, not recorded decisions. Inspect exact source references and uncertainties before proposing a review. API categories below use their exact keys; abstain/no-match uses :identity-matching with {:outcome :unknown} or {:outcome :no-match}. Needs-more-evidence means leave unreviewed or reject an existing proposal with a reason; it is not a decision enum.</p>"
        "<h2>Review rubric</h2><p>Implementation guidance awaiting owner review, not owner labels. CMAS1/AIN and matching names do not establish nationality or identity. Distinct documents are not automatically independent truth.</p>"
        (apply str (for [{:keys [category requires]} rubric]
                     (str "<p><strong>" (escape-html (name category)) "</strong>: " (escape-html requires) "</p>")))
