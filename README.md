@@ -1,6 +1,6 @@
 # Freediving results: local evidence and extraction
 
-This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, and imports those artifacts into immutable PostgreSQL observations. It supports CMAS CWT men, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All observations remain unreviewed. Pilot acceptance, identity review and publication scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
+This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, imports those artifacts into immutable PostgreSQL observations, and records reversible owner review decisions separately. It supports CMAS CWT men, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All real pilot observations remain unreviewed. Pilot acceptance, identity review and publication scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
 
 ## Run
 
@@ -110,7 +110,7 @@ Speed result tokens retain decimal-only and colon-separated notation, components
 
 Every speed row and source line was compared with an independent inventory. Combined Athens coverage is 794 candidates: 787 parsed and seven unparsed, all unresolved. This includes five unparsed result rows and two detached DNF fragments. Every one of the source's 1,241 nonblank lines is accounted for once. Prior distance/STA candidates are unchanged, CWT/AIDA job identities remain unchanged, and earlier parser artifacts remain preserved under their versioned jobs. Ambiguous wrapped/adjacent lines and unrecognized notes remain visible; repeated ranks and listings are not deduplicated. Remaining pilot scope is tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
-All candidates remain unreviewed and publication remains blocked. No command publishes results or approves corrections. Owner review, additional parsers and pilot acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+All real candidates remain unreviewed and publication remains blocked. The review commands below support explicit local owner decisions; no command publishes results. Owner review, additional parsers and pilot acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
 ## Public API
 
@@ -122,7 +122,7 @@ An extraction version is a job and its exact artifact. A candidate ID identifies
 
 `inspect` returns full artifact provenance and observation payloads, including raw text, parsed values, unknown fields, unresolved reasons and mechanical repairs. `list` reports extraction versions. `count` distinguishes sources, versions, unique source-position candidates and versioned observations, with result-row, fragment and unclassified totals. Classification records a reason: known detached Athens `fi` tokens remain fragments, while ambiguous lines without sufficient result evidence remain unclassified. These are ingestion categories, not owner decisions or publication approval.
 
-The checked-in SQL migration has a recorded checksum. Run migrations using a separate database owner; ingestion uses a restricted application role. The application receives SELECT/INSERT only, and triggers also reject UPDATE/DELETE/TRUNCATE on ingestion tables. This protects existing records from ordinary application writes. Database owners/superusers can alter privileges or disable/drop enforcement. Direct INSERT access is not a substitute for the importer’s evidence validation. Role administration, authentication, backups, production migrations and future append-only review decisions remain separate concerns tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+The checked-in SQL migration has a recorded checksum. Run migrations using a separate database owner; ingestion uses a restricted application role. The application receives SELECT/INSERT only, and triggers also reject UPDATE/DELETE/TRUNCATE on ingestion tables. This protects existing records from ordinary application writes. Database owners/superusers can alter privileges or disable/drop enforcement. Direct INSERT access is not a substitute for the importer’s evidence validation. Role administration, authentication, backups, production migrations and production access control remain separate concerns tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
 ```clojure
 (require '[freediving.observations :as observations])
@@ -154,6 +154,63 @@ Run role/database creation once. Restart with the same `start` command; records 
 `scripts/test-postgres.sh` creates a fresh disposable loopback cluster, runs the PostgreSQL integration suite and stops/removes that cluster on exit. It also requires Python 3 to choose an available port. It never resets an existing database. The ordinary `clojure -M:test` suite remains independent of PostgreSQL. Both suites use synthetic evidence only.
 
 Local verification used PostgreSQL 17.5. The three inspected private artifacts imported as three sources/versions and 1,020 source-position observations: 1,013 parsed result rows, five unparsed result rows and two detached fragments. All three reruns skipped; stored artifact bytes and every candidate payload matched the archive exactly. All 1,020 remain unreviewed, with no identity or publication approval. No real source bytes or rows are committed.
+
+### Local owner review
+
+Review decisions are append-only overlays on one exact `(job-id, ordinal)` observation. The stored extraction artifact and candidate payload never change. Proposals have no effect until approved through a separate reviewer database role. Rejection has no effective value; reversal restores the value and active approval that preceded the reversed approval. History retains proposals, decisions, reasons, evidence, before/after values, actor labels, database role and database time.
+
+Categories are explicit: `:extraction-repair`, `:name-normalization`, `:identity-matching` and `:substantive-correction`. The review API never approves automatically. Identity outcomes are `{:outcome :unknown}`, `{:outcome :no-match}` or `{:outcome :matched :identity-id "local-anchor"}`. An identity anchor is a locally assigned reference, not a verified federation account or inferred person. Each observation has at most one effective identity outcome. Name normalization alone does not assign identity.
+
+Review targets must exist and be classified as result rows. Detached fragments and unclassified material cannot be linked to identities through this API. Evidence references identify existing text page/line positions in the target extraction; those coordinates establish traceability, not that the proposed claim is true. The reviewer must examine the evidence. Corrections affect derived fields; original names, raw text, parsed values, representation codes and uncertainties remain available through observation inspection.
+
+Each request has a caller-chosen idempotency ID. Repeating the same request returns the saved result; reusing its ID with changed content fails. Requests carry the effective observation revision they were based on. Concurrent changes serialize per observation; stale requests fail instead of overwriting a newer decision. To revise a decision, read the current effective values and revision and submit a new proposal. Reversal is explicit and only applies to a currently active approval, preserving intervening decisions and the full audit trail.
+
+The migration owner, ingestion role and reviewer role are separate. A supplied `:actor` string is an audit label and never authenticates the caller. Database privileges determine who may make decisions. Ordinary ingestion and public database sessions cannot approve, reject or reverse. These APIs and their history are private administrative interfaces, not public response models. Database owners/superusers can bypass enforcement; the dedicated reviewer is trusted to use the validated API. Clojure enforces before-values, evidence, conflicts and reversal eligibility; direct SQL with reviewer credentials can bypass those checks and corrupt the effective projection. Protect reviewer credentials and do not expose them to ingestion workers or a public application.
+
+The local cluster helper uses loopback trust authentication, so another process on the same machine can impersonate a role. This proves role separation in an isolated development database, not production owner authentication. Network login, authenticated review UI, publication filtering and deployment acceptance remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+
+After creating the restricted reviewer role, apply migration 1 and then migration 2 as the database owner. Both are checksummed. Rerunning the observation migration resets the ingestion role's table grants, so rerun the review migration afterward to restore review access.
+
+```sh
+psql -h 127.0.0.1 -p 55480 -d observations_pilot -v ON_ERROR_STOP=1 \
+  -c 'CREATE ROLE reviews_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;'
+export FREEDIVING_DATABASE_URL="jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=$(id -un)"
+clojure -M:observations migrate observations_app
+clojure -M:reviews migrate observations_app reviews_owner
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=observations_app'
+clojure -M:reviews propose data/proposal.edn
+clojure -M:reviews effective data/target.edn
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=reviews_owner'
+clojure -M:reviews decide data/decision.edn
+clojure -M:reviews history data/target.edn
+```
+
+`target.edn` is `{:job-id "EXACT_EXTRACTION_JOB_HASH" :ordinal 0}`. Ordinals are zero-based, while evidence page and line numbers are one-based. A proposal has this shape, using the actual before value and revision from `effective`:
+
+```clojure
+{:id "proposal-unique-id"
+ :job-id "EXACT_EXTRACTION_JOB_HASH" :ordinal 0 :base-revision 0
+ :category :identity-matching :field :identity
+ :before {:outcome :unknown}
+ :after {:outcome :matched :identity-id "owner-assigned-local-anchor"}
+ :evidence [{:page 1 :line 1}]
+ :actor "proposer-label" :reason "Specific evidence and reasoning"}
+```
+
+For a field correction, use `:category :substantive-correction`, an existing scalar parsed field as `:field`, and its exact `:before` and proposed `:after`. Nested values and adding absent fields are outside this bounded API. Unparsed result rows can receive identity decisions but cannot receive scalar corrections where no parsed field exists. A normalization proposal targets `:source-name`. Evidence validity does not establish a normalization or correction as accurate.
+
+An approval request is `{:id "decision-unique-id" :proposal-id "proposal-unique-id" :action :approve :base-revision 0 :actor "owner-label" :reason "Why the evidence supports this decision"}`. Rejection uses `:action :reject`. A reversal uses `:action :reverse` and `:event-id "decision-unique-id"` instead of `:proposal-id`, with the current revision and a new ID. Rejected proposals cannot later be approved; submit a new proposal. Every decision advances the revision, including rejection, even though rejection leaves values unchanged.
+
+The Clojure API has the same maps: `freediving.reviews/propose!`, `decide!`, `effective` and `history` each take a JDBC URL followed by the request or target. `migrate!` takes the administrator URL, ingestion role and reviewer role. `effective` returns `:revision`, `:identity`, `:fields` and per-field `:active` approval IDs. Read history together with observation inspection for exact source evidence. CLI commands emit EDN and exit nonzero on invalid requests.
+
+Run synthetic PostgreSQL ingestion and review checks in a disposable cluster (the second command runs only review checks):
+
+```sh
+scripts/test-postgres.sh
+scripts/test-postgres.sh test-reviews
+```
+
+All review verification uses synthetic observations. The three real pilot sources still have zero owner-reviewed identity/correction cases. Synthetic approvals do not count toward the required 50 reviewed cases, and no review command authorizes publication.
 
 ### Archive registration
 
