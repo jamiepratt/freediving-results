@@ -85,6 +85,20 @@
     if(!visible.length)$('cases').append(node('p','No cases match these filters.'));
   }
   function expandable(title,value){const d=node('details');d.append(node('summary',title),structure(value));return d;}
+  function sourceEvidence(e){
+    const view=node('div'),table=node('table'),header=node('tr');
+    ['Page','Line','Original source text'].forEach(label=>header.append(node('th',label)));table.append(header);
+    (e['source-lines']||[]).forEach(line=>{const row=node('tr');[line.page,line.line,line.text].forEach(value=>row.append(node('td',readable(value))));table.append(row);});
+    view.append(table,expandable('Exact source provenance, hashes and acquisitions',Object.fromEntries(Object.entries(e).filter(([key])=>key!=='source-lines'))));return view;
+  }
+  function auditEntry(h,history){
+    const item=node('article',undefined,'event');
+    const approval=h.action==='reverse'?history.find(x=>x.id===h['event-id']):h;
+    const proposal=h.action==='propose'?h:history.find(x=>x.id===approval?.['proposal-id']);
+    item.append(node('h4',human(h.action)+(proposal?' · '+human(proposal.field):'')),node('p',h.reason),node('small',(h.actor||'Unknown actor')+' · '+(h['recorded-at']||'Time unavailable')+(h.revision!==undefined?' · Revision '+h.revision:'')));
+    if(proposal)item.append(node('p','Before: '+readable(proposal.before)+' → Proposed: '+readable(proposal.after)));
+    item.append(expandable('Full audit record and exact provenance',Object.fromEntries(Object.entries(h).filter(([key])=>key!=='request'))));return item;
+  }
   function renderDetail(d,e){
     const t=d.packet.target, parsed=t.payload.parsed||{}, fields=d.effective.fields||{};
     $('case-title').textContent=parsed['source-name']||'Missing parsed source name';
@@ -92,12 +106,12 @@
     $('comparison').replaceChildren();
     const table=node('table'),head=node('tr');['Field','Raw source','Original parsed','Effective approved'].forEach(x=>head.append(node('th',x)));table.append(head);
     comparison(t.payload,fields).forEach(([k,...values])=>{const row=node('tr');[human(k),...values.map(readable)].forEach(x=>row.append(node('td',x)));table.append(row);});$('comparison').append(table);
-    $('evidence').replaceChildren(structure(e));
+    $('evidence').replaceChildren(sourceEvidence(e));
     $('uncertainties').replaceChildren(structure(d.packet.uncertainties),structure({'parse-status':t.payload['parse-status'],'unresolved-reasons':t.payload['unresolved-reasons']||[],errors:t.payload.errors||[]}));
     $('candidates').replaceChildren();$('anchor').replaceChildren(new Option('Select an inspected candidate',''));
     (d.packet.candidates||[]).forEach((c,i)=>{
       const card=node('section',undefined,'candidate');card.append(node('h4',c.observations.map(o=>o.payload.parsed?.['source-name']||'Unknown name').join(' / ')),node('p','Retrieval signals: '+readable(c.signals)));
-      c.observations.forEach(o=>{card.append(expandable('Source comparison and exact provenance',o));const b=node('button','Inspect candidate source lines');b.type='button';b.onclick=async()=>{try{const data=await api('/api/evidence?'+targetQuery(o));card.append(expandable('Inspected source evidence',data));}catch(err){status(err.message,true);}};card.append(b);});$('candidates').append(card);
+      c.observations.forEach(o=>{card.append(expandable('Source comparison and exact provenance',o));const b=node('button','Inspect candidate source lines');b.type='button';b.onclick=async()=>{try{const data=await api('/api/evidence?'+targetQuery(o));card.append(sourceEvidence(data));}catch(err){status(err.message,true);}};card.append(b);});$('candidates').append(card);
       $('anchor').append(new Option(c.observations[0].payload.parsed?.['source-name']+' · '+c['source-sha256'].slice(0,12),String(i)));
     });
     if(!d.packet.candidates?.length)$('candidates').append(node('p','No supported candidate retrieved. Unknown and no-match do not establish distinct identities.'));
@@ -107,12 +121,12 @@
     $('publication-state').textContent='Automated prerequisites: '+(d.publication['ready?']?'ready':'blocked')+'. Currently eligible: '+(d.publication['eligible?']?'yes':'no')+'. '+readable(d.publication.reasons);
     $('audit').replaceChildren();
     (d.history||[]).forEach(h=>{
-      const item=node('article',undefined,'event');item.append(node('h4',human(h.action)+' · '+h.id),structure(Object.fromEntries(Object.entries(h).filter(([k])=>k!=='request'))));
+      const item=auditEntry(h,d.history);
       if(h.action==='propose' && !d.history.some(x=>x['proposal-id']===h.id)){['approve','reject'].forEach(action=>{const b=node('button',human(action));b.type='button';b.onclick=()=>decision(action,h.id);item.append(b);});}
       if(h.action==='approve' && Object.values(d.effective.active||{}).includes(h.id)){const b=node('button','Reverse approval');b.type='button';b.onclick=()=>decision('reverse',h.id);item.append(b);}$('audit').append(item);
     });
     if(!d.history?.length)$('audit').append(node('p','No private review proposals or decisions.'));
-    $('publication-history').replaceChildren(structure(d['publication-history']));fieldChanged();$('detail').hidden=false;
+    $('publication-history').replaceChildren(...(d['publication-history']||[]).map(h=>auditEntry(h,[])));if(!d['publication-history']?.length)$('publication-history').append(node('p','No extraction decisions.'));fieldChanged();$('detail').hidden=false;
   }
   async function loadDetail(t){const ticket=++generation,q=targetQuery(t);try{const [d,e]=await Promise.all([api('/api/detail?'+q),api('/api/evidence?'+q)]);if(ticket!==generation)return false;detail=d;renderDetail(d,e);return true;}catch(error){if(ticket!==generation)return false;throw error;}}
   async function openCase(t){if(busy)return;selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status('Inspect original evidence before proposing a change.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
