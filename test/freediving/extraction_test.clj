@@ -379,3 +379,12 @@
       (is (every? #(nil? (:repairs %)) (:candidates r)))))
   (let [r (extraction/parse-pages [(str athens-header "  Other NAME GBR 140 0 DQ SP OK DIR\n")])]
     (is (= :unparsed (get-in r [:candidates 0 :parse-status])))))
+
+(deftest athens-dyn-multiline-notes-never-overwrite-row-notes
+  (let [padding (apply str (repeat 70 " "))
+        r (extraction/parse-pages [(str dyn-header padding "GOLD MEDAL,\n"
+                                        "1 Synthetic NAME GBR 210 210 SILVER MEDAL\n"
+                                        padding "WORLD RECORD SENIORS\n")])]
+    (is (= [:unparsed :parsed :unparsed] (mapv :parse-status (:candidates r))))
+    (is (= "SILVER MEDAL" (get-in r [:candidates 1 :parsed :notes])))
+    (is (every? #(nil? (:repairs %)) (:candidates r)))))
