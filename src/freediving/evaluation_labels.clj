@@ -301,13 +301,13 @@
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (case command
-        "migrate" (if (= 2 (count args)) (println (migrate! url (first args) (keyword (second args)))) (fail! "migrate REVIEWER-ROLE synthetic|real"))
-        "decide" (if (= 1 (count args)) (let [r (decide! url (read-file (first args)))] (println (select-keys r [:id :revision :outcome]))) (fail! "decide REQUEST.edn"))
+        "migrate" (if (= 2 (count args)) (prn (migrate! url (first args) (keyword (second args)))) (fail! "migrate REVIEWER-ROLE synthetic|real"))
+        "decide" (if (= 1 (count args)) (let [r (decide! url (read-file (first args)))] (prn (select-keys r [:id :revision :outcome]))) (fail! "decide REQUEST.edn"))
         "history" (if (= 2 (count args))
                     (let [result (history url (read-file (first args))) receipt {:history result :receipt-version 1}]
-                      (println {:path (write-receipt! (second args) (assoc receipt :receipt-id (digest receipt)))}))
+                      (prn {:path (write-receipt! (second args) (assoc receipt :receipt-id (digest receipt)))}))
                     (fail! "history PAIR.edn PRIVATE-DIRECTORY"))
-        "export" (if (= 2 (count args)) (let [r (export url (read-file (first args)))] (println {:status (:status r) :receipt-id (:receipt-id r) :path (write-receipt! (second args) r)})) (fail! "export OPTIONS.edn PRIVATE-DIRECTORY"))
-        "verify" (if (= 1 (count args)) (println (dissoc (verify! url (read-file (first args))) :dataset)) (fail! "verify RECEIPT.edn"))
+        "export" (if (= 2 (count args)) (let [r (export url (read-file (first args)))] (prn {:status (:status r) :receipt-id (:receipt-id r) :path (write-receipt! (second args) r)})) (fail! "export OPTIONS.edn PRIVATE-DIRECTORY"))
+        "verify" (if (= 1 (count args)) (prn (dissoc (verify! url (read-file (first args))) :dataset)) (fail! "verify RECEIPT.edn"))
         (fail! "Commands: migrate|decide|history|export|verify")))
     (catch Exception _ (binding [*out* *err*] (println "Evaluation label operation failed; private input or database verification required.")) (System/exit 1))))

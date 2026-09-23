@@ -41,4 +41,6 @@ if [[ $# -eq 0 ]]; then
   clojure -M:test-corrections
   clojure -M:test-correction-http
   clojure -M:test-public-demo
+  clojure -M:test-labels
+  clojure -M:test-label-integration
 fi
