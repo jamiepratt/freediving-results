@@ -96,7 +96,7 @@
             (record! root (str prefix "-start") started)
             (progress! runtime {:phase :attempt-started :attempt number})
             (let [t (System/nanoTime)
-                  result (try (providers/execute! prepared runtime)
+                  result (try (providers/execute! prepared (get-in runtime [:providers (get-in prepared [:config :id])] {}))
                               (catch Exception _ {:outcome :error :error :adapter-exception :retryable? false
                                                   :external-outcome :unknown :model-version nil :cost {:status :unknown}}))
                   receipt {:attempt number :request-hash request-hash :start-hash (put! root started) :completed-at (str (java.time.Instant/now))
@@ -123,7 +123,9 @@
 
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
-   content identities. Pending attempts become unknown, never automatically resent.
+   content identities. Provider runtime is scoped as :providers {config-id options};
+   root credentials are never forwarded. Hooks remain at the outer runtime level.
+   Pending attempts become unknown, never automatically resent.
    Admission caps planned responses plus 4 KiB/attempt at 32 MiB and canonical
    dataset/request identity at 32 MiB. Copies/EDN escaping add storage overhead.
    :on-progress may interrupt after durable start or provider return to test recovery."
@@ -145,7 +147,7 @@
        (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
      (let [prepared (mapv (fn [c] (mapv #(providers/prepare-request c %) cases)) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version "shadow-runner/2" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
+           identity {:schema-version 1 :harness-version "shadow-runner/3" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
            identity-text (canonical identity)
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))

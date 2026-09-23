@@ -105,4 +105,30 @@
         (is (= [:possible-duplicate-external-work] (:warnings result)))
         (is (= :unknown (get-in result [:cost :status])))))))
 
+(deftest provider-credentials-are-scoped-by-configuration-id
+  (let [dir (root) received (atom {})
+        server (com.sun.net.httpserver.HttpServer/create (java.net.InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/" (reify com.sun.net.httpserver.HttpHandler
+                                 (handle [_ exchange]
+                                   (let [route (.getPath (.getRequestURI exchange))
+                                         token (.getFirst (.getRequestHeaders exchange) "Authorization")
+                                         body (.getBytes "{\"choices\":[{\"message\":{\"content\":\"{\\\"outcome\\\":\\\"abstain\\\"}\"}}],\"model\":\"fixture-v1\"}" "UTF-8")]
+                                     (swap! received assoc route token)
+                                     (.sendResponseHeaders exchange 200 (alength body))
+                                     (with-open [out (.getResponseBody exchange)] (.write out body))))))
+    (.start server)
+    (try
+      (let [endpoint (str "http://127.0.0.1:" (.getPort (.getAddress server)))
+            configs (mapv (fn [id] {:id id :provider :llm :model "fixture-v1" :endpoint (str endpoint "/" id)}) ["alpha" "beta" "unscoped"])
+            runtime {:bearer-token "root-token-must-not-be-used"
+                     :providers {"alpha" {:bearer-token "alpha-private-token"}
+                                 "beta" {:bearer-token "beta-private-token"}}}]
+        (evaluation/run! dir dataset configs runtime)
+        (is (= "Bearer alpha-private-token" (get @received "/alpha")))
+        (is (= "Bearer beta-private-token" (get @received "/beta")))
+        (is (nil? (get @received "/unscoped")))
+        (doseq [file (filter #(.isFile %) (file-seq (io/file dir)))]
+          (is (not (re-find #"alpha-private-token|beta-private-token|root-token-must-not-be-used" (slurp file))))))
+      (finally (.stop server 0)))))
+
 (defn -main [& _] (let [r (run-tests 'freediving.evaluation-test)] (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))
