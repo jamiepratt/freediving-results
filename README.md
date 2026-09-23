@@ -167,7 +167,7 @@ Each request has a caller-chosen idempotency ID. Repeating the same request retu
 
 The migration owner, ingestion role and reviewer role are separate. A supplied `:actor` string is an audit label and never authenticates the caller. Database privileges determine who may make decisions. Ordinary ingestion and public database sessions cannot approve, reject or reverse. These APIs and their history are private administrative interfaces, not public response models. Database owners/superusers can bypass enforcement; the dedicated reviewer is trusted to use the validated API. Clojure enforces before-values, evidence, conflicts and reversal eligibility; direct SQL with reviewer credentials can bypass those checks and corrupt the effective projection. Protect reviewer credentials and do not expose them to ingestion workers or a public application.
 
-The local cluster helper uses loopback trust authentication, so another process on the same machine can impersonate a role. This proves role separation in an isolated development database, not production owner authentication. Network login, authenticated review UI, publication filtering and deployment acceptance remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+The local cluster helper uses loopback trust authentication, so another process on the same machine can impersonate a role. This proves role separation in an isolated development database, not production owner authentication. Network login, authenticated review UI and deployment acceptance remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). Local publication filtering is described below.
 
 After creating the restricted reviewer role, apply migration 1 and then migration 2 as the database owner. Both are checksummed. Rerunning the observation migration resets the ingestion role's table grants, so rerun the review migration afterward to restore review access.
 
@@ -231,6 +231,34 @@ The export creates private machine-readable EDN and escaped offline HTML. Use a 
 Local verification on the three imported sources produced 488 comparison buckets from 1,020 observations: 48 candidate, 144 ambiguous, 289 no-candidate and seven unknown packets. There are 148 unique unordered candidate pairs, including 89 across source documents. Of the packets, 232 group repeated listings and 35 retain AIN/CMAS1 representation values. These are retrieval coverage counts, not reviewed cases, people, or independent corroborations. All real observations remain private and unreviewed; the required owner-reviewed count is still zero.
 
 A candidate's local anchor identifies an exact observation, not a verified person. For new source-backed identity proposals, copy its reference into `:identity-target` and `:evidence`, and use its `:identity-id` in the matched outcome. The reference shape is `{:job-id ... :ordinal ... :candidate-id ... :source-sha256 ... :artifact-sha256 ... :page ... :line ...}`; the ID is `local-observation:JOB-ID:ORDINAL`. The review API validates that anchor against a named result row and retains it even on rejection. Legacy local identity strings and target-only evidence remain compatible. Evidence validity does not imply approval; the owner must supply a current revision, before value, reason and explicit decision through the review API.
+
+### Local extraction validation and public reads
+
+The [publication policy](docs/publication-policy.md) defines eligibility independently of identity review. `freediving.publication/diagnose` reports automated blockers for an exact `{:job-id ... :ordinal ...}`. Readiness is not approval. `decide!` requires an explicit reviewer decision, exact provenance, current revisions, source-row evidence and visual-accuracy/substantive-error attestations. No parser result automatically creates a validation. Validation/revocation history is append-only; original blocked publication flags remain immutable.
+
+`freediving.public-results` provides read-only `results`, `search-source-name`, `result`, `athlete-history` and `coverage` APIs, each taking a database URL first. Search uses the exact original source name, including when identity is unresolved or an approved name correction exists. Public result and identity IDs are opaque. Missing and private result IDs both return nil; history and coverage count visible results only.
+
+The restricted public reader can select only the sanitized public view. A trusted reviewer explicitly calls `refresh!` to prepare the eligible corpus. Any review or publication decision invalidates that snapshot; affected observations require revalidation, followed by another refresh. Reversals therefore hide stale corrections and identity history immediately. A correction without publicly available evidence withholds its result, including transitive dependencies. Public records contain source citations, allowlisted original/raw/effective values, approved/reversed correction audit, explicit unknown fields and partial-pilot coverage. Archived PDFs, private proposals and processing records remain private.
+
+Create `reviews_public` as a restricted login role, then apply migrations 1 through 4 in order as the database owner. Existing review examples show creation of `observations_app` and `reviews_owner`.
+
+```sh
+psql -h 127.0.0.1 -p 55480 -d observations_pilot -v ON_ERROR_STOP=1 \
+  -c 'CREATE ROLE reviews_public LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;'
+export FREEDIVING_DATABASE_URL="jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=$(id -un)"
+clojure -M:publication migrate reviews_owner
+clojure -M:public-results migrate reviews_owner reviews_public
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=reviews_owner'
+clojure -M:publication diagnose data/target.edn
+# Only after actual source review and explicit evidence-backed validation:
+clojure -M:public-results refresh
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=reviews_public'
+clojure -M:public-results list
+clojure -M:public-results coverage
+clojure -M:public-results search-source-name 'Exact source spelling'
+```
+
+The public CLI emits EDN; errors omit database details. Run the synthetic PostgreSQL checks with `scripts/test-postgres.sh`, or select `test-publication` / `test-public-results`. This is local readiness with trusted reviewer credentials and loopback development authentication, not a deployed public service. All real pilot observations remain private, with zero publication validations and zero owner-reviewed identity cases. Scope and genuine review remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
 ### Archive registration
 

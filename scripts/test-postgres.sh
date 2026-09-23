@@ -30,4 +30,8 @@ export FREEDIVING_TEST_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_
 export FREEDIVING_TEST_REVIEW_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_owner"
 export FREEDIVING_TEST_PUBLIC_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_public"
 clojure -M:${1:-test-postgres}
-if [[ $# -eq 0 ]]; then clojure -M:test-reviews; fi
+if [[ $# -eq 0 ]]; then
+  clojure -M:test-reviews
+  clojure -M:test-publication
+  clojure -M:test-public-results
+fi

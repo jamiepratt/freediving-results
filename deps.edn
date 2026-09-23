@@ -2,7 +2,11 @@
  :deps {org.postgresql/postgresql {:mvn/version "42.7.8"}
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojure/clojure {:mvn/version "1.12.0"}}
- :aliases {:packets {:main-opts ["-m" "freediving.packets"]}
+ :aliases {:publication {:main-opts ["-m" "freediving.publication"]}
+           :public-results {:main-opts ["-m" "freediving.public-results"]}
+           :test-publication {:extra-paths ["test"] :main-opts ["-m" "freediving.publication-test"]}
+           :test-public-results {:extra-paths ["test"] :main-opts ["-m" "freediving.public-results-test"]}
+           :packets {:main-opts ["-m" "freediving.packets"]}
            :reviews {:main-opts ["-m" "freediving.reviews"]}
            :test-reviews {:extra-paths ["test"] :main-opts ["-m" "freediving.reviews-test"]}
            :test-postgres {:extra-paths ["test"] :main-opts ["-m" "freediving.observations-test"]}
