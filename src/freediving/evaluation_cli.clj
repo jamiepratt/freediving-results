@@ -47,15 +47,23 @@
           value)))))
 
 (defn command
-  "Run a local evaluation and return only content references, never private prompts."
+  "Run locally. Reviewed runs take their authoritative DB URL only from the environment."
   [args]
-  (when-not (and (= 4 (count args)) (= "run" (first args)))
-    (throw (ex-info "Usage: run PRIVATE-ROOT DATASET.edn CONFIGS.edn" {})))
-  (let [[_ root dataset config-file] args
-        configs (local-configs! (read-input config-file))]
-    (select-keys (evaluation/run! root (read-input dataset) configs
-                                  {:providers (into {} (map (fn [config] [(:id config) {:bearer-token "local-fixture-only"}]) configs))})
-                 [:run-id :input-hash :report-hash])))
+  (when-not (and (= 4 (count args)) (#{"run" "run-reviewed"} (first args)))
+    (throw (ex-info "Usage: run PRIVATE-ROOT DATASET.edn CONFIGS.edn or run-reviewed PRIVATE-ROOT EXPORT-OPTIONS.edn CONFIGS.edn" {})))
+  (let [[operation root input config-file] args
+        configs (local-configs! (read-input config-file))
+        runtime {:providers (into {} (map (fn [config] [(:id config) {:bearer-token "local-fixture-only"}]) configs))}]
+    (if (= "run-reviewed" operation)
+      (let [db-url (System/getenv "FREEDIVING_DATABASE_URL")]
+        (when-not (seq db-url) (throw (ex-info "Authoritative database URL required" {})))
+        (select-keys
+         (evaluation/run-verified! root db-url
+                                   ((requiring-resolve 'freediving.evaluation-labels/export) db-url (read-input input))
+                                   configs runtime)
+         [:status :reason :verified-id :export-hash :run-id :report-hash]))
+      (select-keys (evaluation/run! root (read-input input) configs runtime)
+                   [:run-id :input-hash :report-hash]))))
 
 (defn -main [& args]
   (try

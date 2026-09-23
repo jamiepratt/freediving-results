@@ -122,14 +122,29 @@
         metered (filter #(= :metered (:status %)) costs)]
     {:overall (stratum pairs)
      :synthetic (stratum (get grouped :synthetic []))
-     :owner (stratum (get grouped :owner []))
+     :owner (stratum [])
+     :asserted (stratum (get grouped :owner []))
      :unlabeled (stratum (get grouped :unlabeled []))
      :latency {:measured-count (count latencies) :unknown-count (- (count results) (count latencies))
                :total-ms (when (seq latencies) (reduce + latencies))
                :mean-ms (when (seq latencies) (/ (reduce + latencies) (count latencies)))}
      :cost {:metered-count (count metered) :unknown-count (- (count costs) (count metered))
             :totals-by-currency (reduce #(update %1 (:currency %2) (fnil + 0M) (bigdec (:amount %2))) {} metered)}
-     :limitations ["Synthetic labels do not estimate real-world accuracy or calibrated safety thresholds."
+     :limitations ["File owner provenance is an unverified assertion; only live database verification authorizes owner metrics."
+                   "Synthetic labels do not estimate real-world accuracy or calibrated safety thresholds."
                    "False-merge and missed-match denominators include abstentions and errors; inspect coverage separately."
                    "Grouping attestations cannot rule out unknown duplicate sources or repeated identities."
                    "Shadow outcomes have no merge or publication authority."]}))
+
+(defn metrics-verified
+  "Verify the entire receipt against the authoritative database on every call.
+   Caller maps, flags, hashes and review-shaped file labels cannot grant authority."
+  [db-url receipt results]
+  (let [verified ((requiring-resolve 'freediving.evaluation-labels/verify!) db-url receipt)
+        cases (filterv #(= :held-out (:split %)) (get-in verified [:dataset :cases]))
+        m (metrics cases results)]
+    (cond-> (assoc m :verification {:receipt-id (:receipt-id verified)
+                                    :label-source (:label-source verified)
+                                    :scope :database-snapshot-at-verification})
+      (= :verified-owner-review (:label-source verified))
+      (assoc :owner (:asserted m) :asserted (stratum [])))))

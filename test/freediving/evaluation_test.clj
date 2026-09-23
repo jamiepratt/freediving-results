@@ -132,3 +132,16 @@
       (finally (.stop server 0)))))
 
 (defn -main [& _] (let [r (run-tests 'freediving.evaluation-test)] (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))
+
+(deftest file-verification-flags-cannot-promote-owner-labels
+  (let [c (assoc (fixtures/sample-case "b" :held-out) :label
+                 {:outcome :match :provenance :owner :reviewer "file assertion"
+                  :review-id "claimed" :evidence-ids ["b"]
+                  :reviewed-at "2026-09-23T00:00:00Z"
+                  :review-artifact-sha256 (apply str (repeat 64 "b"))})
+        forged (assoc (fixtures/dataset [c]) :verified? true :label-source :verified-owner-review)
+        dir (root)
+        receipt (evaluation/run! dir forged configs {:verified? true :label-source :verified-owner-review})
+        metrics (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "rules" :metrics])]
+    (is (= 0 (get-in metrics [:owner :case-count])))
+    (is (= 1 (get-in metrics [:asserted :case-count])))))

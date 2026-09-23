@@ -43,8 +43,9 @@
         m (data/metrics cases predictions)]
     (is (= {:count 1 :denominator 1 :rate 1} (get-in m [:synthetic :false-merges])))
     (is (= {:count 1 :denominator 1 :rate 1} (get-in m [:synthetic :missed-matches])))
-    (is (= {:count 0 :denominator 1 :rate 0} (get-in m [:owner :missed-matches])))
-    (is (= 1 (get-in m [:owner :errors])))
+    (is (= {:count 0 :denominator 1 :rate 0} (get-in m [:asserted :missed-matches])))
+    (is (= 1 (get-in m [:asserted :errors])))
+    (is (= 0 (get-in m [:owner :case-count])))
     (is (= 1 (get-in m [:unlabeled :abstentions])))
     (is (= 2 (get-in m [:overall :review-volume])))
     (is (= {:metered-count 0 :unknown-count 4 :totals-by-currency {}} (:cost m)))
@@ -90,3 +91,11 @@
     (is (= 0 (get-in (data/metrics [] []) [:overall :case-count])))
     (is (thrown? clojure.lang.ExceptionInfo
                  (data/metrics cases [(result "a" :match) (assoc (result "b" :match) :latency-ms ##NaN)])))))
+
+(deftest verified-metrics-require-authoritative-database-not-file-flags
+  (is (thrown? Exception
+               (data/metrics-verified
+                "jdbc:untrusted-file-flags"
+                {:verified? true :label-source :verified-owner-review
+                 :dataset (dataset [(sample-case "a" :held-out)])}
+                [(result "a" :match)]))))

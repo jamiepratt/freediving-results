@@ -147,7 +147,7 @@
        (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
      (let [prepared (mapv (fn [c] (mapv #(providers/prepare-request c %) cases)) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version "shadow-runner/3" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
+           identity {:schema-version 1 :harness-version "shadow-runner/4" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
            identity-text (canonical identity)
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))
@@ -163,8 +163,81 @@
                      report-hash (put! root report)
                      manifest {:run-id run-id :input-hash run-id :report-hash report-hash}]
                  (record! root (str run-id "-manifest") manifest)))))))))
-(defn inspect-run "Read and verify the private report and input by content identity." [root run-id]
+(defn inspect-run
+  "Verify stored bytes and return a metrics view recomputed without DB authority.
+   :stored-report-hash identifies stored bytes; :report-view marks the derived view,
+   including legacy reports whose file assertions once appeared as owner metrics."
+  [root run-id]
   (valid-id! run-id)
-  (with-store root (fn [root]
-                     (let [manifest (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root)) (fail! "Unknown run"))]
-                       (assoc manifest :input (object! root (:input-hash manifest)) :report (object! root (:report-hash manifest)))))))
+  (with-store root
+    (fn [root]
+      (let [manifest (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root)) (fail! "Unknown run"))
+            input (object! root (:input-hash manifest))
+            report (object! root (:report-hash manifest))
+            cases (filterv #(= :held-out (:split %)) (get-in input [:dataset :cases]))
+            view (update report :providers
+                         (fn [reports]
+                           (into {} (map (fn [[id r]] [id (assoc r :metrics (data/metrics cases (:results r)))]) reports))))]
+        (assoc manifest :input input :report view :stored-report-hash (:report-hash manifest)
+               :report-view :recomputed-unverified-assertions)))))
+
+(defn run-verified!
+  "Evaluate a receipt only after live authoritative DB verification. Recheck after
+   provider work, including replay. Persist immutable, private export and report
+   receipts; DB credentials never enter content identities. No-label exports are
+   blocked before provider dispatch. Synthetic corpora remain synthetic."
+  ([root db-url receipt configs] (run-verified! root db-url receipt configs {}))
+  ([root db-url receipt configs runtime]
+   (let [verify! (requiring-resolve 'freediving.evaluation-labels/verify!)
+         verified (verify! db-url receipt)
+         cases (filterv #(= :held-out (:split %)) (get-in verified [:dataset :cases]))
+         eligible (filterv :label cases)
+         export-hash (with-store root #(put! % receipt))]
+     (if (empty? eligible)
+       {:status :blocked :reason :no-eligible-reviewed-labels :export-hash export-hash}
+       (let [raw (run! root (:dataset verified) configs runtime)
+             raw-report (:report (inspect-run root (:run-id raw)))
+             reports (into {} (map (fn [[id report]]
+                                     [id (assoc report :metrics
+                                                (data/metrics-verified db-url receipt (:results report)))])
+                                   (:providers raw-report)))
+             report {:schema-version 1 :status :evaluated :export-hash export-hash
+                     :verification-scope :database-snapshot-at-verification
+                     :label-source (:label-source verified) :raw-run raw :providers reports}]
+         (verify! db-url receipt)
+         (with-store root
+           (fn [root]
+             (let [report-hash (put! root report)
+                   id (digest (canonical ["verified-shadow/1" export-hash (:run-id raw)]))
+                   manifest {:status :evaluated :verified-id id :export-hash export-hash
+                             :run-id (:run-id raw) :report-hash report-hash}]
+               (record! root (str id "-verified-manifest") manifest)))))))))
+
+(defn inspect-verified-run
+  "Inspect verified metrics only while their original export still matches the DB.
+   Recompute metrics using verified labels, never trust metrics copied into files."
+  [root db-url verified-id]
+  (valid-id! verified-id)
+  (let [manifest (with-store root
+                   (fn [root]
+                     (let [manifest (or (read-record root (str verified-id "-verified-manifest"))
+                                        (fail! "Unknown verified run"))]
+                       (assoc manifest :export (object! root (:export-hash manifest))
+                              :report (verify-graph! root (object! root (:report-hash manifest)))))))
+        receipt (:export manifest)
+        verified ((requiring-resolve 'freediving.evaluation-labels/verify!) db-url receipt)
+        raw (inspect-run root (:run-id manifest))
+        expected-id (digest (canonical ["verified-shadow/1" (:export-hash manifest) (:run-id manifest)]))]
+    (when-not (and (= verified-id expected-id (:verified-id manifest))
+                   (= (:dataset verified) (get-in raw [:input :dataset])))
+      (fail! "Verified run does not match authoritative export"))
+    (let [reports (into {} (map (fn [[id report]]
+                                  [id (assoc report :metrics
+                                             (data/metrics-verified db-url receipt (:results report)))])
+                                (get-in raw [:report :providers])))
+          expected {:schema-version 1 :status :evaluated :export-hash (:export-hash manifest)
+                    :verification-scope :database-snapshot-at-verification
+                    :label-source (:label-source verified)
+                    :raw-run (select-keys raw [:run-id :input-hash :report-hash]) :providers reports}]
+      (when-not (= expected (:report manifest)) (fail! "Verified report differs from authoritative labels and raw results"))
+      manifest)))
