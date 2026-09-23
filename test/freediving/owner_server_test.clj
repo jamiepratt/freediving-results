@@ -3,6 +3,7 @@
             [clojure.data.json :as json]
             [clojure.string :as str]
             [freediving.owner-server :as server]
+            [freediving.source-pages-test :as pages-fixture]
             [freediving.publication-test :as publication-fixture]
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
@@ -26,6 +27,7 @@
         _ (.method b method (if data (HttpRequest$BodyPublishers/ofString (json/write-str data)) (HttpRequest$BodyPublishers/noBody)))
         r (.send (HttpClient/newHttpClient) (.build b) (HttpResponse$BodyHandlers/ofString))]
     {:status (.statusCode r) :body (try (json/read-str (.body r) :key-fn keyword) (catch Exception _ (.body r)))
+     :headers (.map (.headers r))
      :cookie (some-> (.firstValue (.headers r) "set-cookie") (.orElse nil))}))
 (defn config [] {:database-url publication-fixture/reviewer :port 0 :demo? true
                  :capability-file (str (.toRealPath (Files/createTempDirectory "owner-http-test" (make-array java.nio.file.attribute.FileAttribute 0)) (make-array java.nio.file.LinkOption 0)) "/capability")})
@@ -176,3 +178,89 @@
 (deftest owner-startup-rejects-correction-record-mutation-authority
   (fixture/sql! fixture/admin "GRANT INSERT ON freediving.correction_requests TO reviews_owner")
   (is (thrown? Exception (let [s (server/start! (config))] (server/stop! s)))))
+
+(deftest synthetic-session-reports-explicit-authority
+  (let [s (server/start! (config))]
+    (try
+      (let [session (:body (request s "GET" "/api/session" nil (login s)))]
+        (is (= "synthetic-demo" (:mode session)))
+        (is (true? (:review-enabled? session)))
+        (is (false? (:source-viewer? session))))
+      (finally (server/stop! s)))))
+
+(deftest inspection-refuses-reviewer-write-authority-before-source-access
+  (let [c (-> (config) (dissoc :demo?) (assoc :mode :real-inspection :archive-root "/missing" :cache-root "/missing"))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Inspector table privileges invalid" (server/start! c)))))
+
+(defn inspector! []
+  (fixture/sql! fixture/admin "DO $$ BEGIN CREATE ROLE source_inspector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+  (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO source_inspector; GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector")
+  (str/replace publication-fixture/reviewer "user=reviews_owner" "user=source_inspector"))
+
+(deftest registered-pages-stay-private-and-real-inspection-cannot-mutate
+  (let [[page-config row] (pages-fixture/sample)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        c (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :database-url (inspector!)})
+        s (server/start! c)
+        path (str "/api/source-page?job-id=" (:job-id row) "&ordinal=0&page=1")
+        png (str/replace path "/api/source-page?" "/api/source-page.png?")]
+    (try
+      (is (= 401 (:status (request s "GET" png nil {}))))
+      (let [h (login s) info (request s "GET" path nil h) image-url (get-in info [:body :image-url])]
+        (is (= 200 (:status info)))
+        (is (= 1 (get-in info [:body :page-count])))
+        (is (= (:source-sha256 row) (get-in info [:body :source-sha256])))
+        (is (= "real-inspection" (get-in (request s "GET" "/api/session" nil h) [:body :mode])))
+        (is (false? (get-in (request s "GET" "/api/session" nil h) [:body :review-enabled?])))
+        (let [image (request s "GET" image-url nil h)]
+          (is (= 200 (:status image)))
+          (is (= ["image/png"] (get-in image [:headers "content-type"])))
+          (is (= ["no-store"] (get-in image [:headers "cache-control"]))))
+        (doseq [endpoint ["/api/proposals" "/api/decisions" "/api/publication" "/api/corrections/triage"]]
+          (is (= 403 (:status (request s "POST" endpoint {} h)))))
+        (is (= 400 (:status (request s "GET" (str/replace path "page=1" "page=2") nil h))))
+        (is (= 400 (:status (request s "GET" (str path "&path=../../etc/passwd") nil h))))
+        (is (= 409 (:status (request s "GET" (str png "&render-id=stale") nil h))))
+        (let [source (str (:archive-root page-config) "/objects/" (:source-sha256 row))
+              original (java.nio.file.Files/readAllBytes (.toPath (java.io.File. source)))]
+          (spit source "corrupt synthetic fixture")
+          (is (= 400 (:status (request s "GET" image-url nil h))))
+          (is (thrown? Exception (server/start! (assoc c :capability-file (str (:capability-file c) "-corrupt")))))
+          (java.nio.file.Files/write (.toPath (java.io.File. source)) original (make-array java.nio.file.OpenOption 0)))
+        (is (= 200 (:status (request s "POST" "/api/logout" {} h))))
+        (is (= 401 (:status (request s "GET" image-url nil h)))))
+      (finally (server/stop! s)))
+    (is (thrown? Exception (server/start! (assoc c :review-enabled? true))))))
+
+(deftest inspection-rejects-hidden-column-or-function-authority
+  (let [url (inspector!) c (merge (dissoc (config) :demo?) {:mode :real-inspection :database-url url :archive-root "/missing" :cache-root "/missing"})]
+    (fixture/sql! fixture/admin "GRANT INSERT (job_id) ON freediving.extractions TO source_inspector")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"(?:Inspector|Owner) database authority invalid" (server/start! c)))
+    (fixture/sql! fixture/admin "REVOKE INSERT (job_id) ON freediving.extractions FROM source_inspector; GRANT EXECUTE ON FUNCTION freediving.submit_correction(uuid,text,text,text,text,text,text) TO source_inspector")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"(?:Inspector|Owner) database authority invalid" (server/start! c)))))
+
+(deftest enabled-review-requires-served-target-image-and-separate-attestation
+  (let [[page-config row] (pages-fixture/sample)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        s (server/start! (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        path (str "/api/source-page?job-id=" (:job-id row) "&ordinal=0&page=1")]
+    (try
+      (let [h (login s) d (publication/diagnose publication-fixture/reviewer target)
+            validation (merge target (select-keys d [:review-revision :policy-version :observation])
+                              {:id "fixture-validate" :base-revision (:revision d) :action "validate" :actor "synthetic-test"
+                               :reason "Inspected synthetic PDF fixture" :evidence [{:page 1 :line 3}]
+                               :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}})
+            metadata (request s "GET" path nil h)]
+        (is (= 200 (:status metadata)))
+        (is (= 403 (:status (request s "POST" "/api/publication" validation h))))
+        (is (= 200 (:status (request s "GET" (get-in metadata [:body :image-url]) nil h))))
+        (is (= 400 (:status (request s "POST" "/api/publication" (assoc validation :attestations {}) h))))
+        (is (= 200 (:status (request s "POST" "/api/publication" validation h))))
+        (let [new-h (login s)]
+          (is (= 403 (:status (request s "POST" "/api/publication" validation new-h))))))
+      (finally (server/stop! s)))))
+
+(deftest review-mode-refuses-hidden-original-write-authority
+  (fixture/sql! fixture/admin "GRANT UPDATE (source_sha256) ON freediving.extractions TO reviews_owner")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Owner database authority invalid" (server/start! (config)))))
