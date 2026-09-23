@@ -141,6 +141,9 @@
       (publish! {:root root :artifact a})
       (is (= :created (:status (observations/import! app root (:job-id a)))))
       (is (= (:candidates a) (mapv :payload (:observations (observations/inspect app (:job-id a)))))))))
+(deftest application-table-owner-cannot-migrate
+  (sql! admin "ALTER TABLE freediving.observations OWNER TO observations_app")
+  (is (thrown-with-msg? Exception #"restricted" (observations/migrate! admin "observations_app"))))
 (deftest unsafe-application-role-rejected
   (is (thrown-with-msg? Exception #"restricted" (observations/migrate! admin (with-open [c (DriverManager/getConnection admin) s (.createStatement c) r (.executeQuery s "SELECT current_user")] (.next r) (.getString r 1))))))
 (defn -main [& _]

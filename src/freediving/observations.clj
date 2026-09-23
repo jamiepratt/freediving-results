@@ -174,9 +174,9 @@
                            (query c "SELECT ordinal,candidate_id,kind,classification_reason,payload_edn FROM freediving.observations WHERE job_id=? ORDER BY ordinal" job-id))})))
 (defn counts [url]
   (with-open [c (connect url)]
-    (let [e (first (query c "SELECT count(*) AS versions,count(DISTINCT source_sha256) AS sources FROM freediving.extractions"))
-          o (first (query c "SELECT count(*) AS observations,count(DISTINCT candidate_id) AS candidates,count(*) FILTER (WHERE kind='result-row') AS result_rows,count(*) FILTER (WHERE kind='fragment') AS fragments,count(*) FILTER (WHERE kind='unclassified') AS unclassified FROM freediving.observations"))]
-      (merge e (-> o (assoc :result-rows (:result_rows o)) (dissoc :result_rows))))))
+    ;; A single PostgreSQL statement observes one MVCC snapshot during concurrent commits.
+    (let [row (first (query c "SELECT e.*,o.* FROM (SELECT count(*) AS versions,count(DISTINCT source_sha256) AS sources FROM freediving.extractions) e CROSS JOIN (SELECT count(*) AS observations,count(DISTINCT candidate_id) AS candidates,count(*) FILTER (WHERE kind='result-row') AS result_rows,count(*) FILTER (WHERE kind='fragment') AS fragments,count(*) FILTER (WHERE kind='unclassified') AS unclassified FROM freediving.observations) o"))]
+      (-> row (assoc :result-rows (:result_rows row)) (dissoc :result_rows)))))
 (defn -main [& [command & args]]
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
