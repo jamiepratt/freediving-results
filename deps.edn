@@ -1,8 +1,11 @@
-{:paths ["src"]
- :deps {org.clojure/data.json {:mvn/version "2.5.1"}
+{:paths ["src" "resources"]
+ :deps {org.postgresql/postgresql {:mvn/version "42.7.8"}
+        org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojure/clojure {:mvn/version "1.12.0"}}
- :aliases {:test {:extra-paths ["test"]
+ :aliases {:test-postgres {:extra-paths ["test"] :main-opts ["-m" "freediving.observations-test"]}
+           :test {:extra-paths ["test"]
                   :main-opts ["-m" "freediving.test-runner"]}
+           :observations {:main-opts ["-m" "freediving.observations"]}
            :extract {:main-opts ["-m" "freediving.extraction"]}
            :legacy {:main-opts ["-m" "freediving.legacy"]}
            :archive {:main-opts ["-m" "freediving.archive"]}}}
