@@ -17,6 +17,8 @@
 (defn- transaction [url f]
   (with-open [c (DriverManager/getConnection url)]
     (.setAutoCommit c false)
+    (execute! c "SET LOCAL lock_timeout = '2s'")
+    (execute! c "SET LOCAL statement_timeout = '5s'")
     (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
 (defn- restricted-role! [c role]
   (let [r (first (query c "SELECT rolsuper,rolcreaterole,rolcreatedb,rolbypassrls,rolreplication FROM pg_roles WHERE rolname=?" role))]

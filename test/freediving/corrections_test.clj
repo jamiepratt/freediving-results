@@ -135,3 +135,15 @@
     (let [suggestion "Correct swimmer name 🐬 修正"]
       (corrections/submit! submit-url (assoc r :suggestion suggestion) client)
       (is (= suggestion (:suggestion (first (:requests (corrections/list-requests reviewer {})))))))))
+(deftest held-visibility-lock-times-out-without-writing-and-retry-succeeds
+  (let [r (request)]
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin) s (.createStatement c)]
+      (.setAutoCommit c false)
+      (.execute s "LOCK TABLE freediving.publication_decisions IN ROW EXCLUSIVE MODE")
+      (let [pending (future (try (corrections/submit! submit-url r client)
+                                 (catch java.sql.SQLException e (.getSQLState e))))]
+        (try
+          (is (= "55P03" (deref pending 4000 :timeout)))
+          (is (= [] (:requests (corrections/list-requests reviewer {}))))
+          (finally (.rollback c) @pending))))
+    (is (= :pending (:status (corrections/submit! submit-url r client))))))
