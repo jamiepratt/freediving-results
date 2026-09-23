@@ -10,6 +10,10 @@
                  :jvm-opts ["-Xss6m" "-Xmx3g" "-Djdk.attach.allowAttachSelf"]}
            :test-rama {:extra-paths ["integration/test" "test"]
                       :main-opts ["-m" "freediving.evaluation-rama-test"]}
+           :test-pipeline-rama {:extra-paths ["integration/test" "test"]
+                                :main-opts ["-m" "freediving.pipeline-rama-test"]}
+           :test-pipeline {:extra-paths ["test"]
+                           :main-opts ["-m" "freediving.pipeline-test"]}
            :labels {:main-opts ["-m" "freediving.evaluation-labels"]}
            :test-labels {:extra-paths ["test"] :main-opts ["-m" "freediving.evaluation-labels-test"]}
            :test-label-integration {:extra-paths ["test"] :main-opts ["-m" "freediving.evaluation-label-integration-test"]}

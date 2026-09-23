@@ -18,6 +18,10 @@ The [local correction workflow](docs/local-corrections.md) accepts private evide
 
 The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the versioned dataset, held-out grouping, rules/Jev/LLM adapters, private restartable traces and synthetic comparison command. The [reviewed-label bridge](docs/local-reviewed-labels.md) verifies explicit pair decisions against PostgreSQL before owner metrics and detects stale exports. The optional [local Agent-o-rama module](docs/local-rama-evaluation.md) runs that verified evaluator through opaque receipt references. File assertions remain separate; synthetic databases remain synthetic. No live provider benchmark or genuine owner labels are included. Shadow outcomes cannot approve identities or publish results.
 
+## Local import orchestration
+
+The optional [Agent-o-rama import graph](docs/local-rama-pipeline.md) coordinates private local job registration, archive provenance, versioned PDF extraction, PostgreSQL ingestion and candidate review readiness. Each stage uses the existing evidence APIs. Graph inputs and outputs contain opaque references and fixed statuses; readiness grants no review or publication authority.
+
 ## Run
 
 Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure and dependencies are pinned in `deps.edn`. Archive/extraction commands need no running service; observation ingestion requires PostgreSQL. First run downloads Maven dependencies.
