@@ -8,6 +8,7 @@
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
             [freediving.reviews :as reviews]
+            [freediving.evaluation-labels :as labels]
             [freediving.publication :as publication]
             [freediving.public-results :as public-results]
             [freediving.corrections :as corrections])
@@ -264,3 +265,24 @@
 (deftest review-mode-refuses-hidden-original-write-authority
   (fixture/sql! fixture/admin "GRANT UPDATE (source_sha256) ON freediving.extractions TO reviews_owner")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Owner database authority invalid" (server/start! (config)))))
+
+(deftest explicit-evaluation-label-capability-keeps-owner-startup-compatible
+  (labels/migrate! fixture/admin "reviews_owner" :synthetic)
+  (let [s (server/start! (config))]
+    (try
+      (is (= 401 (:status (request s "GET" "/api/candidates" nil {}))))
+      (finally (server/stop! s))))
+  (fixture/sql! fixture/admin "GRANT UPDATE (body_edn) ON freediving.evaluation_labels TO reviews_owner")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Owner database authority invalid"
+                        (server/start! (config)))))
+
+(deftest explicit-evaluation-label-capability-is-not-inspector-or-public-authority
+  (labels/migrate! fixture/admin "reviews_owner" :synthetic)
+  (let [url (inspector!)
+        c (merge (dissoc (config) :demo?)
+                 {:mode :real-inspection :database-url url :archive-root "/missing" :cache-root "/missing"})]
+    (fixture/sql! fixture/admin "GRANT INSERT ON freediving.evaluation_labels TO source_inspector")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Inspector database authority invalid"
+                          (server/start! c))))
+  (is (thrown? Exception
+               (server/start! (assoc (config) :database-url (System/getenv "FREEDIVING_TEST_PUBLIC_URL"))))))
