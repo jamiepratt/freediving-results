@@ -1,0 +1,9 @@
+{:sha256 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+ :discovery-url "https://example.org/results"
+ :final-url "https://example.org/results.txt"
+ :acquisition-method "synthetic fixture, created locally for documentation"
+ :retrieved-at "2026-09-23T13:14:09Z"
+ :content-type "text/plain"
+ :publisher "Synthetic example"
+ :relationship :publisher
+ :mirror-of nil}

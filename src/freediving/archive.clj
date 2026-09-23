@@ -1,0 +1,212 @@
+(ns freediving.archive
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str])
+  (:import [java.nio.file Files Paths StandardCopyOption StandardOpenOption LinkOption]
+           [java.security MessageDigest]
+           [java.nio.channels FileChannel]
+           [java.nio.file.attribute FileAttribute PosixFilePermissions]
+           [java.net URI]
+           [java.time OffsetDateTime]
+           [java.util HexFormat]))
+
+(defn- path [s] (Paths/get (str s) (make-array String 0)))
+(defn- sha256 [file]
+  (let [digest (MessageDigest/getInstance "SHA-256") buffer (byte-array 65536)]
+    (with-open [input (io/input-stream file)]
+      (loop []
+        (let [n (.read input buffer)]
+          (when (pos? n)
+            (.update digest buffer 0 n)
+            (recur)))))
+    (.formatHex (HexFormat/of) (.digest digest))))
+
+(defn- canonical [manifest]
+  (binding [*print-length* nil *print-level* nil]
+    (pr-str (into (sorted-map) manifest))))
+(defn- acquisition-id [manifest]
+  (.formatHex (HexFormat/of)
+              (.digest (MessageDigest/getInstance "SHA-256")
+                       (.getBytes (canonical manifest) "UTF-8"))))
+
+(defn- fail! [message] (throw (ex-info message {})))
+(defn- valid-hash? [v] (and (string? v) (re-matches #"[0-9a-f]{64}" v)))
+(defn- text? [v] (and (string? v) (not (str/blank? v))))
+(defn- url? [v]
+  (try (let [u (URI. v)]
+         (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
+              (nil? (.getUserInfo u)) (nil? (.getRawQuery u)) (nil? (.getRawFragment u))))
+       (catch Exception _ false)))
+(defn- validate! [manifest]
+  (when-not (and (map? manifest)
+                 (= #{:sha256 :discovery-url :final-url :acquisition-method :retrieved-at
+                      :content-type :publisher :relationship :mirror-of}
+                    (set (keys manifest)))
+                 (valid-hash? (:sha256 manifest))
+                 (every? url? ((juxt :discovery-url :final-url) manifest))
+                 (every? text? ((juxt :acquisition-method :publisher) manifest))
+                 (string? (:content-type manifest))
+                 (re-matches #"[^\s/;]+/[^\s/;]+(?:;.*)?" (:content-type manifest))
+                 (try (OffsetDateTime/parse (:retrieved-at manifest))
+                      (catch Exception _ false))
+                 (#{:publisher :mirror :unknown} (:relationship manifest))
+                 (if (= :mirror (:relationship manifest))
+                   (text? (:mirror-of manifest))
+                   (nil? (:mirror-of manifest))))
+    (fail! "Malformed manifest: see canonical schema in README"))
+  manifest)
+
+(def ^:private process-lock (Object.))
+(def ^:private nofollow (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+(defn- exists? [p] (Files/exists (path p) nofollow))
+(defn- attrs [mode]
+  (into-array FileAttribute [(PosixFilePermissions/asFileAttribute
+                              (PosixFilePermissions/fromString mode))]))
+
+(defn- safe-path! [p]
+  (let [p (.toAbsolutePath (path p))]
+    (when (some #(= ".." (str %)) (iterator-seq (.iterator p)))
+      (fail! "Parent traversal is not allowed"))
+    (loop [current p]
+      (when current
+        (when (Files/isSymbolicLink current) (fail! "Symlinks are not allowed"))
+        (recur (.getParent current))))
+    (.normalize p)))
+
+(defn- private! [p directory?]
+  (safe-path! p)
+  (when-not (if directory? (Files/isDirectory (path p) nofollow)
+                (Files/isRegularFile (path p) nofollow))
+    (fail! "Archive entry has an invalid file type"))
+  (when (some #(re-find #"GROUP|OTHERS" (str %))
+              (Files/getPosixFilePermissions (path p) nofollow))
+    (fail! "Archive entries must be private: directories 0700, files 0600")))
+
+(defn- directory! [p]
+  (safe-path! p)
+  (when-not (exists? p)
+    (try (Files/createDirectory (path p) (attrs "rwx------"))
+         (catch java.nio.file.FileAlreadyExistsException _ nil)))
+  (private! p true))
+
+(defn- with-archive [root create? action]
+  (locking process-lock
+    (let [root (str (safe-path! root))
+          lock-path (path (io/file root ".lock"))]
+      (when create? (directory! root))
+      (private! root true)
+      (safe-path! lock-path)
+      (when (exists? lock-path) (private! lock-path false))
+      (with-open [channel (FileChannel/open lock-path
+                                            #{StandardOpenOption/CREATE StandardOpenOption/WRITE LinkOption/NOFOLLOW_LINKS}
+                                            (attrs "rw-------"))
+                  _lock (.lock channel)]
+        (doseq [dir ["objects" "acquisitions" "tmp"]]
+          (if create? (directory! (io/file root dir)) (private! (io/file root dir) true)))
+        (action root)))))
+
+(defn- sync! [p]
+  (with-open [channel (FileChannel/open (path p)
+                                        (into-array StandardOpenOption [StandardOpenOption/WRITE]))]
+    (.force channel true)))
+
+(defn- publish! [root target write! expected-hash]
+  (safe-path! target)
+  (let [temp (Files/createTempFile (path (io/file root "tmp")) "pending-" ".tmp" (attrs "rw-------"))]
+    (try
+      (write! (.toFile temp))
+      (Files/setPosixFilePermissions temp (PosixFilePermissions/fromString "rw-------"))
+      (when (and expected-hash (not= expected-hash (sha256 (.toFile temp))))
+        (fail! "Source SHA-256 mismatch"))
+      (sync! temp)
+      (Files/move temp (path target)
+                  (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE]))
+      (finally (Files/deleteIfExists temp)))))
+
+(defn- verified-object! [object digest]
+  (safe-path! object)
+  (when-not (exists? object) (fail! "Unknown artifact"))
+  (private! object false)
+  (when-not (= digest (sha256 object)) (fail! "Archived object SHA-256 mismatch")))
+
+(defn read-manifest
+  "Read exactly one canonical EDN manifest, without evaluating code."
+  [file]
+  (with-open [reader (java.io.PushbackReader. (io/reader file :encoding "UTF-8"))]
+    (let [eof (Object.)
+          value (edn/read {:eof eof} reader)]
+      (when-not (identical? eof (edn/read {:eof eof} reader)) (fail! "Expected one EDN manifest"))
+      (validate! value))))
+
+(defn- verified-record! [file]
+  (private! file false)
+  (when-not (re-matches #"[0-9a-f]{64}\.edn" (.getName file))
+    (fail! "Invalid acquisition filename"))
+  (let [manifest (read-manifest file)
+        id (subs (.getName file) 0 64)]
+    (when-not (= id (acquisition-id manifest)) (fail! "Acquisition record identity mismatch"))
+    {:acquisition-id id :manifest manifest}))
+
+(defn register!
+  "Register existing bytes and explicit provenance. Optional :on-progress runs after
+   the verified artifact is published, before acquisition publication; retry on interruption."
+  ([root source manifest] (register! root source manifest {}))
+  ([root source manifest {:keys [on-progress]}]
+   (validate! manifest)
+   (safe-path! source)
+   (when-not (Files/isRegularFile (path source) nofollow) (fail! "Source must be a regular file"))
+   (when-not (= (:sha256 manifest) (sha256 source)) (fail! "Source SHA-256 mismatch"))
+   (with-archive root true
+     (fn [root]
+       (let [digest (:sha256 manifest)
+             object (io/file root "objects" digest)
+             id (acquisition-id manifest)
+             record (io/file root "acquisitions" (str id ".edn"))]
+         (safe-path! object)
+         (safe-path! record)
+         ;; Only recognizable private staging files may be removed after a terminated writer.
+         (doseq [file (.listFiles (io/file root "tmp"))]
+           (private! file false)
+           (when-not (re-matches #"pending-.*\.tmp" (.getName file)) (fail! "Unexpected staging entry"))
+           (Files/delete (path file)))
+         (when-not (exists? object)
+           (publish! root object
+                     #(Files/copy (path source) (path %)
+                                  (into-array StandardCopyOption [StandardCopyOption/REPLACE_EXISTING]))
+                     digest))
+         (verified-object! object digest)
+         (when on-progress (on-progress {:phase :artifact-ready :sha256 digest}))
+         (when-not (exists? record)
+           (publish! root record #(spit % (canonical manifest) :encoding "UTF-8") nil))
+         (when-not (= manifest (:manifest (verified-record! record)))
+           (fail! "Acquisition record conflict"))
+         {:sha256 digest :acquisition-id id})))))
+
+(defn inspect
+  "Verify artifact bytes and return all acquisition records sharing this SHA-256."
+  [root digest]
+  (when-not (valid-hash? digest) (fail! "Invalid SHA-256"))
+  (with-archive root false
+    (fn [root]
+      (let [object (io/file root "objects" digest)]
+        (verified-object! object digest)
+        {:sha256 digest
+         :artifact-path (str object)
+         :acquisitions (->> (.listFiles (io/file root "acquisitions"))
+                            (map verified-record!)
+                            (filter #(= digest (get-in % [:manifest :sha256])))
+                            (sort-by :acquisition-id)
+                            vec)}))))
+
+(defn -main [& args]
+  (try
+    (let [[command root value manifest-file] args]
+      (prn (cond
+             (and (= command "import") (= 4 (count args)))
+             (register! root value (read-manifest manifest-file))
+             (and (= command "inspect") (= 3 (count args)))
+             (inspect root value)
+             :else (fail! "Usage: import ARCHIVE SOURCE MANIFEST.edn | inspect ARCHIVE SHA256"))))
+    (catch Exception error
+      (binding [*out* *err*] (println "Archive command failed:" (.getMessage error)))
+      (System/exit 1))))
