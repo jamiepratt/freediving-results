@@ -190,7 +190,7 @@
 (deftest athens-dnf-exact-source-and-explicit-fields
   (let [line "1 Zso a EXAMPLE CMAS1 104,5 100,0 GOLD MEDAL"
         r (extraction/parse-pages [(str athens-header line "\nOther EXAMPLE AIN 100 0 DQ SP\nThird EXAMPLE GBR DNS\nfi\n")])]
-    (is (= "cmas-athens-dnf/1" (:parser-version r)))
+    (is (= "cmas-athens-distance/2" (:parser-version r)))
     (is (= 3 (get-in r [:reconciliation :parsed-count])))
     (is (= 1 (get-in r [:reconciliation :unparsed-count])))
     (is (= line (get-in r [:candidates 0 :raw :line])))
@@ -210,7 +210,7 @@
   (let [columns "# Name & surname Country\nRealized Final Notes\nDistance (m) Distance (m)\n"
         r (extraction/parse-pages [(str athens-header "1 Sample NAME GBR 100 100\n")
                                    (str columns "Other NAME GBR DNS\n")
-                                   (str/replace athens-header "DNF" "DYNBF")
+                                   (str/replace athens-header "DNF" "DYN")
                                    (str columns "Should Not Inherit GBR 100 100\n")
                                    (str athens-header "1 Adjacent NAME GBR 100 100 2 Next NAME GBR 90 90\nWrapped\n2 Fragment NAME GBR 90 90\n")])]
     (is (= :partial-unsupported-needs-parser (:status r)))
@@ -268,7 +268,7 @@
       (is (= :created (:run-status receipt)))
       (is (not= (:job-id legacy) (:job-id receipt)))
       (is (= legacy-bytes (slurp (:artifact-path legacy))))
-      (is (= "cmas-athens-dnf/1" (:parser-version r)))
+      (is (= "cmas-athens-distance/2" (:parser-version r)))
       (is (= 3 (:schema-version r)))
       (is (= 1 (get-in r [:reconciliation :parsed-count])))
       (is (= :skipped (:run-status (extraction/extract! root digest opts))))
@@ -288,3 +288,47 @@
     (is (= ["Éva ÖTHER" "Éva ÖTHER" "Éva ÖTHER"] (mapv #(get-in % [:parsed :source-name]) (:candidates r))))
     (is (= ["SENIORS – WOMEN" "SENIORS – WOMEN" "JUNIORS – WOMEN"]
            (mapv #(get-in % [:parsed :category]) (:candidates r))))))
+
+(def dynbf-header (-> athens-header (str/replace "DNF" "DYNBF") (str/replace "20, 2025" "21, 2025")))
+(deftest athens-dynbf-distance-and-notes
+  (let [notes ["PANAMERICAN RECORD" "DOLPHIN KICK" "WALL AT START" "DQ SP CHIN" "DQ SP NO OK"
+               "GOLD MEDAL, WORLD RECORD SENIORS" "BRONZE MEDAL, WORLD RECORD MASTERS M1"]
+        r (extraction/parse-pages [(str dynbf-header (str/join "\n" (map #(str "1 Synthetic NAME CMAS1 141,0 138,0 " %) notes)))])]
+    (is (= "cmas-athens-distance/2" (:parser-version r)))
+    (is (= 7 (get-in r [:reconciliation :parsed-count])))
+    (is (= notes (mapv #(get-in % [:parsed :notes]) (:candidates r))))
+    (is (every? #(= "DYNBF" (get-in % [:parsed :discipline])) (:candidates r)))
+    (is (every? #(= "2025-05-21" (get-in % [:parsed :event-date])) (:candidates r)))
+    (is (every? #(nil? (get-in % [:parsed :penalty])) (:candidates r)))))
+
+(deftest athens-final-only-dns-requires-column-evidence
+  (let [header (str/replace dynbf-header "# Name & surname Country Realized Final Notes" "# Name & surname Country     Realized     Final        Notes")
+        r (extraction/parse-pages [(str header "  Synthetic NAME GBR                         0,0 DNS\n  Other NAME GBR 0 DNS\n")])]
+    (is (= :parsed (get-in r [:candidates 0 :parse-status])))
+    (is (= "0,0" (get-in r [:candidates 0 :raw :fields :final-distance])))
+    (is (= 0M (get-in r [:candidates 0 :parsed :final-distance])))
+    (is (nil? (get-in r [:candidates 0 :parsed :realized-distance])))
+    (is (= "DNS" (get-in r [:candidates 0 :parsed :status])))
+    (is (= :unparsed (get-in r [:candidates 1 :parse-status])))))
+
+(deftest athens-wrapped-name-and-footer-retain-every-source-line
+  (let [header (str/replace dynbf-header "# Name & surname Country Realized Final Notes" "# Name & surname Country     Realized     Final        Notes")
+        first-line "3    ̇ Synthetic SURNAME"
+        second-line "    Given NAME         TUR         176,0        176,0 BRONZE MEDAL"
+        r (extraction/parse-pages [(str header first-line "\n" second-line "\n     7\n\n\n                                   1\n")])
+        candidate (first (:candidates r))]
+    (is (= 2 (get-in r [:reconciliation :candidate-count])))
+    (is (= :unparsed (:parse-status candidate)))
+    (is (= [first-line second-line] (mapv :text (:source-lines candidate))))
+    (is (= "TUR" (get-in candidate [:raw :fields :representation])))
+    (is (some #{:ambiguous-wrapped-name} (:unresolved-reasons candidate)))
+    (is (= "     7" (get-in r [:candidates 1 :raw :line])))
+    (is (= :page-footer (:classification (last (get-in r [:reconciliation :noncandidate-lines])))))
+    (is (= (get-in r [:reconciliation :nonblank-line-count])
+           (+ (reduce + (map #(count (or (:source-lines %) [%])) (:candidates r)))
+              (count (get-in r [:reconciliation :noncandidate-lines])))))))
+
+(deftest athens-dns-cannot-borrow-previous-page-column-positions
+  (let [header (str/replace dynbf-header "# Name & surname Country Realized Final Notes" "# Name & surname Country     Realized     Final        Notes")
+        r (extraction/parse-pages [header "# Name & surname Country\nDistance (m) Distance (m)\n  Synthetic NAME GBR                         0,0 DNS\n\n\n                                   2\n"])]
+    (is (= [:unparsed :unparsed] (mapv :parse-status (:candidates r))))))
