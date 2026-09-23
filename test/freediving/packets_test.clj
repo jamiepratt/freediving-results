@@ -49,3 +49,13 @@
                                                             :signals [:token-order]}]}]})]
     (doseq [text ["Jane &lt;Doe&gt;" "DOE Jane" "ambiguous" "token-order" "Grouped target listings: 2" "<details>"]]
       (is (str/includes? html text)))))
+
+(deftest print-bindings-never-truncate-private-evidence
+  (let [parent (.toRealPath (java.nio.file.Files/createTempDirectory "packet-print-test" (make-array java.nio.file.attribute.FileAttribute 0)) (make-array java.nio.file.LinkOption 0))
+        dest (str parent "/private")
+        data {:packets [{:candidates [{:signals [:token-order :second-signal]}]}]
+              :config {:version 1 :other 2}}]
+    (binding [*print-length* 1 *print-level* 1]
+      (packets/export! data dest))
+    (is (= data (edn/read-string (slurp (str dest "/packets.edn")))))
+    (is (str/includes? (slurp (str dest "/packets.html")) "Signals: [:token-order :second-signal]"))))

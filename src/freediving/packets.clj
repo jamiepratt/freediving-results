@@ -41,7 +41,7 @@
        (if (seq (:candidates packet))
          (apply str (for [candidate (:candidates packet)]
                       (str "<section><h4>" (escape-html (str/join " / " (distinct (map source-name (:observations candidate))))) "</h4>"
-                           "<p>Signals: " (escape-html (pr-str (:signals candidate)))
+                           "<p>Signals: " (escape-html (binding [*print-length* nil *print-level* nil] (pr-str (:signals candidate))))
                            ". Grouped listings: " (count (:observations candidate)) "</p>"
                            "<p>Local anchor: " (escape-html (get-in candidate [:local-identity-anchor :identity-id])) "</p></section>")))
          "<p>No supported candidate retrieved. Missing parsed fields require abstention.</p>")
