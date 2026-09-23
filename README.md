@@ -1,10 +1,10 @@
-# Freediving results: local evidence archive
+# Freediving results: local evidence and extraction
 
-This slice registers existing source bytes and explicit acquisition provenance in a private local archive. It does not extract results, implement the PostgreSQL observations database, resolve identities, or publish data. Pilot acceptance and remaining scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
+This slice registers existing source bytes and explicit acquisition provenance in a private local archive, then produces private page-preserving extraction artifacts and structured CMAS CWT men result candidates. It does not implement the PostgreSQL observations database, resolve identities, or publish data. Pilot acceptance and remaining scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
 
 ## Run
 
-Requires Java 17+ and the Clojure CLI. Clojure is pinned in `deps.edn`; the legacy adapter also uses pinned `data.json`; no running services are needed. First run downloads Maven dependencies.
+Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure is pinned in `deps.edn`; the legacy adapter also uses pinned `data.json`; no running services are needed. First run downloads Maven dependencies.
 
 ```sh
 clojure -M:test
@@ -64,6 +64,26 @@ The archive retains exact manifest and config bytes under `evidence/<sha256>`. E
 
 Evidence uses the archive's private atomic storage and cooperating-process lock. Lineage is saved before acquisition registration; interruption can leave pending lineage or an acquisition without a final report. Repeat the same command to complete it. Report counts describe that invocation, not a historical transaction. Storage failures can stop an invocation; malformed top-level inputs have no trustworthy entry enumeration and fail as a whole after original bytes are retained. No rollback or power-loss durability is promised. JSON, config and size checks currently read complete files into memory; this adapter is intended for the bounded local pilot.
 
+## Private PDF extraction
+
+Extraction consumes registered source hashes; it never fetches documents. It uses the installed Poppler `pdftotext` tool and records its version. Keep source PDFs and extraction artifacts in the ignored private archive. This bounded worker reads complete files into memory and does not run OCR.
+
+```sh
+clojure -M:extract data/archive SOURCE_SHA256 data/extraction-options.edn
+```
+
+The options file is `{:actor "local-owner" :config {}}`. The API is `(freediving.extraction/extract! archive-root source-sha256 options)`. `:config` is retained processing metadata, not a set of tool flags; extraction uses fixed layout and UTF-8 settings. Changing the actor, config, parser/tool version or acquisition/evidence snapshot creates a distinct job. Repeating an unchanged job verifies and reuses its artifact. The receipt contains `:job-id`, `:artifact-sha256`, private `:artifact-path` and `:run-status` (`:created` or `:skipped`).
+
+The private EDN artifact records the original PDF hash, acquisition manifests, retained evidence hashes, processing time and actor, tool/parser versions and config. The evidence snapshot includes all retained legacy evidence in that archive, including original manifest/config bytes and lineage; it is not a claim that every item supports each candidate. Exact tool text remains separate from parsed values, including page delimiters in `:raw-text`.
+
+Extraction serializes cooperating writers with the archive lock. A private pending receipt references the completed artifact before final job publication; retry resumes that artifact after interruption. Verified unreferenced derived objects and recognized staging files are reclaimed under the lock. Corrupt content is rejected. The optional fourth API argument `{:on-progress callback}` receives `:extraction-artifact-ready` after the pending receipt is saved and before final publication; callback failure leaves a resumable job. Guarantees cover process interruption on trusted POSIX storage, not power-loss durability.
+
+The first structured parser targets the 2025 CMAS outdoor CWT men seniors layout. It preserves source names and event representation codes, including `CMAS1` and `AIN`, without assigning citizenship or merging identities. Attempted depth, final depth, penalties, status and notes remain distinct. Missing values remain unknown: a blank status is not an inferred success, and units absent from the PDF are not invented. Extracted text is evidence, not an approved spelling correction.
+
+Artifacts retain exact extracted text by page with 1-based text line coordinates. These are coordinates in the extraction output, not PDF bounding boxes. Other layouts receive `:unsupported-needs-parser`; their result counts remain unknown. Blank text pages receive `:needs-OCR`. Nonblank lines in the supported layout are either classified as headers/footers or retained as parsed/unparsed candidates. Reconciliation records page, candidate, parsed and unresolved counts; it does not establish completeness through automated counts alone.
+
+All candidates remain unreviewed and publication remains blocked. No command publishes results or approves corrections. The database, owner review workflow, additional parsers and pilot acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+
 ## Public API
 
 ```clojure
@@ -96,4 +116,4 @@ clj-kondo --lint src test
 clojure -M:test
 ```
 
-Tests use synthetic bytes, temporary directories, and local JVM subprocesses. No network sources, credentials, or private evidence are used.
+Tests use synthetic bytes/PDFs, temporary directories, Poppler, and local JVM subprocesses. Extraction checks include abrupt termination, concurrent calls, changed processing metadata, corrupted artifacts, malformed lines, unknown dates, Unicode/representation preservation, bounded REPL printing and CLI validation. No network sources, credentials, or private evidence are used.
