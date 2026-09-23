@@ -63,7 +63,7 @@
                  (assert-role! c submit-role)
                  {:schema-version 5})))
 (defn- bounded-text? [v n]
-  (and (string? v) (not (str/blank? v)) (<= (count v) n) (<= (alength (.getBytes ^String v "UTF-8")) (* 4 n))
+  (and (string? v) (not (str/blank? v)) (not (re-find #"\p{Cs}" v)) (<= (count v) n) (<= (alength (.getBytes ^String v "UTF-8")) (* 4 n))
        (not (re-find #"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]" v))))
 (defn- uuid [s]
   (try (when (and (string? s) (re-matches #"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}" s)) (UUID/fromString s)) (catch Exception _ nil)))

@@ -128,3 +128,10 @@
     (is (= :capacity (status-of #(corrections/submit! submit-url (assoc r :id (str (random-uuid)) :reason "New capacity test") client))))
     (fixture/sql! fixture/admin "UPDATE freediving.schema_migrations SET sha256=repeat('0',64) WHERE version=5")
     (is (= :checksum-conflict (status-of #(corrections/migrate! fixture/admin "reviews_owner" "corrections_submit"))))))
+(deftest supplementary-unicode-is-preserved-and-isolated-surrogates-rejected
+  (let [r (request)]
+    (doseq [suggestion [(str (char 0xd800)) (str (char 0xdc00))]]
+      (is (= :invalid (status-of #(corrections/submit! submit-url (assoc r :suggestion suggestion) client)))))
+    (let [suggestion "Correct swimmer name 🐬 修正"]
+      (corrections/submit! submit-url (assoc r :suggestion suggestion) client)
+      (is (= suggestion (:suggestion (first (:requests (corrections/list-requests reviewer {})))))))))
