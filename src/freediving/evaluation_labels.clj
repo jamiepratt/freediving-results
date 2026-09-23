@@ -297,6 +297,33 @@
       (when-not (= (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------") (java.nio.file.Files/getPosixFilePermissions path nofollow))
         (fail! "Receipt must have 0600 permissions"))
       (str (.toAbsolutePath path)))))
+(defn resolve-receipt!
+  "Resolve a private content-addressed receipt and verify against the live database.
+   Like write-receipt!, assumes trusted local owner control of directory ancestry."
+  [db-url private-directory receipt-id]
+  (try
+    (when-not (and (string? receipt-id) (re-matches #"[0-9a-f]{64}" receipt-id))
+      (fail! "Invalid receipt identifier"))
+    (let [dir (.toAbsolutePath (.toPath (io/file private-directory)))
+          path (.resolve dir (str receipt-id ".edn"))
+          nofollow (into-array java.nio.file.LinkOption [java.nio.file.LinkOption/NOFOLLOW_LINKS])
+          permissions #(java.nio.file.attribute.PosixFilePermissions/fromString %)]
+      (loop [ancestor dir]
+        (when ancestor
+          (when (java.nio.file.Files/isSymbolicLink ancestor) (fail! "Receipt ancestry cannot contain symlinks"))
+          (recur (.getParent ancestor))))
+      (when-not (and (java.nio.file.Files/isDirectory dir nofollow)
+                     (= (permissions "rwx------") (java.nio.file.Files/getPosixFilePermissions dir nofollow)))
+        (fail! "Receipt directory must have 0700 permissions"))
+      (when-not (and (java.nio.file.Files/isRegularFile path nofollow)
+                     (= (permissions "rw-------") (java.nio.file.Files/getPosixFilePermissions path nofollow)))
+        (fail! "Receipt must be a regular 0600 file"))
+      (let [receipt (read-file (str path))]
+        (when-not (and (map? receipt) (= receipt-id (:receipt-id receipt) (digest (dissoc receipt :receipt-id))))
+          (fail! "Receipt content identity mismatch"))
+        (verify! db-url receipt)
+        receipt))
+    (catch Exception _ (fail! "Private receipt resolution failed"))))
 (defn -main [& [command & args]]
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]

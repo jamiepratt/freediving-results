@@ -162,3 +162,55 @@
                 s (.prepareStatement c "INSERT INTO freediving.evaluation_labels(id,pair_key,revision,outcome,body_edn) VALUES(?,?,2,'match',?)")]
       (.setString s 1 "forged") (.setString s 2 (:pair-key decision)) (.setString s 3 (pr-str forged)) (.executeUpdate s))
     (is (thrown-with-msg? Exception #"envelope" (labels/export owner {:rubric-version "pair-v1"})))))
+
+(deftest private-receipt-resolution-checks-current-authority
+  (let [req (request (sample))
+        dir (.toRealPath (.toPath (java.io.File. "data")) (make-array java.nio.file.LinkOption 0))
+        root (java.nio.file.Files/createTempDirectory dir "resolve-receipts-" (make-array java.nio.file.attribute.FileAttribute 0))
+        resolve! (ns-resolve 'freediving.evaluation-labels 'resolve-receipt!)]
+    (is (some? resolve!) "Receipt resolution is a public operation")
+    (when resolve!
+      (labels/decide! owner req)
+      (let [receipt (labels/export owner {:rubric-version "pair-v1"})]
+        (labels/write-receipt! (str root) receipt)
+        (is (= receipt (resolve! owner (str root) (:receipt-id receipt))))
+        (labels/decide! owner (assoc req :id "revoked" :base-revision 1 :outcome :revoke))
+        (is (thrown? clojure.lang.ExceptionInfo (resolve! owner (str root) (:receipt-id receipt))))))))
+
+(deftest private-receipt-resolution-rejects-untrusted-storage
+  (let [dir (.toRealPath (.toPath (java.io.File. "data")) (make-array java.nio.file.LinkOption 0))
+        root (java.nio.file.Files/createTempDirectory dir "resolve-boundaries-" (make-array java.nio.file.attribute.FileAttribute 0))
+        attrs (make-array java.nio.file.attribute.FileAttribute 0)
+        chmod! (fn [path mode] (java.nio.file.Files/setPosixFilePermissions path (java.nio.file.attribute.PosixFilePermissions/fromString mode)))
+        receipt (labels/export owner {:rubric-version "pair-v1"})
+        id (:receipt-id receipt)
+        path (.toPath (java.io.File. (labels/write-receipt! (str root) receipt)))
+        rejects? (fn [directory identifier]
+                   (is (thrown? clojure.lang.ExceptionInfo (labels/resolve-receipt! owner (str directory) identifier))))]
+    (doseq [bad [nil "" "../receipt" (apply str (repeat 64 "g")) (str id "/child")]] (rejects? root bad))
+    (chmod! root "rwxr-xr-x") (rejects? root id) (chmod! root "rwx------")
+    (chmod! path "rw-r--r--") (rejects? root id) (chmod! path "rw-------")
+    (let [link (.resolve root "linked-directory")]
+      (java.nio.file.Files/createSymbolicLink link root attrs)
+      (rejects? link id)
+      (rejects? (.resolve link "../linked-directory") id))
+    (let [other-id (apply str (repeat 64 "0")) other-path (.resolve root (str other-id ".edn"))]
+      (spit (str other-path) (pr-str receipt)) (chmod! other-path "rw-------")
+      (rejects? root other-id))
+    (doseq [content [(pr-str (assoc receipt :status :forged)) "{" "" "{} {}" "#unknown {}"
+                     (str (pr-str receipt) (apply str (repeat 10000001 " ")))]]
+      (spit (str path) content) (rejects? root id))
+    (spit (str path) (pr-str receipt))
+    (let [target (.resolve root "target.edn")]
+      (java.nio.file.Files/move path target (make-array java.nio.file.CopyOption 0))
+      (java.nio.file.Files/createSymbolicLink path target attrs)
+      (rejects? root id)
+      (java.nio.file.Files/delete path))
+    (java.nio.file.Files/createDirectory path attrs) (rejects? root id)
+    (java.nio.file.Files/delete path) (rejects? root id)
+    (labels/write-receipt! (str root) receipt)
+    (let [failure (try (labels/resolve-receipt! "jdbc:unsupported:private-password-sentinel" (str root) id)
+                       (catch Exception e e))]
+      (is (instance? clojure.lang.ExceptionInfo failure))
+      (is (nil? (ex-cause failure)))
+      (is (not (.contains (str failure) "private-password-sentinel"))))))
