@@ -1,7 +1,7 @@
 (ns freediving.athens
   (:require [clojure.string :as str]))
 
-(def parser-version "cmas-athens-pool/4")
+(def parser-version "cmas-athens-pool/5")
 (def title "2025 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR, GREECE")
 (defn supported? [pages] (boolean (some #(str/includes? % title) pages)))
 (defn- field [v] {:status (if (nil? v) :unknown :parsed) :value v})
@@ -93,7 +93,7 @@
 
 (defn- sta-row [text context]
   (when-let [[_ rank name representation final notes]
-             (re-matches #"\s*(?:(\d+)\s+)?(.+)\s+(CMAS1|AIN|[A-Z]{3})\s+(\S+)(?:\s+(.*?))?\s*" text)]
+             (re-matches #"\s*(?:(\d+)\s+)?(\S(?:.*\S)?)\s+(CMAS1|AIN|[A-Z]{3})\s+(\S+)(?:\s+(.*?))?\s*" text)]
     (when (and (not (re-find #"\d" name))
                (or (nil? notes)
                    (re-matches #"(?:(?:GOLD|SILVER|BRONZE) MEDAL(?:, (?:WORLD RECORD MASTERS M[123]|PANAMERICAN RECORD))?|WORLD RECORD MASTERS M[123]|DQ(?: (?:TOUCH|SP(?: CHIN)?|SURFACE BO|UW BO|ASSIST))?)" notes)))

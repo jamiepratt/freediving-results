@@ -190,7 +190,7 @@
 (deftest athens-dnf-exact-source-and-explicit-fields
   (let [line "1 Zso a EXAMPLE CMAS1 104,5 100,0 GOLD MEDAL"
         r (extraction/parse-pages [(str athens-header line "\nOther EXAMPLE AIN 100 0 DQ SP\nThird EXAMPLE GBR DNS\nfi\n")])]
-    (is (= "cmas-athens-pool/4" (:parser-version r)))
+    (is (= "cmas-athens-pool/5" (:parser-version r)))
     (is (= 3 (get-in r [:reconciliation :parsed-count])))
     (is (= 1 (get-in r [:reconciliation :unparsed-count])))
     (is (= line (get-in r [:candidates 0 :raw :line])))
@@ -268,7 +268,7 @@
       (is (= :created (:run-status receipt)))
       (is (not= (:job-id legacy) (:job-id receipt)))
       (is (= legacy-bytes (slurp (:artifact-path legacy))))
-      (is (= "cmas-athens-pool/4" (:parser-version r)))
+      (is (= "cmas-athens-pool/5" (:parser-version r)))
       (is (= 3 (:schema-version r)))
       (is (= 1 (get-in r [:reconciliation :parsed-count])))
       (is (= :skipped (:run-status (extraction/extract! root digest opts))))
@@ -294,7 +294,7 @@
   (let [notes ["PANAMERICAN RECORD" "DOLPHIN KICK" "WALL AT START" "DQ SP CHIN" "DQ SP NO OK"
                "GOLD MEDAL, WORLD RECORD SENIORS" "BRONZE MEDAL, WORLD RECORD MASTERS M1"]
         r (extraction/parse-pages [(str dynbf-header (str/join "\n" (map #(str "1 Synthetic NAME CMAS1 141,0 138,0 " %) notes)))])]
-    (is (= "cmas-athens-pool/4" (:parser-version r)))
+    (is (= "cmas-athens-pool/5" (:parser-version r)))
     (is (= 7 (get-in r [:reconciliation :parsed-count])))
     (is (= notes (mapv #(get-in % [:parsed :notes]) (:candidates r))))
     (is (every? #(= "DYNBF" (get-in % [:parsed :discipline])) (:candidates r)))
@@ -341,7 +341,7 @@
                                         "    Beta NAME POL 200 200 WORLD RECORD SENIORS\n"
                                         "3 Gamma NAME ITA 180 180 BRONZE MEDAL\n")])
         [a b c] (:candidates r)]
-    (is (= "cmas-athens-pool/4" (:parser-version r)))
+    (is (= "cmas-athens-pool/5" (:parser-version r)))
     (is (= 3 (get-in r [:reconciliation :candidate-count])))
     (is (= [:unparsed :unparsed :parsed] (mapv :parse-status [a b c])))
     (is (= (:group-evidence a) (:group-evidence b)))
@@ -398,7 +398,7 @@
   (let [r (extraction/parse-pages [(str sta-header "1 Éva NAME CMAS1 04:05 GOLD MEDAL\n"
                                         "  Other NAME GBR 05:32 DQ\n")])
         [a b] (:candidates r)]
-    (is (= "cmas-athens-pool/4" (:parser-version r)))
+    (is (= "cmas-athens-pool/5" (:parser-version r)))
     (is (= 2 (get-in r [:reconciliation :parsed-count])))
     (is (= "04:05" (get-in a [:raw :fields :final-time])))
     (is (= {:components [4 5] :fraction nil :fraction-digits 0 :notation :colon-separated}
@@ -496,3 +496,12 @@
     (is (every? #(nil? (:parsed %)) [a b]))
     (is (every? #(some #{:time-unit-not-explicit} (:unresolved-reasons %)) [a b]))
     (is (every? #(= :ambiguous (get-in % [:fields :unit :status])) [a b]))))
+
+(deftest athens-sta-column-padding-is-not-part-of-source-name
+  (let [r (extraction/parse-pages [(str sta-header
+                                        "1   Éva  UWE                     CMAS1           04:05 GOLD MEDAL\n"
+                                        "2   X                           GBR             05:06\n")])]
+    (is (= ["Éva  UWE" "X"] (mapv #(get-in % [:parsed :source-name]) (:candidates r))))
+    (is (= ["1" "2"] (mapv #(get-in % [:raw :fields :rank]) (:candidates r))))
+    (is (= "1   Éva  UWE                     CMAS1           04:05 GOLD MEDAL"
+           (get-in r [:candidates 0 :raw :line])))))
