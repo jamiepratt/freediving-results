@@ -1,0 +1,76 @@
+{:schema-version 1,
+ :dataset-id "synthetic-v1",
+ :rubric-version "identity-v1",
+ :grouping
+ {:attested-by "fixture-author",
+  :method "explicit person and source families",
+  :limitations
+  "Unknown identities and undiscovered copies remain possible."},
+ :cases
+ [{:case-id "a",
+   :split :development,
+   :input
+   {:left {:authority "fixture-registry", :subject-id "a"},
+    :right {:authority "fixture-registry", :subject-id "a"}},
+   :source-family-ids ["a"],
+   :person-group-ids ["a"],
+   :evidence
+   [{:evidence-id "a",
+     :source-sha256
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     :artifact-sha256
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     :observation-id "a",
+     :page 1,
+     :lines [1 2]}],
+   :label {:outcome :match, :provenance :synthetic, :fixture-id "a"}}
+  {:case-id "b",
+   :split :held-out,
+   :input
+   {:left {:authority "fixture-registry", :subject-id "b"},
+    :right {:authority "fixture-registry", :subject-id "b"}},
+   :source-family-ids ["b"],
+   :person-group-ids ["b"],
+   :evidence
+   [{:evidence-id "b",
+     :source-sha256
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     :artifact-sha256
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     :observation-id "b",
+     :page 1,
+     :lines [1 2]}],
+   :label {:outcome :match, :provenance :synthetic, :fixture-id "b"}}
+  {:case-id "c",
+   :split :held-out,
+   :input
+   {:left {:authority "fixture-registry", :subject-id "c"},
+    :right {:authority "fixture-registry", :subject-id "other-c"}},
+   :source-family-ids ["c"],
+   :person-group-ids ["c"],
+   :evidence
+   [{:evidence-id "c",
+     :source-sha256
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     :artifact-sha256
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     :observation-id "c",
+     :page 1,
+     :lines [1 2]}],
+   :label
+   {:outcome :no-match, :provenance :synthetic, :fixture-id "c"}}
+  {:case-id "d",
+   :split :held-out,
+   :input {:left {:name "synthetic"}, :right {:name "synthetic"}},
+   :source-family-ids ["d"],
+   :person-group-ids ["d"],
+   :evidence
+   [{:evidence-id "d",
+     :source-sha256
+     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     :artifact-sha256
+     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     :observation-id "d",
+     :page 1,
+     :lines [1 2]}],
+   :label nil}]}
