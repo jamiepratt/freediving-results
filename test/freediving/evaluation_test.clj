@@ -82,4 +82,27 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hash mismatch" (evaluation/inspect-run dir (:run-id receipt))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hash mismatch" (evaluation/run! dir dataset configs))))))
 
+(deftest excessive-planned-response-budget-rejected-before-storage-or-dispatch
+  (let [dir (root) calls (atom 0)
+        cases (mapv #(assoc (fixtures/sample-case "b" :held-out) :case-id (str "case-" %)) (range 12))]
+    (with-redefs [providers/execute! (fn [_ _] (swap! calls inc) {:outcome :abstain :retryable? false :cost {:status :unknown}})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"budget"
+                            (evaluation/run! dir (fixtures/dataset cases)
+                                             [{:id "oversized" :provider :stub :max-attempts 3 :max-response-bytes 1048576}])))
+      (is (zero? @calls))
+      (is (empty? (.listFiles (io/file dir)))))))
+
+(deftest successful-retry-retains-unknown-external-attempt-warning
+  (let [dir (root) calls (atom 0)]
+    (with-redefs [providers/execute! (fn [_ _]
+                                       (if (= 1 (swap! calls inc))
+                                         {:outcome :error :retryable? true :external-outcome :unknown :cost {:status :unknown}}
+                                         {:outcome :match :retryable? false :external-outcome :known :cost {:status :metered :amount 0.1 :currency "USD"}}))]
+      (let [receipt (evaluation/run! dir dataset [{:id "retry" :provider :stub :max-attempts 2 :retry-delay-ms 0}])
+            result (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "retry" :results 0])]
+        (is (= :match (:outcome result)))
+        (is (= 1 (:unknown-external-attempt-count result)))
+        (is (= [:possible-duplicate-external-work] (:warnings result)))
+        (is (= :unknown (get-in result [:cost :status])))))))
+
 (defn -main [& _] (let [r (run-tests 'freediving.evaluation-test)] (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))

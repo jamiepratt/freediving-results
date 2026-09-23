@@ -112,15 +112,20 @@
 (defn- evaluate! [root run-id config case prepared runtime]
   (let [key (digest (canonical [run-id (:id config) (:case-id case)]))]
     (loop [n 1 attempts []]
-      (let [attempt (attempt! root key n prepared runtime) attempts (conj attempts (assoc attempt :trace-hash (put! root attempt))) result (:result attempt)]
+      (let [attempt (attempt! root key n prepared runtime) attempts (conj attempts (assoc attempt :trace-hash (put! root attempt))) result (:result attempt)
+            unknown-count (count (filter #(= :unknown (get-in % [:result :external-outcome])) attempts))]
         (if (and (= :error (:outcome result)) (:retryable? result) (< n (:max-attempts config)))
           (do (Thread/sleep (long (min 2000 (* (:retry-delay-ms config) (bit-shift-left 1 (dec n)))))) (recur (inc n) attempts))
           (assoc result :case-id (:case-id case) :attempts attempts
+                 :unknown-external-attempt-count unknown-count
+                 :warnings (if (and (pos? unknown-count) (> (count attempts) 1)) [:possible-duplicate-external-work] [])
                  :cost (total-cost attempts) :latency-ms (when (every? #(number? (:latency-ms %)) attempts) (reduce + (map :latency-ms attempts)))))))))
 
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
    content identities. Pending attempts become unknown, never automatically resent.
+   Admission caps planned responses plus 4 KiB/attempt at 32 MiB and canonical
+   dataset/request identity at 32 MiB. Copies/EDN escaping add storage overhead.
    :on-progress may interrupt after durable start or provider return to test recovery."
   ([root dataset configs] (run! root dataset configs {}))
   ([root dataset configs runtime]
@@ -131,10 +136,20 @@
      (when (empty? cases) (fail! "At least one held-out case required"))
      (doseq [c configs]
        (when-not (and (string? (:id c)) (seq (:id c)) (integer? (:max-attempts c)) (<= 1 (:max-attempts c) 3) (integer? (:retry-delay-ms c)) (<= 0 (:retry-delay-ms c) 2000)) (fail! "Invalid provider ID or attempt bound")))
+     (let [samples (mapv #(providers/prepare-request % (first cases)) configs)
+           response-budget (* (count cases)
+                              (reduce + (map (fn [request config]
+                                               (* (:max-attempts config)
+                                                  (+ 4096 (get-in request [:config :max-response-bytes]))))
+                                             samples configs)))]
+       (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
      (let [prepared (mapv (fn [c] (mapv #(providers/prepare-request c %) cases)) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version "shadow-runner/1" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
-           run-id (digest (canonical identity))]
+           identity {:schema-version 1 :harness-version "shadow-runner/2" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
+           identity-text (canonical identity)
+           _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
+               (fail! "Input and request budget exceeds 32 MiB"))
+           run-id (digest identity-text)]
        (with-store root
          (fn [root]
            (put! root identity)
