@@ -161,7 +161,7 @@ Review decisions are append-only overlays on one exact `(job-id, ordinal)` obser
 
 Categories are explicit: `:extraction-repair`, `:name-normalization`, `:identity-matching` and `:substantive-correction`. The review API never approves automatically. Identity outcomes are `{:outcome :unknown}`, `{:outcome :no-match}` or `{:outcome :matched :identity-id "local-anchor"}`. An identity anchor is a locally assigned reference, not a verified federation account or inferred person. Each observation has at most one effective identity outcome. Name normalization alone does not assign identity.
 
-Review targets must exist and be classified as result rows. Detached fragments and unclassified material cannot be linked to identities through this API. Evidence references identify existing text page/line positions in the target extraction; those coordinates establish traceability, not that the proposed claim is true. The reviewer must examine the evidence. Corrections affect derived fields; original names, raw text, parsed values, representation codes and uncertainties remain available through observation inspection.
+Review targets must exist and be classified as result rows. Detached fragments and unclassified material cannot be linked to identities through this API. Legacy evidence references identify existing text page/line positions in the target extraction. Registered cross-source references additionally bind a job, observation ordinal, candidate ID, source hash and artifact hash to a line on that observation's page. Those coordinates establish traceability, not that the proposed claim is true. The reviewer must examine the evidence. Corrections affect derived fields; original names, raw text, parsed values, representation codes and uncertainties remain available through observation inspection.
 
 Each request has a caller-chosen idempotency ID. Repeating the same request returns the saved result; reusing its ID with changed content fails. Requests carry the effective observation revision they were based on. Concurrent changes serialize per observation; stale requests fail instead of overwriting a newer decision. To revise a decision, read the current effective values and revision and submit a new proposal. Reversal is explicit and only applies to a currently active approval, preserving intervening decisions and the full audit trail.
 
@@ -211,6 +211,26 @@ scripts/test-postgres.sh test-reviews
 ```
 
 All review verification uses synthetic observations. The three real pilot sources still have zero owner-reviewed identity/correction cases. Synthetic approvals do not count toward the required 50 reviewed cases, and no review command authorizes publication.
+
+### Private candidate review packets
+
+Candidate retrieval reads immutable observations without creating proposals or decisions. `freediving.candidates/load-corpus` takes a JDBC URL and configuration; `packets` takes that corpus and pagination/configuration options. `packet` selects a case using an exact `{:job-id ... :ordinal ...}` reference. Retrieval preserves source spelling and derives versioned Unicode case/diacritic and token-order comparison keys. A shared long token is only a weak, ambiguous signal. Missing parsed names abstain. CMAS1/AIN, matching names and source representation never establish citizenship or identity.
+
+One packet groups a source document and comparison-name key, retaining all original observations and versions. This groups repeated listings for review; it does not assert they describe one person. Equal source hashes share a document group even across acquisitions. Distinct hashes are document counts, not independent corroboration. Reciprocal packets are views of the same candidate pair, not independent reviewed cases.
+
+Packets record exact source/acquisition hashes, parser and processing provenance, observation versions, original values, page/line evidence, uncertainties, configuration and deterministic IDs. `:unknown`, `:no-candidate`, `:candidate` and `:ambiguous` are retrieval outcomes. No-candidate is bounded by this corpus and algorithm; it is not an owner no-match decision. The [review rubric](docs/review-rubric.md) is implementation guidance awaiting owner review, not reviewed labels or calibrated confidence.
+
+```sh
+# data/packet-request.edn: {:offset 0 :limit 50 :max-observations 10000}
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=observations_app'
+clojure -M:packets export data/packet-request.edn data/private-packets
+```
+
+The export creates private machine-readable EDN and escaped offline HTML. Use a dedicated output directory beneath an existing private parent. Pagination reports the total and whether more cases remain; candidates within each case are retained completely. The corpus bound fails explicitly rather than returning partial retrieval. IDs include the corpus snapshot and comparison configuration, so adding observations changes packet IDs. Keep these administrative artifacts private.
+
+Local verification on the three imported sources produced 488 comparison buckets from 1,020 observations: 48 candidate, 144 ambiguous, 289 no-candidate and seven unknown packets. There are 148 unique unordered candidate pairs, including 89 across source documents. Of the packets, 232 group repeated listings and 35 retain AIN/CMAS1 representation values. These are retrieval coverage counts, not reviewed cases, people, or independent corroborations. All real observations remain private and unreviewed; the required owner-reviewed count is still zero.
+
+A candidate's local anchor identifies an exact observation, not a verified person. For new source-backed identity proposals, copy its reference into `:identity-target` and `:evidence`, and use its `:identity-id` in the matched outcome. The reference shape is `{:job-id ... :ordinal ... :candidate-id ... :source-sha256 ... :artifact-sha256 ... :page ... :line ...}`; the ID is `local-observation:JOB-ID:ORDINAL`. The review API validates that anchor against a named result row and retains it even on rejection. Legacy local identity strings and target-only evidence remain compatible. Evidence validity does not imply approval; the owner must supply a current revision, before value, reason and explicit decision through the review API.
 
 ### Archive registration
 

@@ -2,10 +2,12 @@
   (:require [clojure.test :as t]
             [freediving.archive-test]
             [freediving.legacy-test]
-            [freediving.extraction-test]))
+            [freediving.extraction-test]
+            [freediving.candidates-test]
+            [freediving.packets-test]))
 
 (defn -main [& _]
-  (let [result (t/run-tests 'freediving.archive-test 'freediving.legacy-test 'freediving.extraction-test)]
+  (let [result (t/run-tests 'freediving.archive-test 'freediving.legacy-test 'freediving.extraction-test 'freediving.candidates-test 'freediving.packets-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail result) (:error result)))
       (System/exit 1))))
