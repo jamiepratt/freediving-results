@@ -57,8 +57,8 @@
     const target=packet.target,payload=target.payload||{},raw=payload.raw||{},coords=payload.coordinates||{};
     const original=raw.fields?.['source-name']||raw.line||'';
     const label=payload.parsed?.['source-name']||('Unparsed source text: '+(original||'No source name available'));
-    const context='Source '+target['job-id']+' · page '+(coords.page??'?')+' · line '+(coords.line??'?')+' · observation '+target.ordinal;
-    return {label,context,search:JSON.stringify([payload.parsed,raw,payload['source-lines'],context,packet.outcome]).toLowerCase()};
+    const context='Source '+String(target['job-id']).slice(0,12)+' · page '+(coords.page??'?')+' · line '+(coords.line??'?')+' · observation '+target.ordinal;
+    return {label,context,search:JSON.stringify([payload.parsed,raw,payload['source-lines'],target['job-id'],context,packet.outcome]).toLowerCase()};
   }
   function viewerControls({state,page,count,observationPage,busy}) {
     const loaded=state==='loaded';

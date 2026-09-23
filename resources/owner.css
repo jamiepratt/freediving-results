@@ -5,3 +5,5 @@
 #evidence td:last-child{white-space:pre-wrap;font-family:ui-monospace,monospace;word-break:normal}
 
 .case{overflow-wrap:anywhere}
+
+#evidence th:first-child,#evidence td:first-child,#evidence th:nth-child(2),#evidence td:nth-child(2){min-width:4rem;white-space:nowrap;overflow-wrap:normal;padding:.65rem .5rem}#evidence th:last-child,#evidence td:last-child{min-width:18rem}
