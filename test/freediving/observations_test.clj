@@ -38,7 +38,7 @@
                                          :parsed {:source-name "Éxample" :performance (inc n) :unit nil}
                                          :parse-status :parsed :review-status :unreviewed
                                          :future/unknown {:value 1/3 :tokens [nil "  " :x/y]}}) (range) lines)]
-      {:root root :artifact (merge identity {:job-id (hash-value identity) :processed-at "synthetic"
+      {:root root :artifact (merge identity {:job-id (hash-value identity) :processed-at "2026-09-23T12:00:00Z"
                                              :pages [{:page 1 :text (str/join "\n" lines)
                                                       :lines (mapv (fn [n line] {:line (inc n) :text line}) (range) lines)}]
                                              :pdf-page-count 1 :raw-text (str/join "\n" lines)
@@ -124,7 +124,7 @@
   (let [{:keys [root artifact] :as fixture} (synthetic 1 "cmas-test/1") receipt (publish! fixture)]
     (observations/import! app root (:job-id artifact))
     ;; Retain both content-addressed artifacts but point completed receipt to changed output under the same job.
-    (let [changed (assoc artifact :processed-at "changed") bytes (.getBytes (pr-str changed) "UTF-8")
+    (let [changed (assoc artifact :processed-at "2026-09-23T13:00:00Z") bytes (.getBytes (pr-str changed) "UTF-8")
           sha (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes))]
       (spit (str root "/derived-objects/" sha) (pr-str changed))
       (spit (str root "/derivations/" (:job-id artifact) ".edn") (pr-str (assoc (dissoc receipt :artifact-path :run-status) :artifact-sha256 sha)))
@@ -141,6 +141,15 @@
       (publish! {:root root :artifact a})
       (is (= :created (:status (observations/import! app root (:job-id a)))))
       (is (= (:candidates a) (mapv :payload (:observations (observations/inspect app (:job-id a)))))))))
+(deftest malformed-processing-provenance-rejected
+  (doseq [change [#(dissoc % :processed-at) #(update % :tool dissoc :version)
+                  #(assoc % :processed-at "yesterday") #(assoc-in % [:tool :arguments] [1])
+                  #(assoc-in % [:publication :status] :approved)]]
+    (let [{:keys [root artifact]} (synthetic 1 "cmas-test/1")
+          a (change artifact) a (assoc a :job-id (hash-value (select-keys a observations/identity-keys)))]
+      (publish! {:root root :artifact a})
+      (is (thrown-with-msg? Exception #"Malformed" (observations/import! app root (:job-id a))))
+      (is (= 0 (:versions (observations/counts app)))))))
 (deftest application-table-owner-cannot-migrate
   (sql! admin "ALTER TABLE freediving.observations OWNER TO observations_app")
   (is (thrown-with-msg? Exception #"restricted" (observations/migrate! admin "observations_app"))))

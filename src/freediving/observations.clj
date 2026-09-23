@@ -110,7 +110,12 @@
                      (string? (:actor a)) (not (str/blank? (:actor a)))
                      (vector? (:evidence-sha256 a)) (every? hash? (:evidence-sha256 a))
                      (vector? (:acquisitions a)) (map? (:tool a))
-                     (string? (:pdfinfo-version a))) (fail! "Malformed extraction artifact"))
+                     (string? (:pdfinfo-version a))
+                     (string? (:processed-at a))
+                     (try (java.time.OffsetDateTime/parse (:processed-at a)) (catch Exception _ false))
+                     (every? #(and (string? %) (not (str/blank? %))) ((juxt :name :version) (:tool a)))
+                     (vector? (get-in a [:tool :arguments])) (every? string? (get-in a [:tool :arguments]))
+                     (map? (:publication a)) (= :blocked (get-in a [:publication :status]))) (fail! "Malformed extraction artifact"))
       (let [source (archive/inspect root (:source-sha256 a)) evidence (set (archive/extraction-evidence root))]
         (when-not (every? (set (:acquisitions source)) (:acquisitions a)) (fail! "Acquisition provenance mismatch"))
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
