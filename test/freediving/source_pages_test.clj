@@ -66,3 +66,48 @@
       (is (re-matches #"[a-f0-9]{64}" (get-in metadata [:executables :pdftoppm :sha256])))
       (is (= :extracted-text-lines (:coordinate-system metadata)))
       (is (seq (:source-lines metadata))))))
+
+(defn- fixture-tool! [config text]
+  (let [file (io/file (.getParentFile (io/file (:archive-root config))) "synthetic-pdf-tool")]
+    (spit file text)
+    (java.nio.file.Files/setPosixFilePermissions (.toPath file)
+                                                 (java.nio.file.attribute.PosixFilePermissions/fromString "rwx------"))
+    (str file)))
+
+(deftest replacement-tool-with-same-version-invalidates-private-cache
+  ;; Replace only the executable lookup boundary. Real Poppler still renders both
+  ;; images; neither system tools nor source PDFs are modified.
+  (let [[config row] (sample)
+        tool-var (ns-resolve 'freediving.source-pages 'binary!)
+        original @tool-var
+        script (str "#!/usr/bin/python3\nimport os,sys\nos.execv(" (pr-str (original "pdftoppm"))
+                    ",[" (pr-str (original "pdftoppm")) "]+sys.argv[1:])\n")
+        tool (fixture-tool! config script)]
+    (with-redefs-fn {tool-var #(if (= % "pdftoppm") tool (original %))}
+      (fn []
+        (let [before (pages/render! config row 1)]
+          (fixture-tool! config (str script "# replacement executable, unchanged tool version\n"))
+          (let [after (pages/render! config row 1)]
+            (is (= (get-in before [:metadata :tool :version]) (get-in after [:metadata :tool :version])))
+            (is (not= (get-in before [:metadata :render-id]) (get-in after [:metadata :render-id])))
+            (is (not= (get-in before [:metadata :executables :pdftoppm :sha256])
+                      (get-in after [:metadata :executables :pdftoppm :sha256])))
+            (is (= 2 (count (.listFiles (io/file (:cache-root config) "derivations")))))))))))
+
+(deftest stalled-tool-times-out-and-concurrent-request-is-refused
+  (let [[config row] (sample)
+        tool-var (ns-resolve 'freediving.source-pages 'binary!) original @tool-var
+        tool (fixture-tool! config "#!/usr/bin/python3\nimport time\ntime.sleep(60)\n")
+        entered (promise)]
+    (with-redefs-fn {tool-var (fn [name] (deliver entered true) (if (= name "pdftoppm") tool (original name)))}
+      (fn []
+        (let [started (System/nanoTime)
+              stalled (future (try (pages/render! config row 1) :unexpected-success
+                                   (catch Exception e (.getMessage e))))]
+          (is (= true (deref entered 5000 :never-started)))
+          (is (thrown-with-msg? Exception #"renderer busy" (pages/render! config row 1)))
+          (is (= "PDF render timeout" (deref stalled 20000 :did-not-time-out)))
+          (is (< (/ (- (System/nanoTime) started) 1e9) 20.0)))))
+    ;; The timeout must release the sole render slot and remove temporary files.
+    (is (= 1 (get-in (pages/render! config row 1) [:metadata :page])))
+    (is (empty? (filter #(.startsWith (.getName %) "render-") (.listFiles (io/file (:cache-root config))))))))
