@@ -34,4 +34,5 @@ if [[ $# -eq 0 ]]; then
   clojure -M:test-reviews
   clojure -M:test-publication
   clojure -M:test-public-results
+  clojure -M:test-owner
 fi

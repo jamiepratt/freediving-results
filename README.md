@@ -2,6 +2,10 @@
 
 This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, imports those artifacts into immutable PostgreSQL observations, and records reversible owner review decisions separately. It supports CMAS CWT men, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All real pilot observations remain unreviewed. Pilot acceptance, identity review and publication scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
 
+## Local owner review demo
+
+A private loopback web interface now exercises proposals, approval/rejection/reversal and separate extraction validation/revocation on explicitly synthetic data. See [setup, access and trust boundary](docs/local-owner-review.md). No real pilot decisions or public site are created.
+
 ## Run
 
 Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure and dependencies are pinned in `deps.edn`. Archive/extraction commands need no running service; observation ingestion requires PostgreSQL. First run downloads Maven dependencies.
