@@ -190,7 +190,7 @@
 (deftest athens-dnf-exact-source-and-explicit-fields
   (let [line "1 Zso a EXAMPLE CMAS1 104,5 100,0 GOLD MEDAL"
         r (extraction/parse-pages [(str athens-header line "\nOther EXAMPLE AIN 100 0 DQ SP\nThird EXAMPLE GBR DNS\nfi\n")])]
-    (is (= "cmas-athens-pool/5" (:parser-version r)))
+    (is (= "cmas-athens-pool/6" (:parser-version r)))
     (is (= 3 (get-in r [:reconciliation :parsed-count])))
     (is (= 1 (get-in r [:reconciliation :unparsed-count])))
     (is (= line (get-in r [:candidates 0 :raw :line])))
@@ -268,7 +268,7 @@
       (is (= :created (:run-status receipt)))
       (is (not= (:job-id legacy) (:job-id receipt)))
       (is (= legacy-bytes (slurp (:artifact-path legacy))))
-      (is (= "cmas-athens-pool/5" (:parser-version r)))
+      (is (= "cmas-athens-pool/6" (:parser-version r)))
       (is (= 3 (:schema-version r)))
       (is (= 1 (get-in r [:reconciliation :parsed-count])))
       (is (= :skipped (:run-status (extraction/extract! root digest opts))))
@@ -294,7 +294,7 @@
   (let [notes ["PANAMERICAN RECORD" "DOLPHIN KICK" "WALL AT START" "DQ SP CHIN" "DQ SP NO OK"
                "GOLD MEDAL, WORLD RECORD SENIORS" "BRONZE MEDAL, WORLD RECORD MASTERS M1"]
         r (extraction/parse-pages [(str dynbf-header (str/join "\n" (map #(str "1 Synthetic NAME CMAS1 141,0 138,0 " %) notes)))])]
-    (is (= "cmas-athens-pool/5" (:parser-version r)))
+    (is (= "cmas-athens-pool/6" (:parser-version r)))
     (is (= 7 (get-in r [:reconciliation :parsed-count])))
     (is (= notes (mapv #(get-in % [:parsed :notes]) (:candidates r))))
     (is (every? #(= "DYNBF" (get-in % [:parsed :discipline])) (:candidates r)))
@@ -341,7 +341,7 @@
                                         "    Beta NAME POL 200 200 WORLD RECORD SENIORS\n"
                                         "3 Gamma NAME ITA 180 180 BRONZE MEDAL\n")])
         [a b c] (:candidates r)]
-    (is (= "cmas-athens-pool/5" (:parser-version r)))
+    (is (= "cmas-athens-pool/6" (:parser-version r)))
     (is (= 3 (get-in r [:reconciliation :candidate-count])))
     (is (= [:unparsed :unparsed :parsed] (mapv :parse-status [a b c])))
     (is (= (:group-evidence a) (:group-evidence b)))
@@ -398,7 +398,7 @@
   (let [r (extraction/parse-pages [(str sta-header "1 Éva NAME CMAS1 04:05 GOLD MEDAL\n"
                                         "  Other NAME GBR 05:32 DQ\n")])
         [a b] (:candidates r)]
-    (is (= "cmas-athens-pool/5" (:parser-version r)))
+    (is (= "cmas-athens-pool/6" (:parser-version r)))
     (is (= 2 (get-in r [:reconciliation :parsed-count])))
     (is (= "04:05" (get-in a [:raw :fields :final-time])))
     (is (= {:components [4 5] :fraction nil :fraction-digits 0 :notation :colon-separated}
@@ -505,3 +505,94 @@
     (is (= ["1" "2"] (mapv #(get-in % [:raw :fields :rank]) (:candidates r))))
     (is (= "1   Éva  UWE                     CMAS1           04:05 GOLD MEDAL"
            (get-in r [:candidates 0 :raw :line])))))
+
+(defn speed-header [family]
+  (str athens/title "\nMAY, 22, 2025\nSPEED " family " FINAL RESULTS\nSENIORS – WOMEN\n"
+       "# Name & surname Country       Realized     Final %\n"
+       "                                                        Notes\n"
+       "                                 Result    Result\n"))
+
+(deftest athens-speed-families-preserve-time-syntax-and-unknown-units
+  (doseq [[family token components] [["8X50" "04:51.36" [4 51]] ["2X50" "39.170" [39]] ["4X50" "1:01.33" [1 1]]]]
+    (let [r (extraction/parse-pages [(str (speed-header family) "1 Éva UWE CMAS1 " token " " token " GOLD MEDAL, WORLD RECORD\n")])
+          c (first (:candidates r))]
+      (is (= 1 (get-in r [:reconciliation :parsed-count])))
+      (is (= (str "SPEED " family) (get-in c [:parsed :discipline])))
+      (is (= token (get-in c [:raw :fields :realized-time]) (get-in c [:raw :fields :final-time])))
+      (is (= components (get-in c [:parsed :final-time :components])))
+      (is (= "Éva UWE" (get-in c [:parsed :source-name])))
+      (is (= :unknown (get-in c [:fields :final-duration :status])))
+      (is (= :unknown (get-in c [:fields :realized-duration :status])))
+      (is (= :unknown (get-in c [:fields :split-time :status])))
+      (is (= :unknown (get-in c [:fields :penalty :status])))
+      (is (= :ambiguous (get-in c [:fields :unit :status])))
+      (is (some #{:final-percent-header-ambiguous} (:unresolved-reasons c)))
+      (is (= :blocked (get-in r [:publication :status]))))))
+
+(deftest athens-speed-missing-cells-status-and-invalid-syntax
+  (let [r (extraction/parse-pages [(str (speed-header "4X50")
+                                        "1 Synthetic NAME GBR            1:46.27                 GOLD MEDAL\n"
+                                        "2 Other NAME GBR                            2:12.34    SILVER MEDAL\n"
+                                        "  Absent NAME GBR                                      DNS\n"
+                                        "  Disqualified NAME GBR                                DQ NO FINISH\n"
+                                        "3 Bad NAME GBR 04:xx 04:51.36\n"
+                                        "4 Unknown NAME GBR 39.17 39.18 MYSTERY NOTE\n"
+                                        "5 Misplaced NAME GBR 1:46.27 GOLD MEDAL\n")])
+        [a b dns dq bad unknown misplaced] (:candidates r)]
+    (is (= 7 (get-in r [:reconciliation :candidate-count])))
+    (is (= [:parsed :parsed :parsed :parsed :unparsed :unparsed :unparsed] (mapv :parse-status (:candidates r))))
+    (is (= "1:46.27" (get-in a [:raw :fields :realized-time])))
+    (is (nil? (get-in a [:parsed :final-time])))
+    (is (= "2:12.34" (get-in b [:raw :fields :final-time])))
+    (is (nil? (get-in b [:parsed :realized-time])))
+    (is (= "DNS" (get-in dns [:parsed :status])))
+    (is (= "DQ" (get-in dq [:parsed :status])))
+    (is (= "DQ NO FINISH" (get-in dq [:raw :fields :notes])))
+    (is (= :invalid (get-in bad [:fields :realized-time :status])))
+    (is (= "04:xx" (get-in bad [:raw :fields :realized-time])))
+    (is (= "MYSTERY NOTE" (get-in unknown [:raw :fields :notes])))
+    (is (some #{:unknown-source-note} (:unresolved-reasons unknown)))
+    (is (nil? (:parsed misplaced)))))
+
+(deftest athens-speed-uncertain-groups-and-overflow-stay-unparsed
+  (let [r (extraction/parse-pages [(str (speed-header "2X50")
+                                        "Alpha NAME GBR 39.17 39.17 GOLD MEDAL\n1\nBeta NAME POL 39.17 39.17\n"
+                                        "3 Wrapped SURNAME\n    Given NAME GBR 40.00 40.00\n"
+                                        "4 Huge NAME GBR 99999999999999999999999.12 39.17\n")])]
+    (is (= 4 (count (:candidates r))))
+    (is (every? #(= :unparsed (:parse-status %)) (:candidates r)))
+    (is (some #{:ambiguous-merged-cells} (get-in r [:candidates 0 :unresolved-reasons])))
+    (is (some #{:ambiguous-wrapped-name} (get-in r [:candidates 2 :unresolved-reasons])))
+    (is (= :invalid (get-in r [:candidates 3 :fields :realized-time :status])))))
+
+(deftest athens-speed-context-and-duplicates
+  (let [h (speed-header "2X50")
+        columns (str/join "\n" (drop 4 (str/split-lines h)))
+        row "1 Éva  NAME GBR 39.170 39.180\n"
+        r (extraction/parse-pages [(str h row row) (str columns "\n" row)
+                                   "SPEED 9X50 FINAL RESULTS\n" (str columns "\n" row)])]
+    (is (= 3 (get-in r [:reconciliation :parsed-count])))
+    (is (= [3 4] (get-in r [:reconciliation :unsupported-pages])))
+    (is (= ["Éva  NAME" "Éva  NAME" "Éva  NAME"] (mapv #(get-in % [:parsed :source-name]) (:candidates r))))
+    (is (= "170" (get-in r [:candidates 0 :parsed :realized-time :fraction])))
+    (is (= "180" (get-in r [:candidates 0 :parsed :final-time :fraction])))
+    (is (every? #(nil? (get-in % [:parsed :penalty])) (:candidates r)))))
+
+(deftest athens-speed-mixed-headers-never-authorize-context
+  (doseq [h [(str sta-header "Notes\n") (str athens-header "Result Result\n")
+             (str (speed-header "2X50") "Distance (m) Distance (m)\n")
+             (str (speed-header "2X50") "# Name & surname Country Final Result Notes\n")]]
+    (is (= [1] (get-in (extraction/parse-pages [(str h "1 Example NAME GBR 39.17 39.17\n")])
+                       [:reconciliation :unsupported-pages])))))
+
+(deftest athens-speed-single-cell-requires-current-bounded-column-evidence
+  (let [h (str athens/title "\nMAY, 23, 2025\nSPEED 4X50 FINAL RESULTS\nMASTERS M1 – WOMEN\n"
+               "                                         Realized    Final %\n"
+               "                                                           Notes\n"
+               "#   Name & surname             Country\n"
+               "                                           Result   Result\n")
+        r (extraction/parse-pages [(str h "1   Example NAME                GBR       1:46.27         GOLD MEDAL\n"
+                                        "2   Far NAME                    GBR                                 1:46.27\n")])]
+    (is (= [:parsed :unparsed] (mapv :parse-status (:candidates r))))
+    (is (= "1:46.27" (get-in r [:candidates 0 :raw :fields :realized-time])))
+    (is (nil? (get-in r [:candidates 0 :raw :fields :final-time])))))
