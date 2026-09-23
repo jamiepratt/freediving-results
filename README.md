@@ -16,7 +16,7 @@ The [local correction workflow](docs/local-corrections.md) accepts private evide
 
 ## Local shadow comparison
 
-The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the versioned dataset, held-out grouping, rules/Jev/LLM adapters, private restartable traces and synthetic comparison command. The [reviewed-label bridge](docs/local-reviewed-labels.md) verifies explicit pair decisions against PostgreSQL before owner metrics and detects stale exports. File assertions remain separate; synthetic databases remain synthetic. No live provider benchmark or genuine owner labels are included. Shadow outcomes cannot approve identities or publish results.
+The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the versioned dataset, held-out grouping, rules/Jev/LLM adapters, private restartable traces and synthetic comparison command. The [reviewed-label bridge](docs/local-reviewed-labels.md) verifies explicit pair decisions against PostgreSQL before owner metrics and detects stale exports. The optional [local Agent-o-rama module](docs/local-rama-evaluation.md) runs that verified evaluator through opaque receipt references. File assertions remain separate; synthetic databases remain synthetic. No live provider benchmark or genuine owner labels are included. Shadow outcomes cannot approve identities or publish results.
 
 ## Run
 
