@@ -23,7 +23,31 @@
   }
   function internalLink(kind, id) { return /^(results|athletes)$/.test(kind) && /^[a-f0-9]{64}$/.test(id || '') ? '/' + kind + '/' + id : null; }
   function citationURL(v) { try { const u = new URL(v); return ['https:', 'http:'].includes(u.protocol) && !u.username && !u.password ? u.href : null; } catch (_) { return null; } }
-  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL};
+  function correctionClient(resultId, version, transport = fetch, newId = () => crypto.randomUUID()) {
+    let previous = null;
+    return async function (fields) {
+      const limits = {suggestion: 1000, reason: 2000, evidence: 2000};
+      const names = {suggestion: 'Suggested change', reason: 'Reason', evidence: 'Evidence citation or reference'};
+      const data = {};
+      for (const [key, limit] of Object.entries(limits)) {
+        const value = fields[key];
+        if (typeof value !== 'string' || !value.trim()) throw new Error(names[key] + ' is required.');
+        if (value.length > limit) throw new Error(names[key] + ' must be at most ' + limit + ' characters.');
+        data[key] = value;
+      }
+      const signature = JSON.stringify(data);
+      if (!previous || previous.signature !== signature) previous = {signature, body: JSON.stringify({id: newId(), 'result-id': resultId, version, ...data})};
+      let response, receipt;
+      try {
+        response = await transport('/api/corrections', {method: 'POST', credentials: 'omit', cache: 'no-store', headers: {'Content-Type': 'application/json', 'X-Correction-Request': '1'}, body: previous.body});
+        receipt = await response.json();
+      } catch (_) { throw new Error('Submission not confirmed. Retry without changing the fields to safely reuse this request.'); }
+      if (!response.ok) throw new Error(receipt.error || (response.status === 429 ? 'Too many requests. Please try later.' : 'Request unavailable. Reload this result and try again.'));
+      if (receipt.status !== 'pending' || typeof receipt.id !== 'string') throw new Error('Submission not confirmed. Retry without changing the fields to safely reuse this request.');
+      return receipt;
+    };
+  }
+  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL, correctionClient};
   if (typeof document === 'undefined') return;
   const main = document.getElementById('content'), status = document.getElementById('status'), banner = document.getElementById('demo');
   let sequence = 0;
@@ -64,6 +88,33 @@
   function evidence(refs) {
     const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link('Source page ' + display(ref.page) + ', line ' + display(ref.line), internalLink('results', ref['result-id']))); n.append(item); }); return n;
   }
+  function correctionForm(r) {
+    const panel = section('Suggest a correction', 'No account needed. Requests stay private and pending owner approval. Submitting does not change the published result.');
+    const form = el('form', null, 'correction-form'); form.setAttribute('aria-label', 'Suggest a correction');
+    const fields = {};
+    [['suggestion', 'Suggested change', 1000, 'State the field and the correct value.'], ['reason', 'Reason for the change', 2000, 'Explain what is wrong with this result.'], ['evidence', 'Evidence citation or reference', 2000, 'Give a source URL or document reference with a page or line. Do not include passwords, access tokens or personal contact details.']].forEach(([key, title, limit, hint]) => {
+      const wrap = el('div'), l = el('label', title + ' (required)'); l.htmlFor = 'correction-' + key;
+      const input = el('textarea'); input.id = l.htmlFor; input.name = key; input.required = true; input.maxLength = limit; input.rows = key === 'suggestion' ? 3 : 4;
+      const help = el('p', hint + ' Maximum ' + limit + ' characters.', 'muted'); help.id = input.id + '-help'; input.setAttribute('aria-describedby', help.id);
+      fields[key] = input; wrap.append(l, input, help); form.append(wrap);
+    });
+    const submit = el('button', 'Send correction request'); submit.type = 'submit';
+    const feedback = el('p'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite'); feedback.tabIndex = -1;
+    form.append(submit, feedback); panel.append(form);
+    const send = correctionClient(r['result-id'], r.correction.version);
+    form.addEventListener('submit', async e => {
+      e.preventDefault(); if (submit.disabled || !form.reportValidity()) return;
+      submit.disabled = true; Object.values(fields).forEach(input => { input.readOnly = true; }); feedback.textContent = 'Sending request…';
+      let accepted = false;
+      try {
+        const receipt = await send(Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.value])));
+        feedback.textContent = (receipt.duplicate ? 'Request already received. ' : 'Request received. ') + 'Receipt: ' + receipt.id + '. Pending owner approval. The published result is unchanged.';
+        submit.textContent = 'Request received'; accepted = true; Object.values(fields).forEach(input => { input.value = ''; });
+      } catch (error) { feedback.textContent = error.message; }
+      finally { if (!accepted) { submit.disabled = false; Object.values(fields).forEach(input => { input.readOnly = false; }); } feedback.focus(); }
+    });
+    return panel;
+  }
   function detail(r) {
     const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'lead'));
     const summary = el('div', null, 'summary'); [['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
@@ -79,7 +130,8 @@
     (r['correction-audit'] || []).forEach(a => { const entry = el('article', null, 'audit-entry'); entry.append(el('p', (a.action === 'reverse' ? 'Reversed' : 'Approved') + ' · ' + label(a.field), 'eyebrow'), el('h3', display(a.before) + ' → ' + display(a.after)), el('p', a.reason || 'No public reason recorded.')); if (a['correction-reason'] && a['correction-reason'] !== a.reason) entry.append(el('p', 'Correction rationale: ' + a['correction-reason'])); entry.append(el('p', display(a['recorded-at']) + (a.action === 'approve' ? (a['effective?'] ? ' · Currently effective' : ' · No longer effective') : ' · Restored the prior value'), 'muted'), evidence(a.evidence)); audit.append(entry); }); main.append(audit);
     const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', 'Source page ' + display((r['source-position'] || {}).page) + ', line ' + display((r['source-position'] || {}).line)));
     (r.citations || []).forEach(c => { const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);
-    main.append(el('p', 'Anonymous correction submissions are not available in this local pilot.', 'muted'));
+    if (r.correction && typeof r.correction.version === 'string') main.append(correctionForm(r));
+    else main.append(el('p', 'Correction requests are currently unavailable for this result.', 'muted'));
   }
   async function load() {
     const token = ++sequence; main.replaceChildren(); status.textContent = 'Loading public records…'; main.setAttribute('aria-busy', 'true'); banner.hidden = true;
