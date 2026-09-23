@@ -1,10 +1,10 @@
 # Freediving results: local evidence and extraction
 
-This slice registers existing source bytes and explicit acquisition provenance in a private local archive, then produces private page-preserving extraction artifacts and structured CMAS CWT men, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. It does not implement the PostgreSQL observations database, resolve identities, or publish data. Pilot acceptance and remaining scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
+This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, and imports those artifacts into immutable PostgreSQL observations. It supports CMAS CWT men, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All observations remain unreviewed. Pilot acceptance, identity review and publication scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
 
 ## Run
 
-Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure is pinned in `deps.edn`; the legacy adapter also uses pinned `data.json`; no running services are needed. First run downloads Maven dependencies.
+Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure and dependencies are pinned in `deps.edn`. Archive/extraction commands need no running service; observation ingestion requires PostgreSQL. First run downloads Maven dependencies.
 
 ```sh
 clojure -M:test
@@ -110,9 +110,52 @@ Speed result tokens retain decimal-only and colon-separated notation, components
 
 Every speed row and source line was compared with an independent inventory. Combined Athens coverage is 794 candidates: 787 parsed and seven unparsed, all unresolved. This includes five unparsed result rows and two detached DNF fragments. Every one of the source's 1,241 nonblank lines is accounted for once. Prior distance/STA candidates are unchanged, CWT/AIDA job identities remain unchanged, and earlier parser artifacts remain preserved under their versioned jobs. Ambiguous wrapped/adjacent lines and unrecognized notes remain visible; repeated ranks and listings are not deduplicated. Remaining pilot scope is tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
-All candidates remain unreviewed and publication remains blocked. No command publishes results or approves corrections. The database, owner review workflow, additional parsers and pilot acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+All candidates remain unreviewed and publication remains blocked. No command publishes results or approves corrections. Owner review, additional parsers and pilot acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
 ## Public API
+
+### Local PostgreSQL
+
+`freediving.observations/import!` takes a JDBC URL, archive root and completed extraction job ID. It verifies the receipt, artifact SHA-256, extraction identity, source bytes, acquisition records and referenced retained evidence before writing. Schemas 1, 2 and 3 are supported explicitly. An earlier acquisition/evidence snapshot remains valid when the archive later gains additional records. Unknown fields remain in the exact artifact bytes and complete candidate EDN; SQL metadata does not replace source evidence.
+
+An extraction version is a job and its exact artifact. A candidate ID identifies the source hash plus its text positions, separate from the extraction version. Repeated athlete names or ranks at different positions remain separate candidates. These coordinates are extraction text locations, not proof of identity or stable PDF geometry across different text-extraction tools. Parser/config changes append versions. Conflicting content under an existing job fails. Each import commits its extraction and all observations together; concurrent reruns serialize per job and return one created import followed by skipped imports.
+
+`inspect` returns full artifact provenance and observation payloads, including raw text, parsed values, unknown fields, unresolved reasons and mechanical repairs. `list` reports extraction versions. `count` distinguishes sources, versions, unique source-position candidates and versioned observations, with result-row, fragment and unclassified totals. Classification records a reason: known detached Athens `fi` tokens remain fragments, while ambiguous lines without sufficient result evidence remain unclassified. These are ingestion categories, not owner decisions or publication approval.
+
+The checked-in SQL migration has a recorded checksum. Run migrations using a separate database owner; ingestion uses a restricted application role. The application receives SELECT/INSERT only, and triggers also reject UPDATE/DELETE/TRUNCATE on ingestion tables. This protects existing records from ordinary application writes. Database owners/superusers can alter privileges or disable/drop enforcement. Direct INSERT access is not a substitute for the importer’s evidence validation. Role administration, authentication, backups, production migrations and future append-only review decisions remain separate concerns tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+
+```clojure
+(require '[freediving.observations :as observations])
+(observations/import! jdbc-url archive-root extraction-job-id)
+(observations/list-extractions jdbc-url)
+(observations/counts jdbc-url)
+(observations/inspect jdbc-url extraction-job-id)
+```
+
+`scripts/local-postgres.sh` starts a dedicated development cluster, bound only to `127.0.0.1`, with no system service registration. Put PostgreSQL `initdb`, `pg_ctl` and `psql` on PATH. The script refuses to start or stop clusters it did not create. Use the same PostgreSQL major version for subsequent starts.
+
+```sh
+scripts/local-postgres.sh start data/local-postgres 55480
+psql -h 127.0.0.1 -p 55480 -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE ROLE observations_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
+  -c 'CREATE DATABASE observations_pilot;'
+export FREEDIVING_DATABASE_URL="jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=$(id -un)"
+clojure -M:observations migrate observations_app
+export FREEDIVING_DATABASE_URL='jdbc:postgresql://127.0.0.1:55480/observations_pilot?user=observations_app'
+clojure -M:observations import data/archive EXTRACTION_JOB_ID
+clojure -M:observations list
+clojure -M:observations count
+clojure -M:observations inspect EXTRACTION_JOB_ID > data/observation-inspection.edn
+scripts/local-postgres.sh stop data/local-postgres
+```
+
+Run role/database creation once. Restart with the same `start` command; records persist. The helper uses **trust authentication on loopback**, suitable only for a trusted local development machine. Other local processes can impersonate database roles. It is not a production authentication or deployment configuration. Private cluster files inherit owner-only permissions; protect inspection output too (`umask 077`). Never supply a production database to development tests.
+
+`scripts/test-postgres.sh` creates a fresh disposable loopback cluster, runs the PostgreSQL integration suite and stops/removes that cluster on exit. It also requires Python 3 to choose an available port. It never resets an existing database. The ordinary `clojure -M:test` suite remains independent of PostgreSQL. Both suites use synthetic evidence only.
+
+Local verification used PostgreSQL 17.5. The three inspected private artifacts imported as three sources/versions and 1,020 source-position observations: 1,013 parsed result rows, five unparsed result rows and two detached fragments. All three reruns skipped; stored artifact bytes and every candidate payload matched the archive exactly. All 1,020 remain unreviewed, with no identity or publication approval. No real source bytes or rows are committed.
+
+### Archive registration
 
 ```clojure
 (require '[freediving.archive :as archive])
