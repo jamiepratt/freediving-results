@@ -2,7 +2,8 @@
   (:require [clojure.string :as str]
             [clojure.java.shell :as shell]
             [clojure.edn :as edn]
-            [freediving.archive :as archive]))
+            [freediving.archive :as archive]
+            [freediving.aida :as aida]))
 
 (def parser-version "cmas-cwt-men/1")
 (defn- number-value [s] (when s (parse-long s)))
@@ -29,7 +30,7 @@
                 :penalty (when (= 3 (count nums)) (second nums)) :status status
                 :notes (when-not (str/blank? notes) notes)}}))))
 
-(defn parse-pages
+(defn- parse-cmas-pages
   "Parse exact pdftotext layout page strings. Coordinates are 1-based text lines,
    not PDF geometry. Every nonblank line remains accounted for and review blocked."
   [pages]
@@ -74,6 +75,9 @@
                       :status :unreviewed}
      :publication {:status :blocked :reasons [:owner-review-required :reconciliation-unreviewed :units-not-explicit]}}))
 
+(defn parse-pages [pages]
+  (if (aida/supported? pages) (aida/parse-pages pages) (parse-cmas-pages pages)))
+
 (defn- canonical [value]
   (cond (map? value) (into (sorted-map) (map (fn [[k v]] [k (canonical v)]) value))
         (vector? value) (mapv canonical value)
@@ -102,19 +106,20 @@
          _ (when (empty? (:acquisitions source)) (throw (ex-info "PDF lacks acquisition evidence" {})))
          evidence (archive/extraction-evidence root)
          tool-version (str/trim (:err (command! "pdftotext" "-v")))
+         result (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-")
+         raw (:out result)
+         segments (str/split raw #"\f" -1)
+         pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
+         aida? (aida/supported? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version parser-version :schema-version 1
+                   :parser-version (if aida? aida/parser-version parser-version) :schema-version (if aida? 2 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}}
          job-id (digest identity)]
      (archive/derive! root job-id
                       (fn []
-                        (let [result (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-")
-                              raw (:out result)
-                              segments (str/split raw #"\f" -1)
-                              pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
-                              info (:out (command! "pdfinfo" (:artifact-path source)))
+                        (let [info (:out (command! "pdfinfo" (:artifact-path source)))
                               page-count (some-> (re-find #"(?m)^Pages:\s+(\d+)\s*$" info) second parse-long)]
                           (when-not (= page-count (count pages))
                             (throw (ex-info "Extracted page count does not match PDF" {:expected page-count :actual (count pages)})))

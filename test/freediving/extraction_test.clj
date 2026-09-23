@@ -1,6 +1,7 @@
 (ns freediving.extraction-test
   (:require [clojure.test :refer [deftest is]]
             [freediving.extraction :as extraction]
+            [freediving.aida :as aida]
             [freediving.archive :as archive]
             [freediving.archive-test :as fixture]
             [clojure.edn :as edn]
@@ -32,20 +33,21 @@
     (is (= :needs-OCR (:status empty-page)))
     (is (= :blocked (get-in bad [:publication :status])))))
 
-(defn synthetic-pdf []
-  (let [stream "BT /F1 12 Tf 40 750 Td (Synthetic result page) Tj ET"
-        objects ["<< /Type /Catalog /Pages 2 0 R >>"
-                 "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
-                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
-                 "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
-                 (str "<< /Length " (count stream) " >>\nstream\n" stream "\nendstream")]
-        pieces (map-indexed #(str (inc %1) " 0 obj\n" %2 "\nendobj\n") objects)
-        prefix "%PDF-1.4\n"
-        offsets (butlast (reductions + (count prefix) (map count pieces)))
-        body (str prefix (apply str pieces))]
-    (str body "xref\n0 6\n0000000000 65535 f \n"
-         (apply str (map #(format "%010d 00000 n \n" %) offsets))
-         "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" (count body) "\n%%EOF\n")))
+(defn synthetic-pdf
+  ([] (synthetic-pdf "BT /F1 12 Tf 40 750 Td (Synthetic result page) Tj ET"))
+  ([stream]
+   (let [objects ["<< /Type /Catalog /Pages 2 0 R >>"
+                  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+                  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+                  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+                  (str "<< /Length " (count stream) " >>\nstream\n" stream "\nendstream")]
+         pieces (map-indexed #(str (inc %1) " 0 obj\n" %2 "\nendobj\n") objects)
+         prefix "%PDF-1.4\n"
+         offsets (butlast (reductions + (count prefix) (map count pieces)))
+         body (str prefix (apply str pieces))]
+     (str body "xref\n0 6\n0000000000 65535 f \n"
+          (apply str (map #(format "%010d 00000 n \n" %) offsets))
+          "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" (count body) "\n%%EOF\n"))))
 
 (defn registered-pdf []
   (let [dir (fixture/workspace) root (str dir "/archive") source (str dir "/source.pdf")
@@ -132,3 +134,53 @@
       (is (= [0 0 0] (mapv :exit results)) (pr-str results))
       (is (= 1 (count (set (map #(:artifact-sha256 (edn/read-string (:out %))) results)))))
       (is (= 1 (count (.listFiles (java.io.File. root "derived-objects"))))))))
+
+(def aida-header "2/7/25, 13:13 AIDA | 34th AIDA FREEDIVING WORLD CHAMPIONSHIP WAKAYAMA 2025\n\nDYN\n\nFemale\n\nMedals # Name Nationality Result Announced Points Penalties\n\n")
+(deftest aida-wrapped-source-rows-retain-evidence
+  (let [r (extraction/parse-pages [(str aida-header "     Éva\n1.   Example-   AIN   150 m   1m   75.5   0\n     Test\n\n1. Other Name HUN 120 m 100 m 0 2\n\nhttps://www.aidainternational.org/EventRanking/4349#rankings 1/1\n")])
+        c (first (:candidates r))]
+    (is (= "aida-wakayama-ranking/1" (:parser-version r)))
+    (is (= 2 (get-in r [:reconciliation :parsed-count])))
+    (is (= "Éva Example- Test" (get-in c [:parsed :source-name])))
+    (is (= ["Éva" "Example-" "Test"] (get-in c [:raw :fields :source-name-fragments])))
+    (is (= "AIN" (get-in c [:parsed :representation])))
+    (is (= "Female" (get-in c [:parsed :category])))
+    (is (= "DYN" (get-in c [:parsed :discipline])))
+    (is (= "m" (get-in c [:parsed :unit])))
+    (is (= 75.5M (get-in c [:parsed :points])))
+    (is (nil? (get-in c [:parsed :event-date])))
+    (is (nil? (get-in r [:candidates 1 :parsed :status])))
+    (is (= :blocked (get-in r [:publication :status])))))
+
+(deftest aida-extraction-selects-version-and-preserves-cmas-compatibility
+  (let [pdf (synthetic-pdf (str "BT /F1 8 Tf 20 750 Td "
+                                "(AIDA | 34th AIDA FREEDIVING WORLD CHAMPIONSHIP WAKAYAMA 2025) Tj 0 -20 Td "
+                                "(Medals # Name Nationality Result Announced Points Penalties) Tj 0 -20 Td "
+                                "(DYN) Tj 0 -20 Td (Female) Tj 0 -20 Td "
+                                "(1. Test Name AIN 100 m 1m 50 0) Tj ET"))
+        [root digest] (with-redefs [synthetic-pdf (constantly pdf)] (registered-pdf))
+        opts {:actor "test" :config {}}
+        previous (with-redefs [aida/supported? (constantly false)] (extraction/extract! root digest opts))
+        receipt (extraction/extract! root digest opts)
+        r (edn/read-string (slurp (:artifact-path receipt)))]
+    (is (not= (:job-id previous) (:job-id receipt)))
+    (is (= :created (:run-status receipt)))
+    (is (= "aida-wakayama-ranking/1" (:parser-version r)))
+    (is (= 2 (:schema-version r)))
+    (is (= 1 (get-in r [:reconciliation :parsed-count])))
+    (is (= :skipped (:run-status (extraction/extract! root digest opts))))
+    (is (= "cmas-cwt-men/1" (:parser-version (extraction/parse-pages [header]))))))
+
+(deftest aida-adjacent-status-and-malformed-rows-remain-distinct
+  (let [r (extraction/parse-pages [(str aida-header "1. Test One AIN 100 m 1m 50 0\n1. Test Two HUN DNS\n\nBROKEN ENTRY\n\nhttps://www.aidainternational.org/EventRanking/4349#rankings 1/1\n")
+                                   "AIDA | 34th AIDA FREEDIVING WORLD CHAMPIONSHIP WAKAYAMA 2025\n\nEVENT RANKING\n\n1. Other Name TPE 200 m 1m 100 0\n"])]
+    (is (= 4 (get-in r [:reconciliation :candidate-count])))
+    (is (= 3 (get-in r [:reconciliation :parsed-count])))
+    (is (= "DNS" (get-in r [:candidates 1 :parsed :status])))
+    (is (= :unknown (get-in r [:candidates 1 :fields :performance :status])))
+    (is (= :unparsed (get-in r [:candidates 2 :parse-status])))
+    (is (nil? (get-in r [:candidates 3 :parsed :category])))
+    (is (nil? (get-in r [:candidates 3 :parsed :discipline])))
+    (is (= (get-in r [:reconciliation :nonblank-line-count])
+           (+ (count (get-in r [:reconciliation :noncandidate-lines]))
+              (reduce + (map #(count (:source-lines %)) (:candidates r))))))))
