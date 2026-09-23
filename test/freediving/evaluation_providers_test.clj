@@ -94,4 +94,8 @@
     (with-server (fn [ex] (reply! ex 200 (json/write-str body)))
       (fn [url]
         (is (= :invalid-response (:error (p/execute! (p/prepare-request {:provider :llm :model "fixture" :endpoint url} {:input {}}) {:bearer-token "test"}))))))))
+(deftest every-provider-rejects-nonportable-model-config
+  (doseq [provider [:rules :stub] model [(Object.) ##NaN 42 "" (apply str (repeat 201 "x"))]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (p/prepare-request {:provider provider :model model} {:input {}})))))
 (defn -main [& _] (let [r (run-tests 'freediving.evaluation-providers-test)] (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))

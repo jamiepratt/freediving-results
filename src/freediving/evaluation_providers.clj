@@ -25,6 +25,7 @@
         config (merge {:timeout-ms 5000 :max-response-bytes 65536 :max-request-bytes 65536} config)
         http? (#{:jev :llm} provider)]
     (when-not (and (every? config-keys (keys config)) (#{:rules :stub :jev :llm} provider)
+                   (or (nil? (:model config)) (and (valid-text? (:model config)) (<= (count (:model config)) 200)))
                    (bounded-int? (:timeout-ms config) 1 60000)
                    (bounded-int? (:max-response-bytes config) 1 1048576)
                    (bounded-int? (:max-request-bytes config) 1 1048576)
