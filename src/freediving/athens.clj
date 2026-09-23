@@ -1,7 +1,7 @@
 (ns freediving.athens
   (:require [clojure.string :as str]))
 
-(def parser-version "cmas-athens-distance/3")
+(def parser-version "cmas-athens-pool/4")
 (def title "2025 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR, GREECE")
 (defn supported? [pages] (boolean (some #(str/includes? % title) pages)))
 (defn- field [v] {:status (if (nil? v) :unknown :parsed) :value v})
@@ -10,9 +10,10 @@
   (cond
     (= s title) :event-title
     (re-matches #"MAY, \d{1,2}, \d{4}" s) :event-date
-    (re-matches #"(?:DNF|DYNBF|DYN)\s+FINAL RESULTS" s) :discipline
+    (re-matches #"(?:DNF|DYNBF|DYN|STA)\s+FINAL RESULTS" s) :discipline
     (re-matches #"(?:JUNIORS|SENIORS|MASTERS M[123]) – (?:WOMEN|MEN)" s) :category
-    (or (re-matches #"#\s+Name & surname\s+Country(?:\s+Realized\s+Final\s+Notes)?" s)
+    (or (re-matches #"#\s+Name & surname\s+Country\s+Final Result\s+Notes" s)
+        (re-matches #"#\s+Name & surname\s+Country(?:\s+Realized\s+Final\s+Notes)?" s)
         (re-matches #"Realized\s+Final\s+Notes" s)
         (re-matches #"Distance \(m\)\s+Distance \(m\)" s)) :column-header))
 (defn- section-line? [text]
@@ -23,25 +24,28 @@
         fresh? (some #(section-line? (:text %)) lines)
         malformed? (some #(and (section-line? (:text %))
                                (nil? (metadata-kind (str/trim (:text %))))) lines)
+        sta? (some #(re-matches #"STA\s+FINAL RESULTS" (str/trim (:text %))) lines)
+        time-header? (some #(re-matches #"#\s+Name & surname\s+Country\s+Final Result\s+Notes" (str/trim (:text %))) lines)
+        distance-columns? (some #(re-find #"Realized\s+Final\s+Notes" (:text %)) lines)
         unit? (some #(re-matches #"Distance \(m\)\s+Distance \(m\)" (str/trim (:text %))) lines)
         table? (some #(re-find #"^\s*#\s+Name & surname\s+Country" (:text %)) lines)]
     (if fresh?
       (when (and (not malformed?) (= 1 (count (:event-title by-kind))) (= 1 (count (:discipline by-kind)))
-                 (= 1 (count (:event-date by-kind))) (= 1 (count (:category by-kind))) unit? table?)
+                 (= 1 (count (:event-date by-kind))) (= 1 (count (:category by-kind))) (if sta? (and time-header? (not unit?) (not distance-columns?)) (and unit? (not time-header?))) table?)
         (let [date-line (first (:event-date by-kind))
               [_ day year] (re-matches #"MAY, (\d{1,2}), (\d{4})" (str/trim (:text date-line)))
               date (try (str (java.time.LocalDate/of (parse-long year) 5 (parse-long day)))
                         (catch java.time.DateTimeException _ nil))]
           (when date
             {:category (str/trim (:text (first (:category by-kind)))) :discipline (first (str/split (str/trim (:text (first (:discipline by-kind)))) #"\s+"))
-             :event-date date :unit "m"
+             :event-date date :unit (when-not sta? "m")
              :evidence (vec (mapcat #(get by-kind %) [:event-title :event-date :discipline :category :column-header]))})))
-      (when (and previous unit? table?)
+      (when (and previous (if (= "STA" (:discipline previous)) (and time-header? (not unit?) (not distance-columns?)) (and unit? (not time-header?))) table?)
         (update previous :evidence into (:column-header by-kind))))))
 (defn- positioning-header [context]
   (let [latest-page (reduce max 0 (map :page (:evidence context)))]
     (some #(when (and (= latest-page (:page %))
-                      (re-find #"Realized\s+Final\s+Notes" (:text %))) (:text %))
+                      (re-find (if (= "STA" (:discipline context)) #"Final Result\s+Notes" #"Realized\s+Final\s+Notes") (:text %))) (:text %))
           (reverse (:evidence context)))))
 
 (defn- final-only-dns [text context]
@@ -60,7 +64,7 @@
                (< (.start matcher 4) (.indexOf header "Final")))
       [text (.group matcher 1) (.group matcher 2) (.group matcher 3) (.group matcher 4) nil (.group matcher 5) nil])))
 
-(defn- row [text context]
+(defn- distance-row [text context]
   (when-let [[_ rank name representation realized final notes dns]
              (or (re-matches #"\s*(?:(\d+)\s+)?(.+?)\s+(CMAS1|AIN|[A-Z]{3})\s+(?:(\d+(?:,\d+)?)\s+(\d+(?:,\d+)?)(?:\s+(.*?))?|(DNS))\s*" text)
                  (final-only-dns text context)
@@ -81,6 +85,31 @@
                      (re-matches #"(?:PANAMERICAN RECORD|DOLPHIN KICK|WALL AT START|DNS|DQ (?:SP(?: CHIN| NO OK)?|SURFACE BO|UW BO)(?:, DQ (?:SP(?: CHIN| NO OK)?|SURFACE BO|UW BO))*|(?:GOLD|SILVER|BRONZE) MEDAL(?:, WORLD RECORD(?: SENIORS| MASTERS M[123])?)?|WORLD RECORD MASTERS M[123])" notes)))
         {:raw-fields raw :parsed parsed}))))
 
+(defn- time-components [token]
+  ;; A colon alone does not establish minutes/seconds. Preserve syntax only.
+  (when-let [[_ a b fraction] (re-matches #"(\d{2}):(\d{2})(?:[.,](\d+))?" (or token ""))]
+    {:components [(parse-long a) (parse-long b)] :fraction fraction
+     :fraction-digits (count fraction) :notation :colon-separated}))
+
+(defn- sta-row [text context]
+  (when-let [[_ rank name representation final notes]
+             (re-matches #"\s*(?:(\d+)\s+)?(.+)\s+(CMAS1|AIN|[A-Z]{3})\s+(\S+)(?:\s+(.*?))?\s*" text)]
+    (when (and (not (re-find #"\d" name))
+               (or (nil? notes)
+                   (re-matches #"(?:(?:GOLD|SILVER|BRONZE) MEDAL(?:, (?:WORLD RECORD MASTERS M[123]|PANAMERICAN RECORD))?|WORLD RECORD MASTERS M[123]|DQ(?: (?:TOUCH|SP(?: CHIN)?|SURFACE BO|UW BO|ASSIST))?)" notes)))
+      (let [time (time-components final)
+            status (second (re-find #"^(DQ)(?:\s|$)" (or notes "")))]
+        {:raw-fields {:rank rank :source-name name :representation representation
+                      :final-time final :realized-time nil :penalty nil :notes notes :status status}
+         :parsed (when time
+                   (merge (dissoc context :evidence)
+                          {:federation "CMAS" :rank (when rank (parse-long rank))
+                           :source-name name :representation representation :final-time time
+                           :final-duration nil :realized-time nil :penalty nil :notes notes :status status}))}))))
+
+(defn- row [text context]
+  (if (= "STA" (:discipline context)) (sta-row text context) (distance-row text context)))
+
 (defn- footer? [line lines context]
   (let [header (positioning-header context)
         previous (last (take-while #(not= (:line %) (:line line)) lines))
@@ -95,7 +124,7 @@
     (if-let [line (first remaining)]
       (let [next-line (second remaining)
             next-row (when next-line (row (:text next-line) context))
-            wrapped? (and (#{"DYNBF" "DYN"} (:discipline context)) next-row
+            wrapped? (and (#{"DYNBF" "DYN" "STA"} (:discipline context)) next-row
                           (= (inc (:line line)) (:line next-line))
                           (nil? (get-in next-row [:parsed :rank]))
                           (re-matches #"\s*\d+\s+[^\d]+" (:text line))
@@ -108,7 +137,10 @@
   (let [{:keys [text page line]} (first source-lines)
         wrapped? (> (count source-lines) 1)
         evidence-row (row (:text (last source-lines)) context)
-        r (when-not wrapped? evidence-row)]
+        r (when (and (not wrapped?) (:parsed evidence-row)) evidence-row)
+        invalid-time? (and (= "STA" (:discipline context))
+                           (get-in evidence-row [:raw-fields :final-time])
+                           (nil? (time-components (get-in evidence-row [:raw-fields :final-time]))))]
     (cond-> {:coordinates {:page page :line line :column-start 1 :column-end (inc (count text))}
              :raw {:line (str/join "\n" (map :text source-lines)) :fields (cond-> (:raw-fields evidence-row) wrapped? (dissoc :source-name :rank))}
              :metadata-evidence (:evidence context)
@@ -117,9 +149,15 @@
              :review-status :unreviewed
              :unresolved-reasons (cond-> [:owner-review-required]
                                    (nil? r) (conj :unparsed-source-line)
+                                   invalid-time? (conj :invalid-time-syntax)
                                    wrapped? (conj :ambiguous-wrapped-name)
                                    (and r (nil? (get-in r [:parsed :status]))) (conj :source-status-not-explicit))}
-      wrapped? (assoc :source-lines source-lines))))
+      invalid-time? (assoc-in [:fields :final-time] {:status :invalid :value nil :reason :invalid-time-syntax})
+      (or wrapped? (= "STA" (:discipline context))) (assoc :source-lines source-lines)
+      (= "STA" (:discipline context))
+      (-> (update :unresolved-reasons conj :time-unit-not-explicit)
+          (assoc-in [:fields :unit] {:status :ambiguous :value nil :reason :time-unit-not-explicit})
+          (assoc-in [:fields :final-duration] {:status :unknown :value nil :reason :time-unit-not-explicit})))))
 
 (defn- dyn-candidates [lines context]
   (loop [remaining (seq lines) candidates [] noncandidate []]
@@ -131,9 +169,12 @@
                          (nil? (get-in rc [:parsed :rank]))
                          (re-matches #"\s*\d+\s*" (:text b))
                          (= (inc (:line a)) (:line b)) (= (inc (:line b)) (:line c)))
-            multiline? (and b c (= "GOLD MEDAL," (str/trim (:text a)))
-                            (= "WORLD RECORD SENIORS" (str/trim (:text c)))
-                            (row (:text b) context)
+            joined-note (when (and a c) (str (str/trim (:text a)) " " (str/trim (:text c))))
+            multiline? (and b c
+                            (if (= "STA" (:discipline context))
+                              (#{"SILVER MEDAL, PANAMERICAN RECORD" "GOLD MEDAL, WORLD RECORD MASTERS M2"} joined-note)
+                              (= "GOLD MEDAL, WORLD RECORD SENIORS" joined-note))
+                            (:parsed (row (:text b) context))
                             (nil? (get-in (row (:text b) context) [:parsed :notes]))
                             (when-let [header (positioning-header context)]
                               (every? #(>= (count (take-while (fn [ch] (= ch \space)) (:text %)))
@@ -145,9 +186,11 @@
                 uncertain (fn [line]
                             (-> (candidate [line] context)
                                 (update-in [:raw :fields] (fn [fields] (-> fields (assoc :note-fragment (:notes fields)) (dissoc :notes :status))))
-                                (assoc :parse-status :unparsed :parsed nil :fields {}
+                                (assoc :parse-status :unparsed :parsed nil
                                        :group-evidence evidence
-                                       :unresolved-reasons [:owner-review-required :unparsed-source-line :ambiguous-merged-cells])))]
+                                       :unresolved-reasons (cond-> [:owner-review-required :unparsed-source-line :ambiguous-merged-cells]
+                                                             (= "STA" (:discipline context)) (conj :time-unit-not-explicit)))
+                                (update :fields #(if (= "STA" (:discipline context)) (select-keys % [:unit :final-duration]) {}))))]
             (recur (drop 3 remaining) (into candidates [(uncertain a) (uncertain c)])
                    (conj noncandidate (assoc b :classification :ambiguous-group-evidence))))
           multiline?
@@ -158,8 +201,8 @@
                                                :coordinates {:page (:page a) :line (:line a) :column-start 1 :column-end (inc (count (:text a)))}
                                                :repairs [{:operation :join-note-lines :field :notes
                                                           :source-lines [a c] :separator " "}])
-                                        (assoc-in [:parsed :notes] "GOLD MEDAL, WORLD RECORD SENIORS")
-                                        (assoc-in [:fields :notes] (field "GOLD MEDAL, WORLD RECORD SENIORS"))
+                                        (assoc-in [:parsed :notes] joined-note)
+                                        (assoc-in [:fields :notes] (field joined-note))
                                         (assoc-in [:raw :line] (str/join "\n" (map :text [a b c])))
                                         (assoc-in [:raw :note-lines] [a c]))) noncandidate))
           :else
@@ -182,7 +225,7 @@
                                               (mapv #(assoc % :classification (classification %))
                                                     (filter classification lines))
                                               (mapv #(assoc % :classification :unsupported-page-line) lines))
-                                   dyn (when (and supported (= "DYN" (:discipline context)))
+                                   dyn (when (and supported (#{"DYN" "STA"} (:discipline context)))
                                          (dyn-candidates (remove classification lines) context))
                                    metadata (into metadata (:noncandidate dyn))
                                    candidates (if dyn (:candidates dyn) (if supported
