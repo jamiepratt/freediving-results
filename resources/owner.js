@@ -53,9 +53,28 @@
     const raw=payload.raw?.fields||{}, parsed=payload.parsed||{};
     return Object.keys({...raw,...parsed,...effective}).map(k=>[k,raw[k],parsed[k],effective[k]]);
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage}; return; }
+  function reviewEnabled(session) { return session['review-enabled?'] === true; }
+  function sourcePageQuery(target, page) {
+    if (!Number.isInteger(page) || page < 1) throw Error('Choose a positive whole page number.');
+    return new URLSearchParams({'job-id':target['job-id'],ordinal:target.ordinal,page}).toString();
+  }
+  function pageViewer(request, show) {
+    let ticket=0;
+    return {
+      clear(){ticket++;show({state:'empty'});},
+      async load(target,page){
+        const current=++ticket;
+        show({state:'loading',target,page});
+        try {
+          const query=sourcePageQuery(target,page),metadata=await request('/api/source-page?'+query);
+          if(current===ticket)show({state:'ready',target,page,metadata,image:'/api/source-page.png?'+query+'&'+new URLSearchParams({'render-id':metadata['render-id']})});
+        } catch(error){if(current===ticket)show({state:'error',target,page,message:error.message});}
+      }
+    };
+  }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer}; return; }
   const $=id=>document.getElementById(id);
-  let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0;
+  let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0, canReview=false, hasViewer=false;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
   function human(v) { return String(v).replaceAll('-',' '); }
   function readable(v) {
@@ -80,6 +99,7 @@
   function common(f){return {...f,actor:$('actor').value,page:$('page').value,line:$('line').value};}
   function lock(value){busy=value;document.querySelectorAll('button').forEach(b=>b.disabled=value);}
   async function mutate(path,request){
+    if(!canReview){status('Read-only inspection: owner review is not enabled.',true);return;}
     if(busy)return;
     pending={path,request};$('retry').hidden=true;lock(true);
     try{await api(path,request);pending=null;if(path==='/api/corrections/triage')await loadCorrections();else {await loadDetail(selected);await loadCorrections();}status('Saved. Audit history and current revisions reloaded.');}
@@ -95,7 +115,8 @@
     rows.forEach(r=>{
       const card=node('article',undefined,'event');
       card.append(node('h3','Request '+r.id),node('p','Suggested change: '+r.suggestion),node('p','Visitor reason: '+r.reason),node('p','Unverified evidence citation: '+r.evidence),node('small','Request revision '+r.revision));
-      const open=node('button','Inspect observation and prepare proposal');open.type='button';open.onclick=()=>openCase(r);card.append(open);
+      const open=node('button',canReview?'Inspect observation and prepare proposal':'Inspect observation');open.type='button';open.onclick=()=>openCase(r);card.append(open);
+      if(!canReview){card.append(expandable('Append-only triage history',r.history||[]));$('corrections').append(card);return;}
       const form=node('form');
       const label=(text,input)=>{const l=node('label',text);l.append(input);form.append(l);};
       const action=node('select');action.append(new Option('Dismiss with reason','dismiss'),new Option('Link an existing proposal','link-proposal'));label('Triage action',action);
@@ -138,11 +159,14 @@
     const table=node('table'),head=node('tr');['Field','Raw source','Original parsed','Effective approved'].forEach(x=>head.append(node('th',x)));table.append(head);
     comparison(t.payload,fields).forEach(([k,...values])=>{const row=node('tr');[human(k),...values.map(readable)].forEach(x=>row.append(node('td',x)));table.append(row);});$('comparison').append(table);
     $('evidence').replaceChildren(sourceEvidence(e));
+    sourceTarget=t;sourcePage=e.coordinates?.page||e['source-lines']?.[0]?.page||1;
+    $('source-viewer').hidden=!hasViewer;
+    if(hasViewer)pageView.load(t,sourcePage);
     $('uncertainties').replaceChildren(structure(d.packet.uncertainties),structure({'parse-status':t.payload['parse-status'],'unresolved-reasons':t.payload['unresolved-reasons']||[],errors:t.payload.errors||[]}));
     $('candidates').replaceChildren();$('anchor').replaceChildren(new Option('Select an inspected candidate',''));
     (d.packet.candidates||[]).forEach((c,i)=>{
       const card=node('section',undefined,'candidate');card.append(node('h4',c.observations.map(o=>o.payload.parsed?.['source-name']||'Unknown name').join(' / ')),node('p','Retrieval signals: '+readable(c.signals)));
-      c.observations.forEach(o=>{card.append(expandable('Source comparison and exact provenance',o));const b=node('button','Inspect candidate source lines');b.type='button';b.onclick=async()=>{try{const data=await api('/api/evidence?'+targetQuery(o));card.append(sourceEvidence(data));}catch(err){status(err.message,true);}};card.append(b);});$('candidates').append(card);
+      c.observations.forEach(o=>{card.append(expandable('Source comparison and exact provenance',o));const b=node('button','Inspect candidate source lines');b.type='button';b.onclick=async()=>{try{const data=await api('/api/evidence?'+targetQuery(o));card.append(sourceEvidence(data));}catch(err){status(err.message,true);}};card.append(b);if(hasViewer){const pageButton=node('button','Open candidate page and comparison');pageButton.type='button';pageButton.onclick=()=>openCase(o);card.append(pageButton);}});$('candidates').append(card);
       $('anchor').append(new Option(c.observations[0].payload.parsed?.['source-name']+' · '+c['source-sha256'].slice(0,12),String(i)));
     });
     if(!d.packet.candidates?.length)$('candidates').append(node('p','No supported candidate retrieved. Unknown and no-match do not establish distinct identities.'));
@@ -153,18 +177,40 @@
     $('audit').replaceChildren();
     (d.history||[]).forEach(h=>{
       const item=auditEntry(h,d.history);
-      if(h.action==='propose' && !d.history.some(x=>x['proposal-id']===h.id)){['approve','reject'].forEach(action=>{const b=node('button',human(action));b.type='button';b.onclick=()=>decision(action,h.id);item.append(b);});}
-      if(h.action==='approve' && Object.values(d.effective.active||{}).includes(h.id)){const b=node('button','Reverse approval');b.type='button';b.onclick=()=>decision('reverse',h.id);item.append(b);}$('audit').append(item);
+      if(canReview && h.action==='propose' && !d.history.some(x=>x['proposal-id']===h.id)){['approve','reject'].forEach(action=>{const b=node('button',human(action));b.type='button';b.onclick=()=>decision(action,h.id);item.append(b);});}
+      if(canReview && h.action==='approve' && Object.values(d.effective.active||{}).includes(h.id)){const b=node('button','Reverse approval');b.type='button';b.onclick=()=>decision('reverse',h.id);item.append(b);}$('audit').append(item);
     });
     if(!d.history?.length)$('audit').append(node('p','No private review proposals or decisions.'));
     $('publication-history').replaceChildren(...(d['publication-history']||[]).map(h=>auditEntry(h,[])));if(!d['publication-history']?.length)$('publication-history').append(node('p','No extraction decisions.'));fieldChanged();$('detail').hidden=false;
   }
   async function loadDetail(t){const ticket=++generation,q=targetQuery(t);try{const [d,e]=await Promise.all([api('/api/detail?'+q),api('/api/evidence?'+q)]);if(ticket!==generation)return false;detail=d;renderDetail(d,e);return true;}catch(error){if(ticket!==generation)return false;throw error;}}
-  async function openCase(t){if(busy)return;selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status('Inspect original evidence before proposing a change.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
+  async function openCase(t){if(busy)return;pageView.clear();selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status(canReview?'Inspect original evidence before proposing a change.':'Read-only: inspect the registered page and compare extracted values.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
   function fieldChanged(){const f=$('field').value,identity=f==='identity';$('scalar-fields').hidden=identity;$('identity-fields').hidden=!identity;if(!identity){const v=detail.effective.fields[f];$('value-type').value=v===null?'unknown':typeof v==='number'?'number':typeof v==='boolean'?'boolean':'text';$('value').value=v??'';}}
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
-  function clearSession(){generation++;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
-  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
+  function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
+  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;canReview=reviewEnabled(s);hasViewer=s['source-viewer?']===true;document.querySelectorAll('[data-review-only]').forEach(e=>e.hidden=!canReview);$('inspection-mode').textContent=canReview?'Owner review enabled. Every decision requires an explicit action.':'Read-only inspection. Proposals, decisions, triage and extraction validation are disabled.';$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
+  let sourceTarget=null, sourcePage=1, sourceCount=1;
+  const pageView=pageViewer(api, view=>{
+    $('source-image').replaceChildren();$('source-render').replaceChildren();
+    $('source-previous').disabled=true;$('source-next').disabled=true;$('source-go').disabled=true;
+    $('visual').checked=false;$('substantive').checked=false;$('visual').disabled=hasViewer;
+    if(view.state==='empty'){sourceTarget=null;$('source-context').textContent='';return;}
+    sourceTarget=view.target;sourcePage=view.page;$('source-page').value=sourcePage;$('source-page').removeAttribute('max');
+    $('source-context').textContent='Observation '+view.target['job-id']+' / '+view.target.ordinal+' · PDF page '+view.page;
+    if(view.state==='loading'){$('source-image').append(node('p','Verifying source and rendering page...'));return;}
+    if(view.state==='error'){$('source-image').append(node('p','Page unavailable: '+view.message,'error'));$('source-go').disabled=false;return;}
+    const m=view.metadata;sourceCount=m['page-count'];$('source-page').max=sourceCount;
+    const img=node('img');img.alt='Registered source PDF page '+view.page+' for observation '+view.target.ordinal;
+    img.onload=()=>{if(!img.isConnected)return;$('visual').disabled=false;$('source-go').disabled=false;$('source-previous').disabled=sourcePage<=1;$('source-next').disabled=sourcePage>=sourceCount;};
+    img.onerror=()=>{if(!img.isConnected)return;img.remove();$('source-image').append(node('p','Page image unavailable. Reload this page to verify the source again.','error'));$('source-go').disabled=false;};
+    img.src=view.image;img.style.width=$('source-zoom').value+'%';$('source-image').append(img);
+    $('source-context').textContent+=' of '+sourceCount+' · '+m.width+' × '+m.height+' pixels';
+    $('source-render').append(expandable('Verified render identity',m));
+  });
+  $('source-navigation').onsubmit=event=>{event.preventDefault();if(sourceTarget)pageView.load(sourceTarget,Number($('source-page').value));};
+  $('source-previous').onclick=()=>{if(sourceTarget && sourcePage>1)pageView.load(sourceTarget,sourcePage-1);};
+  $('source-next').onclick=()=>{if(sourceTarget && sourcePage<sourceCount)pageView.load(sourceTarget,sourcePage+1);};
+  $('source-zoom').onchange=()=>{const img=$('source-image').querySelector('img');if(img)img.style.width=$('source-zoom').value+'%';};
   $('corrections-refresh').onclick=()=>{if(!busy)loadCorrections().catch(e=>status(e.message,true));};
   $('corrections-previous').onclick=()=>{if(busy)return;correctionOffset=Math.max(0,correctionOffset-100);loadCorrections().catch(e=>status(e.message,true));};
   $('corrections-next').onclick=()=>{if(busy)return;correctionOffset+=100;loadCorrections().catch(e=>status(e.message,true));};

@@ -24,6 +24,30 @@
                     assert.equal(link['proposal-id'],'p1');assert.equal(link.evidence,undefined);assert.equal(link.after,undefined);
                     console.log('owner request contract passed');")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest source-page-navigation-contract
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    (async()=>{
+                    assert.equal(ui.reviewEnabled({demo:true}),false);
+                    assert.equal(ui.reviewEnabled({'review-enabled?':true}),true);
+                    assert.equal(ui.reviewEnabled({'review-enabled?':'true'}),false);
+                    assert.equal(ui.sourcePageQuery({'job-id':'a/b & c',ordinal:0},2),'job-id=a%2Fb+%26+c&ordinal=0&page=2');
+                    assert.throws(()=>ui.sourcePageQuery({'job-id':'j',ordinal:0},0));
+                    const pending=[],states=[];
+                    const viewer=ui.pageViewer(url=>new Promise((resolve,reject)=>pending.push({url,resolve,reject})),s=>states.push(s));
+                    const first=viewer.load({'job-id':'first',ordinal:0},1);
+                    const second=viewer.load({'job-id':'second',ordinal:1},2);
+                    assert.equal(states.at(-1).state,'loading');
+                    pending[1].resolve({page:2,'page-count':3,width:1200,height:1600,'render-id':'second'});await second;
+                    assert.equal(states.at(-1).metadata['render-id'],'second');assert.equal(states.at(-1).image,'/api/source-page.png?job-id=second&ordinal=1&page=2&render-id=second');
+                    pending[0].resolve({page:1,'render-id':'stale'});await first;
+                    assert.equal(states.at(-1).metadata['render-id'],'second');
+                    const third=viewer.load({'job-id':'missing',ordinal:0},1);pending[2].reject(Error('Source unavailable'));await third;
+                    assert.equal(states.at(-1).state,'error');assert.equal(states.at(-1).message,'Source unavailable');
+                    const fourth=viewer.load({'job-id':'j',ordinal:0},1);viewer.clear();pending[3].resolve({page:1});await fourth;
+                    assert.equal(states.at(-1).state,'empty');
+                    })().catch(e=>{console.error(e);process.exit(1)});")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.owner-ui-test)]
     (shutdown-agents)
