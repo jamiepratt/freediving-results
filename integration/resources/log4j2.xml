@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="OFF">
+  <!-- Local private evaluation must not persist framework payload diagnostics. -->
+  <Loggers><Root level="OFF"/></Loggers>
+</Configuration>
