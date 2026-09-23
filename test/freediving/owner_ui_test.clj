@@ -48,6 +48,18 @@
                     assert.equal(states.at(-1).state,'empty');
                     })().catch(e=>{console.error(e);process.exit(1)});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest unparsed-source-search-and-page-attestation
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    const p={outcome:'unknown',target:{'job-id':'source-j',ordinal:5,payload:{raw:{line:'17 Julia RAWGLYPH 90'},coordinates:{page:59,line:23}}}};
+                    const c=ui.casePresentation(p);assert.match(c.search,/julia rawglyph/);assert.match(c.label,/Unparsed source text/);assert.match(c.label,/Julia RAWGLYPH/);assert.match(c.context,/page 59.*line 23/);
+                    p.target.payload.raw.fields={'source-name':'Mirela RAW'};assert.match(ui.casePresentation(p).search,/mirela raw/);
+                    assert.deepEqual(ui.viewerControls({state:'loaded',page:1,count:3,observationPage:1,busy:false}),{previous:true,next:false,go:false,visual:false});
+                    assert.equal(ui.viewerControls({state:'loaded',page:2,count:3,observationPage:1,busy:false}).visual,true);
+                    assert.equal(ui.viewerControls({state:'loaded',page:3,count:3,observationPage:3,busy:false}).next,true);
+                    assert.equal(ui.viewerControls({state:'loading',page:1,count:3,observationPage:1,busy:false}).go,true);
+                    assert.equal(ui.viewerControls({state:'loaded',page:1,count:3,observationPage:1,busy:true}).next,true);")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.owner-ui-test)]
     (shutdown-agents)

@@ -53,6 +53,18 @@
     const raw=payload.raw?.fields||{}, parsed=payload.parsed||{};
     return Object.keys({...raw,...parsed,...effective}).map(k=>[k,raw[k],parsed[k],effective[k]]);
   }
+  function casePresentation(packet) {
+    const target=packet.target,payload=target.payload||{},raw=payload.raw||{},coords=payload.coordinates||{};
+    const original=raw.fields?.['source-name']||raw.line||'';
+    const label=payload.parsed?.['source-name']||('Unparsed source text: '+(original||'No source name available'));
+    const context='Source '+target['job-id']+' · page '+(coords.page??'?')+' · line '+(coords.line??'?')+' · observation '+target.ordinal;
+    return {label,context,search:JSON.stringify([payload.parsed,raw,payload['source-lines'],context,packet.outcome]).toLowerCase()};
+  }
+  function viewerControls({state,page,count,observationPage,busy}) {
+    const loaded=state==='loaded';
+    return {previous:busy||!loaded||page<=1,next:busy||!loaded||page>=count,
+      go:busy||state==='empty'||state==='loading',visual:busy||!loaded||page!==observationPage};
+  }
   function reviewEnabled(session) { return session['review-enabled?'] === true; }
   function sourcePageQuery(target, page) {
     if (!Number.isInteger(page) || page < 1) throw Error('Choose a positive whole page number.');
@@ -72,7 +84,7 @@
       }
     };
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer}; return; }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls}; return; }
   const $=id=>document.getElementById(id);
   let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0, canReview=false, hasViewer=false;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
@@ -97,7 +109,7 @@
   function targetQuery(t){return new URLSearchParams({'job-id':t['job-id'],ordinal:t.ordinal}).toString();}
   function formData(id){return Object.fromEntries(new FormData($(id)));}
   function common(f){return {...f,actor:$('actor').value,page:$('page').value,line:$('line').value};}
-  function lock(value){busy=value;document.querySelectorAll('button').forEach(b=>b.disabled=value);}
+  function lock(value){busy=value;document.querySelectorAll('button').forEach(b=>b.disabled=value);syncPageControls();}
   async function mutate(path,request){
     if(!canReview){status('Read-only inspection: owner review is not enabled.',true);return;}
     if(busy)return;
@@ -130,9 +142,9 @@
   }
   function renderList(){
     const filter=$('filter').value.toLowerCase(),outcome=$('outcome-filter').value;
-    const visible=packets.filter(p=>(readable(p.target.payload.parsed)+' '+p.outcome).toLowerCase().includes(filter)&&(!outcome||p.outcome===outcome));
+    const visible=packets.filter(p=>casePresentation(p).search.includes(filter)&&(!outcome||p.outcome===outcome));
     $('cases').replaceChildren();$('case-count').textContent=visible.length+' of '+packets.length+' comparison cases';
-    visible.forEach(p=>{const b=node('button',p.target.payload.parsed?.['source-name']||'Missing parsed source name','case');b.append(node('small',human(p.outcome)));b.onclick=()=>openCase(p.target);$('cases').append(b);});
+    visible.forEach(p=>{const presentation=casePresentation(p),b=node('button',presentation.label,'case');b.append(node('small',human(p.outcome)),node('small',presentation.context));b.onclick=()=>openCase(p.target);$('cases').append(b);});
     if(!visible.length)$('cases').append(node('p','No cases match these filters.'));
   }
   function expandable(title,value){const d=node('details');d.append(node('summary',title),structure(value));return d;}
@@ -153,13 +165,13 @@
   }
   function renderDetail(d,e){
     const t=d.packet.target, parsed=t.payload.parsed||{}, fields=d.effective.fields||{};
-    $('case-title').textContent=parsed['source-name']||'Missing parsed source name';
+    $('case-title').textContent=casePresentation(d.packet).label;
     $('revision').textContent='Review revision '+d.effective.revision+' · Extraction revision '+d.publication.revision+' · Identity '+readable(d.effective.identity);
     $('comparison').replaceChildren();
     const table=node('table'),head=node('tr');['Field','Raw source','Original parsed','Effective approved'].forEach(x=>head.append(node('th',x)));table.append(head);
     comparison(t.payload,fields).forEach(([k,...values])=>{const row=node('tr');[human(k),...values.map(readable)].forEach(x=>row.append(node('td',x)));table.append(row);});$('comparison').append(table);
     $('evidence').replaceChildren(sourceEvidence(e));
-    sourceTarget=t;sourcePage=e.coordinates?.page||e['source-lines']?.[0]?.page||1;
+    sourceTarget=t;observationPage=e.coordinates?.page||e['source-lines']?.[0]?.page||1;sourcePage=observationPage;
     $('source-viewer').hidden=!hasViewer;
     if(hasViewer)pageView.load(t,sourcePage);
     $('uncertainties').replaceChildren(structure(d.packet.uncertainties),structure({'parse-status':t.payload['parse-status'],'unresolved-reasons':t.payload['unresolved-reasons']||[],errors:t.payload.errors||[]}));
@@ -189,8 +201,10 @@
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
   function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
   async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;canReview=reviewEnabled(s);hasViewer=s['source-viewer?']===true;document.querySelectorAll('[data-review-only]').forEach(e=>e.hidden=!canReview);$('inspection-mode').textContent=canReview?'Owner review enabled. Every decision requires an explicit action.':'Read-only inspection. Proposals, decisions, triage and extraction validation are disabled.';$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
-  let sourceTarget=null, sourcePage=1, sourceCount=1;
+  let sourceTarget=null, sourcePage=1, sourceCount=1, observationPage=1, sourceState='empty';
+  function syncPageControls(){const controls=viewerControls({state:sourceState,page:sourcePage,count:sourceCount,observationPage,busy});['previous','next','go'].forEach(key=>$('source-'+key).disabled=controls[key]);if(hasViewer)$('visual').disabled=controls.visual;}
   const pageView=pageViewer(api, view=>{
+    sourceState=view.state;
     $('source-image').replaceChildren();$('source-render').replaceChildren();
     $('source-previous').disabled=true;$('source-next').disabled=true;$('source-go').disabled=true;
     $('visual').checked=false;$('substantive').checked=false;$('visual').disabled=hasViewer;
@@ -198,11 +212,11 @@
     sourceTarget=view.target;sourcePage=view.page;$('source-page').value=sourcePage;$('source-page').removeAttribute('max');
     $('source-context').textContent='Observation '+view.target['job-id']+' / '+view.target.ordinal+' · PDF page '+view.page;
     if(view.state==='loading'){$('source-image').append(node('p','Verifying source and rendering page...'));return;}
-    if(view.state==='error'){$('source-image').append(node('p','Page unavailable: '+view.message,'error'));$('source-go').disabled=false;return;}
+    if(view.state==='error'){$('source-image').append(node('p','Page unavailable: '+view.message,'error'));syncPageControls();return;}
     const m=view.metadata;sourceCount=m['page-count'];$('source-page').max=sourceCount;
     const img=node('img');img.alt='Registered source PDF page '+view.page+' for observation '+view.target.ordinal;
-    img.onload=()=>{if(!img.isConnected)return;$('visual').disabled=false;$('source-go').disabled=false;$('source-previous').disabled=sourcePage<=1;$('source-next').disabled=sourcePage>=sourceCount;};
-    img.onerror=()=>{if(!img.isConnected)return;img.remove();$('source-image').append(node('p','Page image unavailable. Reload this page to verify the source again.','error'));$('source-go').disabled=false;};
+    img.onload=()=>{if(!img.isConnected)return;sourceState='loaded';syncPageControls();if(sourcePage!==observationPage)$('source-context').append(' · Context page only. Return to observation page '+observationPage+' before visual attestation.');};
+    img.onerror=()=>{if(!img.isConnected)return;img.remove();$('source-image').append(node('p','Page image unavailable. Reload this page to verify the source again.','error'));sourceState='error';syncPageControls();};
     img.src=view.image;img.style.width=$('source-zoom').value+'%';$('source-image').append(img);
     $('source-context').textContent+=' of '+sourceCount+' · '+m.width+' × '+m.height+' pixels';
     $('source-render').append(expandable('Verified render identity',m));
