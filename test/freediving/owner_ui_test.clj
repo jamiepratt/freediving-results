@@ -16,6 +16,12 @@
                     assert.throws(()=>ui.publication(d,{action:'validate',actor:'owner',reason:'checked',page:1,line:2,visual:false,substantive:true},'v'));
                     const v=ui.publication(d,{action:'validate',actor:'owner',reason:'checked',page:1,line:2,visual:true,substantive:true},'v');
                     assert.equal(v.attestations['source-visual-accuracy'],true);assert.equal(v['review-revision'],2);
+                    const request={id:'r1',revision:2,'suggested-change':'<img src=x>',reason:'Visitor reason','evidence-reference':'https://visitor.example/unverified'};
+                    assert.throws(()=>ui.triage(request,{action:'dismiss',actor:'owner',reason:''},'t1'));
+                    assert.throws(()=>ui.triage(request,{action:'link-proposal',actor:'owner',reason:'Checked', 'proposal-id':''},'t1'));
+                    assert.deepEqual(ui.triage(request,{action:'dismiss',actor:'owner',reason:'Insufficient registered evidence'},'t1'),{id:'t1',actor:'owner',reason:'Insufficient registered evidence','base-revision':2,'request-id':'r1',action:'dismiss'});
+                    const link=ui.triage(request,{action:'link-proposal',actor:'owner',reason:'Inspected registered source','proposal-id':'p1'},'t2');
+                    assert.equal(link['proposal-id'],'p1');assert.equal(link.evidence,undefined);assert.equal(link.after,undefined);
                     console.log('owner request contract passed');")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]

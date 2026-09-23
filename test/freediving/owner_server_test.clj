@@ -7,7 +7,9 @@
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
             [freediving.reviews :as reviews]
-            [freediving.publication :as publication])
+            [freediving.publication :as publication]
+            [freediving.public-results :as public-results]
+            [freediving.corrections :as corrections])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.nio.file Files]))
@@ -15,7 +17,9 @@
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
                       (observations/migrate! fixture/admin "observations_app")
                       (reviews/migrate! fixture/admin "observations_app" "reviews_owner")
-                      (publication/migrate! fixture/admin "reviews_owner") (f)))
+                      (publication/migrate! fixture/admin "reviews_owner")
+                      (public-results/migrate! fixture/admin "reviews_owner" "reviews_public")
+                      (corrections/migrate! fixture/admin "reviews_owner" "corrections_submit") (f)))
 (defn request [s method path data headers]
   (let [b (HttpRequest/newBuilder (URI/create (str (:url s) path)))
         _ (doseq [[k v] headers] (.header b k v))
@@ -112,3 +116,63 @@
 (deftest policy-owner-capability-cannot-start-reviewer-server
   (fixture/sql! fixture/admin "GRANT INSERT ON freediving.publication_policy_events TO reviews_owner")
   (is (thrown? Exception (server/start! (config)))))
+
+(deftest correction-queue-requires-owner-capability-and-triage-csrf
+  (let [s (server/start! (config))]
+    (try
+      (is (= 401 (:status (request s "GET" "/api/corrections" nil {}))))
+      (let [h (login s)]
+        (is (= 200 (:status (request s "GET" "/api/corrections" nil h))))
+        (is (= [] (get-in (request s "GET" "/api/corrections" nil h) [:body :requests])))
+        (is (= 403 (:status (request s "POST" "/api/corrections/triage" {} (dissoc h "X-CSRF-Token")))))
+        (is (= 405 (:status (request s "GET" "/api/corrections/triage" nil h))))
+        (is (= 400 (:status (request s "GET" "/api/corrections?offset=-1" nil h)))))
+      (finally (server/stop! s)))))
+
+(deftest visitor-request-triage-never-substitutes-for-reviewed-approval
+  (let [t (publication-fixture/sample (fn [a] (let [a (assoc-in a [:config :synthetic] true)] (assoc a :job-id (fixture/hash-value (select-keys a [:source-sha256 :acquisitions :evidence-sha256 :actor :config :parser-version :schema-version :pdfinfo-version :tool]))))))
+        reviewer publication-fixture/reviewer
+        reader-url (System/getenv "FREEDIVING_TEST_PUBLIC_URL")
+        submit-url (System/getenv "FREEDIVING_TEST_SUBMIT_URL")]
+    (publication/decide! reviewer (publication-fixture/request t "visible"))
+    (public-results/refresh! reviewer)
+    (let [row (first (public-results/results reader-url))
+          r {:id (str (random-uuid)) :result-id (:result-id row)
+             :version (corrections/target-version submit-url (:result-id row))
+             :suggestion "Synthetic corrected <script>bad()</script>" :reason "Check the printed source name"
+             :evidence "https://example.org/unverified#page=1"}
+          _ (corrections/submit! submit-url r (apply str (repeat 64 "b")))
+          s (server/start! (config))]
+      (try
+        (let [h (login s)
+              queued (first (get-in (request s "GET" "/api/corrections" nil h) [:body :requests]))
+              dismiss {:id (str (random-uuid)) :request-id (:id r) :base-revision 0 :action "dismiss"
+                       :actor "owner" :reason "Visitor citation does not establish a correction"}
+              p (merge t {:id "owner-registered-proposal" :base-revision 0 :field "source-name" :category "name-normalization"
+                          :before (get-in row [:effective :source-name]) :after "Synthetic Corrected"
+                          :actor "owner" :reason "Independently inspected registered source row" :evidence [{:page 1 :line 1}]})
+              link (assoc dismiss :id (str (random-uuid)) :base-revision 1 :action "link-proposal"
+                          :proposal-id (:id p) :reason "Registered source supports this normal proposal")]
+          (is (= (:suggestion r) (:suggestion queued)))
+          (is (= (:evidence r) (:evidence queued)))
+          (is (= 400 (:status (request s "POST" "/api/corrections/triage" (assoc dismiss :reason "") h))))
+          (is (= 200 (:status (request s "POST" "/api/corrections/triage" dismiss h))))
+          (is (= 200 (:status (request s "POST" "/api/corrections/triage" dismiss h))))
+          (is (= 409 (:status (request s "POST" "/api/corrections/triage" (assoc dismiss :id (str (random-uuid))) h))))
+          (is (= 400 (:status (request s "POST" "/api/corrections/triage" link h))))
+          (is (= 400 (:status (request s "POST" "/api/proposals" (assoc p :evidence [{:url (:evidence r)}]) h))))
+          (is (= 200 (:status (request s "POST" "/api/proposals" p h))))
+          (is (= 200 (:status (request s "POST" "/api/corrections/triage" link h))))
+          (is (= row (first (public-results/results reader-url))))
+          (let [events (get-in (request s "GET" "/api/corrections" nil h) [:body :requests 0 :history])]
+            (is (= ["dismiss" "link-proposal"] (mapv :action events))))
+          (is (= 200 (:status (request s "POST" "/api/decisions"
+                                       {:id "owner-reject" :proposal-id (:id p) :base-revision 0 :action "reject"
+                                        :actor "owner" :reason "More corroboration needed"} h))))
+          (is (= (get-in row [:effective :source-name]) (:source-name (:fields (reviews/effective reviewer t)))))
+          (is (= (:suggestion r) (get-in (request s "GET" "/api/corrections" nil h) [:body :requests 0 :suggestion]))))
+        (finally (server/stop! s))))))
+
+(deftest owner-startup-rejects-correction-record-mutation-authority
+  (fixture/sql! fixture/admin "GRANT INSERT ON freediving.correction_requests TO reviews_owner")
+  (is (thrown? Exception (let [s (server/start! (config))] (server/stop! s)))))

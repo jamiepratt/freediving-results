@@ -40,13 +40,22 @@
       'review-revision':q['review-revision'],'policy-version':q['policy-version'],observation:q.observation,
       action:f.action,evidence:evidence(f),attestations:f.action==='validate'?{'source-visual-accuracy':true,'no-unresolved-substantive-errors':true}:{}};
   }
+  function triage(request, f, id) {
+    if (!['dismiss','link-proposal'].includes(f.action)) throw Error('Choose a triage action.');
+    const event={...audit(f,id,request.revision),'request-id':request.id,action:f.action};
+    if(f.action==='link-proposal') {
+      if(!f['proposal-id']?.trim()) throw Error('Choose an existing proposal for this observation.');
+      event['proposal-id']=f['proposal-id'].trim();
+    }
+    return event;
+  }
   function comparison(payload, effective) {
     const raw=payload.raw?.fields||{}, parsed=payload.parsed||{};
     return Object.keys({...raw,...parsed,...effective}).map(k=>[k,raw[k],parsed[k],effective[k]]);
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison}; return; }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage}; return; }
   const $=id=>document.getElementById(id);
-  let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0;
+  let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
   function human(v) { return String(v).replaceAll('-',' '); }
   function readable(v) {
@@ -73,9 +82,30 @@
   async function mutate(path,request){
     if(busy)return;
     pending={path,request};$('retry').hidden=true;lock(true);
-    try{await api(path,request);pending=null;await loadDetail(selected);status('Saved. Audit history and current revisions reloaded.');}
-    catch(e){status(e.status===409?'Conflict: '+e.message+'. Reload this case before preparing a new action.':e.message,true);$('retry').hidden=!!e.status;$('reload').hidden=false;}
+    try{await api(path,request);pending=null;if(path==='/api/corrections/triage')await loadCorrections();else {await loadDetail(selected);await loadCorrections();}status('Saved. Audit history and current revisions reloaded.');}
+    catch(e){status(e.status===409?'Conflict: '+e.message+(path==='/api/corrections/triage'?'. Refresh requests before preparing a new triage action.':'. Reload this case before preparing a new action.'):e.message,true);$('retry').hidden=!!e.status;$('reload').hidden=path==='/api/corrections/triage';}
     finally{lock(false);}
+  }
+  async function loadCorrections(){
+    const sessionToken=csrf, pageOffset=correctionOffset, result=await api('/api/corrections?offset='+pageOffset), rows=result.requests;
+    if(csrf!==sessionToken || correctionOffset!==pageOffset)return;
+    $('corrections').replaceChildren();
+    $('corrections-page').textContent=rows.length?'Requests '+(correctionOffset+1)+' to '+(correctionOffset+rows.length):'No requests on this page.';
+    $('corrections-previous').hidden=correctionOffset===0;$('corrections-next').hidden=rows.length<100;
+    rows.forEach(r=>{
+      const card=node('article',undefined,'event');
+      card.append(node('h3','Request '+r.id),node('p','Suggested change: '+r.suggestion),node('p','Visitor reason: '+r.reason),node('p','Unverified evidence citation: '+r.evidence),node('small','Request revision '+r.revision));
+      const open=node('button','Inspect observation and prepare proposal');open.type='button';open.onclick=()=>openCase(r);card.append(open);
+      const form=node('form');
+      const label=(text,input)=>{const l=node('label',text);l.append(input);form.append(l);};
+      const action=node('select');action.append(new Option('Dismiss with reason','dismiss'),new Option('Link an existing proposal','link-proposal'));label('Triage action',action);
+      const proposalId=node('input');proposalId.maxLength=200;label('Existing proposal ID (required when linking)',proposalId);
+      const actor=node('input');actor.value='local-owner';actor.required=true;actor.maxLength=200;label('Reviewer label',actor);
+      const reason=node('textarea');reason.required=true;reason.maxLength=2000;reason.rows=3;label('Your triage reason',reason);
+      const save=node('button','Record triage');form.append(save);
+      form.onsubmit=event=>{event.preventDefault();try{mutate('/api/corrections/triage',triage(r,{action:action.value,'proposal-id':proposalId.value,actor:actor.value,reason:reason.value},crypto.randomUUID()));}catch(e){status(e.message,true);}};
+      card.append(form,expandable('Append-only triage history',r.history||[]));$('corrections').append(card);
+    });
   }
   function renderList(){
     const filter=$('filter').value.toLowerCase(),outcome=$('outcome-filter').value;
@@ -97,6 +127,7 @@
     const proposal=h.action==='propose'?h:history.find(x=>x.id===approval?.['proposal-id']);
     item.append(node('h4',human(h.action)+(proposal?' · '+human(proposal.field):'')),node('p',h.reason),node('small',(h.actor||'Unknown actor')+' · '+(h['recorded-at']||'Time unavailable')+(h.revision!==undefined?' · Revision '+h.revision:'')));
     if(proposal)item.append(node('p','Before: '+readable(proposal.before)+' → Proposed: '+readable(proposal.after)));
+    if(h.action==='propose')item.append(node('p','Proposal ID: '+h.id));
     item.append(expandable('Full audit record and exact provenance',Object.fromEntries(Object.entries(h).filter(([key])=>key!=='request'))));return item;
   }
   function renderDetail(d,e){
@@ -132,8 +163,11 @@
   async function openCase(t){if(busy)return;selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status('Inspect original evidence before proposing a change.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
   function fieldChanged(){const f=$('field').value,identity=f==='identity';$('scalar-fields').hidden=identity;$('identity-fields').hidden=!identity;if(!identity){const v=detail.effective.fields[f];$('value-type').value=v===null?'unknown':typeof v==='number'?'number':typeof v==='boolean'?'boolean':'text';$('value').value=v??'';}}
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
-  function clearSession(){generation++;csrf=null;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
-  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';renderList();status('Select a comparison case to inspect its evidence.');}
+  function clearSession(){generation++;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
+  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':'PRIVATE LOCAL · Owner only';renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
+  $('corrections-refresh').onclick=()=>{if(!busy)loadCorrections().catch(e=>status(e.message,true));};
+  $('corrections-previous').onclick=()=>{if(busy)return;correctionOffset=Math.max(0,correctionOffset-100);loadCorrections().catch(e=>status(e.message,true));};
+  $('corrections-next').onclick=()=>{if(busy)return;correctionOffset+=100;loadCorrections().catch(e=>status(e.message,true));};
   $('logout').onclick=async()=>{if(busy)return;lock(true);try{await api('/api/logout',{});clearSession();status('Signed out. Owner session revoked.');$('capability').focus();}catch(e){if(e.status===401){clearSession();status('Session expired. Log in again.');}else status('Sign out failed: '+e.message,true);}finally{lock(false);}};
   $('login').onsubmit=async event=>{event.preventDefault();try{const capability=$('capability').value;$('capability').value='';const s=await api('/api/login',{capability});csrf=s.csrf;await start();status('Owner session established.');}catch(e){status(e.message,true);}};
   $('filter').oninput=renderList;$('outcome-filter').onchange=renderList;$('field').onchange=fieldChanged;

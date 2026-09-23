@@ -2,6 +2,7 @@
   "Trusted-local, synthetic owner review. The capability authenticates the owner; actor is audit text."
   (:require [clojure.data.json :as json] [clojure.java.io :as io] [clojure.string :as str]
             [freediving.candidates :as candidates] [freediving.packets :as packets]
+            [freediving.corrections :as corrections]
             [freediving.reviews :as reviews] [freediving.publication :as publication])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
@@ -26,9 +27,9 @@
               (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(current_user,nspowner,'MEMBER')"))
               (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(current_user,datdba,'MEMBER')")))
       (fail! 403 "Restricted reviewer role required"))
-    (doseq [table ["extractions" "observations" "review_proposals" "review_decisions" "publication_decisions" "publication_policy_events"]]
+    (doseq [table ["extractions" "observations" "review_proposals" "review_decisions" "publication_decisions" "publication_policy_events" "correction_requests" "correction_triage"]]
       (let [v (first (query c (str "SELECT has_table_privilege(current_user,'freediving." table "','SELECT') AS readable,has_table_privilege(current_user,'freediving." table "','UPDATE,DELETE,TRUNCATE') AS mutable,has_table_privilege(current_user,'freediving." table "','INSERT') AS appendable")))]
-        (when (or (not (:readable v)) (:mutable v) (not= (contains? #{"review_proposals" "review_decisions" "publication_decisions"} table) (:appendable v))) (fail! 403 "Reviewer table privileges invalid"))))
+        (when (or (not (:readable v)) (:mutable v) (not= (contains? #{"review_proposals" "review_decisions" "publication_decisions" "correction_triage"} table) (:appendable v))) (fail! 403 "Reviewer table privileges invalid"))))
     (when (:allowed (first (query c "SELECT has_schema_privilege(current_user,'freediving','CREATE') AS allowed"))) (fail! 403 "Reviewer schema privileges invalid"))))
 (defn- capability! [path secret]
   (when-not (string? path) (fail! 400 "Private capability file required"))
@@ -90,12 +91,17 @@
         (when-not (equal-secret? (:csrf auth) (header e "X-CSRF-Token")) (fail! 403 "CSRF token required"))
         (let [r (request-values (body! e))]
           (case path
+            "/api/corrections/triage" (respond (corrections/triage! database-url (assoc r :proposal-id (:proposal-id r))))
             "/api/proposals" (respond (reviews/propose! database-url r))
             "/api/decisions" (respond (reviews/decide! database-url r))
             "/api/publication" (respond (publication/decide! database-url r))
             "/api/logout" (do (reset! sessions {}) (respond {:authenticated false}))
             (fail! 404 "Unknown endpoint"))))
-      (contains? #{"/api/proposals" "/api/decisions" "/api/publication" "/api/login" "/api/logout"} path) (fail! 405 "POST required")
+      (contains? #{"/api/proposals" "/api/decisions" "/api/publication" "/api/login" "/api/logout" "/api/corrections/triage"} path) (fail! 405 "POST required")
+      (= path "/api/corrections")
+      (let [p (params e) offset (try (Long/parseLong (get p :offset "0")) (catch Exception _ -1))]
+        (when-not (<= 0 offset 10000) (fail! 400 "Correction offset must be between 0 and 10000"))
+        (respond (corrections/list-requests database-url {:limit 100 :offset offset})))
       (= path "/api/candidates") (respond (assoc (candidates/packets (candidates/load-corpus database-url {}) {:limit 1000}) :rubric packets/rubric :demo true))
       (contains? #{"/api/detail" "/api/evidence"} path)
       (let [t (target! e) corpus (candidates/load-corpus database-url {}) row (some #(when (= t (select-keys % [:job-id :ordinal])) %) corpus)]
@@ -124,7 +130,13 @@
         (.createContext server "/" (reify HttpHandler (handle [_ e]
                                                         (try (routes! e context)
                                                              (catch clojure.lang.ExceptionInfo x
-                                                               (let [message (.getMessage x) status (or (:status (ex-data x)) (if (re-find #"(?i)stale|idempotency|already decided|active unreversed" message) 409 400))]
+                                                               (let [message (or ({:invalid "Check the required fields and, when linking, use an existing proposal for this observation"
+                                                                                   :conflict "The request changed or the retry contents differ"
+                                                                                   :unavailable "Correction request unavailable"
+                                                                                   :capacity "This request has reached its triage limit"} (:status (ex-data x))) (.getMessage x)) status (let [code (:status (ex-data x))]
+                                                                                                                                                                                           (if (integer? code) code
+                                                                                                                                                                                               (or ({:conflict 409 :unavailable 404 :capacity 429 :invalid 400} code)
+                                                                                                                                                                                                   (if (re-find #"(?i)stale|idempotency|already decided|active unreversed" message) 409 400))))]
                                                                  (respond! e status {:error message} "application/json")))
                                                              (catch Exception _ (respond! e 500 {:error "Operation failed; reload and check local configuration"} "application/json"))
                                                              (finally (.close ^HttpExchange e))))))
