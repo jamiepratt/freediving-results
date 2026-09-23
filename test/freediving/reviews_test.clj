@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
+            [freediving.archive :as archive]
+            [freediving.archive-test :as archive-fixture]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
@@ -158,3 +160,95 @@
         (is (= 1 (:exit r)))
         (is (re-find #"Expected one EDN request" (:err r))))
       (finally (.delete file)))))
+
+(defn cross-reference
+  ([] (cross-reference identity))
+  ([transform]
+   (let [{:keys [root artifact]} (fixture/synthetic 1 "review-cross-source/1")
+         source (str (.getParent (java.io.File. root)) "/cross-source")
+         _ (spit source "distinct synthetic source")
+         hash (.formatHex (java.util.HexFormat/of)
+                          (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                   (.getBytes "distinct synthetic source" "UTF-8")))
+         _ (archive/register! root source (assoc archive-fixture/manifest :sha256 hash))
+         artifact (assoc artifact :source-sha256 hash
+                         :acquisitions (:acquisitions (archive/inspect root hash)))
+         artifact (transform (assoc artifact :job-id (fixture/hash-value (select-keys artifact observations/identity-keys))))]
+     (fixture/publish! {:root root :artifact artifact})
+     (observations/import! fixture/app root (:job-id artifact))
+     (let [inspection (observations/inspect fixture/app (:job-id artifact))]
+       {:job-id (:job-id artifact) :ordinal 0
+        :candidate-id (:candidate_id (first (:observations inspection)))
+        :source-sha256 (:source-sha256 artifact)
+        :artifact-sha256 (.formatHex (java.util.HexFormat/of)
+                                     (.digest (java.security.MessageDigest/getInstance "SHA-256") ^bytes (:artifact-bytes inspection)))
+        :page 1 :line 1}))))
+(deftest registered-cross-source-evidence-survives-approval-and-reversal
+  (let [t (sample) ref (cross-reference)
+        p (assoc (proposal t "cross") :evidence [{:page 1 :line 1} ref])]
+    (is (= (:evidence p) (:evidence (reviews/propose! fixture/app p))))
+    (reviews/decide! reviewer {:id "cross-approve" :proposal-id "cross" :action :approve :base-revision 0 :actor "owner" :reason "Synthetic cross-source evidence"})
+    (is (= (:after p) (:identity (reviews/effective fixture/app t))))
+    (reviews/decide! reviewer {:id "cross-reverse" :event-id "cross-approve" :action :reverse :base-revision 1 :actor "owner" :reason "Undo"})
+    (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app t))))
+    (is (= (:evidence p) (:evidence (first (reviews/history fixture/app t)))))))
+
+(deftest matched-anchor-is-retained-after-rejection
+  (let [t (sample) ref (cross-reference)
+        id (str "local-observation:" (:job-id ref) ":" (:ordinal ref))
+        p (assoc (proposal t "anchor") :identity-target ref :after {:outcome :matched :identity-id id}
+                 :evidence [ref])]
+    (is (= ref (:identity-target (reviews/propose! fixture/app p))))
+    (reviews/decide! reviewer {:id "reject-anchor" :proposal-id "anchor" :action :reject :base-revision 0 :actor "owner" :reason "Candidate unsupported"})
+    (is (= ref (:identity-target (first (reviews/history fixture/app t)))))
+    (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app t))))))
+
+(deftest registered-evidence-rejects-forged-and-incomplete-references
+  (let [t (sample) ref (cross-reference) p (assoc (proposal t "bad") :evidence [ref])]
+    (doseq [bad [(assoc ref :job-id "unregistered") (assoc ref :ordinal 99)
+                 (assoc ref :candidate-id "forged") (assoc ref :source-sha256 "forged")
+                 (assoc ref :artifact-sha256 "forged") (assoc ref :page 2)
+                 (assoc ref :line 999) (assoc ref :ordinal -1)
+                 (dissoc ref :candidate-id) (assoc ref :extra "forged")]]
+      (is (thrown? clojure.lang.ExceptionInfo (reviews/propose! fixture/app (assoc p :evidence [bad])))))
+    (is (= [] (reviews/history fixture/app t)))))
+(deftest identity-target-cannot-be-unrelated-to-matched-anchor
+  (let [t (sample) ref (cross-reference)
+        p (assoc (proposal t "anchor") :identity-target ref :evidence [ref]
+                 :after {:outcome :matched :identity-id (str "local-observation:" (:job-id ref) ":0")})]
+    (doseq [bad [(assoc-in p [:after :identity-id] "unrelated")
+                 (assoc p :after {:outcome :no-match})
+                 (assoc p :evidence [{:page 1 :line 1}])
+                 (assoc p :identity-target (dissoc ref :artifact-sha256))]]
+      (is (thrown? clojure.lang.ExceptionInfo (reviews/propose! fixture/app bad))))
+    (is (= [] (reviews/history fixture/app t)))))
+(deftest forged-cross-reference-is-revalidated-at-owner-approval
+  (let [t (sample) ref (cross-reference)
+        p (reviews/propose! fixture/app (assoc (proposal t "valid") :evidence [ref]))
+        forged (assoc p :id "forged-cross" :evidence [(assoc ref :artifact-sha256 "forged")])]
+    (with-open [c (java.sql.DriverManager/getConnection fixture/app)
+                s (.prepareStatement c "INSERT INTO freediving.review_proposals(id,job_id,ordinal,body_edn) VALUES('forged-cross',?,0,?)")]
+      (.setString s 1 (:job-id t)) (.setString s 2 (pr-str forged)) (.executeUpdate s))
+    (is (thrown-with-msg? Exception #"evidence" (reviews/decide! reviewer {:id "bad-approval" :proposal-id "forged-cross" :action :approve :base-revision 0 :actor "owner" :reason "Must revalidate"})))
+    (is (= 0 (:revision (reviews/effective fixture/app t))))))
+
+(deftest registered-context-line-must-share-observation-page
+  (let [t (sample)
+        ref (cross-reference #(-> % (assoc :pdf-page-count 2)
+                                  (update :pages conj {:page 2 :text "Other page" :lines [{:line 1 :text "Other page"}]})
+                                  (update :raw-text str "\fOther page")))]
+    ;; Context from another line on the observation's page is permitted.
+    (is (map? (reviews/propose! fixture/app (assoc (proposal t "context") :evidence [(assoc ref :line 2)]))))
+    (is (thrown-with-msg? Exception #"coordinates" (reviews/propose! fixture/app (assoc (proposal t "other-page") :evidence [(assoc ref :page 2)]))))))
+(deftest missing-parsed-name-cannot-anchor-an-identity
+  (let [t (sample) ref (cross-reference #(assoc-in % [:candidates 0 :parsed :source-name] nil))
+        p (assoc (proposal t "nameless") :identity-target ref :evidence [ref]
+                 :after {:outcome :matched :identity-id (str "local-observation:" (:job-id ref) ":0")})]
+    (is (thrown-with-msg? Exception #"anchor" (reviews/propose! fixture/app p)))
+    (is (= [] (reviews/history fixture/app t)))))
+
+(deftest local-anchor-id-requires-registered-identity-target
+  (let [t (sample) ref (cross-reference)
+        p (assoc (proposal t "missing-target") :evidence [ref]
+                 :after {:outcome :matched :identity-id (str "local-observation:" (:job-id ref) ":0")})]
+    (is (thrown-with-msg? Exception #"target" (reviews/propose! fixture/app p)))))

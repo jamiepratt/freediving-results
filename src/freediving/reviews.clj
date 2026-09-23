@@ -95,13 +95,48 @@
 (defn- identity-value? [v]
   (or (= v {:outcome :unknown}) (= v {:outcome :no-match})
       (and (= #{:outcome :identity-id} (set (keys v))) (= :matched (:outcome v)) (nonblank? (:identity-id v)))))
+(def reference-keys #{:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :page :line})
+(defn- page-lines [o]
+  (let [a (edn/read-string (String. ^bytes (:artifact_bytes o) "UTF-8"))]
+    (set (for [page (:pages a) line (:lines page)] {:page (:page page) :line (:line line)}))))
+(defn- registered-reference! [c ref]
+  (when-not (and (map? ref) (= reference-keys (set (keys ref)))
+                 (every? nonblank? ((juxt :job-id :candidate-id :source-sha256 :artifact-sha256) ref))
+                 (nat-int? (:ordinal ref)) (every? pos-int? ((juxt :page :line) ref)))
+    (fail! "Invalid registered evidence reference"))
+  (let [o (target c ref) payload (edn/read-string (:payload_edn o))
+        pages (set (conj (mapv :page (:source-lines payload)) (get-in payload [:coordinates :page])))]
+    (when-not (and (= (:candidate-id ref) (:candidate_id o))
+                   (= (:source-sha256 ref) (:source_sha256 o))
+                   (= (:artifact-sha256 ref) (:artifact_sha256 o))
+                   (contains? pages (:page ref))
+                   (contains? (page-lines o) (select-keys ref [:page :line])))
+      (fail! "Registered evidence provenance or coordinates mismatch"))
+    o))
 (defn- validate-proposal! [c p s]
   (audit! p)
-  (let [o (target c p) a (edn/read-string (String. ^bytes (:artifact_bytes o) "UTF-8"))
-        refs (set (for [page (:pages a) line (:lines page)] {:page (:page page) :line (:line line)}))
+  (let [o (target c p) refs (page-lines o)
         f (:field p)]
     (when-not (= "result-row" (:kind o)) (fail! "Review target must be a result-row"))
-    (when-not (and (vector? (:evidence p)) (seq (:evidence p)) (every? refs (:evidence p))) (fail! "Invalid evidence references"))
+    (when-not (and (vector? (:evidence p)) (seq (:evidence p))) (fail! "Invalid evidence references"))
+    (doseq [ref (:evidence p)]
+      (if (and (map? ref) (= #{:page :line} (set (keys ref))))
+        (when-not (contains? refs ref) (fail! "Invalid evidence references"))
+        (registered-reference! c ref)))
+    (when (and (= f :identity) (= :matched (get-in p [:after :outcome]))
+               (string? (get-in p [:after :identity-id]))
+               (str/starts-with? (get-in p [:after :identity-id]) "local-observation:")
+               (not (contains? p :identity-target)))
+      (fail! "Registered identity target required for local anchor"))
+    (when (contains? p :identity-target)
+      (let [ref (:identity-target p) anchor (registered-reference! c ref)
+            name (get-in (edn/read-string (:payload_edn anchor)) [:parsed :source-name])]
+        (when-not (and (= f :identity) (= "result-row" (:kind anchor)) (nonblank? name)
+                       (some #{ref} (:evidence p))
+                       (= :matched (get-in p [:after :outcome]))
+                       (= (str "local-observation:" (:job-id ref) ":" (:ordinal ref))
+                          (get-in p [:after :identity-id])))
+          (fail! "Invalid identity target anchor"))))
     (when-not (= (:base-revision p) (:revision s)) (fail! "Stale base revision"))
     (when-not (and (contains? p :before) (= (:before p) (current-value s f))) (fail! "Before value differs from effective state"))
     (when-not (and (contains? p :after) (not= (:before p) (:after p))) (fail! "Changed after value required"))
@@ -118,7 +153,7 @@
     (when-not (= request (:request (edn/read-string (:body_edn r)))) (fail! "Conflicting idempotency key")) (body r)))
 (defn- keys! [request allowed]
   (when-not (and (map? request) (every? allowed (keys request))) (fail! "Unexpected request fields")))
-(def proposal-keys #{:id :job-id :ordinal :base-revision :category :field :before :after :evidence :reason :actor})
+(def proposal-keys #{:id :job-id :ordinal :base-revision :category :field :before :after :evidence :reason :actor :identity-target})
 (defn propose! [url p]
   (keys! p proposal-keys)
   (transaction url
