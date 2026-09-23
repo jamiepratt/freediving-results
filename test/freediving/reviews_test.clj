@@ -5,7 +5,8 @@
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
             [freediving.observations-test :as fixture]
-            [freediving.reviews :as reviews]))
+            [freediving.reviews :as reviews]
+            [freediving.candidates :as candidates]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
 (use-fixtures :each (fn [f]
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
@@ -252,3 +253,30 @@
         p (assoc (proposal t "missing-target") :evidence [ref]
                  :after {:outcome :matched :identity-id (str "local-observation:" (:job-id ref) ":0")})]
     (is (thrown-with-msg? Exception #"target" (reviews/propose! fixture/app p)))))
+
+(deftest database-candidate-anchor-supports-owner-approval-and-reversal
+  (let [t (sample) expected-ref (cross-reference)
+        corpus (candidates/load-corpus fixture/app {})
+        packet (candidates/packet corpus t {})
+        candidate (first (:candidates packet))
+        {:keys [identity-id reference]} (:local-identity-anchor candidate)
+        row (first (:observations candidate))
+        artifact (:artifact (observations/inspect fixture/app (:job-id reference)))
+        p (assoc (proposal t "retrieved-anchor") :identity-target reference :evidence [reference]
+                 :after {:outcome :matched :identity-id identity-id})]
+    (is (= 1 (:candidate-group-count packet)))
+    (is (= expected-ref reference))
+    (is (= [{:page 1 :line 1 :text "  Éxample  001  "}] (:source-lines row)))
+    (is (= "Éxample" (get-in row [:payload :parsed :source-name])))
+    (is (= (:acquisitions artifact) (:acquisitions row)))
+    (is (= (select-keys artifact [:config :actor :tool :processed-at :pdfinfo-version])
+           (:extraction-provenance row)))
+    (is (= reference (:identity-target (reviews/propose! fixture/app p))))
+    (reviews/decide! reviewer {:id "retrieved-approve" :proposal-id "retrieved-anchor" :action :approve
+                               :base-revision 0 :actor "owner" :reason "Synthetic generated anchor check"})
+    (is (= (:after p) (:identity (reviews/effective fixture/app t))))
+    (reviews/decide! reviewer {:id "retrieved-reverse" :event-id "retrieved-approve" :action :reverse
+                               :base-revision 1 :actor "owner" :reason "Undo synthetic anchor check"})
+    (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app t))))
+    (is (= [reference] (:evidence (first (reviews/history fixture/app t)))))
+    (is (= corpus (candidates/load-corpus fixture/app {})))))
