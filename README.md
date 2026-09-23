@@ -4,7 +4,7 @@ This slice registers existing source bytes and explicit acquisition provenance i
 
 ## Run
 
-Requires Java 17+ and the Clojure CLI. Clojure is pinned in `deps.edn`; no other direct dependencies or running services are needed. First run downloads Maven dependencies.
+Requires Java 17+ and the Clojure CLI. Clojure is pinned in `deps.edn`; the legacy adapter also uses pinned `data.json`; no running services are needed. First run downloads Maven dependencies.
 
 ```sh
 clojure -M:test
@@ -37,7 +37,32 @@ URLs with user credentials, query strings, or fragments are rejected to reduce a
 
 These declarations record acquisition evidence; validation does not prove a publisher claim or fetch a URL. MIME type is not inferred from the bytes. Mirror links are recorded as supplied, never inferred from URL equivalence. Different acquisitions with the same content hash share one artifact and are not independent evidence.
 
-Existing JSON manifests require explicit, evidence-backed conversion to this EDN schema. For example, `requested_url`, `resolved_url`, `fetched_at`, and `content_type` can be mapped when their original meanings match these fields. A browser manifest missing final URL or MIME type is rejected until the missing facts are established. Do not assume a discovery URL is the final URL, invent an acquisition method, or convert uncertainty into a confirmed publisher relationship. The importer never rewrites the source manifest or original bytes.
+## Legacy JSON import
+
+`freediving.legacy/import!` and the CLI import a JSON array of acquisition entries, with an explicit evidence directory and a private EDN supplement:
+
+```sh
+clojure -M:legacy data/archive /absolute/evidence /absolute/manifest.json /absolute/config.edn
+```
+
+```clojure
+{:version 1
+ :entries {0 {:values {:publisher "Example federation"
+                      :acquisition-method "direct HTTP download"
+                      :relationship :publisher
+                      :mirror-of nil}
+              :rationale "Acquisition log identifies publisher and method."}}}
+```
+
+Entry indices are zero-based. Supply facts only when supported by recorded evidence. Config entries cannot overwrite observed mapped fields. Unknown indices, unsupported config versions, malformed JSON, or a non-array top level fail the command. An empty config is `{:version 1 :entries {}}`.
+
+The version 1 mapping is `requested_url` to `:discovery-url`, `resolved_url` to `:final-url`, `fetched_at` to `:retrieved-at`, `content_type` to `:content-type`, and `sha256` to `:sha256`. When `requested_url` is absent, `source_url` supplies discovery only. `archived_at`, browser `acquisition`, `authentication`, `source_kind`, and extraction fields remain original evidence; the adapter does not reinterpret them as retrieval timestamps, acquisition methods, or publisher claims. Browser records lacking final URL or MIME remain incomplete. Missing `:mirror-of` is explicit even when an evidence-backed supplement will eventually set it to nil.
+
+Each entry produces `:imported`, `:skipped`, `:missing-fields` with field names, or `:rejected` with a machine-readable reason. Invalid entries do not prevent subsequent entries from being processed. Source files must be regular nonsymlink files beneath the explicit evidence directory; absolute entry paths and parent traversal are rejected. Declared byte counts, when present, and required SHA-256 hashes are verified. Canonical archive validation still rejects unsupported URLs, MIME types, timestamps, or relationships. Generic `:invalid-source-or-manifest` intentionally omits exception contents. CLI stdout contains only IDs, private storage paths, counts and statuses; detailed original fields stay in private lineage.
+
+The archive retains exact manifest and config bytes under `evidence/<sha256>`. Each entry has a deterministic lineage record linking those hashes and its index to the original entry, mapping/version, complete supplement/rationale and normalized fields. Distinct manifest/config bytes produce distinct lineage even when the acquisition is unchanged. All unknown original fields are retained. Result reports are also content-addressed; the returned `:report-path` identifies the persisted report (without its own self-reference). Repeated imports verify evidence integrity and return skipped acquisitions without duplicating objects, acquisition records or identical lineage. Changed provenance creates separate acquisitions sharing content. The existing archive schema is unchanged.
+
+Evidence uses the archive's private atomic storage and cooperating-process lock. Lineage is saved before acquisition registration; interruption can leave pending lineage or an acquisition without a final report. Repeat the same command to complete it. Report counts describe that invocation, not a historical transaction. Storage failures can stop an invocation; malformed top-level inputs have no trustworthy entry enumeration and fail as a whole after original bytes are retained. No rollback or power-loss durability is promised. JSON, config and size checks currently read complete files into memory; this adapter is intended for the bounded local pilot.
 
 ## Public API
 

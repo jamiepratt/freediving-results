@@ -151,7 +151,7 @@
   "Register existing bytes and explicit provenance. Optional :on-progress runs after
    the verified artifact is published, before acquisition publication; retry on interruption."
   ([root source manifest] (register! root source manifest {}))
-  ([root source manifest {:keys [on-progress]}]
+  ([root source manifest {:keys [on-progress report-status]}]
    (validate! manifest)
    (safe-path! source)
    (when-not (Files/isRegularFile (path source) nofollow) (fail! "Source must be a regular file"))
@@ -161,7 +161,8 @@
        (let [digest (:sha256 manifest)
              object (io/file root "objects" digest)
              id (acquisition-id manifest)
-             record (io/file root "acquisitions" (str id ".edn"))]
+             record (io/file root "acquisitions" (str id ".edn"))
+             existed? (exists? record)]
          (safe-path! object)
          (safe-path! record)
          ;; Only recognizable private staging files may be removed after a terminated writer.
@@ -180,7 +181,8 @@
            (publish! root record #(spit % (canonical manifest) :encoding "UTF-8") nil))
          (when-not (= manifest (:manifest (verified-record! record)))
            (fail! "Acquisition record conflict"))
-         {:sha256 digest :acquisition-id id})))))
+         (cond-> {:sha256 digest :acquisition-id id}
+           report-status (assoc :status (if existed? :skipped :imported))))))))
 
 (defn inspect
   "Verify artifact bytes and return all acquisition records sharing this SHA-256."
@@ -210,3 +212,23 @@
     (catch Exception error
       (binding [*out* *err*] (println "Archive command failed:" (.getMessage error)))
       (System/exit 1))))
+
+(defn read-source-bytes
+  "Read a regular, nonsymlink local evidence file. Does not change its permissions."
+  [file]
+  (let [p (safe-path! file)]
+    (when-not (Files/isRegularFile p nofollow) (fail! "Evidence must be a regular file"))
+    (Files/readAllBytes p)))
+
+(defn retain-evidence!
+  "Retain exact private evidence bytes, addressed by SHA-256, separately from source artifacts."
+  [root bytes]
+  (let [digest (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes))]
+    (with-archive root true
+      (fn [root]
+        (let [dir (io/file root "evidence") target (io/file dir digest)]
+          (directory! dir)
+          (when-not (exists? target)
+            (publish! root target #(with-open [out (io/output-stream %)] (.write out bytes)) digest))
+          (verified-object! target digest)
+          {:sha256 digest :path (str target)})))))
