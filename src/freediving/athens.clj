@@ -1,7 +1,7 @@
 (ns freediving.athens
   (:require [clojure.string :as str]))
 
-(def parser-version "cmas-athens-distance/2")
+(def parser-version "cmas-athens-distance/3")
 (def title "2025 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR, GREECE")
 (defn supported? [pages] (boolean (some #(str/includes? % title) pages)))
 (defn- field [v] {:status (if (nil? v) :unknown :parsed) :value v})
@@ -10,7 +10,7 @@
   (cond
     (= s title) :event-title
     (re-matches #"MAY, \d{1,2}, \d{4}" s) :event-date
-    (re-matches #"(?:DNF|DYNBF)\s+FINAL RESULTS" s) :discipline
+    (re-matches #"(?:DNF|DYNBF|DYN)\s+FINAL RESULTS" s) :discipline
     (re-matches #"(?:JUNIORS|SENIORS|MASTERS M[123]) – (?:WOMEN|MEN)" s) :category
     (or (re-matches #"#\s+Name & surname\s+Country(?:\s+Realized\s+Final\s+Notes)?" s)
         (re-matches #"Realized\s+Final\s+Notes" s)
@@ -52,10 +52,19 @@
                (< (.start matcher 4) (.indexOf header "Notes")))
       [text (.group matcher 1) (.group matcher 2) (.group matcher 3) nil (.group matcher 4) nil "DNS"])))
 
+(defn- dyn-realized-only [text context]
+  (let [matcher (re-matcher #"\s*(?:(\d+)\s+)?(.+?)\s+(CMAS1|AIN|[A-Z]{3})\s+(\d+(?:,\d+)?)\s+(DQ .+?)\s*" text)
+        header (positioning-header context)]
+    (when (and (= "DYN" (:discipline context)) header (.matches matcher)
+               (<= (.indexOf header "Realized") (.start matcher 4))
+               (< (.start matcher 4) (.indexOf header "Final")))
+      [text (.group matcher 1) (.group matcher 2) (.group matcher 3) (.group matcher 4) nil (.group matcher 5) nil])))
+
 (defn- row [text context]
   (when-let [[_ rank name representation realized final notes dns]
              (or (re-matches #"\s*(?:(\d+)\s+)?(.+?)\s+(CMAS1|AIN|[A-Z]{3})\s+(?:(\d+(?:,\d+)?)\s+(\d+(?:,\d+)?)(?:\s+(.*?))?|(DNS))\s*" text)
-                 (final-only-dns text context))]
+                 (final-only-dns text context)
+                 (dyn-realized-only text context))]
     (let [notes (or dns notes)
           status (second (re-find #"^(DQ|DNS)(?:\s|$)" (or notes "")))
           raw {:rank rank :source-name name :representation representation
@@ -67,6 +76,8 @@
                          :notes notes :status status :penalty nil})]
       (when (and (not (re-find #"\d" name))
                  (or (nil? notes)
+                     (and (= "DYN" (:discipline context))
+                          (re-matches #"(?:GOLD MEDAL,|WORLD RECORD SENIORS|DQ SP OK DIR|DQ EQUIPMENT)" notes))
                      (re-matches #"(?:PANAMERICAN RECORD|DOLPHIN KICK|WALL AT START|DNS|DQ (?:SP(?: CHIN| NO OK)?|SURFACE BO|UW BO)(?:, DQ (?:SP(?: CHIN| NO OK)?|SURFACE BO|UW BO))*|(?:GOLD|SILVER|BRONZE) MEDAL(?:, WORLD RECORD(?: SENIORS| MASTERS M[123])?)?|WORLD RECORD MASTERS M[123])" notes)))
         {:raw-fields raw :parsed parsed}))))
 
@@ -84,7 +95,7 @@
     (if-let [line (first remaining)]
       (let [next-line (second remaining)
             next-row (when next-line (row (:text next-line) context))
-            wrapped? (and (= "DYNBF" (:discipline context)) next-row
+            wrapped? (and (#{"DYNBF" "DYN"} (:discipline context)) next-row
                           (= (inc (:line line)) (:line next-line))
                           (nil? (get-in next-row [:parsed :rank]))
                           (re-matches #"\s*\d+\s+[^\d]+" (:text line))
@@ -110,6 +121,52 @@
                                    (and r (nil? (get-in r [:parsed :status]))) (conj :source-status-not-explicit))}
       wrapped? (assoc :source-lines source-lines))))
 
+(defn- dyn-candidates [lines context]
+  (loop [remaining (seq lines) candidates [] noncandidate []]
+    (if-let [a (first remaining)]
+      (let [[_ b c] remaining
+            ra (row (:text a) context)
+            rc (when c (row (:text c) context))
+            shared? (and ra b rc (nil? (get-in ra [:parsed :rank]))
+                         (nil? (get-in rc [:parsed :rank]))
+                         (re-matches #"\s*\d+\s*" (:text b))
+                         (= (inc (:line a)) (:line b)) (= (inc (:line b)) (:line c)))
+            multiline? (and b c (= "GOLD MEDAL," (str/trim (:text a)))
+                            (= "WORLD RECORD SENIORS" (str/trim (:text c)))
+                            (row (:text b) context)
+                            (nil? (get-in (row (:text b) context) [:parsed :notes]))
+                            (when-let [header (positioning-header context)]
+                              (every? #(>= (count (take-while (fn [ch] (= ch \space)) (:text %)))
+                                           (.indexOf header "Notes")) [a c]))
+                            (= (inc (:line a)) (:line b)) (= (inc (:line b)) (:line c)))]
+        (cond
+          shared?
+          (let [evidence {:kind :ambiguous-merged-cells :source-lines [a b c]}
+                uncertain (fn [line]
+                            (-> (candidate [line] context)
+                                (update-in [:raw :fields] (fn [fields] (-> fields (assoc :note-fragment (:notes fields)) (dissoc :notes :status))))
+                                (assoc :parse-status :unparsed :parsed nil :fields {}
+                                       :group-evidence evidence
+                                       :unresolved-reasons [:owner-review-required :unparsed-source-line :ambiguous-merged-cells])))]
+            (recur (drop 3 remaining) (into candidates [(uncertain a) (uncertain c)])
+                   (conj noncandidate (assoc b :classification :ambiguous-group-evidence))))
+          multiline?
+          (let [r (candidate [b] context)]
+            (recur (drop 3 remaining)
+                   (conj candidates (-> r
+                                        (assoc :source-lines [a b c]
+                                               :coordinates {:page (:page a) :line (:line a) :column-start 1 :column-end (inc (count (:text a)))}
+                                               :repairs [{:operation :join-note-lines :field :notes
+                                                          :source-lines [a c] :separator " "}])
+                                        (assoc-in [:parsed :notes] "GOLD MEDAL, WORLD RECORD SENIORS")
+                                        (assoc-in [:fields :notes] (field "GOLD MEDAL, WORLD RECORD SENIORS"))
+                                        (assoc-in [:raw :line] (str/join "\n" (map :text [a b c])))
+                                        (assoc-in [:raw :note-lines] [a c]))) noncandidate))
+          :else
+          (let [group (first (source-groups remaining context))]
+            (recur (drop (count group) remaining) (conj candidates (candidate group context)) noncandidate))))
+      {:candidates candidates :noncandidate noncandidate})))
+
 (defn parse-pages [pages]
   (let [page-data (mapv (fn [i text] {:page (inc i) :text text
                                       :lines (mapv (fn [j s] {:page (inc i) :line (inc j) :text s})
@@ -125,9 +182,12 @@
                                               (mapv #(assoc % :classification (classification %))
                                                     (filter classification lines))
                                               (mapv #(assoc % :classification :unsupported-page-line) lines))
-                                   candidates (if supported
-                                                (mapv #(candidate % context)
-                                                      (source-groups (remove classification lines) context)) [])
+                                   dyn (when (and supported (= "DYN" (:discipline context)))
+                                         (dyn-candidates (remove classification lines) context))
+                                   metadata (into metadata (:noncandidate dyn))
+                                   candidates (if dyn (:candidates dyn) (if supported
+                                                                          (mapv #(candidate % context)
+                                                                                (source-groups (remove classification lines) context)) []))
                                    parsed (count (filter #(= :parsed (:parse-status %)) candidates))]
                                {:context context :results (conj results
                                                                 (assoc page :status (cond supported :needs-review (empty? lines) :needs-OCR :else :unsupported-needs-parser)
