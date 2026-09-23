@@ -22,7 +22,12 @@ PY
 scripts/local-postgres.sh start "$test_root/cluster" "$test_port"
 psql -h 127.0.0.1 -p "$test_port" -d postgres -v ON_ERROR_STOP=1 \
   -c 'CREATE ROLE observations_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
+  -c 'CREATE ROLE reviews_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
+  -c 'CREATE ROLE reviews_public LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE DATABASE observations_test;'
 export FREEDIVING_TEST_ADMIN_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=$(id -un)"
 export FREEDIVING_TEST_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=observations_app"
-clojure -M:test-postgres
+export FREEDIVING_TEST_REVIEW_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_owner"
+export FREEDIVING_TEST_PUBLIC_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_public"
+clojure -M:${1:-test-postgres}
+if [[ $# -eq 0 ]]; then clojure -M:test-reviews; fi
