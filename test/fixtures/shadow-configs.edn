@@ -1,0 +1,3 @@
+[{:id "rules" :provider :rules :identifier-policy :unique-person-id-v1}
+ {:id "llm-unavailable" :provider :stub :stub-outcome :abstain}
+ {:id "jev-unavailable" :provider :stub :stub-outcome :abstain}]

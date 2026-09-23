@@ -14,6 +14,10 @@ Search validated source names, compare original results with approved correction
 
 The [local correction workflow](docs/local-corrections.md) accepts private evidence-backed requests through a separate restricted submission capability. The owner can dismiss or link a normal proposal; only explicit review and revalidation can affect public values. Synthetic setup, abuse limits and access instructions are documented there.
 
+## Local shadow comparison
+
+The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the versioned dataset, held-out grouping, rules/Jev/LLM adapters, private restartable traces and synthetic comparison command. No live provider benchmark or genuine owner labels are included. Shadow outcomes cannot approve identities or publish results.
+
 ## Run
 
 Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure and dependencies are pinned in `deps.edn`. Archive/extraction commands need no running service; observation ingestion requires PostgreSQL. First run downloads Maven dependencies.
