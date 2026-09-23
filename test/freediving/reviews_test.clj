@@ -1,5 +1,6 @@
 (ns freediving.reviews-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [clojure.java.shell :as shell]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]))
@@ -149,3 +150,11 @@
           result (reviews/decide! reviewer r)]
       (is (= result (reviews/decide! reviewer r))))
     (is (= 3 (:revision (reviews/effective fixture/app t))))))
+(deftest cli-requires-exactly-one-edn-request
+  (let [file (java.io.File/createTempFile "review-request-" ".edn")]
+    (try
+      (spit file "{:job-id \"synthetic\" :ordinal 0} {:ignored \"second request\"}")
+      (let [r (shell/sh "java" "-cp" (System/getProperty "java.class.path") "clojure.main" "-m" "freediving.reviews" "effective" (.getPath file))]
+        (is (= 1 (:exit r)))
+        (is (re-find #"Expected one EDN request" (:err r))))
+      (finally (.delete file)))))

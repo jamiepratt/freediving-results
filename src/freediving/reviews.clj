@@ -180,13 +180,19 @@
                                      (:id request) (:job-id t) (:ordinal t) (:revision record) (name action)
                                      (when (not= action :reverse) (:proposal-id request)) (when (= action :reverse) (:event-id request)) (encode record))
                            (existing c "review_decisions" (:id request) request))))))))
+(defn- read-request [path]
+  (with-open [r (java.io.PushbackReader. (io/reader path))]
+    (let [eof (Object.) request (edn/read {:eof eof} r)]
+      (when (or (identical? eof request) (not (identical? eof (edn/read {:eof eof} r))))
+        (fail! "Expected one EDN request"))
+      request)))
 (defn -main [& [command & args]]
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (println (encode (case command
                          "migrate" (if (= 2 (count args)) (apply migrate! url args) (fail! "migrate INGEST-ROLE REVIEWER-ROLE"))
                          ("propose" "decide" "effective" "history")
-                         (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history} command) url (edn/read-string (slurp (first args))))
+                         (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history} command) url (read-request (first args)))
                              (fail! "Expected one EDN request file"))
                          (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history REQUEST.edn")))))
     (catch Exception e (binding [*out* *err*] (println "Review operation failed:" (.getMessage e))) (System/exit 1))))
