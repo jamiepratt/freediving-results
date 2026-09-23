@@ -1,6 +1,6 @@
 # Local synthetic owner review
 
-This interface exercises the existing review and extraction-validation APIs for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). It accepts explicitly synthetic observations only. The five invented rows are not pilot owner reviews. Real source review and source-page rendering remain tracked in that issue. The separate [public interface](local-public-results.md) reads eligible sanitized projections.
+This interface exercises the existing review and extraction-validation APIs for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). The demo configuration accepts explicitly synthetic observations only. The five invented rows are not pilot owner reviews. A separate [real-source inspection configuration](local-source-inspection.md) supports private PDF pages and defaults to read-only access. The separate [public interface](local-public-results.md) reads eligible sanitized projections.
 
 ## Create a demo
 
@@ -26,7 +26,7 @@ Startup refuses elevated/owning database roles, original-record write privileges
 
 ## Review flow
 
-Browse or filter cases, then compare source tokens, parsed values and current approved values. The original values never change. Candidate signals are suggestions, not proof of identity or independent corroboration. Event representation is not citizenship. Evidence references show exact extraction page/line text and source/version identifiers. They do not provide PDF geometry or an original-PDF viewer.
+Browse or filter cases, then compare source tokens, parsed values and current approved values. The original values never change. Candidate signals are suggestions, not proof of identity or independent corroboration. Event representation is not citizenship. Evidence references show exact extraction page/line text and source/version identifiers. The text demo does not contain PDFs. The separate real-source viewer renders registered PDF pages; extraction line coordinates still do not provide PDF geometry.
 
 Prepare a reasoned proposal using a supported scalar field or explicit identity outcome. An identity match references a selected registered observation and its evidence. Unknown and no-match remain distinct. Needs-more-evidence leaves a case unreviewed, or can be the reason for an explicit rejection. A proposal changes nothing until approved. Approve, reject and reverse are separate actions retained in the private audit.
 
@@ -58,7 +58,7 @@ Do not rerun setup against an existing directory. To start a fresh demo, choose 
 
 The server binds only to IPv4 loopback. It checks an exact Host and Origin allowlist, authenticates a random local capability, uses an HttpOnly SameSite session cookie and per-session CSRF token, accepts mutations only as same-origin JSON POSTs, limits request bodies to 64 KiB, and serves only fixed assets and database-scoped evidence. No permissive CORS, external resources or general filesystem routes are provided. Private responses use no-store and a restrictive content security policy. Untrusted values render as text.
 
-This is trusted-local development authentication, not production owner authentication. Another local process running as the same OS user can read the capability, and the development PostgreSQL helper uses loopback trust authentication. Do not tunnel, reverse-proxy or expose either listener. Production authentication, TLS, source rendering and multi-user operation need separate work under issue #1.
+This is trusted-local development authentication, not production owner authentication. Another local process running as the same OS user can read the capability, and the development PostgreSQL helper uses loopback trust authentication. Do not tunnel, reverse-proxy or expose either listener. Production authentication, TLS and multi-user operation need separate work under issue #1.
 
 ## Verification
 

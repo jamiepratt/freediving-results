@@ -4,7 +4,7 @@ This slice registers source bytes and acquisition provenance in a private archiv
 
 ## Local owner review demo
 
-A private loopback web interface now exercises proposals, approval/rejection/reversal and separate extraction validation/revocation on explicitly synthetic data. See [setup, access and trust boundary](docs/local-owner-review.md). No real pilot decisions are created.
+A private loopback web interface supports [read-only real-source inspection](docs/local-source-inspection.md), including authenticated PDF pages and exact extracted evidence. Review authority requires separate explicit configuration. The [synthetic demo](docs/local-owner-review.md) exercises proposals, approval/rejection/reversal and extraction validation. No real pilot decisions were created during verification.
 
 ## Local public results demo
 
