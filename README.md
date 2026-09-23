@@ -4,7 +4,11 @@ This slice registers source bytes and acquisition provenance in a private archiv
 
 ## Local owner review demo
 
-A private loopback web interface now exercises proposals, approval/rejection/reversal and separate extraction validation/revocation on explicitly synthetic data. See [setup, access and trust boundary](docs/local-owner-review.md). No real pilot decisions or public site are created.
+A private loopback web interface now exercises proposals, approval/rejection/reversal and separate extraction validation/revocation on explicitly synthetic data. See [setup, access and trust boundary](docs/local-owner-review.md). No real pilot decisions are created.
+
+## Local public results demo
+
+Search validated source names, compare original results with approved corrections, and browse approved athlete histories through a restricted public database reader. The [public demo guide](docs/local-public-results.md) covers synthetic setup, loopback access, visibility invalidation and stopping the services. Real pilot observations remain private; no deployment is included.
 
 ## Run
 

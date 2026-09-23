@@ -3,7 +3,6 @@
 set -euo pipefail
 umask 077
 export PATH="/Applications/Postgres.app/Contents/Versions/17/bin:$PATH"
-export PATH="/Applications/Postgres.app/Contents/Versions/17/bin:$PATH"
 cd "$(dirname "$0")/.."
 root=${1:-data/public-demo}
 port=${2:-55487}

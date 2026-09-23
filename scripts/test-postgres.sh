@@ -35,4 +35,6 @@ if [[ $# -eq 0 ]]; then
   clojure -M:test-publication
   clojure -M:test-public-results
   clojure -M:test-owner
+  clojure -M:test-public-server
+  clojure -M:test-public-demo
 fi

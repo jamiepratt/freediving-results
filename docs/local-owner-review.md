@@ -1,6 +1,6 @@
 # Local synthetic owner review
 
-This interface exercises the existing review and extraction-validation APIs for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). It accepts explicitly synthetic observations only. The five invented rows are not pilot owner reviews. Real source review, source-page rendering and the public interface remain tracked in that issue.
+This interface exercises the existing review and extraction-validation APIs for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). It accepts explicitly synthetic observations only. The five invented rows are not pilot owner reviews. Real source review and source-page rendering remain tracked in that issue. The separate [public interface](local-public-results.md) reads eligible sanitized projections.
 
 ## Create a demo
 
