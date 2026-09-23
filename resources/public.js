@@ -55,7 +55,7 @@
       const info = el('div'); info.append(el('p', [display(f.federation), display(f.discipline)].join(' / '), 'eyebrow'));
       const title = el('h3'); title.append(link(display(f['source-name']), internalLink('results', r['result-id']))); info.append(title);
       if ((r.original || {})['source-name'] !== f['source-name']) info.append(el('p', 'Original source name: ' + display((r.original || {})['source-name']), 'muted'));
-      info.append(el('p', display(f['event-name']) + ' · ' + display(f['event-date']), 'muted'));
+      info.append(el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'muted'));
       const tags = el('div', null, 'tags'); tags.append(el('span', 'Category: ' + display(f.category)), el('span', 'Representation: ' + display(f.representation)), el('span', r.identity && r.identity.status === 'approved' ? 'Approved identity link' : 'Identity unresolved')); info.append(tags);
       const perf = performance(f), metric = el('div', null, 'performance'); metric.append(el('span', perf.label), el('strong', perf.value), el('span', 'Unit: ' + display(f.unit)), el('span', 'Status: ' + display(f.status)));
       card.append(info, metric); list.append(card);
@@ -65,7 +65,7 @@
     const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link('Source page ' + display(ref.page) + ', line ' + display(ref.line), internalLink('results', ref['result-id']))); n.append(item); }); return n;
   }
   function detail(r) {
-    const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', display(f['event-name']) + ' · ' + display(f['event-date']), 'lead'));
+    const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'lead'));
     const summary = el('div', null, 'summary'); [['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
     const identity = section('Athlete connection');
     if (r.identity && r.identity.status === 'approved' && internalLink('athletes', r.identity.id)) identity.append(el('p', 'This record has an active approved identity link.'), link('View approved athlete history →', internalLink('athletes', r.identity.id)));
@@ -91,7 +91,7 @@
       banner.hidden = !data.demo;
       if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
-        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + ' approved athlete connections', 'muted'));
+        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
         const heading = el('div', null, 'results-heading'); heading.append(el('h2', 'Public results'), el('p', data.total + ' matching ' + (data.total === 1 ? 'record' : 'records'), 'muted')); main.append(heading);
         if (data.results.length) main.append(resultCards(data.results)); else main.append(el('div', 'No public results match these filters. Try another source name or clear the filters.', 'empty'));
         const nav = el('nav', null, 'pagination'); nav.setAttribute('aria-label', 'Result pages');
