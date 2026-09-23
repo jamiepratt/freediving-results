@@ -67,4 +67,4 @@ The development helper uses loopback trust authentication. Another local process
 
 Projection preparation and public reads load the bounded pilot into memory. A simultaneous refresh can return PostgreSQL serialization failure `40001`; retry the complete refresh. Its transaction either commits a complete snapshot or leaves the previous cache intact, with the visibility checks still applied. Public reads already in a repeatable-read transaction retain their earlier snapshot until that transaction ends.
 
-The [local public interface](local-public-results.md) reads these restricted projections. Further pilot coverage, genuine owner review, anonymous corrections, evaluation and production acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+The [local public interface](local-public-results.md) reads these restricted projections. Further pilot coverage, genuine owner review, [anonymous correction triage](local-corrections.md), evaluation and production acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).

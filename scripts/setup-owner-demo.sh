@@ -14,6 +14,7 @@ psql -h 127.0.0.1 -p "$port" -d postgres -v ON_ERROR_STOP=1 \
   -c 'CREATE ROLE observations_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE ROLE reviews_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE ROLE reviews_public LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
+  -c 'CREATE ROLE corrections_submit LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE DATABASE owner_demo;'
 export FREEDIVING_DEMO_ADMIN_URL="jdbc:postgresql://127.0.0.1:$port/owner_demo?user=$(id -un)"
 export FREEDIVING_DEMO_INGEST_URL="jdbc:postgresql://127.0.0.1:$port/owner_demo?user=observations_app"

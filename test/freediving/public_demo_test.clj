@@ -1,6 +1,7 @@
 (ns freediving.public-demo-test
   (:require [clojure.test :refer [deftest is]]
             [freediving.public-demo :as demo]
+            [freediving.corrections :as corrections]
             [clojure.string :as str]
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
@@ -29,6 +30,7 @@
             active (first (public/search-source-name reader "Alex Éxample"))
             reversed (first (public/search-source-name reader "Casey Sample"))]
         (is (= 12 (count rows)))
+        (is (string? (corrections/target-version (url "FREEDIVING_TEST_SUBMIT_URL") (:result-id active))))
         (is (= 2 (count (public/athlete-history reader (get-in active [:identity :id])))))
         (is (= "Alex Example" (get-in active [:effective :source-name])))
         (is (= "Casey Sample" (get-in reversed [:effective :source-name])))

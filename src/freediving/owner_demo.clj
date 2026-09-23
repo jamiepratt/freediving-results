@@ -3,7 +3,8 @@
   (:require [clojure.java.io :as io] [clojure.string :as str]
             [freediving.archive :as archive] [freediving.observations :as observations]
             [freediving.reviews :as reviews] [freediving.publication :as publication]
-            [freediving.public-results :as public-results])
+            [freediving.public-results :as public-results]
+            [freediving.corrections :as corrections])
   (:import [java.security MessageDigest] [java.util HexFormat]
            [java.nio.file Files Paths] [java.nio.file.attribute PosixFilePermissions]))
 
@@ -65,6 +66,7 @@
   (reviews/migrate! admin-url "observations_app" "reviews_owner")
   (publication/migrate! admin-url "reviews_owner")
   (public-results/migrate! admin-url "reviews_owner" "reviews_public")
+  (corrections/migrate! admin-url "reviews_owner" "corrections_submit")
   (let [root (private-dir! root)
         docs [(fixture! root "synthetic-pool-a"
                         [{:text "1 Alex Éxample AIN 101 m" :name "Alex Éxample" :value 101 :raw-value "101"}

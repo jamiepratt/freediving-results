@@ -3,7 +3,8 @@
   (:require [clojure.java.io :as io] [clojure.string :as str]
             [freediving.archive :as archive] [freediving.observations :as observations]
             [freediving.reviews :as reviews] [freediving.publication :as publication]
-            [freediving.public-results :as public-results])
+            [freediving.public-results :as public-results]
+            [freediving.corrections :as corrections])
   (:import [java.security MessageDigest] [java.util HexFormat]
            [java.nio.file Files Paths] [java.nio.file.attribute PosixFilePermissions]))
 
@@ -90,6 +91,7 @@
   (reviews/migrate! admin "observations_app" "reviews_owner")
   (publication/migrate! admin "reviews_owner")
   (public-results/migrate! admin "reviews_owner" "reviews_public")
+  (corrections/migrate! admin "reviews_owner" "corrections_submit")
   (let [root (private-dir! root)
         names ["Alex Éxample" "Casey Sample" "Synthetic Participant 03" "Synthetic Participant 04"
                "Synthetic Participant 05" "Synthetic Participant 06" "Example Alex" "Synthetic Participant 08"

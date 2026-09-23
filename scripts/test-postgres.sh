@@ -24,11 +24,13 @@ psql -h 127.0.0.1 -p "$test_port" -d postgres -v ON_ERROR_STOP=1 \
   -c 'CREATE ROLE observations_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE ROLE reviews_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE ROLE reviews_public LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
+  -c 'CREATE ROLE corrections_submit LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;' \
   -c 'CREATE DATABASE observations_test;'
 export FREEDIVING_TEST_ADMIN_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=$(id -un)"
 export FREEDIVING_TEST_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=observations_app"
 export FREEDIVING_TEST_REVIEW_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_owner"
 export FREEDIVING_TEST_PUBLIC_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=reviews_public"
+export FREEDIVING_TEST_SUBMIT_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=corrections_submit"
 clojure -M:${1:-test-postgres}
 if [[ $# -eq 0 ]]; then
   clojure -M:test-reviews
@@ -36,5 +38,7 @@ if [[ $# -eq 0 ]]; then
   clojure -M:test-public-results
   clojure -M:test-owner
   clojure -M:test-public-server
+  clojure -M:test-corrections
+  clojure -M:test-correction-http
   clojure -M:test-public-demo
 fi

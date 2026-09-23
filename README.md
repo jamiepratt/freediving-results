@@ -10,6 +10,10 @@ A private loopback web interface now exercises proposals, approval/rejection/rev
 
 Search validated source names, compare original results with approved corrections, and browse approved athlete histories through a restricted public database reader. The [public demo guide](docs/local-public-results.md) covers synthetic setup, loopback access, visibility invalidation and stopping the services. Real pilot observations remain private; no deployment is included.
 
+## Anonymous correction requests
+
+The [local correction workflow](docs/local-corrections.md) accepts private evidence-backed requests through a separate restricted submission capability. The owner can dismiss or link a normal proposal; only explicit review and revalidation can affect public values. Synthetic setup, abuse limits and access instructions are documented there.
+
 ## Run
 
 Requires Java 17+ and the Clojure CLI. PDF extraction and its tests also require Poppler `pdftotext` and `pdfinfo` on PATH (verified with 25.05.0). Clojure and dependencies are pinned in `deps.edn`. Archive/extraction commands need no running service; observation ingestion requires PostgreSQL. First run downloads Maven dependencies.

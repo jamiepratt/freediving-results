@@ -34,6 +34,10 @@ Extraction validation is a separate form. Both visual-accuracy and absence-of-su
 
 Revision conflicts display an error and reload control. Reload current state before making a new decision. A retry after uncertain network failure reuses the exact request ID and contents. Changing a request requires a new ID. Review decisions invalidate earlier extraction validation until explicitly revalidated. The UI does not prepare or serve public projections.
 
+## Visitor requests
+
+The private correction queue retains original visitor claims and append-only triage. Dismiss with a reason, or inspect the observation and create a normal registered-evidence proposal before linking it. Approval remains a separate explicit action. See [anonymous correction setup and limits](local-corrections.md).
+
 ## Stop and restart
 
 Stop the foreground HTTP server with Ctrl-C. Its shutdown hook removes the capability file. Then:
