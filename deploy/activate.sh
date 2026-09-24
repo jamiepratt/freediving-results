@@ -7,14 +7,8 @@ release=$(realpath "$1")
 [[ -f "$release/REVISION" ]]
 id freediving >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin freediving
 python3 "$release/deploy/bootstrap.py"
-install -d -m 0700 /var/backups/freediving
-runuser -u postgres -- pg_dump -Fc freediving > "/var/backups/freediving/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
-set -a
-. /etc/freediving/migration.env
-set +a
 cd "$release"
-java -Xmx256m -cp 'src:resources:lib/*' clojure.main -m freediving.deployment
-unset FREEDIVING_MIGRATION_URL
+python3 "$release/deploy/prepare_database.py"
 chown -R root:root "$release"
 chmod -R go-w "$release"
 previous=$(readlink -f /opt/freediving/current || true)
