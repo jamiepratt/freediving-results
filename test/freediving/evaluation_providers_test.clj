@@ -256,3 +256,100 @@
   (doseq [provider [:rules :stub] version [1 2]]
     (is (thrown? clojure.lang.ExceptionInfo
                  (p/prepare-request {:provider provider :diagnostics-version version} {:input {}})))))
+
+(def output-contract-config
+  {:provider :llm :model "gpt-4.1-nano-2025-04-14" :endpoint "http://127.0.0.1:1/"
+   :diagnostics-version 2 :output-contract :identity-outcome-v1 :max-completion-tokens 128})
+
+(deftest explicit-output-contract-changes-only-response-format
+  (let [case {:case-id "synthetic-contract" :input {:left {:name "SYNTHETIC"} :right {}}}
+        legacy (p/prepare-request (dissoc output-contract-config :output-contract) case)
+        request (p/prepare-request output-contract-config case)
+        seen (atom nil)]
+    (is (= "shadow-adapters/5" (:adapter-version request)))
+    (is (= :identity-outcome-v1 (get-in request [:config :output-contract])))
+    (is (= (dissoc (json/read-str (:body legacy)) "response_format")
+           (dissoc (json/read-str (:body request)) "response_format")))
+    (with-server (fn [ex]
+                   (reset! seen (json/read-str (slurp (.getRequestBody ex))))
+                   (reply! ex 200 "{}"))
+      (fn [url]
+        (p/execute! (p/prepare-request (assoc output-contract-config :endpoint url) case)
+                    {:bearer-token "fixture-secret"})))
+    (is (= {"type" "json_schema"
+            "json_schema" {"name" "identity_outcome_v1" "strict" true
+                           "schema" {"type" "object" "properties" {"outcome" {"type" "string" "enum" ["match" "no_match" "abstain"]}}
+                                     "required" ["outcome"] "additionalProperties" false}}}
+           (get @seen "response_format")))))
+
+(deftest output-contract-rejects-unsupported-configurations
+  (doseq [config (concat (map #(assoc output-contract-config :output-contract %) [nil :unknown "identity-outcome-v1" {}])
+                         (map #(assoc output-contract-config :provider %) [:rules :stub :jev])
+                         (map #(assoc output-contract-config :model %) [nil "gpt-4.1-nano" "fixture"])
+                         [(dissoc output-contract-config :diagnostics-version)
+                          (assoc output-contract-config :diagnostics-version 1)])]
+    (is (thrown? clojure.lang.ExceptionInfo (p/prepare-request config {:input {}})))))
+
+(defn output-contract-result [body]
+  (with-server (fn [ex] (reply! ex 200 body))
+    (fn [url]
+      (p/execute! (p/prepare-request (assoc output-contract-config :endpoint url) {:input {}})
+                  {:bearer-token "fixture-secret"}))))
+
+(deftest output-contract-enforces-exact-object-with-sanitized-diagnostics
+  (doseq [[content expected reasons]
+          [[" \t{\"outcome\":\"match\"}\r\n" :match []]
+           ["{\"outcome\":\"no_match\"}" :no-match []]
+           ["{\"outcome\":\"abstain\"}" :abstain []]
+           ["{\"outcome\":\"match\",\"extra\":\"fixture-secret\"}" :error [:invalid-output-shape]]
+           ["{}" :error [:invalid-output-shape :invalid-outcome]]
+           ["[]" :error [:invalid-output-shape :invalid-outcome]]
+           ["null" :error [:invalid-output-shape :invalid-outcome]]
+           ["{\"outcome\":3}" :error [:invalid-output-shape :invalid-outcome]]
+           ["{\"outcome\":null}" :error [:invalid-output-shape :invalid-outcome]]
+           ["{\"outcome\":\"MATCH\"}" :error [:invalid-outcome]]
+           ["{\"outcome\":\"match \"}" :error [:invalid-outcome]]
+           ["{\"outcome\":\"match\"} {}" :error [:invalid-content-json]]]]
+    (let [r (output-contract-result (str " \n" (json/write-str (assoc-in llm-response [:choices 0 :message :content] content)) "\t\r\n"))]
+      (is (= expected (:outcome r)))
+      (is (= reasons (:validation-reasons r)))
+      (is (= "fixture-v1" (:model-version r)))
+      (is (= {:prompt_tokens 7 :completion_tokens 3} (:usage r)))
+      (is (= :stop (:finish-reason r)))
+      (is (= {:status :unknown} (:cost r)))
+      (is (false? (:retryable? r)))
+      (is (= :known (:external-outcome r)))
+      (is (nil? (:response-body r)))
+      (is (not (.contains (pr-str r) "fixture-secret")))
+      (when (= :error expected) (is (= :invalid-response (:error r)))))))
+
+(deftest output-contract-preserves-explicit-errors-and-bounds
+  (doseq [[body reason] [["{" :invalid-outer-json]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :refusal] "fixture-secret")) :refusal]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :finish_reason] "length")) :non-stop-finish]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :content] "bad fixture-secret")) :invalid-content-json]
+                         [(json/write-str (assoc llm-response :model "fixture-secret")) :invalid-model]
+                         [(json/write-str (assoc llm-response :usage {:prompt_tokens -1})) :invalid-usage]]]
+    (let [r (output-contract-result body)]
+      (is (= :error (:outcome r)))
+      (is (= :invalid-response (:error r)))
+      (is (= [reason] (:validation-reasons r)))
+      (is (not (.contains (pr-str r) "fixture-secret")))
+      (is (nil? (:response-body r)))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (p/prepare-request (assoc output-contract-config :max-request-bytes 8) {:input {}})))
+  (with-server (fn [ex] (reply! ex 200 (json/write-str llm-response)))
+    (fn [url]
+      (let [request (p/prepare-request (assoc output-contract-config :endpoint url :max-response-bytes 8) {:input {}})]
+        (is (= :response-too-large (:error (p/execute! request {:bearer-token "fixture-secret"})))))))
+  (doseq [[config version] [[{} "shadow-adapters/1"]
+                            [{:max-completion-tokens 128} "shadow-adapters/2"]
+                            [{:diagnostics-version 1} "shadow-adapters/3"]
+                            [{:diagnostics-version 2} "shadow-adapters/4"]]]
+    (with-server (fn [ex] (reply! ex 200 (json/write-str (assoc-in llm-response [:choices 0 :message :content]
+                                                                   "{\"outcome\":\"match\",\"extra\":true}"))))
+      (fn [url]
+        (let [request (p/prepare-request (merge {:provider :llm :model "fixture" :endpoint url} config) {:input {}})]
+          (is (= version (:adapter-version request)))
+          (is (= {"type" "json_object"} (get (json/read-str (:body request)) "response_format")))
+          (is (= :match (:outcome (p/execute! request {:bearer-token "fixture-secret"})))))))))

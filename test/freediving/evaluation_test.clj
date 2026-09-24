@@ -1,5 +1,6 @@
 (ns freediving.evaluation-test
   (:require [clojure.test :refer [deftest is run-tests]]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [freediving.evaluation :as evaluation]
             [freediving.evaluation-data-test :as fixtures]
@@ -9,6 +10,50 @@
 (defn root [] (.getCanonicalPath (.toFile (Files/createTempDirectory "shadow-eval-" (make-array FileAttribute 0)))))
 (def dataset (fixtures/dataset [(fixtures/sample-case "a" :development) (fixtures/sample-case "b" :held-out)]))
 (def configs [{:id "rules" :provider :rules}])
+(deftest strict-output-contract-is-durable-and-halts-without-masking-errors
+  (let [dir (root) calls (atom 0)
+        ds (fixtures/dataset (mapv #(fixtures/sample-case % :held-out) ["a" "b" "c"]))
+        response (fn [outcome]
+                   (str (json/write-str
+                         {:model "gpt-4.1-nano-2025-04-14" :usage {:prompt_tokens 9}
+                          :choices [{:finish_reason "stop" :message {:content outcome}}]}) "\n"))]
+    (http/with-server
+      (fn [ex]
+        (http/reply! ex 200 (response (if (= 1 (swap! calls inc))
+                                        " \n{\"outcome\":\"match\"}\t"
+                                        "{\"outcome\":\"match\",\"extra\":\"fixture-secret\"}"))))
+      (fn [url]
+        (let [cfg [{:id "remote" :provider :llm :endpoint url :model "gpt-4.1-nano-2025-04-14"
+                    :diagnostics-version 2 :output-contract :identity-outcome-v1
+                    :max-completion-tokens 128 :stop-on-terminal-error? true :max-attempts 3}
+                   {:id "rules" :provider :rules}]
+              runtime {:providers {"remote" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! dir ds cfg runtime)
+              view (evaluation/inspect-run dir (:run-id receipt))
+              results (get-in view [:report :providers "remote" :results])]
+          (is (= 2 @calls))
+          (is (= "shadow-adapters/5" (get-in view [:input :requests 0 0 :adapter-version])))
+          (is (= [:match :error :error] (mapv :outcome results)))
+          (is (= [[] [:invalid-output-shape] nil] (mapv :validation-reasons results)))
+          (is (= [{:prompt_tokens 9} {:prompt_tokens 9} nil] (mapv :usage results)))
+          (is (= ["gpt-4.1-nano-2025-04-14" "gpt-4.1-nano-2025-04-14" nil]
+                 (mapv :model-version results)))
+          (is (= [1 1 0] (mapv #(count (:attempts %)) results)))
+          (is (= :comparator-halted (:error (last results))))
+          (is (= :not-dispatched (:dispatch-status (last results))))
+          (is (= {:status :not-incurred} (:cost (last results))))
+          (is (= [:abstain :abstain :abstain]
+                 (mapv :outcome (get-in view [:report :providers "rules" :results]))))
+          (with-redefs [providers/execute! (fn [& _] (throw (AssertionError. "Replay dispatched provider")))]
+            (is (= receipt (evaluation/run! dir ds cfg runtime)))
+            (is (= view (evaluation/inspect-run dir (:run-id receipt)))))
+          (let [legacy (evaluation/run! dir ds (update cfg 0 dissoc :output-contract))]
+            (is (not= (:run-id receipt) (:run-id legacy)))
+            (is (= "shadow-adapters/4"
+                   (get-in (evaluation/inspect-run dir (:run-id legacy)) [:input :requests 0 0 :adapter-version]))))
+          (is (= 2 @calls))
+          (doseq [file (filter #(.isFile %) (file-seq (io/file dir)))]
+            (is (not (.contains (slurp file) "fixture-secret")))))))))
 (deftest replay-is-idempotent-and-evaluates-only-held-out-cases
   (let [dir (root) first-run (evaluation/run! dir dataset configs)
         again (evaluation/run! dir dataset configs)
@@ -214,10 +259,11 @@
             (is (not (.contains (slurp file) "fixture-secret")))))))))
 
 (deftest legacy-run-identity-remains-anchored-to-pre-diagnostics-code
-  ;; /1 and /2 captured on 4e75100; /3 on b55861b, through public run! without credentials.
+  ;; /1 and /2 captured on 4e75100; /3 on b55861b; /4 on 51b07ab, via public run! without credentials.
   (doseq [[cap diagnostics version expected] [[nil nil "shadow-adapters/1" "4e9b85ffca3a3d97cde02dfbc1b9b373ffd11f75cca065b15ef9dddb4c0b7fb3"]
                                               [128 nil "shadow-adapters/2" "472e342314cac02f762fba3025beda369435f720220b0905bdabb72ebb40f712"]
-                                              [nil 1 "shadow-adapters/3" "e8cf87fbe372cc63abebcfa525587a3e3c7b3f0a0de53923f34247b8fc77a964"]]]
+                                              [nil 1 "shadow-adapters/3" "e8cf87fbe372cc63abebcfa525587a3e3c7b3f0a0de53923f34247b8fc77a964"]
+                                              [nil 2 "shadow-adapters/4" "b9729f53c826b21d25dc852f0e9afc993a75943eefa6012a55526ceec97b4fb4"]]]
     (let [dir (root)
           cfg [(cond-> {:id "legacy" :provider :llm :model "fixture" :endpoint "http://127.0.0.1:1/"}
                  cap (assoc :max-completion-tokens cap)

@@ -54,6 +54,18 @@ A returned model must be a 1-200 character identifier using letters, digits, `.`
 
 Runtime bearer values never enter run identity. Set a nonsecret `:scope-id` when account or route meaning changes, even if endpoint/model stay the same. Reusing a store/configuration across such a change without changing scope would replay the old result. Credential rotation alone need not change scope.
 
+### Opt-in strict outcome contract
+
+Set `:output-contract :identity-outcome-v1` with `:provider :llm`, `:model "gpt-4.1-nano-2025-04-14"` and `:diagnostics-version 2` to select `shadow-adapters/5`. Other contract values, models, providers and diagnostic combinations are rejected before dispatch. Omit the option to retain adapters 1-4 unchanged.
+
+This changes only the transport output contract: `response_format` becomes `json_schema`, named `identity_outcome_v1`, with `strict: true`. Its object has one required string property, `outcome`, with enum `match`, `no_match`, `abstain`, and `additionalProperties: false`. System/user messages, source input, model, token cap, deadline and stop policy remain unchanged. The option and adapter version produce a distinct immutable request/run identity. Old stores replay without HTTP; selecting this contract does not repair or overwrite an old run.
+
+Official documentation checked 2026-09-24 lists structured outputs for the [pinned GPT-4.1 nano snapshot](https://developers.openai.com/api/docs/models/gpt-4.1-nano). The [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) distinguishes schema adherence from JSON-object mode and documents strict schemas, enums, required fields and refusal handling. This verifies documented support, not live account/model availability.
+
+Adapter 5 also validates the exact decoded object locally. Extra keys or a non-object shape yield `:invalid-output-shape`; missing or invalid outcome values remain errors. Refusals, non-stop finishes and malformed JSON remain explicit errors with independently valid sanitized metadata. There is no coercion, recovery or conversion of failures to abstentions. Legal JSON whitespace and existing response/deadline bounds remain supported. Raw content is discarded, including failed content, so historical invalid-outcome text cannot be recovered.
+
+Synthetic contract and durable replay tests establish these mechanics only. They establish no decision accuracy or empirical performance gain. The incomplete live baseline, actual-cost evidence and any separately authorized frozen evaluation remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+
 ## Persistence and metrics
 
 Runs accept at most ten configurations. Preflight limits planned response bytes plus per-attempt overhead to 32 MiB, and the canonical input/request identity to 32 MiB, before storage or dispatch. Copies, EDN encoding and retained prior runs add disk/memory overhead; these are admission bounds, not an operating-system memory cap. Response limits, timeout, retry count and scope belong to immutable configuration.
