@@ -15,6 +15,10 @@ with tempfile.TemporaryDirectory() as tmp:
         if item.endswith('.jar'):
             shutil.copy2(item, staging / 'lib' / pathlib.Path(item).name)
     (staging / 'REVISION').write_text(revision + '\n')
+    # The service user must read releases even when the builder uses umask 077
+    # or dependency cache files are private. Change only these packaged copies.
+    for path in staging.rglob('*'):
+        path.chmod(0o755 if path.is_dir() else 0o644)
     artifact = out / 'freediving.tar.gz'
     with tarfile.open(artifact, 'w:gz') as tar:
         for child in staging.iterdir():
