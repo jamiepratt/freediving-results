@@ -174,7 +174,8 @@ are not stored by the new adapters.
 ### Opt-in native failure diagnostics
 
 Add `:native-diagnostics-version 1` to a native configuration to select
-`shadow-adapters/8`. Other values or use without native batching are rejected.
+`shadow-adapters/8`. Version 2 selects `/9`, described below; other values or use
+without native batching are rejected.
 The option and adapter version create new immutable request/run identities;
 the exact HTTP body, model, source protocol, question semantics and runner bounds
 remain unchanged. Omitting it preserves adapters 1-7, including frozen adapter 7
@@ -279,3 +280,74 @@ The incomplete B benchmark leaves [#4](https://github.com/jamiepratt/freediving-
 and [#5](https://github.com/jamiepratt/freediving-results/issues/5) open.
 Fresh held-out evaluation is tracked in [#6](https://github.com/jamiepratt/freediving-results/issues/6);
 actual billing evidence remains tracked under [#1](https://github.com/jamiepratt/freediving-results/issues/1).
+
+### Probability contract audit, 2026-09-24
+
+The [HTTP API](https://docs.typesafe.ai/api) describes Choice probabilities as
+floats summing to 1; the [Choice guide](https://docs.typesafe.ai/primitives/choice)
+also states that their sum is 1. The
+[Python response documentation](https://docs.typesafe.ai/sdk/python/api/types/responses)
+instead says they sum to approximately 1, without specifying an error bound.
+The [JavaScript response interface](https://docs.typesafe.ai/sdk/javascript/api/interfaces/ChoiceResponse)
+adds no numerical bound. These checked pages specify neither decimal precision,
+rounding mode, normalization order nor an allowed deviation. Two-decimal examples
+are examples, not a general rounding guarantee. Vendor clarification is needed
+to establish a different numerical acceptance contract.
+
+The [Jev 1.13 limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13)
+discuss numeric reasoning and inconsistent answers across separate questions.
+Those limitations do not define an exception to normalization within one Choice.
+[Confidence](https://docs.typesafe.ai/confidence) is derived from a distribution,
+but its formula is unspecified; it is not the chosen probability or evidence of
+calibration for these identity decisions.
+
+The adapter decodes JSON decimal numbers as binary doubles using `data.json`,
+rejects duplicate keys, and accepts a probability sum only when
+`abs(sum - 1) < 0.00001`. This is a local strict policy, not a documented vendor
+tolerance. Ordinary double representation and addition error for three bounded
+probabilities is far smaller than this threshold. Decimal-looking values such as
+`0.33, 0.33, 0.33` fail that policy; their appearance cannot establish whether the
+provider rounded them. No normalization or tolerance change is justified by this
+audit.
+
+The later adapter-8 diagnostic D made one request and rejected `identity_0` with
+`invalid-probability-sum`, retaining its valid sibling. Its rejected numbers were
+not persisted: the deviation and cause remain unknown. This observation cannot
+recover the earlier B failure cause. A new diagnostic cannot recover either
+historical response.
+
+### Opt-in numerical diagnostics
+
+Native configurations with `:native-diagnostics-version 2` select immutable
+`shadow-adapters/9`. Validation remains unchanged. An `invalid-probability-sum`
+answer now includes `:probability-diagnostics` after its answer type, choice,
+confidence, exact probability keys and numeric ranges have passed validation:
+
+- `:values`: exactly three finite numbers in `[0,1]`, under fixed keyword keys
+  `:match/:no_match/:abstain` or `:yes/:no/:unknown` for companions.
+- `:count`, `:sum`, `:absolute-deviation`, and `:tolerance`: respectively 3,
+  a number in `[0,3]`, a number in `[0,2]`, and `0.00001`.
+- `:comparison :strict-less-than` and `:rounding-cause :unestablished`.
+
+These are decoded numerical values, not original decimal text or proof of the
+provider's internal precision. No raw response, arbitrary keys, strings, invalid
+ranges or nonfinite values enter this diagnostic. Invalid metadata still blocks
+decisions; independently valid request counters remain available. Valid siblings
+survive, terminal failures stop later dispatch, and uncertain/completed runs
+remain non-dispatching on replay. Versions 7 and 8 retain their previous behavior.
+HTTP body, model, domain protocol, bounds and question semantics are unchanged.
+
+The next evidence gate under [#4](https://github.com/jamiepratt/freediving-results/issues/4)
+is at most one separately scoped `/9` request with the original failed B batch's
+two ordered cases. Use a fresh private store and configuration with
+`:id "E"`, `:scope-id "jev-probability-diagnostic-20260924-07"`, and
+`:native-diagnostics-version 2`; retain D's remaining settings: Jev `1.13.0`,
+`freediving-source-v1`, diagnostics version 2, batch size 2, no companions,
+15-second deadline, 49152/65536 request/response byte caps, one attempt, zero
+retry delay, terminal stopping and concurrency 1. Require exact byte equality
+with the frozen B batch, verified current label authority before/after and
+zero-dispatch replay. This offline batch did not execute that request.
+Do not resume B or rerun A. If normalization still fails, the recorded numerical
+facts are sufficient for vendor clarification; another equivalent diagnostic
+batch cannot establish an undocumented tolerance. Successful evidence still
+does not complete the benchmark or explain historical failures.
