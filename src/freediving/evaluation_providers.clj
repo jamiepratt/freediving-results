@@ -107,7 +107,7 @@
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
         base-config (apply dissoc config batch-option-keys)]
     (when-not (and (= :jev (:provider config)) (= :freediving-source-v1 (:identity-protocol config))
-                   (or (not (contains? config :native-diagnostics-version)) (= 1 (:native-diagnostics-version config)))
+                   (or (not (contains? config :native-diagnostics-version)) (#{1 2} (:native-diagnostics-version config)))
                    (bounded-int? size 1 8) (= 1 (get config :max-attempts 1))
                    (vector? cases) (seq cases) (= (count cases) (count (set (map :case-id cases))))
                    (every? #(valid-text? (:case-id %)) cases)
@@ -142,7 +142,7 @@
          (when (or (> (count questions) 32)
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
-         {:adapter-version (if (:native-diagnostics-version config) "shadow-adapters/8" "shadow-adapters/7") :provider :jev :config normalized
+         {:adapter-version (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7") :provider :jev :config normalized
           :protocol protocol/descriptor :body body
           :case-ids (mapv :case-id members)
           :evidence (mapv #(select-keys % [:case-id :evidence]) members)
@@ -354,9 +354,9 @@
     (catch Exception _ (failure :invalid-response false :known))
     (catch StackOverflowError _ (failure :invalid-response false :known))))
 
-(defn- native-choice-diagnostics [answer allowed present?]
-  ;; Report only the first failed check. No provider-controlled keys or values
-  ;; escape this branch; keyword conversion occurs only in strict-choice on success.
+(defn- native-choice-diagnostics [answer allowed present? numerical?]
+  ;; Report the first failed check. Version 2 adds only validated, finite
+  ;; probabilities under fixed choice keys after every structural/range check.
   (let [choice (get answer "choice") probs (get answer "probabilities")
         reason (cond
                  (not present?) :missing-answer
@@ -373,8 +373,14 @@
                  (not (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)) :invalid-probability-sum
                  (not= (get probs choice) (apply max (vals probs))) :choice-probability-inconsistency)]
     (if reason
-      {:outcome :error :error (if (= :missing-answer reason) :missing-answer :invalid-answer)
-       :validation-reasons [reason]}
+      (cond-> {:outcome :error :error (if (= :missing-answer reason) :missing-answer :invalid-answer)
+               :validation-reasons [reason]}
+        (and numerical? (= :invalid-probability-sum reason))
+        (assoc :probability-diagnostics
+               {:values (into (sorted-map) (map (fn [[k v]] [(keyword k) v]) probs))
+                :count (count probs) :sum (reduce + (vals probs))
+                :absolute-deviation (Math/abs (- 1.0 (reduce + (vals probs))))
+                :tolerance 0.00001 :comparison :strict-less-than :rounding-cause :unestablished}))
       (strict-choice answer allowed))))
 
 (defn- native-metadata [request data token]
@@ -411,7 +417,8 @@
                                                                          (if (str/starts-with? id "identity")
                                                                            #{"match" "no_match" "abstain"}
                                                                            #{"yes" "no" "unknown"})
-                                                                         (and (map? answers) (contains? answers id))))]) ids))
+                                                                         (and (map? answers) (contains? answers id))
+                                                                         (= "shadow-adapters/9" (:adapter-version request))))]) ids))
             reasons (cond-> (:validation-reasons metadata)
                       (not (contains? data "answers")) (conj :missing-answers)
                       (and (contains? data "answers") (not (map? answers))) (conj :invalid-answers-type)
@@ -440,8 +447,8 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8"} (:adapter-version request))
-                       ((if (= "shadow-adapters/8" (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9"} (:adapter-version request))
+                       ((if (#{"shadow-adapters/8" "shadow-adapters/9"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
                        (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
                          (parse-diagnostic-response (:provider request) (.body response) token
                                                     (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))

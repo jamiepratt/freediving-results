@@ -168,7 +168,7 @@
     (is (= legacy (-> diagnostic (assoc :adapter-version "shadow-adapters/7")
                       (update :config dissoc :native-diagnostics-version))))
     (is (= (:body legacy) (:body diagnostic)))
-    (doseq [version [nil 0 2 "1"]]
+    (doseq [version [nil 0 3 "1"]]
       (is (thrown? Exception (p/prepare-batches (assoc cfg :native-diagnostics-version version) (cases)))))
     (is (thrown? Exception (p/prepare-request (-> cfg (dissoc :native-batch-size)
                                                   (assoc :native-diagnostics-version 1)) (first (cases)))))))
@@ -305,3 +305,170 @@
             (is (= (if (= :match outcome) :complete :error) (get-in report [:batches 0 :attempt :result :outcome])))
             (is (= known (get-in report [:request-metrics :usage-known-request-count])))
             (is (not (re-find #"private-provider-key|private-provider-value" (pr-str report))))))))))
+
+(defn execute-numerical-body [body]
+  (http/with-server (fn [ex] (http/reply! ex 200 body))
+    (fn [url] (p/execute! (first (p/prepare-batches (assoc (config url) :native-diagnostics-version 2) (cases)))
+                          {:bearer-token "fixture-secret"}))))
+
+(deftest numerical-diagnostics-explain-sum-without-assuming-rounding
+  (let [bad (assoc (answer "match") :probabilities {"match" 0.61 "no_match" 0.08 "abstain" 0.30})
+        result (execute-numerical-body (json/write-str (diagnostic-response bad)))
+        numerical (get-in result [:answers "identity_0" :probability-diagnostics])]
+    (is (= :invalid-response (:error result)))
+    (is (= [:invalid-probability-sum] (get-in result [:answers "identity_0" :validation-reasons])))
+    (is (= {:match 0.61 :no_match 0.08 :abstain 0.30} (:values numerical)))
+    (is (= 3 (:count numerical)))
+    (is (= 0.99 (:sum numerical)))
+    (is (= (Math/abs (- 1.0 0.99)) (:absolute-deviation numerical)))
+    (is (= 0.00001 (:tolerance numerical)))
+    (is (= :strict-less-than (:comparison numerical)))
+    (is (= :unestablished (:rounding-cause numerical)))
+    (is (= :no-match (get-in result [:answers "identity_1" :outcome])))
+    (is (= {:input_tokens 27 :output_tokens 3} (:usage result)))))
+
+(deftest numerical-opt-in-preserves-wire-body-and-version-eight
+  (let [cfg (config "https://example.com")
+        old (first (p/prepare-batches (assoc cfg :native-diagnostics-version 1) (cases)))
+        new (first (p/prepare-batches (assoc cfg :native-diagnostics-version 2) (cases)))
+        body (json/write-str (diagnostic-response (assoc (answer "match") :probabilities {"match" 0.61 "no_match" 0.08 "abstain" 0.30})))
+        legacy (execute-diagnostic-body body)
+        numerical (execute-numerical-body body)]
+    (is (= "shadow-adapters/9" (:adapter-version new)))
+    (is (= old (-> new (assoc :adapter-version "shadow-adapters/8")
+                   (assoc-in [:config :native-diagnostics-version] 1))))
+    (is (= (:body old) (:body new)))
+    (is (= {:outcome :error :error :invalid-answer :validation-reasons [:invalid-probability-sum]}
+           (get-in legacy [:answers "identity_0"])))
+    (is (= (dissoc legacy :latency-ms) (-> numerical (dissoc :latency-ms)
+                                           (update-in [:answers "identity_0"] dissoc :probability-diagnostics))))))
+
+(deftest numerical-diagnostics-retain-the-strict-binary-sum-boundary
+  ;; Closest representable sums straddling both mathematical tolerance limits.
+  (doseq [[values expected]
+          [[[0.1 0.7 0.2] :no-match]
+           [[(Math/nextUp (- 1.0 0.00001)) 0.0 0.0] :match]
+           [[(Math/nextDown (- 1.0 0.00001)) 0.0 0.0] :error]
+           [[0.5 (- (Math/nextDown (+ 1.0 0.00001)) 0.5) 0.0] :no-match]
+           [[0.5 (- (Math/nextUp (+ 1.0 0.00001)) 0.5) 0.0] :error]
+           [[0.61 0.08 0.30] :error]
+           [[0.0 0.0 0.0] :error]
+           [[1.0 1.0 1.0] :error]]]
+    (let [probs (zipmap ["match" "no_match" "abstain"] values)
+          choice (key (apply max-key val probs))
+          result (execute-numerical-body (json/write-str (diagnostic-response (assoc (answer choice) :probabilities probs))))
+          prediction (get-in result [:answers "identity_0"])]
+      (is (= expected (:outcome prediction)) (pr-str values))
+      (if (= :error expected)
+        (let [d (:probability-diagnostics prediction)]
+          (is (= [:invalid-probability-sum] (:validation-reasons prediction)))
+          (is (= #{:values :count :sum :absolute-deviation :tolerance :comparison :rounding-cause} (set (keys d))))
+          (is (<= 0 (:sum d) 3))
+          (is (<= 0 (:absolute-deviation d) 2))
+          (is (every? #(and (Double/isFinite (double %)) (<= 0 % 1)) (vals (:values d)))))
+        (is (nil? (:probability-diagnostics prediction)))))))
+
+(deftest numerical-diagnostics-never-retain-malformed-or-private-values
+  (let [good (answer "match")]
+    (doseq [bad [nil "private-source-name"
+                 (assoc good :probabilities "private-source-name")
+                 (assoc good :probabilities {"private-source-name" 1})
+                 (assoc good :probabilities {"match" 0.5 "no_match" 0.2})
+                 (assoc-in good [:probabilities "match"] "private-source-name")
+                 (assoc-in good [:probabilities "match"] nil)
+                 (assoc-in good [:probabilities "match"] true)
+                 (assoc-in good [:probabilities "match"] [0.6])
+                 (assoc-in good [:probabilities "match"] -0.01)
+                 (assoc-in good [:probabilities "match"] 1.01)
+                 (assoc good :confidence "private-source-name")]]
+      (let [r (execute-numerical-body (json/write-str (diagnostic-response bad)))]
+        (is (= :invalid-response (:error r)))
+        (is (nil? (get-in r [:answers "identity_0" :probability-diagnostics])))
+        (is (= :no-match (get-in r [:answers "identity_1" :outcome])))
+        (is (not (str/includes? (pr-str r) "private-source-name"))))))
+  (doseq [numeric ["1e400" "-1e400" "NaN" "Infinity" "-Infinity"]]
+    (let [body (str/replace (json/write-str (diagnostic-response (assoc-in (answer "match") [:probabilities "match"] "PLACEHOLDER")))
+                            "\"PLACEHOLDER\"" numeric)
+          r (execute-numerical-body body)]
+      (is (= :invalid-response (:error r)))
+      (is (nil? (get-in r [:answers "identity_0" :probability-diagnostics])))
+      (is (not (re-find #"Infinity|NaN|1e400" (pr-str r))))))
+  (let [bad (assoc (answer "match") :probabilities {"match" 0.61 "no_match" 0.08 "abstain" 0.30}
+                   :private-source-name "fixture-secret")
+        r (execute-numerical-body (json/write-str (diagnostic-response bad)))]
+    (is (some? (get-in r [:answers "identity_0" :probability-diagnostics])))
+    (is (not (re-find #"fixture-secret|private-source-name" (pr-str r))))))
+
+(deftest numerical-runs-retain-diagnostics-stop-and-replay-native-adapter-generations
+  (doseq [mode [:complete :invalid :unknown]]
+    (let [calls (atom 0) dir (runner/root) run-ids (atom #{})]
+      (http/with-server
+        (fn [ex]
+          (swap! calls inc)
+          (let [body (json/read-str (slurp (.getRequestBody ex)))
+                payload {:model "jev-1.13.0" :usage {:input_tokens 27 :output_tokens 3}
+                         :answers (into {} (map (fn [id] [id (answer "match")]) (keys (get body "questions"))))}]
+            (http/reply! ex 200 (json/write-str (if (= mode :invalid)
+                                                  (assoc-in payload [:answers "identity_0" :probabilities]
+                                                            {"match" 0.61 "no_match" 0.08 "abstain" 0.30})
+                                                  payload)))))
+        (fn [url]
+          (doseq [version [nil 1 2]]
+            (reset! calls 0)
+            (let [cfg [(cond-> (config url) version (assoc :native-diagnostics-version version))]
+                  runtime {:providers {"native" {:bearer-token "fixture-secret"}}}]
+              (when (= mode :unknown)
+                (is (thrown? Exception
+                             (evaluation/run! dir (dataset) cfg
+                                              (assoc runtime :on-progress
+                                                     #(when (= :attempt-returned (:phase %))
+                                                        (throw (ex-info "synthetic crash" {}))))))))
+              (let [receipt (if (= mode :unknown)
+                              (with-redefs [p/execute! (fn [& _] (throw (ex-info "Forbidden redispatch" {})))]
+                                (evaluation/run! dir (dataset) cfg runtime))
+                              (evaluation/run! dir (dataset) cfg runtime))
+                    report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])
+                    diagnostic (get-in report [:results 0 :probability-diagnostics])]
+                (swap! run-ids conj (:run-id receipt))
+                (is (= (if (= mode :complete) 2 1) @calls))
+                (is (= (case mode :complete [:match :match :match] :invalid [:error :match :error] :unknown [:error :error :error])
+                       (mapv :outcome (:results report))))
+                (is (= (if (= mode :complete) 0 1) (get-in report [:dispatch :undispatched-case-count])))
+                (if (and (= version 2) (= mode :invalid))
+                  (do (is (= 0.99 (:sum diagnostic)))
+                      (is (= diagnostic (get-in report [:batches 0 :attempt :result :answers "identity_0" :probability-diagnostics])))
+                      (is (= {:input_tokens 27 :output_tokens 3} (get-in report [:request-metrics :usage]))))
+                  (is (nil? diagnostic)))
+                (with-redefs [p/execute! (fn [& _] (throw (ex-info "Forbidden redispatch" {})))]
+                  (is (= receipt (evaluation/run! dir (dataset) cfg runtime)))))))
+          (is (= 3 (count @run-ids))))))))
+
+(deftest numerical-companions-use-only-their-fixed-choice-keys
+  (http/with-server
+    (fn [ex]
+      (http/reply! ex 200 (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                           :answers {:identity_0 (answer "match")
+                                                     :contradiction_0 {:type "choice" :choice "no" :confidence 0.7
+                                                                       :probabilities {:yes 0.08 :no 0.61 :unknown 0.30}
+                                                                       :private-source-name "fixture-secret"}}})))
+    (fn [url]
+      (let [cfg (assoc (config url) :native-diagnostics-version 2 :companion-assessments [:contradiction])
+            r (p/execute! (first (p/prepare-batches cfg [(first (cases))])) {:bearer-token "fixture-secret"})
+            d (get-in r [:answers "contradiction_0" :probability-diagnostics])]
+        (is (= :invalid-response (:error r)))
+        (is (= :match (get-in r [:answers "identity_0" :outcome])))
+        (is (= {:yes 0.08 :no 0.61 :unknown 0.30} (:values d)))
+        (is (= 0.99 (:sum d)))
+        (is (not (re-find #"private-source-name|fixture-secret" (pr-str r))))))))
+
+(deftest numerical-diagnostics-preserve-independent-metadata-validation
+  (doseq [[changes model usage]
+          [[{:model "private-source-name"} nil {:input_tokens 27 :output_tokens 3}]
+           [{:usage {:input_tokens "private-source-name" :output_tokens 3}} "jev-1.13.0" {:output_tokens 3}]]]
+    (let [bad (assoc (answer "match") :probabilities {"match" 0.61 "no_match" 0.08 "abstain" 0.30})
+          r (execute-numerical-body (json/write-str (merge (diagnostic-response bad) changes)))]
+      (is (= :invalid-response (:error r)))
+      (is (= model (:model-version r)))
+      (is (= usage (:usage r)))
+      (is (nil? (get-in r [:answers "identity_0" :probability-diagnostics])))
+      (is (not (str/includes? (pr-str r) "private-source-name"))))))
