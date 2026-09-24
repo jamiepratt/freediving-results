@@ -115,11 +115,18 @@
             (is (thrown? clojure.lang.ExceptionInfo
                          (p/prepare-request (assoc config :max-completion-tokens invalid) {:input {}})))))))))
 
-(defn diagnostic-result [provider body]
-  (with-server (fn [ex] (reply! ex 200 body))
-    (fn [url]
-      (p/execute! (p/prepare-request {:provider provider :model "fixture" :endpoint url :diagnostics-version 1} {:input {}})
-                  {:bearer-token "fixture-secret"}))))
+(defn diagnostic-result
+  ([provider body]
+   ;; Existing compact diagnostics and adversarial cases must stay identical.
+   (let [legacy (diagnostic-result provider body 1)
+         corrected (diagnostic-result provider body 2)]
+     (is (= legacy corrected))
+     corrected))
+  ([provider body version]
+   (with-server (fn [ex] (reply! ex 200 body))
+     (fn [url]
+       (p/execute! (p/prepare-request {:provider provider :model "fixture" :endpoint url :diagnostics-version version} {:input {}})
+                   {:bearer-token "fixture-secret"})))))
 
 (deftest invalid-content-retains-independent-metadata
   (let [result (diagnostic-result :llm (json/write-str {:model "gpt-4.1-nano-2025-04-14"
@@ -195,3 +202,57 @@
       (let [r (diagnostic-result :llm body)]
         (is (= :invalid-response (:error r)))
         (is (some #{reason} (:validation-reasons r)))))))
+
+(deftest corrected-diagnostics-accept-complete-json-with-legal-whitespace
+  (with-server (fn [ex] (reply! ex 200 (str " \t\r\n" (json/write-str llm-response) "\n\r\t ")))
+    (fn [url]
+      (let [request (p/prepare-request {:provider :llm :model "fixture" :endpoint url :diagnostics-version 2} {:input {}})
+            result (p/execute! request {:bearer-token "fixture-secret"})]
+        (is (= "shadow-adapters/4" (:adapter-version request)))
+        (is (= :match (:outcome result)))
+        (is (= [] (:validation-reasons result)))
+        (is (= "fixture-v1" (:model-version result)))
+        (is (= {:prompt_tokens 7 :completion_tokens 3} (:usage result)))
+        (is (nil? (:response-body result)))))))
+
+(deftest corrected-json-whitespace-is-exact-and-preserves-strings
+  (let [content "{\"outcome\":\"match\",\"ignored\":\" inside \\t \\r\\n \"}"
+        llm-body #(json/write-str (assoc-in llm-response [:choices 0 :message :content] %))
+        jev-body (json/write-str {:answers {:identity jev-answer}})]
+    (doseq [whitespace ["" " " "\t" "\r" "\n" " \t\r\n"]]
+      (doseq [[provider body] [[:llm (str whitespace (llm-body content) whitespace)]
+                               [:llm (llm-body (str whitespace content whitespace))]
+                               [:jev (str whitespace jev-body whitespace)]]]
+        (is (= :match (:outcome (diagnostic-result provider body 2))))))
+    (doseq [invalid ["{}" " []" " true" " null" " 1" " junk fixture-secret"
+                     "\u000b" "\f" "\u00a0" "\u2003" "\ufeff"]]
+      (doseq [[provider body reason] [[:llm (str (llm-body content) invalid) :invalid-outer-json]
+                                      [:llm (llm-body (str content invalid)) :invalid-content-json]
+                                      [:jev (str jev-body invalid) :invalid-outer-json]]]
+        (let [result (diagnostic-result provider body 2)]
+          (is (= :invalid-response (:error result)))
+          (is (= [reason] (:validation-reasons result)))
+          (is (nil? (:response-body result)))
+          (is (not (.contains (pr-str result) "fixture-secret"))))))
+    (doseq [invalid ["\u000b" "\f" "\u00a0" "\u2003" "\ufeff"]]
+      (doseq [[provider body reason] [[:llm (str invalid (llm-body content)) :invalid-outer-json]
+                                      [:llm (llm-body (str invalid content)) :invalid-content-json]
+                                      [:jev (str invalid jev-body) :invalid-outer-json]]]
+        (is (= [reason] (:validation-reasons (diagnostic-result provider body 2))))))
+    (doseq [outcome [" match" "match " "mat ch" "match\n" "MATCH"]]
+      (is (= [:invalid-outcome]
+             (:validation-reasons (diagnostic-result :llm (llm-body (json/write-str {:outcome outcome})) 2))))))
+  (doseq [[provider body] [[:llm (str (json/write-str llm-response) "\n")]
+                           [:llm (json/write-str (assoc-in llm-response [:choices 0 :message :content] "{\"outcome\":\"match\"}\n"))]
+                           [:jev (str (json/write-str {:answers {:identity jev-answer}}) "\n")]]]
+    (is (= :error (:outcome (diagnostic-result provider body 1))))
+    (is (= :match (:outcome (diagnostic-result provider body 2))))))
+
+(deftest diagnostics-version-is-an-explicit-http-only-choice
+  (doseq [provider [:llm :jev] version [0 3 "2" nil]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (p/prepare-request {:provider provider :model "fixture" :endpoint "http://127.0.0.1:1/"
+                                     :diagnostics-version version} {:input {}}))))
+  (doseq [provider [:rules :stub] version [1 2]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (p/prepare-request {:provider provider :diagnostics-version version} {:input {}})))))

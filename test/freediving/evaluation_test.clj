@@ -214,12 +214,14 @@
             (is (not (.contains (slurp file) "fixture-secret")))))))))
 
 (deftest legacy-run-identity-remains-anchored-to-pre-diagnostics-code
-  ;; Recorded by public run! using base 4e75100 provider source, without credentials.
-  (doseq [[cap version expected] [[nil "shadow-adapters/1" "4e9b85ffca3a3d97cde02dfbc1b9b373ffd11f75cca065b15ef9dddb4c0b7fb3"]
-                                  [128 "shadow-adapters/2" "472e342314cac02f762fba3025beda369435f720220b0905bdabb72ebb40f712"]]]
+  ;; /1 and /2 captured on 4e75100; /3 on b55861b, through public run! without credentials.
+  (doseq [[cap diagnostics version expected] [[nil nil "shadow-adapters/1" "4e9b85ffca3a3d97cde02dfbc1b9b373ffd11f75cca065b15ef9dddb4c0b7fb3"]
+                                              [128 nil "shadow-adapters/2" "472e342314cac02f762fba3025beda369435f720220b0905bdabb72ebb40f712"]
+                                              [nil 1 "shadow-adapters/3" "e8cf87fbe372cc63abebcfa525587a3e3c7b3f0a0de53923f34247b8fc77a964"]]]
     (let [dir (root)
           cfg [(cond-> {:id "legacy" :provider :llm :model "fixture" :endpoint "http://127.0.0.1:1/"}
-                 cap (assoc :max-completion-tokens cap))]
+                 cap (assoc :max-completion-tokens cap)
+                 diagnostics (assoc :diagnostics-version diagnostics))]
           receipt (evaluation/run! dir dataset cfg)
           before (evaluation/inspect-run dir (:run-id receipt))]
       (is (= expected (:run-id receipt)))
@@ -228,3 +230,41 @@
       (with-redefs [providers/execute! (fn [& _] (throw (AssertionError. "Replay dispatched provider")))]
         (is (= receipt (evaluation/run! dir dataset cfg)))
         (is (= before (evaluation/inspect-run dir (:run-id receipt))))))))
+
+(deftest corrected-whitespace-results-and-terminal-diagnostics-replay-without-http
+  (let [dir (root) calls (atom 0)
+        valid " \t\r\n{\"model\":\"fixture-v1\",\"usage\":{\"prompt_tokens\":9},\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\" \\n{\\\"outcome\\\":\\\"match\\\"}\\t \"}}]}\n"
+        invalid "{\"model\":\"fixture-v1\",\"usage\":{\"prompt_tokens\":9},\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"invalid fixture-secret\"}}]}\n"
+        ds (fixtures/dataset (mapv #(fixtures/sample-case % :held-out) ["a" "b" "c"]))]
+    (http/with-server (fn [ex] (http/reply! ex 200 (if (= 3 (swap! calls inc)) invalid valid)))
+      (fn [url]
+        (let [legacy [{:id "remote" :provider :llm :model "fixture" :endpoint url
+                       :diagnostics-version 1 :stop-on-terminal-error? true :max-attempts 3 :retry-delay-ms 0}
+                      {:id "rules" :provider :rules}]
+              corrected (assoc-in legacy [0 :diagnostics-version] 2)
+              runtime {:providers {"remote" {:bearer-token "fixture-secret"}}}
+              old (evaluation/run! dir ds legacy runtime)
+              old-view (evaluation/inspect-run dir (:run-id old))
+              fresh (evaluation/run! dir ds corrected runtime)
+              fresh-view (evaluation/inspect-run dir (:run-id fresh))
+              results (get-in fresh-view [:report :providers "remote" :results])]
+          (is (= 3 @calls))
+          (is (not= (:run-id old) (:run-id fresh)))
+          (is (= [:invalid-outer-json] (get-in old-view [:report :providers "remote" :results 0 :validation-reasons])))
+          (is (= "shadow-adapters/4" (get-in fresh-view [:input :requests 0 0 :adapter-version])))
+          (is (= [:match :error :error] (mapv :outcome results)))
+          (is (= [[] [:invalid-content-json] nil] (mapv :validation-reasons results)))
+          (is (= ["fixture-v1" "fixture-v1" nil] (mapv :model-version results)))
+          (is (= [{:prompt_tokens 9} {:prompt_tokens 9} nil] (mapv :usage results)))
+          (is (= [1 1 0] (mapv #(count (:attempts %)) results)))
+          (is (= :comparator-halted (:error (last results))))
+          (is (= :not-dispatched (:dispatch-status (last results))))
+          (is (= {:status :not-incurred} (:cost (last results))))
+          (is (= [:abstain :abstain :abstain] (mapv :outcome (get-in fresh-view [:report :providers "rules" :results]))))
+          (is (= old (evaluation/run! dir ds legacy runtime)))
+          (is (= fresh (evaluation/run! dir ds corrected runtime)))
+          (is (= old-view (evaluation/inspect-run dir (:run-id old))))
+          (is (= fresh-view (evaluation/inspect-run dir (:run-id fresh))))
+          (is (= 3 @calls))
+          (doseq [file (filter #(.isFile %) (file-seq (io/file dir)))]
+            (is (not (.contains (slurp file) "fixture-secret")))))))))

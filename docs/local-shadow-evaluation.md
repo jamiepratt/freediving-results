@@ -36,9 +36,11 @@ The LLM adapter implements [OpenAI Chat Completions](https://developers.openai.c
 
 ### Opt-in sanitized diagnostics
 
-Set `:diagnostics-version 1` on a Jev or LLM configuration to select `shadow-adapters/3`. The option is immutable and changes request/run identities. Without it, adapters `/1` and `/2` keep their original parsing behavior and exact identities, including `/2` configurations with `:max-completion-tokens`. Old runs replay stored attempts without dispatch. Enabling diagnostics creates a new execution identity; it does not enrich or recover metadata from earlier frozen failures. No inference about the cause of earlier invalid responses is possible from their undifferentiated error alone.
+Set `:diagnostics-version 2` on a Jev or LLM configuration to select `shadow-adapters/4`. It accepts one complete JSON value surrounded by JSON whitespace (space, tab, CR, LF), for the outer envelope and nested LLM content. Another value, trailing junk and other whitespace characters are rejected. Quoted strings are preserved; outcomes must still match exactly. Response bounds, sanitized diagnostics and terminal-error halting remain unchanged.
 
-Version 3 returns only allowlisted fields, even for successful predictions. It never stores the raw response body. Invalid predictions remain nonretryable `:error :invalid-response`; they never become abstentions or recovered predictions. `:validation-reasons` is a bounded vector of fixed keywords:
+The option is immutable and changes request/run identities. `:diagnostics-version 1` still selects `/3`, preserving its original parsing behavior, including erroneous rejection of legal trailing whitespace. Without diagnostics, `/1` and `/2` retain their exact identities and behavior, including `/2` configurations with `:max-completion-tokens`. Stored runs replay without dispatch. Switching to version 2 creates a new execution identity; it neither rewrites nor recovers earlier failures. The whitespace defect is proven by offline synthetic HTTP responses, but is not an established cause of the historical live baseline failure because its response body was not retained.
+
+Adapters 3 and 4 return only allowlisted fields, even for successful predictions. Neither stores the raw response body. Invalid predictions remain nonretryable `:error :invalid-response`; they never become abstentions or recovered predictions. `:validation-reasons` is a bounded vector of fixed keywords:
 
 - `:invalid-outer-json` or `:invalid-envelope` for unreadable JSON or incorrect response structure.
 - `:missing-content`, `:invalid-content-type`, `:invalid-content-json`, or `:invalid-outcome` for LLM content failures.

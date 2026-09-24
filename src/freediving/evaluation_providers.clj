@@ -27,7 +27,7 @@
     (when-not (and (every? config-keys (keys config)) (#{:rules :stub :jev :llm} provider)
                    (or (nil? (:model config)) (and (valid-text? (:model config)) (<= (count (:model config)) 200)))
                    (or (not (contains? config :diagnostics-version))
-                       (and http? (= 1 (:diagnostics-version config))))
+                       (and http? (#{1 2} (:diagnostics-version config))))
                    (or (nil? (:max-completion-tokens config))
                        (and (= :llm provider) (bounded-int? (:max-completion-tokens config) 1 16384)))
                    (or (not (contains? config :stop-on-terminal-error?)) (boolean? (:stop-on-terminal-error? config)))
@@ -64,7 +64,8 @@
                                         {:role "user" :content (json/write-str (:input case))}]}
                       (:max-completion-tokens config) (assoc :max_completion_tokens (:max-completion-tokens config))))))]
       (when (and body (> (alength (.getBytes ^String body "UTF-8")) (:max-request-bytes config))) (invalid!))
-      (cond-> {:adapter-version (cond (:diagnostics-version config) "shadow-adapters/3"
+      (cond-> {:adapter-version (cond (= 2 (:diagnostics-version config)) "shadow-adapters/4"
+                                      (:diagnostics-version config) "shadow-adapters/3"
                                       (:max-completion-tokens config) "shadow-adapters/2"
                                       :else "shadow-adapters/1") :provider provider :case-id (:case-id case) :config config :input (:input case)}
         body (assoc :body body)))))
@@ -126,10 +127,19 @@
 
 (def ^:private usage-keys [:input_tokens :output_tokens :prompt_tokens :completion_tokens :total_tokens])
 
-(defn- decode-json [body]
+(defn- json-whitespace-tail [value ^java.io.Reader reader]
+  ;; data.json invokes this callback before skipping trailing whitespace.
+  (loop [c (.read reader)]
+    (cond
+      (= -1 c) value
+      (#{9 10 13 32} c) (recur (.read reader))
+      :else (throw (ex-info "Trailing JSON" {})))))
+
+(defn- decode-json [body complete-json?]
   ;; String keys avoid interning arbitrary provider-controlled names. Require EOF.
   (try
-    {:value (json/read-str body :extra-data-fn (fn [_ _] (throw (ex-info "Trailing JSON" {}))))}
+    {:value (json/read-str body :extra-data-fn (if complete-json? json-whitespace-tail
+                                                   (fn [_ _] (throw (ex-info "Trailing JSON" {})))))}
     (catch Exception _ {:invalid? true})
     (catch StackOverflowError _ {:invalid? true})))
 
@@ -153,10 +163,10 @@
      :validation-reasons (cond-> [] (not model-valid?) (conj :invalid-model)
                                  (not usage-valid?) (conj :invalid-usage))}))
 
-(defn- llm-diagnostics [data]
+(defn- llm-diagnostics [data complete-json?]
   (let [entries (get data "choices") entry (when (vector? entries) (first entries))
         message (get entry "message") content (get message "content")
-        decoded (when (string? content) (decode-json content))
+        decoded (when (string? content) (decode-json content complete-json?))
         outcome (get choices (get (:value decoded) "outcome"))
         reasons (cond-> []
                   (not (and (vector? entries) (= 1 (count entries)) (map? entry) (map? message))) (conj :invalid-envelope)
@@ -187,13 +197,13 @@
     (cond-> {:outcome outcome :validation-reasons reasons}
       (empty? reasons) (assoc :confidence confidence :probabilities (into {} (map (fn [[k v]] [(keyword k) v]) probs))))))
 
-(defn- parse-diagnostic-response [provider body token]
-  (let [decoded (decode-json body) data (:value decoded)]
+(defn- parse-diagnostic-response [provider body token complete-json?]
+  (let [decoded (decode-json body complete-json?) data (:value decoded)]
     (if (or (:invalid? decoded) (not (map? data)))
       (assoc (failure :invalid-response false :known)
              :validation-reasons [(if (:invalid? decoded) :invalid-outer-json :invalid-envelope)])
       (let [metadata (response-metadata data token)
-            prediction (if (= provider :llm) (llm-diagnostics data)
+            prediction (if (= provider :llm) (llm-diagnostics data complete-json?)
                            (jev-diagnostics data))
             reasons (into (:validation-reasons prediction) (:validation-reasons metadata))]
         (merge (if (seq reasons) (failure :invalid-response false :known)
@@ -220,8 +230,9 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (= "shadow-adapters/3" (:adapter-version request))
-                       (parse-diagnostic-response (:provider request) (.body response) token)
+                     (if (#{"shadow-adapters/3" "shadow-adapters/4"} (:adapter-version request))
+                       (parse-diagnostic-response (:provider request) (.body response) token
+                                                  (= "shadow-adapters/4" (:adapter-version request)))
                        (parse-response (:provider request) (.body response)))
                      (failure (cond (= 429 status) :rate-limited (>= status 500) :provider-unavailable
                                     (<= 300 status 399) :redirect-refused :else :http-error)
