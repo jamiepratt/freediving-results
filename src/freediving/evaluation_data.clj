@@ -110,26 +110,34 @@
     (let [cost (:cost r)]
       (demand! (and (map? cost)
                     (case (:status cost)
+                      :not-incurred (and (= {:status :not-incurred} cost)
+                                         (= :not-dispatched (:dispatch-status r))
+                                         (= :error (:outcome r)) (= :comparator-halted (:error r))
+                                         (string? (:halted-by-case-id r))
+                                         (= [] (:attempts r)) (nil? (:latency-ms r)))
                       :unknown (and (not (contains? cost :amount)) (not (contains? cost :currency)))
                       :metered (and (nonnegative-finite? (:amount cost))
                                     (string? (:currency cost)) (boolean (re-matches #"[A-Z]{3}" (:currency cost))))
-                      false)) "Cost must be explicitly unknown or metered")))
+                      false)) "Cost must be explicitly unknown, metered, or undispatched")))
   (let [by-id (into {} (map (juxt :case-id identity) results))
         pairs (mapv #(vector % (by-id (:case-id %))) cases)
         grouped (group-by #(or (get-in % [0 :label :provenance]) :unlabeled) pairs)
         latencies (keep :latency-ms results)
         costs (map :cost results)
-        metered (filter #(= :metered (:status %)) costs)]
+        metered (filter #(= :metered (:status %)) costs)
+        undispatched (count (filter #(= :not-incurred (:status %)) costs))]
     {:overall (stratum pairs)
      :synthetic (stratum (get grouped :synthetic []))
      :owner (stratum [])
      :asserted (stratum (get grouped :owner []))
      :unlabeled (stratum (get grouped :unlabeled []))
-     :latency {:measured-count (count latencies) :unknown-count (- (count results) (count latencies))
-               :total-ms (when (seq latencies) (reduce + latencies))
-               :mean-ms (when (seq latencies) (/ (reduce + latencies) (count latencies)))}
-     :cost {:metered-count (count metered) :unknown-count (- (count costs) (count metered))
-            :totals-by-currency (reduce #(update %1 (:currency %2) (fnil + 0M) (bigdec (:amount %2))) {} metered)}
+     :latency (cond-> {:measured-count (count latencies) :unknown-count (- (count results) (count latencies) undispatched)
+                       :total-ms (when (seq latencies) (reduce + latencies))
+                       :mean-ms (when (seq latencies) (/ (reduce + latencies) (count latencies)))}
+                (pos? undispatched) (assoc :not-dispatched-count undispatched))
+     :cost (cond-> {:metered-count (count metered) :unknown-count (- (count costs) (count metered) undispatched)
+                    :totals-by-currency (reduce #(update %1 (:currency %2) (fnil + 0M) (bigdec (:amount %2))) {} metered)}
+             (pos? undispatched) (assoc :not-incurred-count undispatched))
      :limitations ["File owner provenance is an unverified assertion; only live database verification authorizes owner metrics."
                    "Synthetic labels do not estimate real-world accuracy or calibrated safety thresholds."
                    "False-merge and missed-match denominators include abstentions and errors; inspect coverage separately."

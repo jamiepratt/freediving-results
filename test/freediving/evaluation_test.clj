@@ -3,7 +3,8 @@
             [clojure.java.io :as io]
             [freediving.evaluation :as evaluation]
             [freediving.evaluation-data-test :as fixtures]
-            [freediving.evaluation-providers :as providers])
+            [freediving.evaluation-providers :as providers]
+            [freediving.evaluation-providers-test :as http])
   (:import [java.nio.file Files] [java.nio.file.attribute FileAttribute]))
 (defn root [] (.getCanonicalPath (.toFile (Files/createTempDirectory "shadow-eval-" (make-array FileAttribute 0)))))
 (def dataset (fixtures/dataset [(fixtures/sample-case "a" :development) (fixtures/sample-case "b" :held-out)]))
@@ -145,3 +146,35 @@
         metrics (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "rules" :metrics])]
     (is (= 0 (get-in metrics [:owner :case-count])))
     (is (= 1 (get-in metrics [:asserted :case-count])))))
+
+(deftest terminal-provider-errors-stop-only-that-comparator-and-replay
+  (doseq [[status body token] [[400 "{}" "fixture"] [401 "{}" "fixture"]
+                               [402 "{}" "fixture"] [403 "{}" "fixture"]
+                               [404 "{}" "fixture"] [422 "{}" "fixture"]
+                               [429 "{}" "fixture"] [200 "{}" "fixture"]
+                               [200 "{}" nil]]]
+    (let [calls (atom 0) dir (root)
+          ds (fixtures/dataset (mapv #(fixtures/sample-case % :held-out) ["a" "b" "c"]))]
+      (http/with-server (fn [ex] (swap! calls inc) (http/reply! ex status body))
+        (fn [url]
+          (let [cfg [{:id "remote" :provider :llm :endpoint url :model "fixture"
+                      :stop-on-terminal-error? true :max-attempts 3 :retry-delay-ms 0}
+                     {:id "rules" :provider :rules}]
+                runtime {:providers {"remote" {:bearer-token token}}}
+                receipt (evaluation/run! dir ds cfg runtime)
+                report (:report (evaluation/inspect-run dir (:run-id receipt)))
+                results (get-in report [:providers "remote" :results])]
+            (is (= (if token 1 0) @calls))
+            (is (= [1 0 0] (mapv #(count (:attempts %)) results)))
+            (is (= [:comparator-halted :comparator-halted] (mapv :error (rest results))))
+            (is (every? #(and (= :not-dispatched (:dispatch-status %))
+                              (nil? (:latency-ms %)) (= {:status :not-incurred} (:cost %))) (rest results)))
+            (is (= {:evaluated-case-count 1 :undispatched-case-count 2 :attempt-count 1}
+                   (get-in report [:providers "remote" :dispatch])))
+            (is (= {:metered-count 0 :unknown-count 1 :not-incurred-count 2 :totals-by-currency {}}
+                   (get-in report [:providers "remote" :metrics :cost])))
+            (is (= 3 (get-in report [:providers "remote" :metrics :overall :errors])))
+            (is (= 2 (get-in report [:providers "remote" :metrics :latency :not-dispatched-count])))
+            (is (= [:abstain :abstain :abstain] (mapv :outcome (get-in report [:providers "rules" :results]))))
+            (is (= receipt (evaluation/run! dir ds cfg runtime)))
+            (is (= (if token 1 0) @calls))))))))

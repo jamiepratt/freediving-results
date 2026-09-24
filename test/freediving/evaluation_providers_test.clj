@@ -99,3 +99,18 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (p/prepare-request {:provider provider :model model} {:input {}})))))
 (defn -main [& _] (let [r (run-tests 'freediving.evaluation-providers-test)] (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))
+
+(deftest llm-output-bound-is-validated-and-sent
+  (let [seen (atom nil)]
+    (with-server (fn [ex]
+                   (reset! seen (json/read-str (slurp (.getRequestBody ex)) :key-fn keyword))
+                   (reply! ex 200 "{}"))
+      (fn [url]
+        (let [config {:provider :llm :model "fixture" :endpoint url :max-completion-tokens 128}
+              request (p/prepare-request config {:input {}})]
+          (p/execute! request {:bearer-token "fixture"})
+          (is (= 128 (:max_completion_tokens @seen)))
+          (is (= 128 (get-in request [:config :max-completion-tokens])))
+          (doseq [invalid [0 -1 16385 1.5 "128"]]
+            (is (thrown? clojure.lang.ExceptionInfo
+                         (p/prepare-request (assoc config :max-completion-tokens invalid) {:input {}})))))))))

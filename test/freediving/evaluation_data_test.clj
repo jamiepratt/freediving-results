@@ -99,3 +99,14 @@
                 {:verified? true :label-source :verified-owner-review
                  :dataset (dataset [(sample-case "a" :held-out)])}
                 [(result "a" :match)]))))
+
+(deftest no-incurred-cost-requires-an-undispatched-result
+  (let [cases [(sample-case "a" :held-out)]
+        skipped {:case-id "a" :outcome :error :error :comparator-halted
+                 :dispatch-status :not-dispatched :halted-by-case-id "prior"
+                 :attempts [] :latency-ms nil :cost {:status :not-incurred}}]
+    (is (= 1 (get-in (data/metrics cases [skipped]) [:cost :not-incurred-count])))
+    (doseq [bad [(assoc skipped :attempts [{}]) (assoc skipped :latency-ms 1)
+                 (dissoc skipped :dispatch-status) (assoc skipped :outcome :match)
+                 (assoc skipped :cost {:status :not-incurred :amount 0})]]
+      (is (thrown? clojure.lang.ExceptionInfo (data/metrics cases [bad]))))))

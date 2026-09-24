@@ -109,17 +109,39 @@
              (= 1 (count (set (map :currency costs)))))
       {:status :metered :amount (reduce + (map :amount costs)) :currency (:currency (first costs))}
       {:status :unknown})))
+(defn- terminal-error? [config result]
+  (and (:stop-on-terminal-error? config) (= :error (:outcome result))
+       (or (#{400 401 402 403 404 422 429} (:http-status result))
+           (#{:invalid-response :missing-credential} (:error result)))))
+
 (defn- evaluate! [root run-id config case prepared runtime]
   (let [key (digest (canonical [run-id (:id config) (:case-id case)]))]
     (loop [n 1 attempts []]
       (let [attempt (attempt! root key n prepared runtime) attempts (conj attempts (assoc attempt :trace-hash (put! root attempt))) result (:result attempt)
             unknown-count (count (filter #(= :unknown (get-in % [:result :external-outcome])) attempts))]
-        (if (and (= :error (:outcome result)) (:retryable? result) (< n (:max-attempts config)))
+        (if (and (= :error (:outcome result)) (:retryable? result) (not (terminal-error? config result)) (< n (:max-attempts config)))
           (do (Thread/sleep (long (min 2000 (* (:retry-delay-ms config) (bit-shift-left 1 (dec n)))))) (recur (inc n) attempts))
           (assoc result :case-id (:case-id case) :attempts attempts
                  :unknown-external-attempt-count unknown-count
                  :warnings (if (and (pos? unknown-count) (> (count attempts) 1)) [:possible-duplicate-external-work] [])
                  :cost (total-cost attempts) :latency-ms (when (every? #(number? (:latency-ms %)) attempts) (reduce + (map :latency-ms attempts)))))))))
+
+(defn- comparator! [root run-id config cases requests runtime]
+  (loop [pending (map vector cases requests) results [] halted-by nil]
+    (if-let [[case prepared] (first pending)]
+      (let [result (if halted-by
+                     {:case-id (:case-id case) :outcome :error :error :comparator-halted
+                      :dispatch-status :not-dispatched :halted-by-case-id halted-by
+                      :attempts [] :latency-ms nil :cost {:status :not-incurred}
+                      :unknown-external-attempt-count 0 :warnings []}
+                     (evaluate! root run-id config case prepared runtime))]
+        (recur (next pending) (conj results result)
+               (or halted-by (when (terminal-error? config result) (:case-id case)))))
+      (let [undispatched (count (filter #(= :not-dispatched (:dispatch-status %)) results))]
+        {:results results :metrics (data/metrics cases results)
+         :dispatch {:evaluated-case-count (- (count results) undispatched)
+                    :undispatched-case-count undispatched
+                    :attempt-count (reduce + (map #(count (:attempts %)) results))}}))))
 
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
@@ -147,7 +169,7 @@
        (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
      (let [prepared (mapv (fn [c] (mapv #(providers/prepare-request c %) cases)) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version "shadow-runner/4" :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id]) configs)}
+           identity {:schema-version 1 :harness-version (if (some :stop-on-terminal-error? configs) "shadow-runner/5" "shadow-runner/4") :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id :stop-on-terminal-error?]) configs)}
            identity-text (canonical identity)
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))
@@ -157,8 +179,7 @@
            (put! root identity)
            (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root))
                (let [reports (into {} (map (fn [c requests]
-                                             (let [results (mapv #(evaluate! root run-id c %1 %2 runtime) cases requests)]
-                                               [(:id c) {:results results :metrics (data/metrics cases results)}])) configs prepared))
+                                             [(:id c) (comparator! root run-id c cases requests runtime)]) configs prepared))
                      report {:schema-version 1 :run-id run-id :dataset-id (:dataset-id dataset) :providers reports}
                      report-hash (put! root report)
                      manifest {:run-id run-id :input-hash run-id :report-hash report-hash}]
