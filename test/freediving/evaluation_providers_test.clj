@@ -114,3 +114,84 @@
           (doseq [invalid [0 -1 16385 1.5 "128"]]
             (is (thrown? clojure.lang.ExceptionInfo
                          (p/prepare-request (assoc config :max-completion-tokens invalid) {:input {}})))))))))
+
+(defn diagnostic-result [provider body]
+  (with-server (fn [ex] (reply! ex 200 body))
+    (fn [url]
+      (p/execute! (p/prepare-request {:provider provider :model "fixture" :endpoint url :diagnostics-version 1} {:input {}})
+                  {:bearer-token "fixture-secret"}))))
+
+(deftest invalid-content-retains-independent-metadata
+  (let [result (diagnostic-result :llm (json/write-str {:model "gpt-4.1-nano-2025-04-14"
+                                                        :usage {:prompt_tokens 7 :completion_tokens 3}
+                                                        :choices [{:finish_reason "stop" :message {:content "bad fixture-secret"}}]}))]
+    (is (= :invalid-response (:error result)))
+    (is (= [:invalid-content-json] (:validation-reasons result)))
+    (is (= "gpt-4.1-nano-2025-04-14" (:model-version result)))
+    (is (= {:prompt_tokens 7 :completion_tokens 3} (:usage result)))
+    (is (= {:status :unknown} (:cost result)))
+    (is (false? (:retryable? result)))
+    (is (not (.contains (pr-str result) "fixture-secret")))
+    (is (nil? (:response-body result)))))
+
+(def jev-answer {:type "choice" :choice "match" :confidence 0.8
+                 :probabilities {:match 0.9 :no_match 0.05 :abstain 0.05}})
+(deftest jev-diagnostics-distinguish-invalid-prediction-fields
+  (doseq [[answer reasons] [[jev-answer []]
+                            [(assoc jev-answer :choice "unknown") [:invalid-choice]]
+                            [(assoc jev-answer :confidence -1) [:invalid-confidence]]
+                            [(assoc jev-answer :probabilities {:match 1}) [:invalid-probabilities]]
+                            [(assoc jev-answer :type "text") [:invalid-choice-type]]]]
+    (let [r (diagnostic-result :jev (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 8}
+                                                     :answers {:identity answer}}))]
+      (is (= reasons (:validation-reasons r)))
+      (is (= (if (seq reasons) :error :match) (:outcome r)))
+      (is (= {:input_tokens 8} (:usage r)))
+      (is (= "jev-1.13.0" (:model-version r)))
+      (when (seq reasons) (is (not (contains? r :confidence)))))))
+
+(def llm-response {:model "fixture-v1" :usage {:prompt_tokens 7 :completion_tokens 3}
+                   :choices [{:finish_reason "stop" :message {:content "{\"outcome\":\"match\"}"}}]})
+(deftest diagnostic-output-is-bounded-and-secret-safe
+  (doseq [[body reason] [["{" :invalid-outer-json]
+                         ["{} {}" :invalid-outer-json]
+                         ["[]" :invalid-envelope]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :content] "{} {}")) :invalid-content-json]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :content] "{}")) :invalid-outcome]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :content] nil)) :missing-content]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :content] 3)) :invalid-content-type]
+                         [(json/write-str (assoc-in llm-response [:choices 0 :message :refusal] "fixture-secret")) :refusal]]]
+    (let [r (diagnostic-result :llm body)]
+      (is (= :invalid-response (:error r)))
+      (is (some #{reason} (:validation-reasons r)))
+      (is (nil? (:response-body r)))
+      (is (not (.contains (pr-str r) "fixture-secret")))))
+  (doseq [[finish expected] [["stop" :stop] ["length" :length] ["content_filter" :content-filter]
+                             ["tool_calls" :tool-calls] ["function_call" :function-call]
+                             [nil :missing] ["fixture-secret" :unknown] [{:secret "fixture-secret"} :unknown]]]
+    (let [r (diagnostic-result :llm (json/write-str (assoc-in llm-response [:choices 0 :finish_reason] finish)))]
+      (is (= expected (:finish-reason r)))
+      (is (= (if (= finish "stop") :match :error) (:outcome r)))
+      (is (not (.contains (pr-str r) "fixture-secret")))))
+  (doseq [model [42 "" (apply str (repeat 201 "x")) "Bearer fixture-secret" "prefix-fixture-secret-suffix"
+                 "sk-abcdef" "api_key-abcdef" "token-abcdef" "unsafe\nmodel"]]
+    (let [r (diagnostic-result :llm (json/write-str (assoc llm-response :model model :usage {:prompt_tokens -1 :completion_tokens 3 :arbitrary "fixture-secret"})))]
+      (is (= :error (:outcome r)))
+      (is (= [:invalid-model :invalid-usage] (:validation-reasons r)))
+      (is (nil? (:model-version r)))
+      (is (= {:completion_tokens 3} (:usage r)))
+      (is (not (.contains (pr-str r) "fixture-secret")))))
+  (doseq [usage [3 [] {:prompt_tokens 1000000001 :completion_tokens 3}
+                 {:prompt_tokens 1.5 :completion_tokens 3} {:prompt_tokens "fixture-secret" :completion_tokens 3}]]
+    (let [r (diagnostic-result :llm (json/write-str (assoc llm-response :usage usage)))]
+      (is (= [:invalid-usage] (:validation-reasons r)))
+      (is (= "fixture-v1" (:model-version r)))
+      (is (= (when (map? usage) {:completion_tokens 3}) (:usage r))))))
+
+(deftest deeply-nested-untrusted-json-remains-a-sanitized-error
+  (let [nested (str (apply str (repeat 10000 "[")) "0" (apply str (repeat 10000 "]")))]
+    (doseq [[body reason] [[nested :invalid-outer-json]
+                           [(json/write-str (assoc-in llm-response [:choices 0 :message :content] nested)) :invalid-content-json]]]
+      (let [r (diagnostic-result :llm body)]
+        (is (= :invalid-response (:error r)))
+        (is (some #{reason} (:validation-reasons r)))))))

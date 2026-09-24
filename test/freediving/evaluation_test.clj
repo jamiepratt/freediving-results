@@ -178,3 +178,53 @@
             (is (= [:abstain :abstain :abstain] (mapv :outcome (get-in report [:providers "rules" :results]))))
             (is (= receipt (evaluation/run! dir ds cfg runtime)))
             (is (= (if token 1 0) @calls))))))))
+
+(deftest diagnostics-have-distinct-identities-and-survive-durable-replay
+  (let [dir (root) calls (atom 0)
+        body "{\"model\":\"fixture-v1\",\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":-1,\"unknown\":\"fixture-secret\"},\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"invalid fixture-secret\"}}]}"
+        ds (fixtures/dataset (mapv #(fixtures/sample-case % :held-out) ["a" "b"]))]
+    (http/with-server (fn [ex] (swap! calls inc) (http/reply! ex 200 body))
+      (fn [url]
+        (let [legacy [{:id "remote" :provider :llm :model "fixture" :endpoint url :stop-on-terminal-error? true}]
+              cfg (mapv #(assoc % :diagnostics-version 1) legacy)
+              runtime {:providers {"remote" {:bearer-token "fixture-secret"}}}
+              old (evaluation/run! dir ds legacy runtime)
+              old-view (evaluation/inspect-run dir (:run-id old))
+              fresh (evaluation/run! dir ds cfg runtime)
+              fresh-view (evaluation/inspect-run dir (:run-id fresh))
+              result (get-in fresh-view [:report :providers "remote" :results 0])
+              request (get-in fresh-view [:input :requests 0 0])]
+          (is (= 2 @calls))
+          (is (not= (:run-id old) (:run-id fresh)))
+          (is (= "shadow-adapters/3" (:adapter-version request)))
+          (is (= :invalid-response (:error result)))
+          (is (= [:non-stop-finish :invalid-content-json :invalid-usage] (:validation-reasons result)))
+          (is (= :length (:finish-reason result)))
+          (is (= "fixture-v1" (:model-version result)))
+          (is (= {:prompt_tokens 9} (:usage result)))
+          (is (= :comparator-halted (get-in fresh-view [:report :providers "remote" :results 1 :error])))
+          (is (= {:status :unknown} (:cost result)))
+          (is (nil? (get-in old-view [:report :providers "remote" :results 0 :validation-reasons])))
+          (is (= old (evaluation/run! dir ds legacy runtime)))
+          (is (= fresh (evaluation/run! dir ds cfg runtime)))
+          (is (= fresh-view (evaluation/inspect-run dir (:run-id fresh))))
+          (is (= old-view (evaluation/inspect-run dir (:run-id old))))
+          (is (= 2 @calls))
+          (doseq [file (filter #(.isFile %) (file-seq (io/file dir)))]
+            (is (not (.contains (slurp file) "fixture-secret")))))))))
+
+(deftest legacy-run-identity-remains-anchored-to-pre-diagnostics-code
+  ;; Recorded by public run! using base 4e75100 provider source, without credentials.
+  (doseq [[cap version expected] [[nil "shadow-adapters/1" "4e9b85ffca3a3d97cde02dfbc1b9b373ffd11f75cca065b15ef9dddb4c0b7fb3"]
+                                  [128 "shadow-adapters/2" "472e342314cac02f762fba3025beda369435f720220b0905bdabb72ebb40f712"]]]
+    (let [dir (root)
+          cfg [(cond-> {:id "legacy" :provider :llm :model "fixture" :endpoint "http://127.0.0.1:1/"}
+                 cap (assoc :max-completion-tokens cap))]
+          receipt (evaluation/run! dir dataset cfg)
+          before (evaluation/inspect-run dir (:run-id receipt))]
+      (is (= expected (:run-id receipt)))
+      (is (= version (get-in before [:input :requests 0 0 :adapter-version])))
+      (is (= :missing-credential (get-in before [:report :providers "legacy" :results 0 :error])))
+      (with-redefs [providers/execute! (fn [& _] (throw (AssertionError. "Replay dispatched provider")))]
+        (is (= receipt (evaluation/run! dir dataset cfg)))
+        (is (= before (evaluation/inspect-run dir (:run-id receipt))))))))
