@@ -171,6 +171,49 @@ Actual billed cost remains unknown unless separately available; estimates must
 be labelled. Source text and receipts stay private; response text and credentials
 are not stored by the new adapters.
 
+### Opt-in native failure diagnostics
+
+Add `:native-diagnostics-version 1` to a native configuration to select
+`shadow-adapters/8`. Other values or use without native batching are rejected.
+The option and adapter version create new immutable request/run identities;
+the exact HTTP body, model, source protocol, question semantics and runner bounds
+remain unchanged. Omitting it preserves adapters 1-7, including frozen adapter 7
+configurations and completed, failed or uncertain replay. It does not retrofit
+stored requests or redispatch them.
+
+For each expected answer, `/8` retains the first failed validation category in
+`:validation-reasons`: `:missing-answer`, `:invalid-answer-type`,
+`:invalid-choice-type`, `:unsupported-choice`, `:missing-confidence`,
+`:invalid-confidence`, `:missing-probabilities`, `:invalid-probabilities-type`,
+`:invalid-probability-keys`, `:invalid-probability-type`,
+`:invalid-probability-range`, `:invalid-probability-sum`, or
+`:choice-probability-inconsistency`. The existing `:missing-answer` or
+`:invalid-answer` error and strict acceptance criteria remain. A valid sibling
+survives an invalid answer; the request still fails and halts later dispatch.
+Confidence need not equal the selected probability: the official confidence
+page describes a distribution statistic without specifying its formula.
+
+Request reasons distinguish `:invalid-outer-json` (including duplicate keys),
+`:invalid-envelope`, `:missing-answers`, `:invalid-answers-type`,
+`:missing-answer-identifiers`, `:extra-answer-identifiers`, `:missing-model`,
+`:invalid-model`, `:model-mismatch`, `:missing-usage`, and `:invalid-usage`.
+No unexpected IDs, malformed values, raw response text or exception strings
+are retained. Returned model metadata survives only when sanitized and equal
+to the pinned requested model. Independently valid allowlisted integer token
+counters survive even when another counter or the decision is invalid; unknown
+usage keys are ignored. Metadata failures invalidate all decisions.
+
+The official API marks the `usage` object required. Adapters 6/7 tolerated its
+absence or null; `/8` requires an object. Its documented integer counters are
+not individually marked required, so an empty usage object is accepted with
+no measured counters. Existing counter bounds (0 through 1,000,000,000) apply.
+This stricter envelope check is versioned; it cannot explain the earlier live
+batch's `:invalid-answer`, whose malformed answer was not retained. That
+historical failure's precise category remains unknown. Offline loopback tests
+cover redaction, independent metadata, partial outcomes, terminal halting,
+request-level accounting, distinct identities and replay without new HTTP calls.
+Remaining live benchmark work is tracked in [issue #4](https://github.com/jamiepratt/freediving-results/issues/4).
+
 Provider contracts checked 2026-09-24: [API](https://docs.typesafe.ai/api),
 [models and limits](https://docs.typesafe.ai/models),
 [fan-out](https://docs.typesafe.ai/patterns/fan-out),

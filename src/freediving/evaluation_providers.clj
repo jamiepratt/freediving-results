@@ -92,7 +92,7 @@
         (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
-(def ^:private batch-option-keys [:native-batch-size :companion-assessments])
+(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version])
 (def ^:private companion-instructions
   {:name-variation "Assess whether plausible name ordering, transliteration, omitted components or transcription variation explains the names."
    :contradiction "Assess whether reliable source evidence substantively contradicts these being the same person."
@@ -107,6 +107,7 @@
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
         base-config (apply dissoc config batch-option-keys)]
     (when-not (and (= :jev (:provider config)) (= :freediving-source-v1 (:identity-protocol config))
+                   (or (not (contains? config :native-diagnostics-version)) (= 1 (:native-diagnostics-version config)))
                    (bounded-int? size 1 8) (= 1 (get config :max-attempts 1))
                    (vector? cases) (seq cases) (= (count cases) (count (set (map :case-id cases))))
                    (every? #(valid-text? (:case-id %)) cases)
@@ -141,7 +142,7 @@
          (when (or (> (count questions) 32)
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
-         {:adapter-version "shadow-adapters/7" :provider :jev :config normalized
+         {:adapter-version (if (:native-diagnostics-version config) "shadow-adapters/8" "shadow-adapters/7") :provider :jev :config normalized
           :protocol protocol/descriptor :body body
           :case-ids (mapv :case-id members)
           :evidence (mapv #(select-keys % [:case-id :evidence]) members)
@@ -353,6 +354,74 @@
     (catch Exception _ (failure :invalid-response false :known))
     (catch StackOverflowError _ (failure :invalid-response false :known))))
 
+(defn- native-choice-diagnostics [answer allowed present?]
+  ;; Report only the first failed check. No provider-controlled keys or values
+  ;; escape this branch; keyword conversion occurs only in strict-choice on success.
+  (let [choice (get answer "choice") probs (get answer "probabilities")
+        reason (cond
+                 (not present?) :missing-answer
+                 (not (map? answer)) :invalid-answer-type
+                 (not= "choice" (get answer "type")) :invalid-choice-type
+                 (not (contains? allowed choice)) :unsupported-choice
+                 (not (contains? answer "confidence")) :missing-confidence
+                 (not (probability? (get answer "confidence"))) :invalid-confidence
+                 (not (contains? answer "probabilities")) :missing-probabilities
+                 (not (map? probs)) :invalid-probabilities-type
+                 (not= allowed (set (keys probs))) :invalid-probability-keys
+                 (not (every? number? (vals probs))) :invalid-probability-type
+                 (not (every? probability? (vals probs))) :invalid-probability-range
+                 (not (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)) :invalid-probability-sum
+                 (not= (get probs choice) (apply max (vals probs))) :choice-probability-inconsistency)]
+    (if reason
+      {:outcome :error :error (if (= :missing-answer reason) :missing-answer :invalid-answer)
+       :validation-reasons [reason]}
+      (strict-choice answer allowed))))
+
+(defn- native-metadata [request data token]
+  (let [metadata (response-metadata data token)
+        model (get data "model") usage (get data "usage")
+        model-reason (cond
+                       (not (contains? data "model")) :missing-model
+                       (not (safe-model? model token)) :invalid-model
+                       (not= model (get-in request [:config :model])) :model-mismatch)
+        usage-reason (cond
+                       (not (contains? data "usage")) :missing-usage
+                       (or (not (map? usage)) (some #{:invalid-usage} (:validation-reasons metadata))) :invalid-usage)]
+    {:model-version (when-not model-reason model) :usage (:usage metadata)
+     :validation-reasons (vec (keep identity [model-reason usage-reason]))}))
+
+(defn- parse-native-diagnostics [request body token]
+  (let [decoded (try {:value (decode-unique-json body)}
+                     (catch Exception _ {:invalid? true})
+                     (catch StackOverflowError _ {:invalid? true}))
+        data (:value decoded)]
+    (if (or (:invalid? decoded) (not (map? data)))
+      (assoc (failure :invalid-response false :known)
+             :validation-reasons [(if (:invalid? decoded) :invalid-outer-json :invalid-envelope)])
+      (let [ids (:question-ids request)
+            metadata (native-metadata request data token)
+            answers (get data "answers")
+            bad-metadata? (seq (:validation-reasons metadata))
+            predictions (into {} (map (fn [id]
+                                        [id (if bad-metadata?
+                                              {:outcome :error :error :invalid-response-metadata
+                                               :validation-reasons (:validation-reasons metadata)}
+                                              (native-choice-diagnostics (get answers id)
+                                                                         (if (str/starts-with? id "identity")
+                                                                           #{"match" "no_match" "abstain"}
+                                                                           #{"yes" "no" "unknown"})
+                                                                         (and (map? answers) (contains? answers id))))]) ids))
+            reasons (cond-> (:validation-reasons metadata)
+                      (not (contains? data "answers")) (conj :missing-answers)
+                      (and (contains? data "answers") (not (map? answers))) (conj :invalid-answers-type)
+                      (and (map? answers) (some #(not (contains? answers %)) ids)) (conj :missing-answer-identifiers)
+                      (and (map? answers) (some #(not (contains? (set ids) %)) (keys answers))) (conj :extra-answer-identifiers)
+                      (some #(= :error (:outcome %)) (vals predictions)) (conj :invalid-answer))]
+        (merge (if (seq reasons) (failure :invalid-response false :known)
+                   (base-result :complete (:model-version metadata)))
+               (select-keys metadata [:model-version :usage])
+               {:answers predictions :validation-reasons reasons})))))
+
 (defn- http-attempt! [request runtime]
   (let [config (:config request) token (:bearer-token runtime)]
     (if-not (and (valid-text? token) (not (re-find #"[\r\n]" token)))
@@ -370,8 +439,8 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7"} (:adapter-version request))
-                       (parse-strict-jev request (.body response) token)
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8"} (:adapter-version request))
+                       ((if (= "shadow-adapters/8" (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
                        (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
                          (parse-diagnostic-response (:provider request) (.body response) token
                                                     (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
