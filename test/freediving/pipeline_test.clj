@@ -3,6 +3,7 @@
             [freediving.archive-test :as fixture]
             [freediving.pipeline :as pipeline]
             [freediving.depth :as depth]
+            [freediving.novi-sad :as novi-sad]
             [freediving.extraction-test :as pdf]
             [freediving.archive :as archive]
             [freediving.observations :as observations]
@@ -193,5 +194,11 @@
 (deftest depth-parser-version-change-requires-new-registration
   (let [{:keys [job config job-id]} (setup)]
     (with-redefs [depth/parser-version "cmas-women-depth/test-next"]
+      (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
+      (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))
+
+(deftest novi-parser-version-change-requires-new-registration
+  (let [{:keys [job config job-id]} (setup)]
+    (with-redefs [novi-sad/parser-version "cmas-novi-sad-dnf-juniors/test-next"]
       (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
       (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))

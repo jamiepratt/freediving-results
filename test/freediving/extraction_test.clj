@@ -596,3 +596,97 @@
     (is (= [:parsed :unparsed] (mapv :parse-status (:candidates r))))
     (is (= "1:46.27" (get-in r [:candidates 0 :raw :fields :realized-time])))
     (is (nil? (get-in r [:candidates 0 :raw :fields :final-time])))))
+
+(def novi-header
+  (str "2026 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR\n"
+       "NOVI SAD, SERBIA                    JUNE, 11, 2026\n"
+       "DNF\nJUNIORS – WOMEN\n"
+       "                                      Realized     Final           Notes\n"
+       "#      Name & surname       Country\n"
+       "                                      Distance (m) Distance (m)\n"))
+
+(deftest novi-sad-junior-dnf-retains-distance-evidence
+  (let [line "1   Zoë EXAMPLE               FRA             86,5          86,5 GOLD MEDAL"
+        r (extraction/parse-pages [(str novi-header line "\n")])
+        c (first (:candidates r))]
+    (is (= "cmas-novi-sad-dnf-juniors/1" (:parser-version r)))
+    (is (= 3 (:schema-version r)))
+    (is (= 1 (get-in r [:reconciliation :parsed-count])))
+    (is (= {:source-name "Zoë EXAMPLE" :representation "FRA" :rank 1
+            :realized-distance 86.5M :final-distance 86.5M :unit "m"
+            :event-date "2026-06-11" :discipline "DNF" :category "JUNIORS – WOMEN"}
+           (select-keys (:parsed c) [:source-name :representation :rank :realized-distance
+                                     :final-distance :unit :event-date :discipline :category])))
+    (is (= "86,5" (get-in c [:raw :fields :final-distance])))
+    (is (= line (get-in c [:source-lines 0 :text])))
+    (is (= 7 (count (:metadata-evidence c))))
+    (is (= :unknown (get-in c [:fields :penalty :status])))
+    (is (= :blocked (get-in r [:publication :status])))))
+
+(deftest novi-sad-dsq-does-not-invent-final-or-penalty
+  (let [r (extraction/parse-pages [(str novi-header
+                                        "    Ada EXAMPLE              TUR             72,5                 DSQ SP\n"
+                                        "    Elif EXAMPLE             TUR             71,0                 DSQ SURFACE BO\n")])]
+    (is (= 2 (get-in r [:reconciliation :parsed-count])))
+    (doseq [c (:candidates r)]
+      (is (= "DSQ" (get-in c [:parsed :status])))
+      (is (nil? (get-in c [:parsed :final-distance])))
+      (is (= :unknown (get-in c [:fields :final-distance :status])))
+      (is (= :unknown (get-in c [:fields :penalty :status])))
+      (is (nil? (get-in c [:raw :fields :final-distance]))))
+    (is (= 72.5M (get-in r [:candidates 0 :parsed :realized-distance])))))
+
+(deftest novi-sad-supported-counts-do-not-hide-unsupported-pages
+  (let [row "1 Synthetic ATHLETE AIN 80,0 80,0\n"
+        men (str/replace novi-header "JUNIORS – WOMEN" "JUNIORS \u2014 MEN")
+        pages (into [(str men row) (str novi-header row)]
+                    (map #(str % row) [(str/replace novi-header "JUNIORS" "SENIORS")
+                                       (str/replace novi-header "DNF\n" "DYN\n")
+                                       (str/replace novi-header "11, 2026" "12, 2026")
+                                       (str/replace novi-header "Distance (m)" "Distance")
+                                       "" "UNSUPPORTED PAGE\n"]))
+        r (extraction/parse-pages pages)]
+    (is (= pages (mapv :text (:pages r))))
+    (is (= [3 4 5 6 7 8] (get-in r [:reconciliation :unsupported-pages])))
+    (is (= :supported-pages-only (get-in r [:reconciliation :counts-scope])))
+    (is (= 2 (get-in r [:reconciliation :candidate-count])))
+    (is (= 2 (get-in r [:reconciliation :parsed-count])))
+    (is (= "JUNIORS \u2014 MEN" (get-in r [:candidates 0 :parsed :category])))
+    (doseq [p (drop 2 (get-in r [:reconciliation :per-page]))]
+      (is (false? (:supported? p)))
+      (is (nil? (:candidate-count p)))
+      (is (nil? (:parsed-count p))))
+    (is (= "cmas-cwt-men/1" (:parser-version (extraction/parse-pages [header]))))
+    (is (= "cmas-athens-pool/6" (:parser-version (extraction/parse-pages [athens/title]))))))
+
+(deftest novi-sad-ambiguous-single-distance-remains-unparsed
+  (let [r (extraction/parse-pages [(str novi-header
+                                        "    Someone EXAMPLE          TUR                          72,5    DSQ SP\n"
+                                        "    Other EXAMPLE            TUR             71,0                 DSQ UNKNOWN\n")])]
+    (is (= 2 (get-in r [:reconciliation :unparsed-count])))
+    (is (every? nil? (map :parsed (:candidates r))))))
+
+(deftest novi-sad-archive-extraction-retains-schema-and-parser-identity
+  (let [pdf (synthetic-pdf (str "BT /F1 8 Tf 20 750 Td "
+                                "(2026 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR) Tj 0 -20 Td "
+                                "(NOVI SAD, SERBIA    JUNE, 11, 2026) Tj 0 -20 Td "
+                                "(DNF) Tj 0 -20 Td (JUNIORS \\261 WOMEN) Tj 0 -20 Td "
+                                "(Realized Final Notes) Tj 0 -20 Td "
+                                "(# Name & surname Country) Tj 0 -20 Td "
+                                "(Distance \\(m\\) Distance \\(m\\)) Tj 0 -20 Td "
+                                "(1 Synthetic NAME GBR 82,5 82,5) Tj ET"))
+        [root digest] (with-redefs [synthetic-pdf (constantly pdf)] (registered-pdf))
+        opts {:actor "synthetic-novi-sad" :config {}}
+        receipt (extraction/extract! root digest opts)
+        r (edn/read-string (slurp (:artifact-path receipt)))]
+    (is (= "cmas-novi-sad-dnf-juniors/1" (:parser-version r)))
+    (is (= 3 (:schema-version r)))
+    (is (= 1 (get-in r [:reconciliation :parsed-count])))
+    (is (= 82.5M (get-in r [:candidates 0 :parsed :final-distance])))
+    (is (= :skipped (:run-status (extraction/extract! root digest opts))))))
+
+(deftest novi-sad-conflicting-section-evidence-fails-closed
+  (doseq [extra ["SENIORS – WOMEN" "DYN" "JUNE, 12, 2026" "NOVI SAD, SERBIA JUNE, 12, 2026"]]
+    (let [r (extraction/parse-pages [(str novi-header extra "\n1 Synthetic NAME GBR 80 80\n")])]
+      (is (= [1] (get-in r [:reconciliation :unsupported-pages])) extra)
+      (is (empty? (:candidates r)) extra))))
