@@ -35,6 +35,27 @@
   (let [r (clojure.test/run-tests 'freediving.corrections-test)]
     (shutdown-agents) (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))
 (defn status-of [f] (try (f) :ok (catch clojure.lang.ExceptionInfo e (:status (ex-data e)))))
+(deftest rerunning-migration-repairs-default-function-access-after-restore
+  (let [r (request)
+        functions ["freediving.correction_target_version(text)"
+                   "freediving.submit_correction(uuid,text,text,text,text,text,text)"
+                   "freediving.stamp_correction_triage()"]]
+    ;; An ACL-less restore gives newly created functions default PUBLIC EXECUTE.
+    (doseq [function functions]
+      (fixture/sql! fixture/admin (str "GRANT EXECUTE ON FUNCTION " function " TO PUBLIC")))
+    (is (= {:schema-version 5} (corrections/migrate! fixture/admin "reviews_owner" "corrections_submit")))
+    (with-open [c (java.sql.DriverManager/getConnection reader-url)]
+      (doseq [function functions]
+        (with-open [s (.prepareStatement c "SELECT has_function_privilege(current_user,?,'EXECUTE')")]
+          (.setString s 1 function)
+          (with-open [rs (.executeQuery s)]
+            (.next rs)
+            (is (false? (.getBoolean rs 1)) function)))))
+    (is (thrown? java.sql.SQLException (corrections/target-version reader-url (:result-id r))))
+    (is (thrown? java.sql.SQLException (corrections/submit! reader-url r client)))
+    (is (true? (corrections/assert-submitter! submit-url)))
+    (is (= (:version r) (corrections/target-version submit-url (:result-id r))))
+    (is (= :pending (:status (corrections/submit! submit-url r client))))))
 (deftest public-detail-binds-token-and-value-in-one-snapshot
   (let [r (request) d (corrections/public-detail reader-url (:result-id r))]
     (is (= (:version r) (get-in d [:correction :version])))

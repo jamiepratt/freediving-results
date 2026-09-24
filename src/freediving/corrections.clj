@@ -55,6 +55,9 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=5"))]
                      (when-not (= checksum (:sha256 old)) (fail! :checksum-conflict))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(5,?)" checksum))))
+                 ;; Restoring without ACLs restores default PUBLIC EXECUTE even when
+                 ;; the migration checksum is present. Reapply its function boundary.
+                 (execute! c "REVOKE ALL ON FUNCTION freediving.correction_target_version(text),freediving.submit_correction(uuid,text,text,text,text,text,text),freediving.stamp_correction_triage() FROM PUBLIC")
                  (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " submit-role))
                  (execute! c (str "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA freediving FROM " submit-role))
                  (execute! c (str "REVOKE ALL ON SCHEMA freediving FROM " submit-role))
