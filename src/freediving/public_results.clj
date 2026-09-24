@@ -6,7 +6,7 @@
 (def public-field-keys
   #{:source-name :representation :federation :event-name :event-date :discipline :category
     :rank :performance :unit :announced :announced-unit :points :penalty :penalty-unit
-    :attempted-depth :final-depth :final-distance :realized-distance :duration :source-name-fragments
+    :declared-depth :attempted-depth :final-depth :final-distance :realized-distance :duration :source-name-fragments
     :status :card :notes :final-time :realized-time :final-duration :realized-duration :split-time})
 (defn- scalar? [v] (or (nil? v) (string? v) (number? v) (boolean? v) (keyword? v)))
 (defn public-fields [fields]

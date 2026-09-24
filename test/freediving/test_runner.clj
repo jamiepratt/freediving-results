@@ -3,12 +3,13 @@
             [freediving.archive-test]
             [freediving.legacy-test]
             [freediving.extraction-test]
+            [freediving.depth-test]
             [freediving.candidates-test]
             [freediving.packets-test]
             [freediving.source-pages-test]))
 
 (defn -main [& _]
-  (let [result (t/run-tests 'freediving.archive-test 'freediving.legacy-test 'freediving.extraction-test 'freediving.candidates-test 'freediving.packets-test 'freediving.source-pages-test)]
+  (let [result (t/run-tests 'freediving.archive-test 'freediving.legacy-test 'freediving.extraction-test 'freediving.depth-test 'freediving.candidates-test 'freediving.packets-test 'freediving.source-pages-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail result) (:error result)))
       (System/exit 1))))

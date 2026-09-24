@@ -4,7 +4,8 @@
             [clojure.edn :as edn]
             [freediving.archive :as archive]
             [freediving.aida :as aida]
-            [freediving.athens :as athens]))
+            [freediving.athens :as athens]
+            [freediving.depth :as depth]))
 
 (def parser-version "cmas-cwt-men/1")
 (defn- number-value [s] (when s (parse-long s)))
@@ -77,7 +78,8 @@
      :publication {:status :blocked :reasons [:owner-review-required :reconciliation-unreviewed :units-not-explicit]}}))
 
 (defn parse-pages [pages]
-  (cond (aida/supported? pages) (aida/parse-pages pages)
+  (cond (depth/supported? pages) (depth/parse-pages pages)
+        (aida/supported? pages) (aida/parse-pages pages)
         (athens/supported? pages) (athens/parse-pages pages)
         :else (parse-cmas-pages pages)))
 
@@ -113,12 +115,13 @@
          raw (:out result)
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
+         depth? (depth/supported? pages)
          aida? (aida/supported? pages)
          athens? (and (not aida?) (athens/supported? pages))
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond aida? aida/parser-version athens? athens/parser-version :else parser-version)
-                   :schema-version (cond aida? 2 athens? 3 :else 1)
+                   :parser-version (cond depth? depth/parser-version aida? aida/parser-version athens? athens/parser-version :else parser-version)
+                   :schema-version (cond depth? 2 aida? 2 athens? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}}
          job-id (digest identity)]
