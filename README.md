@@ -20,6 +20,8 @@ The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the ver
 
 ## Local import orchestration
 
+For new AIDA sources, prefer supported [official HTML attempt tables](docs/aida-html-ingestion.md). The separate schema-4 API preserves table/row evidence and imports private observations; HTML review/publication remains blocked. CMAS retains its PDF/text path.
+
 The optional [Agent-o-rama import graph](docs/local-rama-pipeline.md) coordinates private local job registration, archive provenance, versioned PDF extraction, PostgreSQL ingestion and candidate review readiness. Each stage uses the existing evidence APIs. Graph inputs and outputs contain opaque references and fixed statuses; readiness grants no review or publication authority.
 
 ## Run
