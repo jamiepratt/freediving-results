@@ -1,0 +1,23 @@
+[Unit]
+Description=Freediving public results
+After=network.target postgresql.service
+Requires=postgresql.service
+[Service]
+User=freediving
+Group=freediving
+WorkingDirectory=/opt/freediving/current
+EnvironmentFile=/etc/freediving/public.env
+ExecStart=/usr/bin/java -Xms64m -Xmx384m -cp src:resources:lib/* clojure.main -m freediving.public-server 8785
+Restart=on-failure
+RestartSec=5
+MemoryMax=640M
+CPUQuota=100%
+TasksMax=64
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+[Install]
+WantedBy=multi-user.target

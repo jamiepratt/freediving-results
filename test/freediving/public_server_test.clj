@@ -119,3 +119,31 @@
       (fixture/sql! fixture/admin "REVOKE SELECT ON freediving.public_results FROM reviews_public")
       (is (= {:status 503 :body {:error "Service unavailable"}}
              (select-keys (request url "/api/results") [:status :body]))))))
+
+(deftest deployed-origin-requires-authenticated-gateway
+  (let [start! (requiring-resolve 'freediving.public-server/start!)
+        stop! (requiring-resolve 'freediving.public-server/stop!)
+        secret (apply str (repeat 64 "a"))
+        origin "https://poc.alphacompose.com"
+        app (start! {:database-url sample/reader-url :port 0
+                     :public-origin origin :gateway-secret secret})
+        port (.getPort (.getAddress ^com.sun.net.httpserver.HttpServer (:server app)))
+        fetch (fn [headers]
+                (let [b (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/results")))]
+                  (doseq [[k v] headers] (.header b k v))
+                  (.statusCode (.send (HttpClient/newHttpClient) (.build b) (HttpResponse$BodyHandlers/ofString)))))]
+    (try
+      (is (= origin (:url app)))
+      (is (= 403 (fetch {})))
+      (is (= 403 (fetch {"X-Freediving-Gateway" "wrong"})))
+      (is (= 200 (fetch {"X-Freediving-Gateway" secret "X-Freediving-Client" "203.0.113.7"})))
+      (is (= 403 (fetch {"X-Freediving-Gateway" secret "X-Freediving-Client" "203.0.113.7" "Origin" "https://evil.example"})))
+      (is (= 403 (fetch {"X-Freediving-Gateway" secret})))
+      (finally (stop! app))))
+  (doseq [config [{:public-origin "http://poc.alphacompose.com" :gateway-secret (apply str (repeat 64 "a"))}
+                  {:public-origin "https://poc.alphacompose.com"}
+                  {:gateway-secret (apply str (repeat 64 "a"))}]]
+    (is (thrown? Exception
+                 (let [app ((requiring-resolve 'freediving.public-server/start!)
+                            (merge {:database-url sample/reader-url :port 0} config))]
+                   ((requiring-resolve 'freediving.public-server/stop!) app))))))

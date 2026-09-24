@@ -108,10 +108,12 @@
               (loop [c (.read reader)] (when-not (= -1 c) (when-not (Character/isWhitespace (char c)) (fail! 400)) (recur (.read reader))))
               r)))
         (catch Exception _ (fail! 400))))))
-(defn- client-key [^HttpExchange e]
-  ;; Only the actual socket peer counts. Forwarded headers never establish identity.
+(defn- client-key [^HttpExchange e gateway-secret]
+  ;; Forwarded identity is accepted only after authenticating the configured gateway.
   (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256")
-                                      (.getAddress (.getAddress (.getRemoteAddress e))))))
+                                      (if gateway-secret
+                                        (.getBytes (.getFirst (.getRequestHeaders e) "X-Freediving-Client") "UTF-8")
+                                        (.getAddress (.getAddress (.getRemoteAddress e)))))))
 (def correction-errors
   {400 "Enter a suggested change, reason and safe evidence reference within the field limits."
    403 "Same-origin correction request required."
@@ -121,12 +123,21 @@
    415 "JSON correction request required."
    429 "Too many correction requests. Try again later."
    503 "Correction service unavailable. Retry the same request later."})
-(defn- routes! [^HttpExchange e {:keys [url database-url submission-database-url demo?]}]
+(defn- routes! [^HttpExchange e {:keys [url authority gateway-secret database-url submission-database-url demo?]}]
   (let [uri (.getRequestURI e) path (.getRawPath uri) raw (.getRawQuery uri)
         headers (.getRequestHeaders e)
         host (.get headers "Host") origin (.get headers "Origin")
         send #(respond! e 200 % "application/json")]
-    (when-not (= [(.getAuthority (java.net.URI/create url))] (vec host)) (fail! 403))
+    (when-not (= [authority] (vec host)) (fail! 403))
+    (when gateway-secret
+      (let [tokens (vec (.get headers "X-Freediving-Gateway"))
+            clients (vec (.get headers "X-Freediving-Client"))]
+        (when-not (and (= 1 (count tokens))
+                       (MessageDigest/isEqual (.getBytes ^String gateway-secret "UTF-8")
+                                              (.getBytes ^String (first tokens) "UTF-8"))
+                       (= 1 (count clients))
+                       (re-matches #"[0-9a-fA-F:.]{3,45}" (first clients)))
+          (fail! 403))))
     (when (and origin (not= [url] (vec origin))) (fail! 403))
     (when-not (or (= "GET" (.getRequestMethod e))
                   (and submission-database-url (= path "/api/corrections") (= "POST" (.getRequestMethod e)))) (fail! 405))
@@ -135,7 +146,7 @@
       (and (= path "/api/corrections") (= "POST" (.getRequestMethod e)))
       (do (when (some? raw) (fail! 400))
           (when-not (= [url] (vec origin)) (fail! 403))
-          (let [r (correction-body! e)] (send (corrections/submit! submission-database-url r (client-key e)))))
+          (let [r (correction-body! e)] (send (corrections/submit! submission-database-url r (client-key e gateway-secret)))))
       (= path "/api/results") (let [p (params raw)] (send (listing (public/results database-url) p demo?)))
       (re-matches #"/api/(results|athletes)/[0-9a-f]{64}" path)
       (do (when (seq raw) (fail! 400))
@@ -154,8 +165,13 @@
           (let [[resource mime] (get {"/public.js" ["public.js" "text/javascript"] "/public.css" ["public.css" "text/css"]} path ["public.html" "text/html"])]
             (if-let [r (io/resource resource)] (respond! e 200 (slurp r) mime) (fail! 404))))
       :else (fail! 404))))
-(defn start! [{:keys [database-url submission-database-url port demo?] :or {port 0 demo? false}}]
+(defn start! [{:keys [database-url submission-database-url port demo? public-origin gateway-secret] :or {port 0 demo? false}}]
   (when-not (and (integer? port) (<= 0 port 65535) (boolean? demo?)) (fail! 400))
+  (when (or public-origin gateway-secret)
+    (when-not (and (string? public-origin)
+                   (re-matches #"https://[a-z0-9]+(?:[.-][a-z0-9]+)*" public-origin)
+                   (string? gateway-secret) (re-matches #"[0-9a-f]{64}" gateway-secret))
+      (fail! 400)))
   (authority! database-url)
   (when submission-database-url
     (when-not (= (first (str/split database-url #"\?"))
@@ -166,7 +182,8 @@
   (System/setProperty "sun.net.httpserver.maxRspTime" "10")
   (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" port) 16)
         executor (ThreadPoolExecutor. 4 4 0 TimeUnit/MILLISECONDS (ArrayBlockingQueue. 32) (ThreadPoolExecutor$AbortPolicy.))
-        config {:database-url database-url :submission-database-url submission-database-url :demo? demo? :url (str "http://127.0.0.1:" (.getPort (.getAddress server)))}]
+        authority (str "127.0.0.1:" (.getPort (.getAddress server)))
+        config {:authority authority :gateway-secret gateway-secret :database-url database-url :submission-database-url submission-database-url :demo? demo? :url (or public-origin (str "http://" authority))}]
     (.createContext server "/" (reify HttpHandler
                                  (handle [_ e]
                                    (try (routes! e config)
@@ -190,6 +207,8 @@
                    (or (= 1 (count args)) (= "--synthetic-demo" (second args)))) (fail! 400))
     (let [app (start! {:database-url (System/getenv "FREEDIVING_PUBLIC_DATABASE_URL")
                        :submission-database-url (System/getenv "FREEDIVING_SUBMIT_DATABASE_URL")
+                       :public-origin (System/getenv "FREEDIVING_PUBLIC_ORIGIN")
+                       :gateway-secret (System/getenv "FREEDIVING_GATEWAY_SECRET")
                        :port (Long/parseLong (first args)) :demo? (= "--synthetic-demo" (second args))})]
       (.addShutdownHook (Runtime/getRuntime) (Thread. #(stop! app)))
       (println (:url app)))

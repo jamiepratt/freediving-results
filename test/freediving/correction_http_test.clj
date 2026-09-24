@@ -94,3 +94,25 @@
   (let [r (run-tests 'freediving.correction-http-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))
+
+(deftest authenticated-gateway-keeps-visitor-rate-limits-separate
+  (let [target (sample/sample)
+        _ (sample/validate! target "gateway-target")
+        _ (public/refresh! sample/reviewer)
+        row (first (public/results sample/reader-url))
+        detail (corrections/public-detail sample/reader-url (:result-id row))
+        secret (apply str (repeat 64 "b"))
+        origin "https://poc.alphacompose.com"
+        app (server/start! {:database-url sample/reader-url :submission-database-url submit-url
+                            :public-origin origin :gateway-secret secret :port 0})
+        url (str "http://127.0.0.1:" (.getPort (.getAddress ^com.sun.net.httpserver.HttpServer (:server app))))
+        send (fn [ip n]
+               (post url {:id (str (UUID/randomUUID)) :result-id (:result-id row)
+                          :version (get-in detail [:correction :version]) :suggestion (str "change " n)
+                          :reason "Check original source" :evidence "https://example.org/source.pdf page 1"}
+                     {"Origin" origin "X-Freediving-Gateway" secret "X-Freediving-Client" ip}))]
+    (try
+      (doseq [n (range 5)] (is (= 200 (:status (send "203.0.113.1" n)))))
+      (is (= 429 (:status (send "203.0.113.1" 6))))
+      (is (= 200 (:status (send "203.0.113.2" 7))))
+      (finally (server/stop! app)))))

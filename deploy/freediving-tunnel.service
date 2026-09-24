@@ -1,0 +1,17 @@
+[Unit]
+Description=Freediving outbound Cloudflare tunnel
+After=network-online.target freediving-public.service
+Wants=network-online.target
+[Service]
+DynamicUser=true
+LoadCredential=token:/etc/freediving/tunnel-token
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token-file ${CREDENTIALS_DIRECTORY}/token
+Restart=on-failure
+RestartSec=5
+MemoryMax=192M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

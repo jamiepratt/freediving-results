@@ -8,7 +8,7 @@ A private loopback web interface supports [read-only real-source inspection](doc
 
 ## Local public results demo
 
-Search validated source names, compare original results with approved corrections, and browse approved athlete histories through a restricted public database reader. The [public demo guide](docs/local-public-results.md) covers synthetic setup, loopback access, visibility invalidation and stopping the services. Real pilot observations remain private; no deployment is included.
+Search validated source names, compare original results with approved corrections, and browse approved athlete histories through a restricted public database reader. The [public demo guide](docs/local-public-results.md) covers synthetic setup, loopback access, visibility invalidation and stopping the services. Real pilot observations remain private. The public site is deployed at [poc.alphacompose.com](https://poc.alphacompose.com), initially with no published records. See [deployment and rollback](docs/deployment.md).
 
 ## Anonymous correction requests
 
