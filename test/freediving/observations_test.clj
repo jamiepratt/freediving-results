@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.string :as str]
             [clojure.java.shell :as shell]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
             [freediving.extraction-test :as extraction-fixture]
@@ -159,3 +161,40 @@
   (let [result (clojure.test/run-tests 'freediving.observations-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
+
+(deftest html-import-is-replay-validated-idempotent-and-versioned
+  (let [dir (fixture/workspace) root (str dir "/archive") file (str dir "/source.html")
+        hash (html-fixture/register-html root file (html-fixture/document html-fixture/cells))
+        receipt (html/extract! root hash {:actor "synthetic" :config {}})
+        job (:job-id receipt)]
+    (is (= :created (:status (observations/import! app root job))))
+    (is (= :skipped (:status (observations/import! app root job))))
+    (is (= {:table 1 :row 2} (get-in (observations/inspect app job) [:observations 0 :payload :coordinates])))
+    (let [hash2 (html-fixture/register-html root file (html-fixture/document (assoc html-fixture/cells 7 "1 m")))
+          job2 (:job-id (html/extract! root hash2 {:actor "synthetic" :config {}}))]
+      (is (= :created (:status (observations/import! app root job2))))
+      (is (= 2 (:sources (observations/counts app))))
+      (is (= 2 (:observations (observations/counts app))))
+      (is (= "0 m" (get-in (observations/inspect app job) [:observations 0 :payload :parsed :realised-performance]))))
+    (let [a (:artifact (observations/inspect app job))
+          bad (-> a (assoc :actor "altered") (assoc-in [:candidates 0 :parsed :points] "99"))
+          bad (assoc bad :job-id (html/digest (select-keys bad html/identity-keys)))]
+      (archive/derive! root (:job-id bad) (constantly bad) nil)
+      (is (thrown-with-msg? Exception #"HTML source replay" (observations/import! app root (:job-id bad))))
+      (is (= 2 (:observations (observations/counts app)))))))
+
+(deftest html-migration-upgrades-original-constraint-without-changing-pdf-replay
+  (let [{:keys [root artifact]} (synthetic 1 "cmas-test/1")
+        artifact (assoc-in artifact [:candidates 0 :coordinates :table] 99)
+        artifact (assoc-in artifact [:candidates 0 :coordinates :row] 99)]
+    (publish! {:root root :artifact artifact})
+    (observations/import! app root (:job-id artifact))
+    (let [before (observations/inspect app (:job-id artifact))]
+      (sql! admin "DELETE FROM freediving.schema_migrations WHERE version=7")
+      (sql! admin "ALTER TABLE freediving.extractions DROP CONSTRAINT extractions_schema_version_check; ALTER TABLE freediving.extractions ADD CONSTRAINT extractions_schema_version_check CHECK(schema_version IN(1,2,3))")
+      (observations/migrate! admin "observations_app")
+      (observations/migrate! admin "observations_app")
+      (is (= :skipped (:status (observations/import! app root (:job-id artifact)))))
+      (is (= (:observations before) (:observations (observations/inspect app (:job-id artifact)))))
+      (is (= (hash-value [(:source-sha256 artifact) [{:page 1 :line 1}]])
+             (get-in before [:observations 0 :candidate_id]))))))

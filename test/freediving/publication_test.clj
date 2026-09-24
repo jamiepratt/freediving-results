@@ -1,5 +1,8 @@
 (ns freediving.publication-test
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
+            [freediving.archive-test :as archive-fixture]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
@@ -164,3 +167,15 @@
     (deliver gate true) @validation @activation
     (is (false? (:eligible? (publication/diagnose reviewer t))))
     (is (= "extraction-publication/2" (:active-policy-version (publication/diagnose reviewer t))))))
+
+(deftest html-observations-cannot-enter-pdf-publication-review
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        target {:job-id job :ordinal 0}]
+    (observations/import! fixture/app root job)
+    (let [diagnosis (publication/diagnose reviewer target)]
+      (is (false? (:ready? diagnosis)))
+      (is (false? (:eligible? diagnosis)))
+      (is (some #{[:unresolved-extraction-error :html-review-not-supported]} (:reasons diagnosis))))
+    (is (thrown? Exception (publication/decide! reviewer (request target "html-not-pdf"))))))

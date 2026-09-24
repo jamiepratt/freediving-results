@@ -2,7 +2,8 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [freediving.archive :as archive])
+            [freediving.archive :as archive]
+            [freediving.aida-html :as html])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -57,6 +58,11 @@
         (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=1"))]
           (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
           (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES (1, ?)" checksum)))
+        (let [html-sql (slurp (io/resource "migrations/007-html-extractions.sql"))
+              html-checksum (sha (.getBytes html-sql "UTF-8"))]
+          (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=7"))]
+            (when-not (= html-checksum (:sha256 old)) (fail! "HTML migration checksum conflict"))
+            (do (execute! c html-sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES (7, ?)" html-checksum))))
         (execute! c "REVOKE ALL ON SCHEMA freediving FROM PUBLIC")
         (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " app-role))
         (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " app-role))
@@ -102,15 +108,15 @@
     (let [bytes (archive/read-source-bytes (str (io/file root "derived-objects" h)))
           _ (when-not (= h (sha bytes)) (fail! "Artifact integrity mismatch"))
           a (read-edn bytes)]
-      (when-not (#{1 2 3} (:schema-version a)) (fail! "Unsupported extraction schema"))
-      (when-not (and (= job-id (:job-id a)) (= job-id (digest (select-keys a identity-keys))))
+      (when-not (#{1 2 3 4} (:schema-version a)) (fail! "Unsupported extraction schema"))
+      (when-not (and (= job-id (:job-id a)) (= job-id (digest (select-keys a (if (= 4 (:schema-version a)) html/identity-keys identity-keys)))))
         (fail! "Extraction job identity mismatch"))
-      (when-not (and (vector? (:candidates a)) (vector? (:pages a)) (seq (:acquisitions a))
+      (when-not (and (vector? (:candidates a)) (or (= 4 (:schema-version a)) (vector? (:pages a))) (seq (:acquisitions a))
                      (string? (:parser-version a)) (not (str/blank? (:parser-version a))) (map? (:config a))
                      (string? (:actor a)) (not (str/blank? (:actor a)))
                      (vector? (:evidence-sha256 a)) (every? hash? (:evidence-sha256 a))
                      (vector? (:acquisitions a)) (map? (:tool a))
-                     (string? (:pdfinfo-version a))
+                     (or (= 4 (:schema-version a)) (string? (:pdfinfo-version a)))
                      (string? (:processed-at a))
                      (try (java.time.OffsetDateTime/parse (:processed-at a)) (catch Exception _ false))
                      (every? #(and (string? %) (not (str/blank? %))) ((juxt :name :version) (:tool a)))
@@ -119,11 +125,15 @@
       (let [source (archive/inspect root (:source-sha256 a)) evidence (set (archive/extraction-evidence root))]
         (when-not (every? (set (:acquisitions source)) (:acquisitions a)) (fail! "Acquisition provenance mismatch"))
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
-      {:artifact (validate-pages! a) :bytes bytes :hash h})))
-(defn- position [candidate]
-  (let [p (select-keys (:coordinates candidate) [:page :line])]
-    (when-not (every? pos-int? ((juxt :page :line) p)) (fail! "Invalid candidate coordinates"))
-    (or (when (seq (:source-lines candidate)) (mapv #(select-keys % [:page :line]) (:source-lines candidate))) [p])))
+      {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a) (validate-pages! a)) :bytes bytes :hash h})))
+(defn- position [artifact candidate]
+  (if (= 4 (:schema-version artifact))
+    (let [p (select-keys (:coordinates candidate) [:table :row])]
+      (when-not (every? pos-int? ((juxt :table :row) p)) (fail! "Invalid HTML candidate coordinates"))
+      [p])
+    (let [p (select-keys (:coordinates candidate) [:page :line])]
+      (when-not (every? pos-int? ((juxt :page :line) p)) (fail! "Invalid candidate coordinates"))
+      (or (when (seq (:source-lines candidate)) (mapv #(select-keys % [:page :line]) (:source-lines candidate))) [p]))))
 (defn- classification [a candidate]
   (cond
     (and (= 3 (:schema-version a)) (#{"cmas-athens-pool/4" "cmas-athens-pool/5" "cmas-athens-pool/6"} (:parser-version a))
@@ -136,7 +146,7 @@
 (defn- observation-rows [a]
   (mapv (fn [ordinal candidate]
           (let [[kind reason] (classification a candidate)]
-            {:ordinal ordinal :candidate_id (digest [(:source-sha256 a) (position candidate)])
+            {:ordinal ordinal :candidate_id (digest [(:source-sha256 a) (position a candidate)])
              :kind kind :classification_reason reason :payload_edn (encoded candidate)}))
         (range) (:candidates a)))
 (defn import!
@@ -163,7 +173,7 @@
                        job-id hash (:source-sha256 artifact) (:parser-version artifact) (:schema-version artifact) bytes)
              (doseq [[ordinal candidate] (map-indexed vector (:candidates artifact))]
                (let [[kind reason] (classification artifact candidate)
-                     candidate-id (digest [(:source-sha256 artifact) (position candidate)])]
+                     candidate-id (digest [(:source-sha256 artifact) (position artifact candidate)])]
                  (execute! c "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) VALUES (?,?,?,?,?,?)"
                            job-id ordinal candidate-id kind reason (encoded candidate))
                  (when on-progress (on-progress {:phase :observation-inserted :ordinal ordinal :job-id job-id}))))
