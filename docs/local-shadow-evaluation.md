@@ -276,8 +276,9 @@ and paired outcomes; only aggregates appear here. Independent combined validatio
 passed 93 tests and 1,401 assertions.
 
 The domain/source acceptance evidence supports [#3](https://github.com/jamiepratt/freediving-results/issues/3).
-The incomplete B benchmark leaves [#4](https://github.com/jamiepratt/freediving-results/issues/4)
-and [#5](https://github.com/jamiepratt/freediving-results/issues/5) open.
+The incomplete B benchmark left [#4](https://github.com/jamiepratt/freediving-results/issues/4)
+and [#5](https://github.com/jamiepratt/freediving-results/issues/5) open at that checkpoint.
+The later complete F comparison is recorded below; B remains unchanged.
 Fresh held-out evaluation is tracked in [#6](https://github.com/jamiepratt/freediving-results/issues/6);
 actual billing evidence remains tracked under [#1](https://github.com/jamiepratt/freediving-results/issues/1).
 
@@ -337,17 +338,106 @@ survive, terminal failures stop later dispatch, and uncertain/completed runs
 remain non-dispatching on replay. Versions 7 and 8 retain their previous behavior.
 HTTP body, model, domain protocol, bounds and question semantics are unchanged.
 
-The next evidence gate under [#4](https://github.com/jamiepratt/freediving-results/issues/4)
-is at most one separately scoped `/9` request with the original failed B batch's
-two ordered cases. Use a fresh private store and configuration with
-`:id "E"`, `:scope-id "jev-probability-diagnostic-20260924-07"`, and
-`:native-diagnostics-version 2`; retain D's remaining settings: Jev `1.13.0`,
-`freediving-source-v1`, diagnostics version 2, batch size 2, no companions,
-15-second deadline, 49152/65536 request/response byte caps, one attempt, zero
-retry delay, terminal stopping and concurrency 1. Require exact byte equality
-with the frozen B batch, verified current label authority before/after and
-zero-dispatch replay. This offline batch did not execute that request.
-Do not resume B or rerun A. If normalization still fails, the recorded numerical
-facts are sufficient for vendor clarification; another equivalent diagnostic
-batch cannot establish an undocumented tolerance. Successful evidence still
-does not complete the benchmark or explain historical failures.
+The subsequent separately scoped `/9` diagnostic E used the original failed B
+batch's two ordered cases, an exact matching HTTP body, a fresh store and
+`:scope-id "jev-probability-diagnostic-20260924-07"`. It retained D's model,
+protocol and execution limits, verified current label authority before/after,
+and replayed without dispatch. Successful new evidence cannot establish an
+undocumented tolerance or explain historical failures. Remaining probability
+contract context is recorded in [#4](https://github.com/jamiepratt/freediving-results/issues/4).
+
+### Complete native comparison, 2026-09-24
+
+The separately authorized E diagnostic returned two valid answers in one request.
+It did not recover the rejected values or causes of B/D. A fresh full comparison,
+F (`jev-native-comparison-20260924-08`), then completed all 24 requests and 48
+identity questions. A was reused without redispatch; failed B and diagnostic D/E
+stores were preserved. This is an exploratory systems comparison, including an
+observed false merge, not evidence for automatic identity decisions.
+
+F froze the original 48 cases, order, source evidence and question semantics.
+Independent preparation verified all 24 HTTP bodies byte-for-byte against B
+(17,550-21,887 bytes), and pair mappings against A. Only the configuration ID,
+scope and opt-in numerical diagnostics changed from B. Requested and returned
+models were `jev-1.13.0` in every A/F request. F used adapter 9, native diagnostics
+2, `freediving-source-v1`, diagnostics 2, batch size 2, no companions, concurrency
+1, one attempt, zero retry delay, a 15-second request deadline, 49,152/65,536-byte
+request/response limits and terminal stopping. No validation tolerance changed.
+No other tests or audits ran during F's timed dispatch.
+
+| Measure | A: preserved single-question arm | F: complete native arm |
+| --- | ---: | ---: |
+| Requests / identity questions | 48 / 48 | 24 / 48 |
+| Pairs per request, in frozen order | 48 batches of 1 | 24 batches of 2 |
+| Match / no-match / abstain | 29 / 10 / 9 | 30 / 15 / 3 |
+| Decisive coverage | 39/48 (81.25%) | 45/48 (93.75%) |
+| Errors / undispatched pairs | 0 / 0 | 0 / 0 |
+| False merges / no-match labels | 0/19 | 1/19 (5.26%) |
+| Missed matches / match labels | 0/29 | 0/29 |
+| Outer wrapper wall time, different scopes | 61.009 s | 57.825 s |
+| Request-loop wall time | 39.245 s | 22.717 s |
+| Summed request latency | 37.581 s | 22.046 s |
+| Request latency mean / median / p95 | 782.94 / 768.02 / 879.43 ms | 918.56 / 898.65 / 1021.03 ms |
+| Request latency min / max | 714.57 / 984.05 ms | 839.97 / 1200.95 ms |
+| Dispatched pairs / request-loop second | 1.223 | 2.113 |
+| Successfully evaluated pairs / request-loop second | 1.223 | 2.113 |
+| Dispatched or successfully evaluated pairs / wrapper second | 0.787 | 0.830 |
+| Requests with token counters | 48/48 | 24/24 |
+| Input / output tokens | 236,323 / 2,092 | 229,795 / 2,013 |
+| Request errors / HTTP 200 responses | 0 / 48 | 0 / 24 |
+| Actual billed cost | Unknown | Unknown |
+
+Successfully evaluated includes valid abstentions, not just decisive choices.
+Median and p95 use nearest-rank order statistics. Request timings and token
+counters remain request-level; neither is charged to every pair. No new cost
+estimate or billing receipt was obtained. A's wrapper measured its Rama
+invocation; F's direct verified-API wrapper includes repeated authority checks,
+report inspection and persistence, but excludes JVM startup and initial
+preflight. These outer timings are not directly comparable.
+
+All 48 pairs had valid results in both arms. Choices changed for six: five
+previous abstentions became correct no-match decisions, and one became an
+incorrect match. The other 42 choices stayed the same: 29 matches, ten
+no-matches and three abstentions. Probability distributions changed for 45/48
+pairs; the maximum absolute component difference was 0.48 and the mean across
+all 144 components was 0.06306. Lower abstention came with a false merge; it is
+not sufficient evidence of better decision quality. Both error-rate denominators
+remain 48, and false-merge/missed-match denominators include abstentions.
+
+A and F were noncontemporaneous, uncontrolled runs. Native shared state exposed
+the other pair's records, so observed timing and answer differences cannot be
+attributed solely to execution strategy. Stochastic variation was not isolated.
+Existing labels and outcomes informed protocol design: no unbiased improvement,
+calibration or production-accuracy claim follows. The historical 7 match, 7
+no-match, 34 abstain reference remains unchanged; companions and concurrent HTTP
+arms were not run.
+
+The full reviewed receipt was verified before/after F and replay against the
+user-designated recovered authority. All 13 logical table fingerprints, 51
+label-history events and latest 50 decisions (29 match, 19 no-match, two unknown)
+remained unchanged. The two unknown decisions were excluded from provider cases
+and scoring. This snapshot authority does not establish uninterrupted history;
+possible post-backup loss remains acknowledged. Independent checks re-extracted
+six PDFs, verified 437 source references and 96 parsed records, and reproduced
+all 48 source-only inputs. Closed-schema and metadata-key checks found no owner
+labels/reasons in provider input.
+
+F replay used a throwing dispatch guard: zero provider calls, identical results
+and verified report, unchanged private store bytes/modes/modification times.
+All 1,907 inventoried prior evidence files and frozen inputs remained unchanged.
+Credentials stayed in memory; the exact credential/service-token scan passed.
+Private evidence uses 0700 directories and 0600 files outside the disposable
+worktree. New private harness admission/launch/replay behavior followed TDD;
+independent ordered repair, lint and five tests/23 assertions passed. Shipped
+adapter regression evidence remains 107 tests/1,779 assertions from the prior
+implementation batch; this evidence-only update did not rerun that full suite.
+
+F raw run: `adeb3b1c98bf2f2dc18f567c2be86a0c39bd33719a9629d06da0d1fdd4ce7901`.
+Verified report: `8b6de8b69084cfe82140ba050199fd49ebe354494e5dc3bca06a550a412938f2`.
+Exact inputs, request receipts and paired probabilities remain private.
+The completed exploratory benchmark supplies the remaining comparison evidence
+for [#4](https://github.com/jamiepratt/freediving-results/issues/4) and
+[#5](https://github.com/jamiepratt/freediving-results/issues/5).
+Fresh held-out owner review remains [#6](https://github.com/jamiepratt/freediving-results/issues/6);
+actual billing and broader pilot/release limits remain
+[#1](https://github.com/jamiepratt/freediving-results/issues/1).
