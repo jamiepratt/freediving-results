@@ -92,6 +92,63 @@
         (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
+(def ^:private batch-option-keys [:native-batch-size :companion-assessments])
+(def ^:private companion-instructions
+  {:name-variation "Assess whether plausible name ordering, transliteration, omitted components or transcription variation explains the names."
+   :contradiction "Assess whether reliable source evidence substantively contradicts these being the same person."
+   :source-quality "Assess whether source quality is insufficient to decide identity."})
+(defn- byte-count [s] (alength (.getBytes ^String s "UTF-8")))
+
+(defn prepare-batches
+  "Freeze bounded native Jev requests. At most eight pairs, 32 questions, one HTTP
+  attempt and one request at a time. Exact equal records alone are deduplicated.
+  Conservative UTF-8 byte caps leave headroom below provider 32k/64k token limits."
+  [config cases]
+  (let [size (:native-batch-size config) companions (get config :companion-assessments [])
+        base-config (apply dissoc config batch-option-keys)]
+    (when-not (and (= :jev (:provider config)) (= :freediving-source-v1 (:identity-protocol config))
+                   (bounded-int? size 1 8) (= 1 (get config :max-attempts 1))
+                   (vector? cases) (seq cases) (= (count cases) (count (set (map :case-id cases))))
+                   (every? #(valid-text? (:case-id %)) cases)
+                   (vector? companions) (= (count companions) (count (set companions)))
+                   (every? companion-instructions companions)) (invalid!))
+    (doseq [[_ records] (group-by :record-id (mapcat #(vals (select-keys (:input %) [:left :right])) cases))]
+      (when-not (apply = records) (invalid!)))
+    (mapv
+     (fn [members]
+       (let [singles (mapv #(prepare-request base-config %) members)
+             records (vec (distinct (mapcat #(map (:input %) [:left :right]) singles)))
+             names (zipmap records (map #(str "record_" %) (range)))
+             state (json/write-str {:schema-version "freediving-source/1"
+                                    :records (into (sorted-map) (map (fn [r] [(names r) r]) records))})
+             questions (into (sorted-map)
+                             (mapcat (fn [i request]
+                                       (let [left (str "/records/" (names (get-in request [:input :left])))
+                                             right (str "/records/" (names (get-in request [:input :right])))
+                                             q (protocol/question left right)]
+                                         (cons [(str "identity_" i) q]
+                                               (map (fn [kind]
+                                                      [(str (name kind) "_" i)
+                                                       {:type "choice"
+                                                        :instructions (str (str/replace (:instructions q) #"Choose match when combined evidence supports the same person, no_match when it supports different people, abstain when material ambiguity remains\. " "") " Independent companion assessment; not sequential reasoning or calibrated confidence. " (companion-instructions kind))
+                                                        :criteria {:yes "Source evidence supports this assessment"
+                                                                   :no "Source evidence does not support this assessment"
+                                                                   :unknown "Insufficient evidence"}}]) companions))))
+                                     (range) singles))
+             body (json/write-str {:model (:model config) :state state :questions questions})
+             normalized (merge (:config (first singles)) (select-keys config batch-option-keys)
+                               {:max-attempts 1 :stop-on-terminal-error? true})]
+         (when (or (> (count questions) 32)
+                   (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
+                   (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
+         {:adapter-version "shadow-adapters/7" :provider :jev :config normalized
+          :protocol protocol/descriptor :body body
+          :case-ids (mapv :case-id members)
+          :evidence (mapv #(select-keys % [:case-id :evidence]) members)
+          :question-ids (vec (keys questions))
+          :companions companions :context-policy :exact-record-dedup-shared-batch}))
+     (partition-all size cases))))
+
 (defn- base-result [outcome model]
   {:outcome outcome :retryable? false :external-outcome :known
    :model-version model :cost {:status :unknown}})
@@ -241,6 +298,61 @@
                (select-keys metadata [:model-version :usage])
                {:validation-reasons reasons})))))
 
+(defn- decode-unique-json [body]
+  ;; Preserve each occurrence until its containing object can reject duplicates,
+  ;; including keys expressed with different JSON escapes.
+  (let [ordinal (atom 0)
+        value (json/read-str body :key-fn #(vector % (swap! ordinal inc))
+                             :extra-data-fn json-whitespace-tail)]
+    (letfn [(normalize [x]
+              (cond
+                (map? x) (reduce-kv (fn [m [k _] v]
+                                      (when (contains? m k) (throw (ex-info "Duplicate JSON key" {})))
+                                      (assoc m k (normalize v))) {} x)
+                (vector? x) (mapv normalize x)
+                :else x))]
+      (normalize value))))
+
+(defn- strict-choice [answer allowed]
+  (let [choice (get answer "choice") probs (get answer "probabilities")]
+    (if (and (map? answer) (= "choice" (get answer "type")) (contains? allowed choice)
+             (probability? (get answer "confidence"))
+             (map? probs) (= allowed (set (keys probs))) (every? probability? (vals probs))
+             (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)
+             (= (get probs choice) (apply max (vals probs))))
+      {:outcome (get choices choice (keyword choice)) :confidence (get answer "confidence")
+       :probabilities (into {} (map (fn [[k v]] [(keyword k) v]) probs))}
+      {:outcome :error :error (if (nil? answer) :missing-answer :invalid-answer)})))
+
+(defn- parse-strict-jev [request body token]
+  (try
+    (let [data (decode-unique-json body)
+          native? (= "shadow-adapters/7" (:adapter-version request))
+          ids (if native? (:question-ids request) ["identity"])
+          metadata (response-metadata data token)
+          answers (get data "answers")
+          bad-metadata? (or (seq (:validation-reasons metadata))
+                            (not= (get-in request [:config :model]) (:model-version metadata)))
+          predictions (into {} (map (fn [id]
+                                      [id (if bad-metadata?
+                                            {:outcome :error :error :invalid-response-metadata}
+                                            (strict-choice (get answers id)
+                                                           (if (str/starts-with? id "identity")
+                                                             #{"match" "no_match" "abstain"}
+                                                             #{"yes" "no" "unknown"})))]) ids))
+          invalid? (or bad-metadata? (not (map? answers)) (not= (set ids) (set (keys answers)))
+                       (some #(= :error (:outcome %)) (vals predictions)))
+          result (merge (if invalid? (failure :invalid-response false :known)
+                            (base-result (if native? :complete (get-in predictions ["identity" :outcome])) (:model-version metadata)))
+                        (select-keys metadata [:model-version :usage])
+                        {:validation-reasons (cond-> [] bad-metadata? (conj :invalid-response-metadata)
+                                                     (not= (set ids) (set (keys answers))) (conj :invalid-answer-identifiers)
+                                                     (some #(= :error (:outcome %)) (vals predictions)) (conj :invalid-answer))})]
+      (if native? (assoc result :answers predictions)
+          (merge result (when-not invalid? (select-keys (get predictions "identity") [:confidence :probabilities])))))
+    (catch Exception _ (failure :invalid-response false :known))
+    (catch StackOverflowError _ (failure :invalid-response false :known))))
+
 (defn- http-attempt! [request runtime]
   (let [config (:config request) token (:bearer-token runtime)]
     (if-not (and (valid-text? token) (not (re-find #"[\r\n]" token)))
@@ -258,12 +370,14 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request))
-                       (parse-diagnostic-response (:provider request) (.body response) token
-                                                  (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
-                                                  (= "shadow-adapters/5" (:adapter-version request))
-                                                  (= "shadow-adapters/6" (:adapter-version request)))
-                       (parse-response (:provider request) (.body response)))
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7"} (:adapter-version request))
+                       (parse-strict-jev request (.body response) token)
+                       (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
+                         (parse-diagnostic-response (:provider request) (.body response) token
+                                                    (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
+                                                    (= "shadow-adapters/5" (:adapter-version request))
+                                                    (= "shadow-adapters/6" (:adapter-version request)))
+                         (parse-response (:provider request) (.body response))))
                      (failure (cond (= 429 status) :rate-limited (>= status 500) :provider-unavailable
                                     (<= 300 status 399) :redirect-refused :else :http-error)
                               (or (= 429 status) (>= status 500)) :known))

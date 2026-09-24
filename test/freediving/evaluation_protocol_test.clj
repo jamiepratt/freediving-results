@@ -51,7 +51,7 @@
   (let [in (input) seen (atom nil)]
     (with-server (fn [exchange]
                    (reset! seen (json/read-str (slurp (.getRequestBody exchange)) :key-fn keyword))
-                   (reply! exchange 200 (json/write-str {:answers {:identity jev-answer}})))
+                   (reply! exchange 200 (json/write-str {:model "jev-1.13.0" :answers {:identity jev-answer}})))
       (fn [url]
         (let [request (providers/prepare-request (assoc config :endpoint url)
                                                  {:case-id "case" :input in :label :no-match :review-reason "PRIVATE OWNER"})
@@ -66,7 +66,7 @@
 
 (deftest domain-single-question-rejects-unrequested-answer-ids
   (with-server (fn [exchange]
-                 (reply! exchange 200 (json/write-str {:answers {:identity jev-answer :other jev-answer}})))
+                 (reply! exchange 200 (json/write-str {:model "jev-1.13.0" :answers {:identity jev-answer :other jev-answer}})))
     (fn [url]
       (let [result (providers/execute! (providers/prepare-request (assoc config :endpoint url) {:input (input)})
                                        {:bearer-token "fixture-secret"})]

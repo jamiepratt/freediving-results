@@ -124,3 +124,56 @@ Freeze the protocol before fresh held-out collection; group shared people,
 documents and source families conservatively and report remaining leakage.
 Confidence is not calibrated accuracy. Report false merges, missed matches,
 abstentions and errors with denominators; fewer abstentions alone is not success.
+
+### Native Jev requests
+
+Opt into `:identity-protocol :freediving-source-v1`, `:diagnostics-version 2`,
+`:native-batch-size 1` for sequential single-question requests, or sizes 2-8 for
+native multiple questions. These use `shadow-adapters/7` and `shadow-runner/6`.
+`freediving.evaluation-providers/prepare-batches` freezes membership, order,
+source state, explicit record pointers, question IDs and configuration before
+any dispatch. Only exactly equal records are deduplicated; conflicting bodies
+for one record ID are rejected. Shared batch state exposes other pairs' records:
+size 1 versus size 2 is also a context change, not a pure execution speed control.
+
+Optional `:companion-assessments` is a separate ordered vector drawn from
+`:name-variation`, `:contradiction`, `:source-quality`. Independent yes/no/unknown
+assessments remain separate from the identity answer; no combined confidence or
+calibration is inferred. Benchmark this configuration as a separate arm.
+
+Local bounds: eight pairs, 32 questions, 24,576 UTF-8 bytes for state plus longest
+question, 49,152 bytes for the entire request (or a lower configured request
+limit), existing response limit up to 1 MiB, deadline up to 60 seconds per request,
+exactly one attempt, HTTP concurrency one. This is conservative byte admission, not exact token accounting,
+with headroom below the documented Jev 32k state-plus-longest question and 64k
+total limits; these are local conservative limits, not claimed
+provider question limits. All planned requests undergo admission before dispatch.
+The finite dataset and per-request deadline bound total scheduling.
+
+Adapters 6 and 7 reject duplicate JSON keys, missing/unexpected answer IDs,
+invalid distributions, choices below the maximum probability, and missing or
+mismatched pinned returned models. Native partial responses preserve valid
+expected answers; missing/malformed siblings are explicit errors. Any schema
+failure halts later batches even when all expected identity answers were valid.
+Auth, billing, rate-limit, oversized-response and unknown external outcomes also
+halt scheduling. Undispatched cases remain in denominators. No timeout or
+interrupted request is automatically resent. Start and completion records are
+at the actual HTTP request boundary; replay reuses completed or uncertain batches.
+
+`:batches` retains request receipts and case/evidence links. `:request-metrics`
+contains batch sizes, request/question counts, latency samples and sum, usage
+and known-usage request count, request errors, and request-level cost. Case
+latency is nil and case cost unknown with `:accounting :request-level-only`;
+no request cost is duplicated across cases. Stored wall time describes the
+completion invocation including local overhead; recovered runs are not clean
+throughput benchmarks. Measure whole-arm wall time externally for comparisons.
+Actual billed cost remains unknown unless separately available; estimates must
+be labelled. Source text and receipts stay private; response text and credentials
+are not stored by the new adapters.
+
+Provider contracts checked 2026-09-24: [API](https://docs.typesafe.ai/api),
+[models and limits](https://docs.typesafe.ai/models),
+[fan-out](https://docs.typesafe.ai/patterns/fan-out),
+[parallel questions](https://docs.typesafe.ai/cookbooks/parallel_questions), and
+[confidence](https://docs.typesafe.ai/confidence). Provider limits may change;
+the frozen local admission settings remain part of each request identity.

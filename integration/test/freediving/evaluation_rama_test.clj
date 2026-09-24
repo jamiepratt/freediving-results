@@ -12,6 +12,7 @@
             [freediving.observations :as observations]
             [freediving.reviews :as reviews]
             [freediving.evaluation-labels-test :as fixture]
+            [freediving.evaluation-label-integration-test :as enriched]
             [freediving.evaluation-labels :as labels]
             [freediving.evaluation :as evaluation]
             [freediving.evaluation-providers-test :as http]))
@@ -203,3 +204,25 @@
   (let [r (run-tests 'freediving.evaluation-rama-test)]
     (shutdown-agents)
     (System/exit (if (pos? (+ (:fail r) (:error r))) 1 0))))
+
+(deftest real-rama-native-enriched-evaluation-replays-without-dispatch
+  (let [root (private-root) store (str root "/store") exports (str root "/exports")
+        pair (fixture/sample) _ (labels/decide! fixture/owner (fixture/request pair))
+        receipt (stored-export exports) calls (atom 0)]
+    (http/with-server
+      (fn [ex] (swap! calls inc)
+        (http/reply! ex 200 (json/write-str {:model "jev-1.13.0" :answers {:identity_0 {:type "choice" :choice "abstain" :confidence 0.8 :probabilities {:match 0.1 :no_match 0.1 :abstain 0.8}}}})))
+      (fn [endpoint]
+        (reset! configuration {:db-url fixture/owner :receipt-directory exports :private-root store
+                               :enriched-dataset (enriched/enrich receipt)
+                               :configs [{:id "native" :provider :jev :endpoint endpoint :model "jev-1.13.0"
+                                          :identity-protocol :freediving-source-v1 :diagnostics-version 2 :native-batch-size 1}]
+                               :runtime {:providers {"native" {:bearer-token "private-native-fixture"}}}})
+        (with-module
+          (fn [{:keys [client] :as context}]
+            (let [{:keys [result trace]} (observe context (:receipt-id receipt))]
+              (is (= :evaluated (:status result)))
+              (is (= 1 @calls))
+              (is (= result (boundary/invoke! client (:receipt-id receipt))))
+              (is (= 1 @calls))
+              (assert-private trace ["private-native-fixture" fixture/owner "synthetic fixture source row"]))))))))

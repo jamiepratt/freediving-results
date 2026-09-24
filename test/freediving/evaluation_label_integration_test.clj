@@ -139,3 +139,46 @@
   (let [r (run-tests 'freediving.evaluation-label-integration-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))
+
+(defn enrich [receipt]
+  (update (:dataset receipt) :cases
+          (fn [cases]
+            (mapv (fn [case]
+                    (assoc case :input
+                           (into {:schema-version "freediving-source/1"}
+                                 (map (fn [side ref]
+                                        [side {:record-id (:observation-id ref)
+                                               :fields (zipmap [:name :event-name :event-date :discipline :representation :rank :performance :age-category :birth-date]
+                                                               (repeat {:value nil :evidence-ids []}))
+                                               :sources [(assoc ref :source-family-id (first (:source-family-ids case))
+                                                                :exact-lines ["synthetic fixture source row"])]
+                                               :uncertainties [] :publisher-identity nil}])
+                                      [:left :right] (:evidence case))))) cases))))
+
+(deftest enriched-native-run-keeps-original-review-authority-and-replay
+  (let [pair (fixture/sample)
+        _ (labels/decide! fixture/owner (fixture/request pair))
+        receipt (labels/export fixture/owner {:rubric-version "pair-v1"})
+        enriched (enrich receipt) store (str (private-root) "/store") calls (atom 0)]
+    (http/with-server
+      (fn [ex] (swap! calls inc)
+        (http/reply! ex 200 (json/write-str {:model "jev-1.13.0" :answers {:identity_0 {:type "choice" :choice "abstain" :confidence 0.8 :probabilities {:match 0.1 :no_match 0.1 :abstain 0.8}}}})))
+      (fn [endpoint]
+        (let [configs [{:id "native" :provider :jev :model "jev-1.13.0" :endpoint endpoint
+                        :identity-protocol :freediving-source-v1 :diagnostics-version 2 :native-batch-size 1}]
+              runtime {:providers {"native" {:bearer-token "fixture"}}}
+              result (evaluation/run-enriched-verified! store fixture/owner receipt enriched configs runtime)
+              report (:report (evaluation/inspect-verified-run store fixture/owner (:verified-id result)))]
+          (is (= :evaluated (:status result)))
+          (is (= 1 (get-in report [:providers "native" :metrics :synthetic :case-count])))
+          (is (= result (evaluation/run-enriched-verified! store fixture/owner receipt enriched configs runtime)))
+          (is (= 1 @calls))
+          (doseq [bad [(assoc enriched :dataset-id "different")
+                       (assoc-in enriched [:cases 0 :label :outcome] :no-match)
+                       (assoc-in enriched [:cases 0 :input :left :sources 0 :observation-id] "unrelated")]]
+            (is (thrown? Exception (evaluation/run-enriched-verified! store fixture/owner receipt bad configs runtime))))
+          (is (= 1 @calls))
+          (labels/decide! fixture/owner (assoc (fixture/request pair) :id "revoke-enriched" :base-revision 1 :outcome :revoke))
+          (is (thrown? Exception (evaluation/inspect-verified-run store fixture/owner (:verified-id result))))
+          (is (thrown? Exception (evaluation/run-enriched-verified! store fixture/owner receipt enriched configs runtime)))
+          (is (= 1 @calls)))))))

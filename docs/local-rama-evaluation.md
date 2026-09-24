@@ -49,3 +49,9 @@ Successful graph results contain status and opaque run, verified-report, report 
 Keep the same private store across retries on the same trusted host. Completed provider attempts and immutable receipts replay without redispatch. A failed framework result delivery can retry the node against that store. The evaluator's interrupted-attempt and bounded-retry rules still apply: a provider timeout can leave an unknown external outcome. This is not exactly-once provider execution or billing, distributed storage, power-loss durability, or a production deployment.
 
 The local database uses the documented trusted-machine role boundary. Export hashes authenticate content identity; they do not prove human review. This module covers evaluation only. The separate [local import graph](local-rama-pipeline.md) coordinates archive registration, extraction, ingestion and private candidate readiness through their existing APIs. Neither module establishes an acquisition-to-publication pipeline. Genuine labels, owner extraction validation, additional source collection, authorized live provider measurements and production acceptance remain separate requirements.
+
+The trusted loader optionally returns `:enriched-dataset` alongside its existing
+configuration. The worker routes this through `run-enriched-verified!`; Rama
+still receives only the opaque original receipt reference and safe hash results.
+Enriched source inputs and credentials remain in the worker/private storage.
+Native Jev batch size and optional companion assessments live in `:configs`.

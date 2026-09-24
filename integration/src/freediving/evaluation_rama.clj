@@ -16,11 +16,13 @@
 
 (defn- worker [loader]
   (try
-    (let [{:keys [db-url receipt-directory private-root configs runtime]} ((requiring-resolve loader))]
+    (let [{:keys [db-url receipt-directory private-root configs runtime enriched-dataset]} ((requiring-resolve loader))]
       (fn [receipt-id]
         (try
           (let [receipt (labels/resolve-receipt! db-url receipt-directory receipt-id)]
-            (select-keys (evaluation/run-verified! private-root db-url receipt configs (or runtime {}))
+            (select-keys (if enriched-dataset
+                           (evaluation/run-enriched-verified! private-root db-url receipt enriched-dataset configs (or runtime {}))
+                           (evaluation/run-verified! private-root db-url receipt configs (or runtime {})))
                          [:status :reason :run-id :verified-id :report-hash :export-hash]))
           (catch Throwable _
             {:status :blocked :reason :evaluation-unavailable}))))
@@ -31,6 +33,8 @@
   "Loader is a trusted qualified symbol for a zero-argument worker configuration
    function. Resolve secrets there, never capture them in the serialized module.
    Configuration: :db-url, :receipt-directory, :private-root, :configs, :runtime.
+   Optional :enriched-dataset is trusted archive-verified source input; original
+   receipt and label authority are rechecked through run-enriched-verified!.
    Private store must survive retries on this host. This is not distributed storage."
   [loader]
   (when-not (qualified-symbol? loader)

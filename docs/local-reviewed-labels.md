@@ -76,3 +76,18 @@ clojure -M:test-shadow
 ```
 
 All these demonstrations use synthetic observations and labels. The integration test compares rules, Jev-shaped HTTP and LLM-shaped HTTP on the same exported case, checks duplicate-free replay and rejects labels revoked before or during evaluation. It makes no live provider calls.
+
+### Verified source enrichment
+
+`evaluation/run-enriched-verified!` takes the same arguments as `run-verified!`
+with an enriched dataset inserted after the original receipt. It verifies the
+original receipt against the live DB, permits changes only to each case's
+`:input`, validates the closed source protocol and links left/right source
+references to the original pair evidence. Dataset identity, order, labels,
+review details and grouping remain exactly equal. The trusted caller must verify
+all extracted facts and added context against the archive; schema validation
+alone does not attest factual truth. The original receipt is frozen unchanged.
+
+Verified enrichment uses `verified-shadow/2`. Inspection and replay repeat
+original DB authority and enrichment linkage checks; a revoked or changed review
+blocks reuse. Legacy verified runs and identifiers keep their original path.

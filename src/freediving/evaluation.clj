@@ -5,6 +5,7 @@
             [clojure.java.io :as io]
             [clojure.walk :as walk]
             [freediving.evaluation-data :as data]
+            [freediving.evaluation-protocol :as protocol]
             [freediving.evaluation-providers :as providers])
   (:import [java.nio.file Files Paths LinkOption StandardOpenOption StandardCopyOption]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
@@ -143,6 +144,59 @@
                     :undispatched-case-count undispatched
                     :attempt-count (reduce + (map #(count (:attempts %)) results))}}))))
 
+(defn- native-comparator! [root run-id config cases requests runtime]
+  (let [began (System/nanoTime)]
+    (loop [pending (map-indexed vector requests) batches [] results [] halted-by nil]
+      (if-let [[index request] (first pending)]
+        (let [ids (:case-ids request)
+              key (digest (canonical [run-id (:id config) :batch index]))
+              receipt (when-not halted-by (attempt! root key 1 request runtime))
+              trace-hash (when receipt (put! root receipt))
+              response (:result receipt)
+              batch (cond-> {:batch-index index :case-ids ids :question-ids (:question-ids request)
+                             :dispatch-status (if halted-by :not-dispatched :dispatched)
+                             :request-hash (put! root request) :attempt receipt}
+                      trace-hash (assoc :trace-hash trace-hash))
+              outcomes (mapv
+                        (fn [i id]
+                          (if halted-by
+                            {:case-id id :outcome :error :error :comparator-halted
+                             :dispatch-status :not-dispatched :halted-by-case-id halted-by
+                             :attempts [] :latency-ms nil :cost {:status :not-incurred}}
+                            (merge {:case-id id :batch-index index :request-hash (:request-hash receipt)
+                                    :trace-hash trace-hash :accounting :request-level-only
+                                    :cost {:status :unknown} :latency-ms nil :attempts []
+                                    :model-version (:model-version response)
+                                    :external-outcome (:external-outcome response)
+                                    :companions (into {} (map (fn [kind] [kind (or (get-in response [:answers (str (name kind) "_" i)])
+                                                                                   {:outcome :error :error (:error response)})]) (:companions request)))}
+                                   (or (get-in response [:answers (str "identity_" i)])
+                                       {:outcome :error :error (:error response)}))))
+                        (range) ids)
+              halt? (or (= :unknown (:external-outcome response))
+                        (terminal-error? (assoc config :stop-on-terminal-error? true) response)
+                        (= :response-too-large (:error response)))]
+          (recur (next pending) (conj batches batch) (into results outcomes)
+                 (or halted-by (when halt? (first ids)))))
+        (let [attempts (keep :attempt batches) latencies (keep :latency-ms attempts)
+              dispatched (count attempts) undispatched (count (filter #(= :not-dispatched (:dispatch-status %)) results))
+              measured-usage (keep #(get-in % [:result :usage]) attempts)]
+          {:results results :metrics (data/metrics cases results) :batches batches
+           :dispatch {:evaluated-case-count (- (count results) undispatched) :undispatched-case-count undispatched
+                      :attempt-count dispatched :in-flight-count 0}
+           :request-metrics {:request-count dispatched :planned-request-count (count requests)
+                             :question-count (reduce + (map #(count (:question-ids %)) (filter :attempt batches)))
+                             :batch-sizes (mapv #(count (:case-ids %)) (filter :attempt batches))
+                             :latencies-ms (vec latencies) :summed-latency-ms (when (seq latencies) (reduce + latencies))
+                             :latency-unknown-count (- dispatched (count latencies))
+                             :wall-clock-ms (/ (double (- (System/nanoTime) began)) 1000000.0)
+                             :wall-time-scope :completion-invocation-including-local-overhead
+                             :usage (when (seq measured-usage) (apply merge-with + measured-usage))
+                             :usage-known-request-count (count measured-usage)
+                             :request-error-count (count (filter #(= :error (get-in % [:result :outcome])) attempts))
+                             :request-errors (frequencies (keep #(get-in % [:result :error]) attempts))
+                             :cost (total-cost attempts) :accounting :request-level-only}})))))
+
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
    content identities. Provider runtime is scoped as :providers {config-id options};
@@ -160,16 +214,16 @@
      (when (empty? cases) (fail! "At least one held-out case required"))
      (doseq [c configs]
        (when-not (and (string? (:id c)) (seq (:id c)) (integer? (:max-attempts c)) (<= 1 (:max-attempts c) 3) (integer? (:retry-delay-ms c)) (<= 0 (:retry-delay-ms c) 2000)) (fail! "Invalid provider ID or attempt bound")))
-     (let [samples (mapv #(providers/prepare-request % (first cases)) configs)
+     (let [samples (mapv #(if (:native-batch-size %) (first (providers/prepare-batches % [(first cases)])) (providers/prepare-request % (first cases))) configs)
            response-budget (* (count cases)
                               (reduce + (map (fn [request config]
                                                (* (:max-attempts config)
                                                   (+ 4096 (get-in request [:config :max-response-bytes]))))
                                              samples configs)))]
        (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
-     (let [prepared (mapv (fn [c] (mapv #(providers/prepare-request c %) cases)) configs)
+     (let [prepared (mapv (fn [c] (if (:native-batch-size c) (providers/prepare-batches c cases) (mapv #(providers/prepare-request c %) cases))) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version (if (some :stop-on-terminal-error? configs) "shadow-runner/5" "shadow-runner/4") :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id :stop-on-terminal-error?]) configs)}
+           identity {:schema-version 1 :harness-version (if (some :native-batch-size configs) "shadow-runner/6" (if (some :stop-on-terminal-error? configs) "shadow-runner/5" "shadow-runner/4")) :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id :stop-on-terminal-error?]) configs)}
            identity-text (canonical identity)
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))
@@ -179,7 +233,7 @@
            (put! root identity)
            (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root))
                (let [reports (into {} (map (fn [c requests]
-                                             [(:id c) (comparator! root run-id c cases requests runtime)]) configs prepared))
+                                             [(:id c) ((if (:native-batch-size c) native-comparator! comparator!) root run-id c cases requests runtime)]) configs prepared))
                      report {:schema-version 1 :run-id run-id :dataset-id (:dataset-id dataset) :providers reports}
                      report-hash (put! root report)
                      manifest {:run-id run-id :input-hash run-id :report-hash report-hash}]
@@ -202,37 +256,67 @@
         (assoc manifest :input input :report view :stored-report-hash (:report-hash manifest)
                :report-view :recomputed-unverified-assertions)))))
 
-(defn run-verified!
+(defn- validate-enrichment! [original enriched]
+  (data/validate-dataset! enriched)
+  (let [without-input #(update % :cases (fn [cases] (mapv (fn [c] (dissoc c :input)) cases)))]
+    (when-not (= (without-input original) (without-input enriched))
+      (fail! "Enrichment may change only source input")))
+  (doseq [c (:cases enriched)]
+    (protocol/validate-input! (:input c))
+    (when-not (= 2 (count (:evidence c))) (fail! "Enrichment requires original pair evidence"))
+    (doseq [[side reference] (map vector [:left :right] (:evidence c))]
+      (when-not (some #(= reference (select-keys % (keys reference))) (get-in c [:input side :sources]))
+        (fail! "Enrichment does not link original pair evidence"))))
+  enriched)
+
+(defn- run-verified-internal!
   "Evaluate a receipt only after live authoritative DB verification. Recheck after
    provider work, including replay. Persist immutable, private export and report
    receipts; DB credentials never enter content identities. No-label exports are
    blocked before provider dispatch. Synthetic corpora remain synthetic."
+  [root db-url receipt enriched configs runtime]
+  (let [verify! (requiring-resolve 'freediving.evaluation-labels/verify!)
+        verified (verify! db-url receipt)
+        dataset (if enriched (validate-enrichment! (:dataset verified) enriched) (:dataset verified))
+        cases (filterv #(= :held-out (:split %)) (get-in verified [:dataset :cases]))
+        eligible (filterv :label cases)
+        export-hash (with-store root #(put! % receipt))]
+    (if (empty? eligible)
+      {:status :blocked :reason :no-eligible-reviewed-labels :export-hash export-hash}
+      (let [raw (run! root dataset configs runtime)
+            raw-report (:report (inspect-run root (:run-id raw)))
+            reports (into {} (map (fn [[id report]]
+                                    [id (assoc report :metrics
+                                               (data/metrics-verified db-url receipt (:results report)))])
+                                  (:providers raw-report)))
+            report (cond-> {:schema-version 1 :status :evaluated :export-hash export-hash
+                            :verification-scope :database-snapshot-at-verification
+                            :label-source (:label-source verified) :raw-run raw :providers reports}
+                     enriched (assoc :enrichment-version 1))]
+        (verify! db-url receipt)
+        (with-store root
+          (fn [root]
+            (let [report-hash (put! root report)
+                  id (digest (canonical [(if enriched "verified-shadow/2" "verified-shadow/1") export-hash (:run-id raw)]))
+                  manifest (cond-> {:status :evaluated :verified-id id :export-hash export-hash
+                                    :run-id (:run-id raw) :report-hash report-hash}
+                             enriched (assoc :enrichment-version 1))]
+              (record! root (str id "-verified-manifest") manifest))))))))
+
+(defn run-verified!
+  "Verify original immutable review receipt before and after provider work/replay."
   ([root db-url receipt configs] (run-verified! root db-url receipt configs {}))
   ([root db-url receipt configs runtime]
-   (let [verify! (requiring-resolve 'freediving.evaluation-labels/verify!)
-         verified (verify! db-url receipt)
-         cases (filterv #(= :held-out (:split %)) (get-in verified [:dataset :cases]))
-         eligible (filterv :label cases)
-         export-hash (with-store root #(put! % receipt))]
-     (if (empty? eligible)
-       {:status :blocked :reason :no-eligible-reviewed-labels :export-hash export-hash}
-       (let [raw (run! root (:dataset verified) configs runtime)
-             raw-report (:report (inspect-run root (:run-id raw)))
-             reports (into {} (map (fn [[id report]]
-                                     [id (assoc report :metrics
-                                                (data/metrics-verified db-url receipt (:results report)))])
-                                   (:providers raw-report)))
-             report {:schema-version 1 :status :evaluated :export-hash export-hash
-                     :verification-scope :database-snapshot-at-verification
-                     :label-source (:label-source verified) :raw-run raw :providers reports}]
-         (verify! db-url receipt)
-         (with-store root
-           (fn [root]
-             (let [report-hash (put! root report)
-                   id (digest (canonical ["verified-shadow/1" export-hash (:run-id raw)]))
-                   manifest {:status :evaluated :verified-id id :export-hash export-hash
-                             :run-id (:run-id raw) :report-hash report-hash}]
-               (record! root (str id "-verified-manifest") manifest)))))))))
+   (run-verified-internal! root db-url receipt nil configs runtime)))
+
+(defn run-enriched-verified!
+  "Trusted source enrichment boundary. Only :input may differ from the verified
+  dataset; strict source schema and original pair references are checked. Caller
+  independently verifies every source fact against archive, including added context.
+  Original receipt remains immutable and is reverified before/after every replay."
+  ([root db-url receipt enriched configs] (run-enriched-verified! root db-url receipt enriched configs {}))
+  ([root db-url receipt enriched configs runtime]
+   (run-verified-internal! root db-url receipt enriched configs runtime)))
 
 (defn inspect-verified-run
   "Inspect verified metrics only while their original export still matches the DB.
@@ -248,17 +332,21 @@
         receipt (:export manifest)
         verified ((requiring-resolve 'freediving.evaluation-labels/verify!) db-url receipt)
         raw (inspect-run root (:run-id manifest))
-        expected-id (digest (canonical ["verified-shadow/1" (:export-hash manifest) (:run-id manifest)]))]
+        enriched? (= 1 (:enrichment-version manifest))
+        expected-id (digest (canonical [(if enriched? "verified-shadow/2" "verified-shadow/1") (:export-hash manifest) (:run-id manifest)]))]
     (when-not (and (= verified-id expected-id (:verified-id manifest))
-                   (= (:dataset verified) (get-in raw [:input :dataset])))
+                   (if enriched?
+                     (validate-enrichment! (:dataset verified) (get-in raw [:input :dataset]))
+                     (= (:dataset verified) (get-in raw [:input :dataset]))))
       (fail! "Verified run does not match authoritative export"))
     (let [reports (into {} (map (fn [[id report]]
                                   [id (assoc report :metrics
                                              (data/metrics-verified db-url receipt (:results report)))])
                                 (get-in raw [:report :providers])))
-          expected {:schema-version 1 :status :evaluated :export-hash (:export-hash manifest)
-                    :verification-scope :database-snapshot-at-verification
-                    :label-source (:label-source verified)
-                    :raw-run (select-keys raw [:run-id :input-hash :report-hash]) :providers reports}]
+          expected (cond-> {:schema-version 1 :status :evaluated :export-hash (:export-hash manifest)
+                            :verification-scope :database-snapshot-at-verification
+                            :label-source (:label-source verified)
+                            :raw-run (select-keys raw [:run-id :input-hash :report-hash]) :providers reports}
+                     enriched? (assoc :enrichment-version 1))]
       (when-not (= expected (:report manifest)) (fail! "Verified report differs from authoritative labels and raw results"))
       manifest)))
