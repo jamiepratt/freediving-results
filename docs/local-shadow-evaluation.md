@@ -87,3 +87,40 @@ The companion checkout at commit `fad26a6db5c4d9647c190dc3df587401b9ee5efb` expo
 `freediving.evaluation-node/node-function` takes `result!`, a trusted private dataset resolver, the private store root, configurations and runtime credentials. It returns a function accepting the node handle and a 64-character dataset content reference. The resolver must verify the requested content hash before returning data. Node inputs and results contain opaque references; private dataset bytes stay in the worker. Inject `aor/result!` at graph construction and use persistent same-host private storage across retries.
 
 Executable tests verify this older function contract and repeated-node local persistence using an injected callback. For database-verified evaluation, use the separate optional [local Rama module](local-rama-evaluation.md), which registers the reviewed evaluator and resolves private export receipts through live database verification. The dependency-free shim does not establish that authority. No companion source was changed; production deployment remains a separate checkpoint in issue #1.
+
+## Source-only freediving protocol
+
+Jev configuration can opt into `:identity-protocol :freediving-source-v1` with
+`:diagnostics-version 2`. Legacy configurations keep their exact request and
+adapter identities. The new `shadow-adapters/6` request freezes the protocol
+descriptor, source input, model and effective execution settings before dispatch.
+The immutable descriptor and `question` function live in
+`freediving.evaluation-protocol`; both sequential and native batch questions use
+explicit JSON pointers to the compared records. Question keys identify outputs.
+
+Input schema `freediving-source/1` contains `:left` and `:right`. Each record has
+`:record-id`, `:fields`, `:sources`, `:uncertainties` and `:publisher-identity`.
+Every field listed by `field-keys` is present, with `{:value nil :evidence-ids []}`
+for unknown facts. Known values are original strings with source citations.
+Closed schemas reject extra keys and nested metadata, including owner labels,
+review reasons and post-review identities. Source strings remain untrusted data.
+Schema validation checks provenance structure, not truth: callers independently
+verify facts, source document hashes, record associations and any publisher
+person-identifier uniqueness contract against archived material.
+
+`source-evidence` verifies the exact UTF-8 artifact digest, then extracts exact
+page-local lines from archived EDN `:pages`, or artifact-local lines from plain
+text. Sources retain document/artifact digests, family, observation, page and line
+references. Repeated exports retain their dependence. Event representation never
+becomes nationality. No metadata is invented. Single requests have a hard 24,576
+UTF-8 byte bound including JSON framing and instructions, plus any smaller
+configured request bound. This is conservative byte admission, not exact provider
+token accounting.
+
+Synthetic tests verify preservation, schema boundaries and loopback transport,
+not model classification accuracy. Outcomes remain advisory. Existing48 labels
+and historical results informed the design, so comparisons are exploratory.
+Freeze the protocol before fresh held-out collection; group shared people,
+documents and source families conservatively and report remaining leakage.
+Confidence is not calibrated accuracy. Report false merges, missed matches,
+abstentions and errors with denominators; fewer abstentions alone is not success.

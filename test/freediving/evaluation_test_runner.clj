@@ -1,6 +1,7 @@
 (ns freediving.evaluation-test-runner
   (:require [clojure.test :as t]
             [freediving.evaluation-data-test]
+            [freediving.evaluation-protocol-test]
             [freediving.evaluation-providers-test]
             [freediving.evaluation-test]
             [freediving.evaluation-cli-test]
@@ -8,6 +9,7 @@
 
 (defn -main [& _]
   (let [r (t/run-tests 'freediving.evaluation-data-test
+                       'freediving.evaluation-protocol-test
                        'freediving.evaluation-providers-test
                        'freediving.evaluation-test
                        'freediving.evaluation-cli-test

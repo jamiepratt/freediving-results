@@ -1,7 +1,8 @@
 (ns freediving.evaluation-providers
   "Single-attempt shadow adapters. No result grants merge/publication authority."
   (:require [clojure.data.json :as json]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [freediving.evaluation-protocol :as protocol])
   (:import [java.net URI]
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandler HttpResponse$BodySubscriber]
@@ -13,7 +14,7 @@
 (defn- invalid! [] (throw (ex-info "Invalid provider configuration" {:error :invalid-config})))
 (defn- bounded-int? [x lo hi] (and (integer? x) (<= lo x hi)))
 (def ^:private config-keys #{:provider :id :scope-id :retry-delay-ms :max-attempts :endpoint :model :timeout-ms
-                             :max-response-bytes :max-request-bytes :max-completion-tokens :stop-on-terminal-error? :identifier-policy :stub-outcome :diagnostics-version :output-contract})
+                             :max-response-bytes :max-request-bytes :max-completion-tokens :stop-on-terminal-error? :identifier-policy :stub-outcome :diagnostics-version :output-contract :identity-protocol})
 (def ^:private choices {"match" :match "no_match" :no-match "abstain" :abstain})
 (def ^:private identity-outcome-format
   {:type "json_schema"
@@ -34,6 +35,9 @@
                    (or (nil? (:model config)) (and (valid-text? (:model config)) (<= (count (:model config)) 200)))
                    (or (not (contains? config :diagnostics-version))
                        (and http? (#{1 2} (:diagnostics-version config))))
+                   (or (not (contains? config :identity-protocol))
+                       (and (= :freediving-source-v1 (:identity-protocol config))
+                            (= :jev provider) (= 2 (:diagnostics-version config))))
                    (or (not (contains? config :output-contract))
                        (and (= :identity-outcome-v1 (:output-contract config))
                             (= :llm provider)
@@ -62,25 +66,30 @@
                              (and (= "http" (.getScheme uri)) (#{"localhost" "127.0.0.1" "[::1]"} (.getHost uri)))))
             (invalid!)))
         (catch Exception _ (invalid!))))
+    (when (:identity-protocol config) (protocol/validate-input! (:input case)))
     (let [body (when http?
                  (json/write-str
                   (if (= :jev provider)
                     {:model (:model config) :state (json/write-str (:input case))
-                     :questions {:identity {:type "choice" :instructions instruction
-                                            :criteria {:match "Same person supported by explicit identity evidence"
-                                                       :no_match "Different people supported by explicit contradiction"
-                                                       :abstain "Insufficient or ambiguous identity evidence"}}}}
+                     :questions {:identity (if (:identity-protocol config)
+                                             (protocol/question "/left" "/right")
+                                             {:type "choice" :instructions instruction
+                                              :criteria {:match "Same person supported by explicit identity evidence"
+                                                         :no_match "Different people supported by explicit contradiction"
+                                                         :abstain "Insufficient or ambiguous identity evidence"}})}}
                     (cond-> {:model (:model config) :stream false :response_format {:type "json_object"}
                              :messages [{:role "system" :content (str instruction " Return JSON object with outcome exactly match, no_match, or abstain.")}
                                         {:role "user" :content (json/write-str (:input case))}]}
                       (:output-contract config) (assoc :response_format identity-outcome-format)
                       (:max-completion-tokens config) (assoc :max_completion_tokens (:max-completion-tokens config))))))]
-      (when (and body (> (alength (.getBytes ^String body "UTF-8")) (:max-request-bytes config))) (invalid!))
-      (cond-> {:adapter-version (cond (:output-contract config) "shadow-adapters/5"
+      (when (and body (> (alength (.getBytes ^String body "UTF-8")) (if (:identity-protocol config) (min 24576 (:max-request-bytes config)) (:max-request-bytes config)))) (invalid!))
+      (cond-> {:adapter-version (cond (:identity-protocol config) "shadow-adapters/6"
+                                      (:output-contract config) "shadow-adapters/5"
                                       (= 2 (:diagnostics-version config)) "shadow-adapters/4"
                                       (:diagnostics-version config) "shadow-adapters/3"
                                       (:max-completion-tokens config) "shadow-adapters/2"
                                       :else "shadow-adapters/1") :provider provider :case-id (:case-id case) :config config :input (:input case)}
+        (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
 (defn- base-result [outcome model]
@@ -214,14 +223,16 @@
     (cond-> {:outcome outcome :validation-reasons reasons}
       (empty? reasons) (assoc :confidence confidence :probabilities (into {} (map (fn [[k v]] [(keyword k) v]) probs))))))
 
-(defn- parse-diagnostic-response [provider body token complete-json? exact-output?]
+(defn- parse-diagnostic-response [provider body token complete-json? exact-output? strict-jev?]
   (let [decoded (decode-json body complete-json?) data (:value decoded)]
     (if (or (:invalid? decoded) (not (map? data)))
       (assoc (failure :invalid-response false :known)
              :validation-reasons [(if (:invalid? decoded) :invalid-outer-json :invalid-envelope)])
       (let [metadata (response-metadata data token)
             prediction (if (= provider :llm) (llm-diagnostics data complete-json? exact-output?)
-                           (jev-diagnostics data))
+                           (if (and strict-jev? (not (and (map? (get data "answers")) (= #{"identity"} (set (keys (get data "answers")))))))
+                             {:validation-reasons [:invalid-answer-identifiers]}
+                             (jev-diagnostics data)))
             reasons (into (:validation-reasons prediction) (:validation-reasons metadata))]
         (merge (if (seq reasons) (failure :invalid-response false :known)
                    (base-result (:outcome prediction) (:model-version metadata)))
@@ -247,10 +258,11 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
+                     (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request))
                        (parse-diagnostic-response (:provider request) (.body response) token
-                                                  (boolean (#{"shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request)))
-                                                  (= "shadow-adapters/5" (:adapter-version request)))
+                                                  (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
+                                                  (= "shadow-adapters/5" (:adapter-version request))
+                                                  (= "shadow-adapters/6" (:adapter-version request)))
                        (parse-response (:provider request) (.body response)))
                      (failure (cond (= 429 status) :rate-limited (>= status 500) :provider-unavailable
                                     (<= 300 status 399) :redirect-refused :else :http-error)
