@@ -387,7 +387,8 @@
         usage-reason (cond
                        (not (contains? data "usage")) :missing-usage
                        (or (not (map? usage)) (some #{:invalid-usage} (:validation-reasons metadata))) :invalid-usage)]
-    {:model-version (when-not model-reason model) :usage (:usage metadata)
+    {:model-version (when-not model-reason model)
+     :usage (when (seq (:usage metadata)) (:usage metadata))
      :validation-reasons (vec (keep identity [model-reason usage-reason]))}))
 
 (defn- parse-native-diagnostics [request body token]

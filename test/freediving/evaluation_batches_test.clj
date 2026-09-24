@@ -286,3 +286,22 @@
     (is (= :complete (:outcome result)))
     (is (= 0.7 (get-in result [:answers "identity_0" :confidence])))
     (is (= 0.8 (get-in result [:answers "identity_0" :probabilities :match])))))
+
+(deftest native-usage-accounting-requires-a-measured-counter
+  (doseq [[usage expected known outcome]
+          [[{} nil 0 :match]
+           [{:private-provider-key "private-provider-value"} nil 0 :match]
+           [{:input_tokens "private-provider-value"} nil 0 :error]
+           [{:input_tokens "private-provider-value" :output_tokens 3} {:output_tokens 3} 1 :error]]]
+    (let [dir (runner/root)]
+      (http/with-server
+        (fn [ex] (http/reply! ex 200 (json/write-str (assoc (diagnostic-response (answer "match")) :usage usage))))
+        (fn [url]
+          (let [receipt (evaluation/run! dir (update (dataset) :cases #(vec (take 2 %))) [(assoc (config url) :native-diagnostics-version 1)]
+                                         {:providers {"native" {:bearer-token "fixture-secret"}}})
+                report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])]
+            (is (= outcome (:outcome (first (:results report)))))
+            (is (= expected (get-in report [:batches 0 :attempt :result :usage])))
+            (is (= (if (= :match outcome) :complete :error) (get-in report [:batches 0 :attempt :result :outcome])))
+            (is (= known (get-in report [:request-metrics :usage-known-request-count])))
+            (is (not (re-find #"private-provider-key|private-provider-value" (pr-str report))))))))))

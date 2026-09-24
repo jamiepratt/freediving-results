@@ -206,7 +206,8 @@ usage keys are ignored. Metadata failures invalidate all decisions.
 The official API marks the `usage` object required. Adapters 6/7 tolerated its
 absence or null; `/8` requires an object. Its documented integer counters are
 not individually marked required, so an empty usage object is accepted with
-no measured counters. Existing counter bounds (0 through 1,000,000,000) apply.
+no measured counters. An empty set of valid counters is stored as nil usage and
+does not increment `:usage-known-request-count`. Existing counter bounds (0 through 1,000,000,000) apply.
 This stricter envelope check is versioned; it cannot explain the earlier live
 batch's `:invalid-answer`, whose malformed answer was not retained. That
 historical failure's precise category remains unknown. Offline loopback tests
