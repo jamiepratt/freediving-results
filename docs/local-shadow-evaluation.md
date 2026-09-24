@@ -177,3 +177,61 @@ Provider contracts checked 2026-09-24: [API](https://docs.typesafe.ai/api),
 [parallel questions](https://docs.typesafe.ai/cookbooks/parallel_questions), and
 [confidence](https://docs.typesafe.ai/confidence). Provider limits may change;
 the frozen local admission settings remain part of each request identity.
+
+### Exploratory run, 2026-09-24
+
+The frozen `jev-1.13.0` protocol ran against 48 definitive owner-reviewed pairs
+(29 match, 19 no-match); two unknown decisions remain preserved separately.
+All 437 source references were checked against independent extraction of six
+source PDFs. Missing metadata stayed explicit. Both arms used one HTTP request
+at a time, one attempt, a 15-second deadline and no companion questions.
+Arm A sent one pair per request; B planned two. B shared additional pair records
+in state, so this was also a context change, not a pure execution comparison.
+
+| Measure | A: complete | B: partial, halted |
+| --- | ---: | ---: |
+| Requests / questions | 48 / 48 | 3 of 24 / 6 of 48 |
+| Pairs per request, in frozen order | 48 batches of 1 | First 3 batches of 2 |
+| Match / no-match / abstain | 29 / 10 / 9 | 4 / 0 / 1 |
+| Invalid answers / undispatched pairs | 0 / 0 | 1 / 42 |
+| Decisive / all pairs | 39/48 | 4/48 |
+| Error outcomes / all pairs | 0/48 | 43/48 |
+| False merges / no-match labels | 0/19 | 0/19 |
+| Missed matches / match labels | 0/29 | 0/29 |
+| Rama invocation wall time | 61.009 s | 24.851 s |
+| Request-loop wall time | 39.245 s | 3.952 s |
+| Summed request latency | 37.581 s | 3.214 s |
+| Request latency mean / median / p95 | 782.94 / 768.02 / 879.43 ms | 1071.20 / 1028.03 / 1174.77 ms |
+| Dispatched pairs / Rama wall second | 0.787 | 0.241 |
+| Input / output tokens | 236,323 / 2,092 | 28,526 / 252 |
+| Token-based cost estimate, USD | 0.009925566 | 0.001198092 |
+| Actual billed cost | Unknown | Unknown |
+
+B's third HTTP 200 response contained one invalid answer. Valid siblings were
+retained, and scheduling stopped with 42 pairs undispatched. The rejected field
+is unknown because the invalid raw answer was not retained. B's zero observed
+false merges and missed matches do not establish quality: 43/48 outcomes are
+errors, including undispatched work. Its partial timing cannot establish a
+throughput advantage. Among the five jointly valid pairs, choices agreed, but
+all five probability distributions changed (maximum absolute difference 0.16).
+
+The preserved historical reference is 7 match, 7 no-match and 34 abstain,
+14/48 decisive. A's 39/48 decisive outcomes are descriptive only: existing labels
+and outcomes informed design. There is no unbiased improvement, calibration or
+production-accuracy claim. Local timings were uncontrolled; a brief historical
+replay-copy audit overlapped late B verification. Estimates use the checked
+$0.042 per million input tokens with free output, not billing receipts.
+
+Completed A and partial B replayed with zero provider calls and unchanged private
+stores. Live label authority passed before and after; owner decisions remained
+unchanged. Historical replay from a copy also made zero calls and retained its
+run identity. All 793 original historical files retained hashes, modes and
+modification times. Private receipts retain exact order, requests, configurations
+and paired outcomes; only aggregates appear here. Independent combined validation
+passed 93 tests and 1,401 assertions.
+
+The domain/source acceptance evidence supports [#3](https://github.com/jamiepratt/freediving-results/issues/3).
+The incomplete B benchmark leaves [#4](https://github.com/jamiepratt/freediving-results/issues/4)
+and [#5](https://github.com/jamiepratt/freediving-results/issues/5) open.
+Fresh held-out evaluation is tracked in [#6](https://github.com/jamiepratt/freediving-results/issues/6);
+actual billing evidence remains tracked under [#1](https://github.com/jamiepratt/freediving-results/issues/1).

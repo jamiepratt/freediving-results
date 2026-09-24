@@ -1,6 +1,6 @@
 # Local reviewed-label export
 
-This bridge connects explicit pair decisions to the private shadow evaluator. It implements a local verification boundary for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). No genuine pilot labels have been created. Synthetic decisions and synthetic database demonstrations do not count toward the required owner reviews.
+This bridge connects explicit pair decisions to the private shadow evaluator. It implements a local verification boundary for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). As of 2026-09-24, the genuine pilot has 48 definitive owner-reviewed pairs (29 match, 19 no-match), with two unknown decisions preserved separately. These existing outcomes informed protocol design; they are exploratory, not fresh held-out evidence. Fresh grouped evaluation is tracked in [issue #6](https://github.com/jamiepratt/freediving-results/issues/6). Synthetic decisions and database demonstrations remain separate from genuine owner reviews.
 
 ## Decision semantics
 
