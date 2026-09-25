@@ -73,7 +73,7 @@
                              fragment)
                  (re-matches #"/1/static-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/001/007/001"
                              fragment)
-                 (re-matches #"/1/speed-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/004/007/001"
+                 (re-matches #"/1/speed-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/(?:002|004)/007/001"
                              fragment)))))
     (catch Exception _ false)))
 
