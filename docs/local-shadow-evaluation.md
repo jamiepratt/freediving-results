@@ -625,3 +625,23 @@ bytes, modes and modification times. A live credential/service-token scan found
 no retained secrets. The unchanged adapter passed 84 tests / 1,610 assertions;
 private harness delimiter repair, lint and preflight passed. No identity merges,
 publication, deployment or database mutation occurred.
+
+### Inclusive probability-sum tolerance
+
+For question-local Jev requests, set `:probability-sum-tolerance 0.02` to select
+`shadow-adapters/11`. Probability components must sum to **0.98 through 1.02,
+including both endpoints**. Decimal summation avoids rejecting a boundary due
+to binary floating-point arithmetic. For example, `0.93 / 0.01 / 0.05` is
+accepted unchanged; probabilities are never normalized.
+
+Individual components must still be within [0, 1], contain exactly the expected
+choice keys, and agree with the selected maximum-probability choice. Confidence,
+model, usage, response structure and execution limits retain their validation.
+The option accepts only `0.02` with `freediving-question-local-v1`; omitted
+options preserve adapter `/10` and its historical strict sum validation.
+
+The new option changes the immutable request/run identity without changing the
+wire body, prompt, model or source evidence. Existing stored results and errors
+remain unchanged and replay without HTTP. Synthetic loopback tests cover both
+inclusive endpoints, nearby rejected sums, unchanged probabilities, other
+validation failures, distinct run identities and replay of both versions.

@@ -536,3 +536,75 @@
         (is (= :error (:outcome result)))
         (is (= :match (get-in result [:answers "identity_1" :outcome])))
         (is (= 0.99 (get-in result [:answers "identity_0" :probability-diagnostics :sum])))))))
+
+(deftest question-local-rounded-probabilities-accept-inclusive-two-percent-sums
+  (doseq [[values expected]
+          [[[0.93 0.01 0.05] :match]
+           [[0.93 0.01 0.04] :match]
+           [[0.93 0.04 0.05] :match]
+           [[0.93 0.01 0.039999999] :error]
+           [[0.93 0.04 0.050000001] :error]]]
+    (http/with-server
+      (fn [ex] (http/reply! ex 200 (json/write-str
+                                    (diagnostic-response
+                                     (assoc (answer "match") :probabilities
+                                            (zipmap ["match" "no_match" "abstain"] values))))))
+      (fn [url]
+        (let [cfg (assoc (local-config url 2) :probability-sum-tolerance 0.02)
+              prepared (first (p/prepare-batches cfg (cases)))
+              result (p/execute! prepared {:bearer-token "fixture-secret"})
+              prediction (get-in result [:answers "identity_0"])]
+          (is (= "shadow-adapters/11" (:adapter-version prepared)))
+          (is (= (:body (first (p/prepare-batches (dissoc cfg :probability-sum-tolerance) (cases)))) (:body prepared)))
+          (is (= expected (:outcome prediction)) (pr-str values))
+          (if (= :match expected)
+            (is (= (zipmap [:match :no_match :abstain] values) (:probabilities prediction)))
+            (do (is (= [:invalid-probability-sum] (:validation-reasons prediction)))
+                (is (= 0.02 (get-in prediction [:probability-diagnostics :tolerance])))
+                (is (= :less-than-or-equal (get-in prediction [:probability-diagnostics :comparison]))))))))))
+
+(deftest rounded-sum-contract-preserves-other-validation-and-rejects-unsupported-configs
+  (doseq [cfg [(assoc (local-config "https://example.com" 2) :probability-sum-tolerance 0.03)
+               (assoc (local-config "https://example.com" 2) :probability-sum-tolerance nil)
+               (assoc (config "https://example.com") :probability-sum-tolerance 0.02)]]
+    (is (thrown? Exception (p/prepare-batches cfg (cases)))))
+  (doseq [[bad reason]
+          [[(assoc (answer "match") :probabilities {"match" 1.01 "no_match" 0 "abstain" 0}) :invalid-probability-range]
+           [(assoc (answer "match") :probabilities {"match" 0.01 "no_match" 0.93 "abstain" 0.05}) :choice-probability-inconsistency]
+           [(assoc (answer "match") :probabilities {"match" 0.99}) :invalid-probability-keys]
+           [(assoc (answer "match") :confidence 1.01) :invalid-confidence]]]
+    (http/with-server
+      (fn [ex] (http/reply! ex 200 (json/write-str (diagnostic-response bad))))
+      (fn [url]
+        (let [r (p/execute! (first (p/prepare-batches
+                                    (assoc (local-config url 2) :probability-sum-tolerance 0.02) (cases)))
+                            {:bearer-token "fixture-secret"})]
+          (is (= [reason] (get-in r [:answers "identity_0" :validation-reasons])))
+          (is (= :no-match (get-in r [:answers "identity_1" :outcome]))))))))
+
+(deftest rounded-sum-runs-have-distinct-identities-and-replay-without-calls
+  (let [calls (atom 0) dir (runner/root)]
+    (http/with-server
+      (fn [ex]
+        (swap! calls inc)
+        (let [body (json/read-str (slurp (.getRequestBody ex)))]
+          (http/reply! ex 200 (json/write-str
+                               {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                :answers (into {} (map (fn [id] [id (assoc (answer "match") :probabilities
+                                                                           {"match" 0.93 "no_match" 0.01 "abstain" 0.05})])
+                                                       (keys (get body "questions"))))}))))
+      (fn [url]
+        (let [old [(local-config url 2)]
+              new [(assoc (first old) :probability-sum-tolerance 0.02)]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              before (evaluation/run! dir (dataset) old runtime)
+              after (evaluation/run! dir (dataset) new runtime)]
+          (is (not= (:run-id before) (:run-id after)))
+          (is (= [:error :error :error]
+                 (mapv :outcome (get-in (evaluation/inspect-run dir (:run-id before)) [:report :providers "native" :results]))))
+          (is (= [:match :match :match]
+                 (mapv :outcome (get-in (evaluation/inspect-run dir (:run-id after)) [:report :providers "native" :results]))))
+          (is (= 3 @calls))
+          (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
+            (is (= before (evaluation/run! dir (dataset) old runtime)))
+            (is (= after (evaluation/run! dir (dataset) new runtime)))))))))

@@ -92,7 +92,7 @@
         (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
-(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version])
+(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version :probability-sum-tolerance])
 (def ^:private companion-instructions
   {:name-variation "Assess whether plausible name ordering, transliteration, omitted components or transcription variation explains the names."
    :contradiction "Assess whether reliable source evidence substantively contradicts these being the same person."
@@ -106,12 +106,14 @@
   [config cases]
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
         local? (= :freediving-question-local-v1 (:identity-protocol config))
+        rounded? (contains? config :probability-sum-tolerance)
         base-config (cond-> (apply dissoc config batch-option-keys)
                       local? (assoc :identity-protocol :freediving-source-v1))]
     (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1} (:identity-protocol config))
                    (or (not local?) (and (= "jev-1.13.0" (:model config))
                                          (= 2 (:native-diagnostics-version config))
                                          (#{1 2} size) (empty? companions)))
+                   (or (not rounded?) (and local? (= 0.02 (:probability-sum-tolerance config))))
                    (or (not (contains? config :native-diagnostics-version)) (#{1 2} (:native-diagnostics-version config)))
                    (bounded-int? size 1 8) (= 1 (get config :max-attempts 1))
                    (vector? cases) (seq cases) (= (count cases) (count (set (map :case-id cases))))
@@ -149,7 +151,7 @@
          (when (or (> (count questions) 32)
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
-         {:adapter-version (if local? "shadow-adapters/10" (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7")) :provider :jev :config normalized
+         {:adapter-version (if local? (if rounded? "shadow-adapters/11" "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7")) :provider :jev :config normalized
           :protocol (if local? protocol/question-local-descriptor protocol/descriptor) :body body
           :case-ids (mapv :case-id members)
           :evidence (mapv #(select-keys % [:case-id :evidence]) members)
@@ -321,16 +323,24 @@
                 :else x))]
       (normalize value))))
 
-(defn- strict-choice [answer allowed]
-  (let [choice (get answer "choice") probs (get answer "probabilities")]
-    (if (and (map? answer) (= "choice" (get answer "type")) (contains? allowed choice)
-             (probability? (get answer "confidence"))
-             (map? probs) (= allowed (set (keys probs))) (every? probability? (vals probs))
-             (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)
-             (= (get probs choice) (apply max (vals probs))))
-      {:outcome (get choices choice (keyword choice)) :confidence (get answer "confidence")
-       :probabilities (into {} (map (fn [[k v]] [(keyword k) v]) probs))}
-      {:outcome :error :error (if (nil? answer) :missing-answer :invalid-answer)})))
+(defn- valid-probability-sum? [probs rounded?]
+  (if rounded?
+    ;; Sum decoded decimal components exactly so 0.98 and 1.02 are inclusive.
+    (<= 0.98M (reduce + (map bigdec (vals probs))) 1.02M)
+    (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)))
+
+(defn- strict-choice
+  ([answer allowed] (strict-choice answer allowed false))
+  ([answer allowed rounded?]
+   (let [choice (get answer "choice") probs (get answer "probabilities")]
+     (if (and (map? answer) (= "choice" (get answer "type")) (contains? allowed choice)
+              (probability? (get answer "confidence"))
+              (map? probs) (= allowed (set (keys probs))) (every? probability? (vals probs))
+              (valid-probability-sum? probs rounded?)
+              (= (get probs choice) (apply max (vals probs))))
+       {:outcome (get choices choice (keyword choice)) :confidence (get answer "confidence")
+        :probabilities (into {} (map (fn [[k v]] [(keyword k) v]) probs))}
+       {:outcome :error :error (if (nil? answer) :missing-answer :invalid-answer)}))))
 
 (defn- parse-strict-jev [request body token]
   (try
@@ -361,7 +371,7 @@
     (catch Exception _ (failure :invalid-response false :known))
     (catch StackOverflowError _ (failure :invalid-response false :known))))
 
-(defn- native-choice-diagnostics [answer allowed present? numerical?]
+(defn- native-choice-diagnostics [answer allowed present? numerical? rounded?]
   ;; Report the first failed check. Version 2 adds only validated, finite
   ;; probabilities under fixed choice keys after every structural/range check.
   (let [choice (get answer "choice") probs (get answer "probabilities")
@@ -377,7 +387,7 @@
                  (not= allowed (set (keys probs))) :invalid-probability-keys
                  (not (every? number? (vals probs))) :invalid-probability-type
                  (not (every? probability? (vals probs))) :invalid-probability-range
-                 (not (< (Math/abs (- 1.0 (reduce + (vals probs)))) 0.00001)) :invalid-probability-sum
+                 (not (valid-probability-sum? probs rounded?)) :invalid-probability-sum
                  (not= (get probs choice) (apply max (vals probs))) :choice-probability-inconsistency)]
     (if reason
       (cond-> {:outcome :error :error (if (= :missing-answer reason) :missing-answer :invalid-answer)
@@ -387,8 +397,9 @@
                {:values (into (sorted-map) (map (fn [[k v]] [(keyword k) v]) probs))
                 :count (count probs) :sum (reduce + (vals probs))
                 :absolute-deviation (Math/abs (- 1.0 (reduce + (vals probs))))
-                :tolerance 0.00001 :comparison :strict-less-than :rounding-cause :unestablished}))
-      (strict-choice answer allowed))))
+                :tolerance (if rounded? 0.02 0.00001)
+                :comparison (if rounded? :less-than-or-equal :strict-less-than) :rounding-cause :unestablished}))
+      (strict-choice answer allowed rounded?))))
 
 (defn- native-metadata [request data token]
   (let [metadata (response-metadata data token)
@@ -425,7 +436,8 @@
                                                                            #{"match" "no_match" "abstain"}
                                                                            #{"yes" "no" "unknown"})
                                                                          (and (map? answers) (contains? answers id))
-                                                                         (#{"shadow-adapters/9" "shadow-adapters/10"} (:adapter-version request))))]) ids))
+                                                                         (#{"shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11"} (:adapter-version request))
+                                                                         (= "shadow-adapters/11" (:adapter-version request))))]) ids))
             reasons (cond-> (:validation-reasons metadata)
                       (not (contains? data "answers")) (conj :missing-answers)
                       (and (contains? data "answers") (not (map? answers))) (conj :invalid-answers-type)
@@ -454,8 +466,8 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10"} (:adapter-version request))
-                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11"} (:adapter-version request))
+                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
                        (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
                          (parse-diagnostic-response (:provider request) (.body response) token
                                                     (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
