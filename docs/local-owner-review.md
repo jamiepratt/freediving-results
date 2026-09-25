@@ -26,7 +26,7 @@ Startup refuses elevated/owning database roles, original-record write privileges
 
 ## Review flow
 
-Browse or filter cases, then compare source tokens, parsed values and current approved values. The original values never change. Candidate signals are suggestions, not proof of identity or independent corroboration. Event representation is not citizenship. Evidence references show exact extraction page/line text and source/version identifiers. The text demo does not contain PDFs. The separate real-source viewer renders registered PDF pages; extraction line coordinates still do not provide PDF geometry.
+Browse or filter cases, then compare source tokens, parsed values and current approved values. The original values never change. Candidate signals are suggestions, not proof of identity or independent corroboration. Event representation is not citizenship. Evidence references show exact PDF page/line or HTML table/row coordinates and source/version identifiers. The text demo does not contain PDFs. The separate source viewer renders registered PDF pages or shows verified HTML context and cells as inert text; extraction line coordinates still do not provide PDF geometry.
 
 Prepare a reasoned proposal using a supported scalar field or explicit identity outcome. An identity match references a selected registered observation and its evidence. Unknown and no-match remain distinct. Needs-more-evidence leaves a case unreviewed, or can be the reason for an explicit rejection. A proposal changes nothing until approved. Approve, reject and reverse are separate actions retained in the private audit.
 

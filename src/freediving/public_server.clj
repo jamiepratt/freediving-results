@@ -29,9 +29,9 @@
                          "SELECT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user))"
                          "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=current_database() AND pg_has_role(current_user,datdba,'MEMBER'))"
                          "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' AND (pg_has_role(current_user,nspowner,'MEMBER') OR has_schema_privilege(current_user,oid,'CREATE')))"
-                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR (c.oid <> 'freediving.public_results'::regclass AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) OR has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))"
+                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR (c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) OR has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))"
                          "SELECT has_database_privilege(current_user,current_database(),'CREATE')"
-                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND ((c.oid <> 'freediving.public_results'::regclass AND has_any_column_privilege(current_user,c.oid,'SELECT')) OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES')))"
+                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND ((c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND has_any_column_privilege(current_user,c.oid,'SELECT')) OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES')))"
                          "SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE'))"
                          "SELECT NOT has_table_privilege(current_user,'freediving.public_results','SELECT')"]))
       (fail! 403))))
@@ -147,7 +147,8 @@
       (do (when (some? raw) (fail! 400))
           (when-not (= [url] (vec origin)) (fail! 403))
           (let [r (correction-body! e)] (send (corrections/submit! submission-database-url r (client-key e gateway-secret)))))
-      (= path "/api/results") (let [p (params raw)] (send (listing (public/results database-url) p demo?)))
+      (= path "/api/results") (let [p (params raw) snapshot (public/listing-snapshot database-url)]
+                                (send (assoc-in (listing (:results snapshot) p demo?) [:coverage :events] (:events snapshot))))
       (re-matches #"/api/(results|athletes)/[0-9a-f]{64}" path)
       (do (when (seq raw) (fail! 400))
           (let [[_ kind id] (re-matches #"/api/(results|athletes)/([0-9a-f]{64})" path)

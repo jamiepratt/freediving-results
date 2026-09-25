@@ -2,7 +2,9 @@
   "Append-only local owner review. DB reviewer credentials are the authority; actor is audit text."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [freediving.aida-html :as html]
+            [freediving.html-evidence :as html-evidence])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -97,20 +99,30 @@
       (and (= #{:outcome :identity-id} (set (keys v))) (= :matched (:outcome v)) (nonblank? (:identity-id v)))))
 (def reference-keys #{:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :page :line})
 (defn- page-lines [o]
-  (let [a (edn/read-string (String. ^bytes (:artifact_bytes o) "UTF-8"))]
-    (set (for [page (:pages a) line (:lines page)] {:page (:page page) :line (:line line)}))))
+  (let [bytes (:artifact_bytes o)
+        a (edn/read-string (String. ^bytes bytes "UTF-8"))]
+    (if (html-evidence/html? a)
+      (let [payload (edn/read-string (:payload_edn o))
+            context (html-evidence/bound-context! a payload (:ordinal o) (:source_sha256 o))]
+        (when-not (and (= (:artifact_sha256 o) (html-evidence/sha256 bytes))
+                       (= (:job_id o) (:job-id a) (html/digest (select-keys a html/identity-keys)))
+                       (= (:candidate_id o) (html/digest [(:source_sha256 o) [(:coordinates context)]])))
+          (fail! "HTML observation envelope mismatch"))
+        #{(:coordinates context)})
+      (set (for [page (:pages a) line (:lines page)] {:page (:page page) :line (:line line)})))))
 (defn- registered-reference! [c ref]
-  (when-not (and (map? ref) (= reference-keys (set (keys ref)))
+  (when-not (and (map? ref) (or (= reference-keys (set (keys ref)))
+                                (= (into (disj reference-keys :page :line) [:table :row]) (set (keys ref))))
                  (every? nonblank? ((juxt :job-id :candidate-id :source-sha256 :artifact-sha256) ref))
-                 (nat-int? (:ordinal ref)) (every? pos-int? ((juxt :page :line) ref)))
+                 (nat-int? (:ordinal ref)) (every? pos-int? (if (contains? ref :table) ((juxt :table :row) ref) ((juxt :page :line) ref))))
     (fail! "Invalid registered evidence reference"))
   (let [o (target c ref) payload (edn/read-string (:payload_edn o))
         pages (set (conj (mapv :page (:source-lines payload)) (get-in payload [:coordinates :page])))]
     (when-not (and (= (:candidate-id ref) (:candidate_id o))
                    (= (:source-sha256 ref) (:source_sha256 o))
                    (= (:artifact-sha256 ref) (:artifact_sha256 o))
-                   (contains? pages (:page ref))
-                   (contains? (page-lines o) (select-keys ref [:page :line])))
+                   (or (contains? ref :table) (contains? pages (:page ref)))
+                   (contains? (page-lines o) (select-keys ref (if (contains? ref :table) [:table :row] [:page :line]))))
       (fail! "Registered evidence provenance or coordinates mismatch"))
     o))
 (defn- validate-proposal! [c p s]
@@ -120,7 +132,7 @@
     (when-not (= "result-row" (:kind o)) (fail! "Review target must be a result-row"))
     (when-not (and (vector? (:evidence p)) (seq (:evidence p))) (fail! "Invalid evidence references"))
     (doseq [ref (:evidence p)]
-      (if (and (map? ref) (= #{:page :line} (set (keys ref))))
+      (if (and (map? ref) (#{#{:page :line} #{:table :row}} (set (keys ref))))
         (when-not (contains? refs ref) (fail! "Invalid evidence references"))
         (registered-reference! c ref)))
     (when (and (= f :identity) (= :matched (get-in p [:after :outcome]))
@@ -159,6 +171,8 @@
   (transaction url
                (fn [c]
                  (audit! p) (lock! c p)
+                 (page-lines (target c p))
+                 (doseq [ref (:evidence p) :when (contains? ref :job-id)] (registered-reference! c ref))
                  (or (existing c "review_proposals" (:id p) p)
                      (let [s (snapshot c p) _ (validate-proposal! c p s) o (target c p)
                            record (assoc p :action :propose :request p
@@ -189,6 +203,7 @@
                        _ (when-not (= (select-keys raw [:id :job-id :ordinal]) (assoc t :id (:id row)))
                            (fail! "Proposal or event envelope mismatch"))]
                    (lock! c t)
+                   (page-lines (target c t))
                    (or (existing c "review_decisions" (:id request) request)
                        (let [s (snapshot c t) subject (body row) ds (decisions c t)
                              _ (when-not (= (:base-revision request) (:revision s)) (fail! "Stale base revision"))

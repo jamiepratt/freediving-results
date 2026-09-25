@@ -163,3 +163,160 @@
   (let [dir (workspace) file (str dir "/manifest.edn")]
     (spit file (str (pr-str manifest) " :freediving.archive/eof {:extra true}"))
     (is (thrown? clojure.lang.ExceptionInfo (archive/read-manifest file)))))
+
+;; Synthetic acquisition context, never copied from a real athlete table.
+(deftest structured-provenance-is-preserved-and-order-independent
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        provenance {:publisher-url "https://example.org/"
+                    :redirect-chain ["https://example.org/results.pdf"]}
+        contextual (assoc manifest :provenance provenance)]
+    (spit source "abc")
+    (let [receipt (archive/register! root source contextual)]
+      (is (= receipt (archive/register! root source
+                                        (assoc contextual :provenance (into (sorted-map) provenance)))))
+      (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest)))))))))
+
+(deftest browser-context-is-bound-to-verified-retained-evidence
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        evidence (archive/retain-evidence! root (.getBytes "synthetic rendered DOM" "UTF-8"))
+        browser {:selected-date "2025-06-28" :filters {} :representation :rendered-dom
+                 :rendered-sha256 (:sha256 evidence)}
+        contextual (assoc manifest :provenance
+                          {:publisher-url "https://example.org/"
+                           :redirect-chain [(:final-url manifest)]
+                           :browser-state browser})]
+    (spit source "abc")
+    (let [first-receipt (archive/register! root source contextual)
+          different-date (assoc-in contextual [:provenance :browser-state :selected-date] "2025-07-02")]
+      (is (= first-receipt (archive/register! root source contextual)))
+      (is (not= (:acquisition-id first-receipt)
+                (:acquisition-id (archive/register! root source different-date))))
+      (is (= 2 (count (:acquisitions (archive/inspect root (:sha256 manifest)))))))
+    (spit (:path evidence) "tampered DOM")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SHA-256 mismatch"
+                          (archive/inspect root (:sha256 manifest))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SHA-256 mismatch"
+                          (archive/register! root source contextual)))))
+
+(deftest official-timing-route-context-is-preserved
+  (doseq [url ["https://results-ws.microplustimingservices.com/CMAS/Results/#/2/schedule-bydate"
+               "https://cmas.microplustimingservices.com/#/competition-schedule/3"
+               "https://cmas.microplustimingservices.com/#/competition-schedule/30"]]
+    (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+          contextual (assoc manifest :final-url url :provenance
+                            {:publisher-url "https://www.cmas.org/"
+                             :redirect-chain ["https://www.cmas.org/document/download.html" url]})]
+      (spit source "abc")
+      (archive/register! root source contextual)
+      (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest)))))))))
+
+(deftest unsafe-or-unsupported-provenance-is-rejected
+  (let [provenance {:publisher-url "https://example.org/" :redirect-chain [(:final-url manifest)]}
+        browser {:selected-date "2025-06-28" :filters {} :representation :rendered-dom
+                 :rendered-sha256 (:sha256 manifest)}]
+    (doseq [bad [(assoc provenance :secret "credential")
+                 (assoc provenance :publisher-url "https://user:password@example.org/")
+                 (assoc provenance :redirect-chain [])
+                 (assoc provenance :redirect-chain ["https://example.org/other"])
+                 (assoc provenance :redirect-chain ["https://example.org/?token=secret" (:final-url manifest)])
+                 (assoc provenance :browser-state (assoc browser :cookies "secret"))
+                 (assoc provenance :browser-state (assoc browser :selected-date "2025-02-30"))
+                 (assoc provenance :browser-state (assoc browser :filters {:session "secret"}))
+                 (assoc provenance :browser-state (assoc browser :filters {:discipline "secret"}))
+                 (assoc provenance :browser-state (assoc browser :representation :response-html))
+                 (assoc provenance :browser-state (assoc browser :rendered-sha256 "missing"))
+                 nil]]
+      (let [dir (workspace) source (str dir "/source")]
+        (spit source "abc")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                              (archive/register! (str dir "/archive") source (assoc manifest :provenance bad))))))
+    (doseq [url ["https://cmas.microplustimingservices.com/#/competition-schedule/3?token=secret"
+                 "https://cmas.microplustimingservices.com/?token=secret#/competition-schedule/3"
+                 "https://cmas.microplustimingservices.com/#/competition-schedule/secret"
+                 "https://cmas.microplustimingservices.com:8443/#/competition-schedule/3"
+                 "https://cmas.microplustimingservices.com.evil.org/#/competition-schedule/3"
+                 "https://cmas.microplustimingservices.com/other#/competition-schedule/3"
+                 "http://cmas.microplustimingservices.com/#/competition-schedule/3"
+                 "https://results-ws.microplustimingservices.com/CMAS/Results/#/2/schedule-bydate/secret"]]
+      (let [dir (workspace) source (str dir "/source")]
+        (spit source "abc")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                              (archive/register! (str dir "/archive") source (assoc manifest :final-url url))))))))
+
+(deftest missing-browser-evidence-and-context-tampering-are-rejected
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        contextual (assoc manifest :provenance
+                          {:publisher-url "https://example.org/"
+                           :redirect-chain [(:final-url manifest)]
+                           :browser-state {:selected-date "2025-06-28" :filters {}
+                                           :representation :rendered-dom
+                                           :rendered-sha256 (:sha256 manifest)}})]
+    (spit source "abc")
+    (is (thrown? clojure.lang.ExceptionInfo (archive/register! root source contextual)))
+    (archive/retain-evidence! root (.getBytes "abc" "UTF-8"))
+    (let [receipt (archive/register! root source contextual)
+          record (str root "/acquisitions/" (:acquisition-id receipt) ".edn")]
+      (spit record (pr-str (assoc-in contextual [:provenance :browser-state :selected-date] "2025-07-02")))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"identity mismatch"
+                            (archive/inspect root (:sha256 manifest)))))))
+
+(deftest changed-source-retains-both-versions-and-original-manifest-identity
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        changed (assoc manifest :sha256 "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34")
+        old-id (.formatHex (java.util.HexFormat/of)
+                           (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                    (.getBytes (pr-str (into (sorted-map) manifest)) "UTF-8")))]
+    (spit source "abc")
+    (is (= old-id (:acquisition-id (archive/register! root source manifest))))
+    (spit source "def")
+    (archive/register! root source changed)
+    (is (= "abc" (slurp (:artifact-path (archive/inspect root (:sha256 manifest))))))
+    (is (= "def" (slurp (:artifact-path (archive/inspect root (:sha256 changed))))))
+    (is (= :skipped (:status (archive/register! root source changed {:report-status true}))))))
+
+(deftest observed-aida-session-links-preserve-context
+  (doseq [url ["https://www.aidainternational.org/StartList/4350#start"
+               "https://www.aidainternational.org/StartList/4350?day_index=3"
+               "https://www.aidainternational.org/StartList/4350?day_index=12"]]
+    (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+          contextual (assoc manifest :discovery-url url :final-url url :provenance
+                            {:publisher-url "https://example.org/" :redirect-chain [url]})]
+      (spit source "abc")
+      (let [receipt (archive/register! root source contextual)]
+        (is (= receipt (archive/register! root source contextual)))
+        (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest))))))))))
+
+(deftest observed-cmas-result-link-preserves-context
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        url "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/result"
+        contextual (assoc manifest :final-url url :provenance
+                          {:publisher-url "https://www.cmas.org/" :redirect-chain [url]})]
+    (spit source "abc")
+    (let [receipt (archive/register! root source contextual)]
+      (is (= receipt (archive/register! root source contextual)))
+      (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest)))))))))
+
+(deftest session-and-result-route-allowlists-reject-unobserved-context
+  (doseq [url (concat
+               (map #(str "https://www.aidainternational.org/StartList/4350" %)
+                    ["?day_index=3&token=secret" "?day_index=3&day_index=4"
+                     "?%64ay_index=3" "?day_index=%33" "?day_index=-3"
+                     "?day_index=3#start" "?day_index=3;token=secret"
+                     "?day_index=" "?token=3" "#secret" "#%73tart"])
+               ["https://www.aidainternational.org:8443/StartList/4350?day_index=3"
+                "http://www.aidainternational.org/StartList/4350?day_index=3"
+                "https://www.aidainternational.org.evil.org/StartList/4350?day_index=3"
+                "https://user:secret@www.aidainternational.org/StartList/4350?day_index=3"
+                "https://www.aidainternational.org/EventPage/4350?day_index=3"
+                "https://www.aidainternational.org/StartList/%34%33%35%30?day_index=3"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/4/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/OTHER/30/110/655/588/3559/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/token/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/result?token=secret"
+                "https://cmas.microplustimingservices.com/?token=secret#/event-detail/FRD/30/110/655/588/3559/result"])]
+    (let [dir (workspace) source (str dir "/source")]
+      (spit source "abc")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                            (archive/register! (str dir "/archive") source (assoc manifest :final-url url)))
+          url))))

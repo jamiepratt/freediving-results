@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [freediving.archive :as archive]
+            [freediving.extraction :as extraction]
             [freediving.aida-html :as html])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
@@ -125,7 +126,11 @@
       (let [source (archive/inspect root (:source-sha256 a)) evidence (set (archive/extraction-evidence root))]
         (when-not (every? (set (:acquisitions source)) (:acquisitions a)) (fail! "Acquisition provenance mismatch"))
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
-      {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a) (validate-pages! a)) :bytes bytes :hash h})))
+      {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a)
+                     (cond-> (validate-pages! a)
+                       (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
+                       (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
+                       (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 4 (:schema-version artifact))
     (let [p (select-keys (:coordinates candidate) [:table :row])]
@@ -136,7 +141,7 @@
       (or (when (seq (:source-lines candidate)) (mapv #(select-keys % [:page :line]) (:source-lines candidate))) [p]))))
 (defn- classification [a candidate]
   (cond
-    (and (= 3 (:schema-version a)) (#{"cmas-athens-pool/4" "cmas-athens-pool/5" "cmas-athens-pool/6"} (:parser-version a))
+    (and (= 3 (:schema-version a)) (#{"cmas-athens-pool/4" "cmas-athens-pool/5" "cmas-athens-pool/6" "cmas-athens-pool/7"} (:parser-version a))
          (= "fi" (some-> candidate :raw :line str/trim)) (nil? (get-in candidate [:raw :fields]))
          (nil? (:parsed candidate)) (= :unparsed (:parse-status candidate)))
     ["fragment" "athens-detached-fi-token"]

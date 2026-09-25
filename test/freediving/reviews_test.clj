@@ -2,8 +2,12 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
+            [freediving.aida-html :as html]
+            [freediving.html-evidence :as html-evidence]
+            [freediving.aida-html-test :as html-fixture]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
+            [freediving.extraction-test :as extraction-fixture]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.candidates :as candidates]))
@@ -167,10 +171,11 @@
   ([transform]
    (let [{:keys [root artifact]} (fixture/synthetic 1 "review-cross-source/1")
          source (str (.getParent (java.io.File. root)) "/cross-source")
-         _ (spit source "distinct synthetic source")
+         pdf (extraction-fixture/synthetic-pdf "BT /F1 12 Tf 40 750 Td (Distinct synthetic source) Tj ET")
+         _ (spit source pdf :encoding "UTF-8")
          hash (.formatHex (java.util.HexFormat/of)
                           (.digest (java.security.MessageDigest/getInstance "SHA-256")
-                                   (.getBytes "distinct synthetic source" "UTF-8")))
+                                   (.getBytes pdf "UTF-8")))
          _ (archive/register! root source (assoc archive-fixture/manifest :sha256 hash))
          artifact (assoc artifact :source-sha256 hash
                          :acquisitions (:acquisitions (archive/inspect root hash)))
@@ -280,3 +285,38 @@
     (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app t))))
     (is (= [reference] (:evidence (first (reviews/history fixture/app t)))))
     (is (= corpus (candidates/load-corpus fixture/app {})))))
+
+(deftest html-review-references-bind-exact-retained-row
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        target {:job-id job :ordinal 0}]
+    (observations/import! fixture/app root job)
+    (let [p (assoc (proposal target "html") :evidence [{:table 1 :row 2}])]
+      (is (= :propose (:action (reviews/propose! fixture/app p))))
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :id "wrong-row" :evidence [{:table 1 :row 1}]))))
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :id "pdf" :evidence [{:page 1 :line 1}]))))
+      (reviews/decide! reviewer {:id "approve-html" :proposal-id "html" :action :approve :base-revision 0 :actor "owner" :reason "Explicit review"})
+      (is (= :matched (get-in (reviews/effective reviewer target) [:identity :outcome])))
+      (reviews/decide! reviewer {:id "reverse-html" :event-id "approve-html" :action :reverse :base-revision 1 :actor "owner" :reason "Undo"})
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target)))))))
+(deftest html-registered-identity-target-rejects-wrong-source-row-and-envelope
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        _ (observations/import! fixture/app root job)
+        inspection (observations/inspect fixture/app job)
+        ref {:job-id job :ordinal 0 :candidate-id (:candidate_id (first (:observations inspection)))
+             :source-sha256 hash :artifact-sha256 (html-evidence/sha256 (:artifact-bytes inspection))
+             :table 1 :row 2}
+        t (sample) p (assoc (proposal t "html-anchor") :identity-target ref :evidence [ref]
+                            :after {:outcome :matched :identity-id (str "local-observation:" job ":0")})]
+    (doseq [bad [(assoc ref :row 1) (assoc ref :table 2) (assoc ref :ordinal 1)
+                 (assoc ref :candidate-id "forged") (assoc ref :source-sha256 "forged")
+                 (assoc ref :artifact-sha256 "forged")]]
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :evidence [bad] :identity-target bad)))))
+    (reviews/propose! fixture/app p)
+    (is (thrown? Exception (reviews/decide! fixture/app {:id "forbidden" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Not authorized"})))
+    (reviews/decide! reviewer {:id "approved-html-anchor" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Explicit review"})
+    (is (= (:after p) (:identity (reviews/effective reviewer t))))))

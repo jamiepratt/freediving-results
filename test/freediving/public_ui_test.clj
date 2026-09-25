@@ -5,7 +5,7 @@
   (let [r (shell/sh "node" "-e"
                     "const a=require('node:assert/strict'),ui=require('./resources/public.js');
      a.equal(ui.searchURL({q:'A & B',discipline:'STA',page:2}),'/api/results?q=A+%26+B&discipline=STA&page=2&limit=10');
-     a.deepEqual(ui.performance({'final-depth':32}),{label:'Final depth',value:'32'});a.deepEqual(ui.performance({'final-time':{raw:'01:02.30'}}),{label:'Final time',value:'01:02.30'});a.equal(ui.display(null),'Not recorded');a.equal(ui.display({raw:'01:02.30',seconds:62.3}),'01:02.30');
+     a.deepEqual(ui.performance({'final-depth':32}),{label:'Final depth',value:'32'});a.deepEqual(ui.performance({'final-time':{raw:'01:02.30'}}),{label:'Final time',value:'01:02.30'});a.equal(ui.positionLabel({table:2,row:4}),'Source table 2, row 4');a.equal(ui.positionLabel({page:1,line:3}),'Source page 1, line 3');a.equal(ui.display(null),'Not recorded');a.equal(ui.display({raw:'01:02.30',seconds:62.3}),'01:02.30');
      a.equal(ui.display({minutes:1,seconds:2}),'minutes: 1 · seconds: 2');
      a.deepEqual(ui.comparison({original:{performance:12},effective:{performance:13},'raw-values':{performance:'012'}}),[['performance','012','12','13']]);
      a.equal(ui.internalLink('results','a'.repeat(64)),'/results/'+ 'a'.repeat(64));a.equal(ui.internalLink('results','javascript:bad'),null);
@@ -51,11 +51,12 @@ const events={};global.window={addEventListener:(k,v)=>events[k]=v};
 global.location={pathname:'/results/'+ 'a'.repeat(64),search:'',origin:'http://localhost'};
 global.history={pushState:()=>{throw Error('must not navigate')}};
 let post=null;
-global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({correction:{version:'v1'},result:{'result-id':'a'.repeat(64),effective:{'source-name':'Synthetic'}}})};
+global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({correction:{version:'v1'},result:{'result-id':'a'.repeat(64),effective:{'source-name':'Synthetic'},'source-position':{table:2,row:4},citations:[{publisher:'Synthetic','event-name':'<script>not executed</script>','event-date':'2025-06-28',table:2,row:4,'final-url':'javascript:bad'}]}})};
 require('./resources/public.js');
 function all(n){return [n,...n.children.flatMap(all)]}
 (async()=>{
  await events.pageshow();
+ a.ok(all(nodes.content).some(n=>n.textContent==='Source table 2, row 4'));a.ok(all(nodes.content).some(n=>String(n.textContent).includes('<script>not executed</script>')));a.ok(!all(nodes.content).some(n=>n.tag==='script'));
  const form=all(nodes.content).find(n=>n.attributes['aria-label']==='Suggest a correction');a.ok(form);
  const fields=all(form).filter(n=>n.tag==='textarea');a.equal(fields.length,3);
  fields.forEach(n=>{a.equal(n.required,true);a.ok(n.attributes['aria-describedby']);a.ok(all(form).some(l=>l.tag==='label'&&l.htmlFor===n.id));});
@@ -66,6 +67,50 @@ function all(n){return [n,...n.children.flatMap(all)]}
  const feedback=all(form).find(n=>n.attributes.role==='status');a.match(feedback.textContent,/receipt-123/);a.match(feedback.textContent,/Pending owner approval/);a.ok(feedback.focused);
  a.ok(fields.every(n=>n.value===''));a.equal(all(form).find(n=>n.tag==='button').disabled,true);
  console.log('rendered correction form passed');
+})().catch(e=>{console.error(e);process.exitCode=1});")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest reviewed-event-coverage-and-source-history-render-without-inferred-deltas
+  (let [r (shell/sh "node" "-e"
+                    "const a=require('node:assert/strict');
+class Element {
+ constructor(tag){this.tag=tag;this.children=[];this.events={};this.attributes={};}
+ append(...items){this.children.push(...items)} replaceChildren(...items){this.children=items}
+ setAttribute(k,v){this.attributes[k]=v} removeAttribute(k){delete this.attributes[k]}
+ addEventListener(k,v){this.events[k]=v}
+}
+const nodes=Object.fromEntries(['content','status','demo'].map(k=>[k,new Element('div')]));
+global.document={getElementById:k=>nodes[k],createElement:t=>new Element(t),addEventListener:()=>{}};
+const events={};global.window={addEventListener:(k,v)=>events[k]=v};
+global.location={pathname:'/results/'+ 'a'.repeat(64),search:'',origin:'http://localhost'};
+let result={'result-id':'a'.repeat(64),original:{'source-name':'Synthetic'},effective:{'source-name':'Synthetic'},
+ 'event-selection':{id:'b'.repeat(64),revision:2},coverage:{scope:'event',completeness:'partial',gaps:['Session 2 unavailable <script>alert(1)</script>']},
+ 'revision-history':{status:'confirmed-correction','previous-values':'unknown'},
+ citations:[{publisher:'Synthetic','final-url':'https://example.org/revised.pdf'}]};
+global.fetch=async()=>({ok:true,json:async()=>({result})});
+require('./resources/public.js');
+function all(n){return [n,...n.children.flatMap(all)]}
+function texts(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')}
+(async()=>{
+ await events.pageshow();
+ a.match(texts(),/Partial event coverage/);a.match(texts(),/Session 2 unavailable <script>alert/);
+ a.match(texts(),/Reviewed source replacement/);a.match(texts(),/does not establish a change in result values/);a.match(texts(),/Earlier values are not shown/);
+ a.match(texts(),/Identity unresolved/);
+ a.ok(all(nodes.content).some(n=>n.href==='https://example.org/revised.pdf'));
+ a.ok(!all(nodes.content).some(n=>n.tag==='script'||n.innerHTML));
+ result={...result,'revision-history':{status:'history-unavailable','previous-values':'unknown'}};
+ await events.pageshow();
+ a.match(texts(),/Earlier source history unavailable/);a.match(texts(),/No prior values or changes are inferred/);
+ a.doesNotMatch(texts(),/Reviewed source replacement/);
+ result={...result,coverage:{scope:'event',completeness:'complete',gaps:[]},'revision-history':null};
+ await events.pageshow();a.match(texts(),/Complete coverage for this reviewed event scope/);
+ a.doesNotMatch(texts(),/Earlier source history unavailable|Partial event coverage/);
+ global.location.pathname='/';
+ global.fetch=async()=>({ok:true,json:async()=>({results:[],total:0,page:1,pages:0,filters:{},coverage:{scope:'pilot',completeness:'partial',results:0,approved_identities:0,events:[{scope:'event',completeness:'partial',gaps:['Final session source unavailable'],event:{federation:'AIDA','event-id':'Synthetic empty event',date:'2026-01-01',discipline:'STA',category:'women',round:'final',session:'2'}}]}})});
+ await events.pageshow();
+ a.match(texts(),/Reviewed event coverage/);a.match(texts(),/Synthetic empty event/);
+ a.match(texts(),/Final session source unavailable/);a.match(texts(),/Session: 2/);
+ a.match(texts(),/Partial pilot coverage/);a.match(texts(),/No records published yet/);
+ console.log('reviewed event coverage and history rendering passed');
 })().catch(e=>{console.error(e);process.exitCode=1});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]

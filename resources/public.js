@@ -23,6 +23,7 @@
   }
   function internalLink(kind, id) { return /^(results|athletes)$/.test(kind) && /^[a-f0-9]{64}$/.test(id || '') ? '/' + kind + '/' + id : null; }
   function citationURL(v) { try { const u = new URL(v); return ['https:', 'http:'].includes(u.protocol) && !u.username && !u.password ? u.href : null; } catch (_) { return null; } }
+  function positionLabel(p = {}) { return p.table != null ? 'Source table ' + display(p.table) + ', row ' + display(p.row) : 'Source page ' + display(p.page) + ', line ' + display(p.line); }
   function correctionClient(resultId, version, transport = fetch, newId = () => crypto.randomUUID()) {
     let previous = null;
     return async function (fields) {
@@ -47,7 +48,7 @@
       return receipt;
     };
   }
-  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL, correctionClient};
+  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL, positionLabel, correctionClient};
   if (typeof document === 'undefined') return;
   const main = document.getElementById('content'), status = document.getElementById('status'), banner = document.getElementById('demo');
   let sequence = 0;
@@ -72,6 +73,30 @@
     form.addEventListener('submit', e => { e.preventDefault(); const data = Object.fromEntries(new FormData(form)); const p = new URLSearchParams(); keys.filter(k => k !== 'page').forEach(k => { if (data[k]) p.set(k, data[k]); }); navigate('/' + (p.size ? '?' + p : '')); });
     return form;
   }
+  function eventContext(r) {
+    const n = el('div', null, 'event-context'), coverage = r.coverage || {};
+    if (coverage.scope === 'event') {
+      n.append(el('p', coverage.completeness === 'complete' ? 'Complete coverage for this reviewed event scope.' : 'Partial event coverage. Other sessions or source records may be unavailable.', 'muted'));
+      if ((coverage.gaps || []).length) {
+        const gaps = el('ul'); gaps.setAttribute('aria-label', 'Event coverage gaps');
+        coverage.gaps.forEach(gap => gaps.append(el('li', display(gap)))); n.append(gaps);
+      }
+    }
+    const history = (r['revision-history'] || {}).status;
+    if (history === 'confirmed-correction') n.append(el('p', 'Reviewed source replacement. A replacement source was confirmed; this does not establish a change in result values. Earlier values are not shown here. See source evidence for this published record.', 'muted'));
+    else if (history === 'history-unavailable') n.append(el('p', 'Earlier source history unavailable. No prior values or changes are inferred. See source evidence for this published record.', 'muted'));
+    return n;
+  }
+  function eventCoverage(events) {
+    const panel = section('Reviewed event coverage', 'Coverage is limited to the named event scopes. The archive remains a partial pilot.');
+    events.forEach(coverage => {
+      const event = coverage.event || {}, entry = el('article', null, 'audit-entry');
+      entry.append(el('h3', display(event['event-id'])));
+      entry.append(el('p', ['federation', 'date', 'venue', 'discipline', 'category', 'round', 'session'].map(k => label(k) + ': ' + display(event[k])).join(' · '), 'muted'));
+      entry.append(eventContext({coverage})); panel.append(entry);
+    });
+    return panel;
+  }
   function resultCards(rows) {
     const list = el('div', null, 'result-list');
     rows.forEach(r => {
@@ -82,17 +107,17 @@
       info.append(el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'muted'));
       const tags = el('div', null, 'tags'); tags.append(el('span', 'Category: ' + display(f.category)), el('span', 'Representation: ' + display(f.representation)), el('span', r.identity && r.identity.status === 'approved' ? 'Approved identity link' : 'Identity unresolved')); info.append(tags);
       const perf = performance(f), metric = el('div', null, 'performance'); metric.append(el('span', perf.label), el('strong', perf.value), el('span', 'Unit: ' + display(f.unit)), el('span', 'Status: ' + display(f.status)));
-      card.append(info, metric); list.append(card);
+      info.append(eventContext(r)); card.append(info, metric); list.append(card);
     }); return list;
   }
   function evidence(refs) {
-    const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link('Source page ' + display(ref.page) + ', line ' + display(ref.line), internalLink('results', ref['result-id']))); n.append(item); }); return n;
+    const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link(positionLabel(ref), internalLink('results', ref['result-id']))); n.append(item); }); return n;
   }
   function correctionForm(r) {
     const panel = section('Suggest a correction', 'No account needed. Requests stay private and pending owner approval. Submitting does not change the published result.');
     const form = el('form', null, 'correction-form'); form.setAttribute('aria-label', 'Suggest a correction');
     const fields = {};
-    [['suggestion', 'Suggested change', 1000, 'State the field and the correct value.'], ['reason', 'Reason for the change', 2000, 'Explain what is wrong with this result.'], ['evidence', 'Evidence citation or reference', 2000, 'Give a source URL or document reference with a page or line. Do not include passwords, access tokens or personal contact details.']].forEach(([key, title, limit, hint]) => {
+    [['suggestion', 'Suggested change', 1000, 'State the field and the correct value.'], ['reason', 'Reason for the change', 2000, 'Explain what is wrong with this result.'], ['evidence', 'Evidence citation or reference', 2000, 'Give a source URL or document reference with a page and line, or table and row. Do not include passwords, access tokens or personal contact details.']].forEach(([key, title, limit, hint]) => {
       const wrap = el('div'), l = el('label', title + ' (required)'); l.htmlFor = 'correction-' + key;
       const input = el('textarea'); input.id = l.htmlFor; input.name = key; input.required = true; input.maxLength = limit; input.rows = key === 'suggestion' ? 3 : 4;
       const help = el('p', hint + ' Maximum ' + limit + ' characters.', 'muted'); help.id = input.id + '-help'; input.setAttribute('aria-describedby', help.id);
@@ -118,6 +143,7 @@
   function detail(r) {
     const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'lead'));
     const summary = el('div', null, 'summary'); [['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
+    main.append(eventContext(r));
     const identity = section('Athlete connection');
     if (r.identity && r.identity.status === 'approved' && internalLink('athletes', r.identity.id)) identity.append(el('p', 'This record has an active approved identity link.'), link('View approved athlete history →', internalLink('athletes', r.identity.id)));
     else identity.append(el('p', 'Identity unresolved. This validated source record is searchable under its source name; no athlete identity is inferred.'));
@@ -126,10 +152,10 @@
     const scroll = el('div', null, 'table-scroll'); scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', 'Source and corrected values');
     const table = el('table'), head = el('thead'), hr = el('tr'); ['Field', 'Original source token', 'Original parsed value', 'Effective value'].forEach(t => {const th = el('th', t); th.scope = 'col'; hr.append(th); }); head.append(hr); table.append(head); const body = el('tbody'); comparison(r).forEach(([k, ...v]) => { const tr = el('tr'), th = el('th', label(k)); th.scope = 'row'; tr.append(th); v.forEach(x => tr.append(el('td', x))); body.append(tr); }); table.append(body); scroll.append(table); original.append(scroll); main.append(original);
     const audit = section('Public correction history', 'Approved corrections and reversals, with their public reasons and evidence.');
-    if (!(r['correction-audit'] || []).length) audit.append(el('p', 'No public corrections recorded.'));
+    if (!(r['correction-audit'] || []).length) audit.append(el('p', 'No approved field corrections recorded for this source record.'));
     (r['correction-audit'] || []).forEach(a => { const entry = el('article', null, 'audit-entry'); entry.append(el('p', (a.action === 'reverse' ? 'Reversed' : 'Approved') + ' · ' + label(a.field), 'eyebrow'), el('h3', display(a.before) + ' → ' + display(a.after)), el('p', a.reason || 'No public reason recorded.')); if (a['correction-reason'] && a['correction-reason'] !== a.reason) entry.append(el('p', 'Correction rationale: ' + a['correction-reason'])); entry.append(el('p', display(a['recorded-at']) + (a.action === 'approve' ? (a['effective?'] ? ' · Currently effective' : ' · No longer effective') : ' · Restored the prior value'), 'muted'), evidence(a.evidence)); audit.append(entry); }); main.append(audit);
-    const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', 'Source page ' + display((r['source-position'] || {}).page) + ', line ' + display((r['source-position'] || {}).line)));
-    (r.citations || []).forEach(c => { const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);
+    const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', positionLabel(r['source-position'])));
+    (r.citations || []).forEach(c => { if (c['event-name'] || c['event-date']) sources.append(el('p', 'Event: ' + display(c['event-name']) + ' · Date: ' + display(c['event-date']))); if (c.table != null) { sources.append(el('p', positionLabel(c))); sources.append(el('p', 'Retained filters: discipline ' + display(c['selected-discipline']) + ' · gender ' + display(c['selected-gender']), 'muted')); } const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);
     if (r.correction && typeof r.correction.version === 'string') main.append(correctionForm(r));
     else main.append(el('p', 'Correction requests are currently unavailable for this result.', 'muted'));
   }
@@ -143,7 +169,8 @@
       banner.hidden = !data.demo;
       if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
-        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
+        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage, with unpublished and unreviewed gaps · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
+        if (((data.coverage || {}).events || []).length) main.append(eventCoverage(data.coverage.events));
         const heading = el('div', null, 'results-heading'); heading.append(el('h2', 'Public results'), el('p', data.total + ' matching ' + (data.total === 1 ? 'record' : 'records'), 'muted')); main.append(heading);
         if (data.results.length) main.append(resultCards(data.results)); else main.append(el('div', data.coverage.results === 0 ? 'No records published yet. Source records must pass validation before they appear here.' : 'No public results match these filters. Try another source name or clear the filters.', 'empty'));
         const nav = el('nav', null, 'pagination'); nav.setAttribute('aria-label', 'Result pages');

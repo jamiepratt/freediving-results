@@ -2,8 +2,10 @@
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
             [clojure.data.json :as json]
             [clojure.string :as str]
+            [clojure.java.shell :as shell]
             [freediving.owner-server :as server]
             [freediving.source-pages-test :as pages-fixture]
+            [freediving.aida-html-test :as html-fixture]
             [freediving.publication-test :as publication-fixture]
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
@@ -286,3 +288,88 @@
                           (server/start! c))))
   (is (thrown? Exception
                (server/start! (assoc (config) :database-url (System/getenv "FREEDIVING_TEST_PUBLIC_URL"))))))
+
+(deftest html-inspection-is-private-bound-and-rechecked-before-attestation
+  (let [[page-config row] (pages-fixture/html-sample)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        s (server/start! (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        path (str "/api/source-html?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (is (= 401 (:status (request s "GET" path nil {}))))
+      (let [h (login s)
+            validation (merge target {:id "html-validate" :action "validate" :actor "synthetic-test"
+                                      :reason "Inspected synthetic HTML"})]
+        (is (= 403 (:status (request s "POST" "/api/publication" validation h))))
+        (let [response (request s "GET" path nil h)]
+          (is (= 200 (:status response)))
+          (is (= ["application/json; charset=utf-8"] (get-in response [:headers "content-type"])))
+          (is (= ["no-store"] (get-in response [:headers "cache-control"])))
+          (is (= (:source-sha256 row) (get-in response [:body :source-sha256])))
+          (is (= (get-in row [:payload :coordinates]) (get-in response [:body :coordinates])))
+          (is (nil? (get-in response [:body :page])))
+          (is (= "Synthetic Pool Championship" (get-in response [:body :event-name]))))
+        (is (= 400 (:status (request s "GET" (str path "&path=../../etc/passwd") nil h))))
+        (is (= 400 (:status (request s "GET" (str path "&row=999") nil h))))
+        (is (= 400 (:status (request s "POST" "/api/publication" validation h))))
+        (spit (str (:archive-root page-config) "/objects/" (:source-sha256 row)) "changed source")
+        (is (= 400 (:status (request s "POST" "/api/publication" validation h))))
+        (is (= 400 (:status (request s "GET" path nil h))))
+        (let [new-h (login s)]
+          (is (= 403 (:status (request s "POST" "/api/publication" validation new-h))))))
+      (finally (server/stop! s)))))
+
+(deftest html-validation-requires-inspection-and-explicit-attestations
+  (let [[source-config row] (with-redefs [html-fixture/cells (assoc html-fixture/cells 10 "")] (pages-fixture/html-sample))
+        _ (observations/import! fixture/app (:archive-root source-config) (:job-id row))
+        _ (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic test only")
+        s (server/start! (merge (dissoc (config) :demo?) source-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        path (str "/api/source-html?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (let [h (login s) validation (publication-fixture/html-request target "html-valid")]
+        (is (= 403 (:status (request s "POST" "/api/publication" validation h))))
+        (is (= 200 (:status (request s "GET" path nil h))))
+        (is (= 400 (:status (request s "POST" "/api/publication" (assoc validation :attestations {}) h))))
+        (is (= 200 (:status (request s "POST" "/api/publication" validation h))))
+        (is (:eligible? (publication/diagnose publication-fixture/reviewer target)))
+        (is (= 200 (:status (request s "POST" "/api/publication" (assoc validation :id "html-revoke" :action "revoke" :base-revision 1 :attestations {}) h))))
+        (is (false? (:eligible? (publication/diagnose publication-fixture/reviewer target)))))
+      (finally (server/stop! s)))))
+
+(deftest pdf-table-hints-still-require-pdf-inspection-and-page-line-attestation
+  (let [[page-config row] (pages-fixture/pdf-with-table-hints)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        s (server/start! (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        q (str "?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (let [h (login s) d (publication/diagnose publication-fixture/reviewer target)
+            validation (merge target (select-keys d [:review-revision :policy-version :observation])
+                              {:id "pdf-hints-validate" :base-revision (:revision d) :action "validate" :actor "synthetic-test"
+                               :reason "Inspected PDF with optional table hints" :evidence [{:page 1 :line 3}]
+                               :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}})
+            detail (get-in (request s "GET" (str "/api/detail" q) nil h) [:body :packet])
+            reference (get-in detail [:local-identity-anchor :reference])
+            metadata (request s "GET" (str "/api/source-page" q "&page=1") nil h)]
+        (is (= "pdf" (get-in detail [:target :source-format])))
+        (is (= {:page 1 :line 3} (select-keys reference [:page :line :table :row])))
+        (is (= 400 (:status (request s "GET" (str "/api/source-html" q) nil h))))
+        (is (= 200 (:status (request s "GET" (get-in metadata [:body :image-url]) nil h))))
+        (is (= 200 (:status (request s "POST" "/api/publication" validation h)))))
+      (finally (server/stop! s)))))
+
+(deftest normal-deployment-revision-capabilities-allow-owner-but-not-extra-writes
+  (let [deployment (shell/sh "clojure" "-M" "-m" "freediving.deployment"
+                             :env (assoc (into {} (System/getenv)) "FREEDIVING_MIGRATION_URL" fixture/admin))]
+    (is (zero? (:exit deployment)) (str (:out deployment) (:err deployment)))
+    (let [s (server/start! (config))]
+      (try (is (= 401 (:status (request s "GET" "/api/candidates" nil {}))))
+           (finally (server/stop! s))))
+    (fixture/sql! fixture/admin "GRANT UPDATE (body_edn) ON freediving.revision_proposals TO reviews_owner")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Owner database authority invalid" (server/start! (config))))
+    (fixture/sql! fixture/admin "REVOKE UPDATE (body_edn) ON freediving.revision_proposals FROM reviews_owner")
+    (let [url (inspector!)]
+      (fixture/sql! fixture/admin "GRANT INSERT (body_edn) ON freediving.revision_proposals TO source_inspector")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Inspector database authority invalid"
+                            (server/start! (merge (dissoc (config) :demo?) {:mode :real-inspection :database-url url :archive-root "/missing" :cache-root "/missing"})))))))

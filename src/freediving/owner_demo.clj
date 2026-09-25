@@ -1,6 +1,7 @@
 (ns freediving.owner-demo
   "Explicit synthetic fixtures. Never reads or changes the real pilot."
   (:require [clojure.java.io :as io] [clojure.string :as str]
+            [freediving.synthetic-pdf :as synthetic-pdf]
             [freediving.archive :as archive] [freediving.observations :as observations]
             [freediving.reviews :as reviews] [freediving.publication :as publication]
             [freediving.public-results :as public-results]
@@ -19,20 +20,21 @@
                                            [(PosixFilePermissions/asFileAttribute (PosixFilePermissions/fromString "rwx------"))]))
     (.toString (.toRealPath p (make-array java.nio.file.LinkOption 0)))))
 (defn- fixture! [root label rows]
-  (let [text (str/join "\n" (map :text rows)) source-sha (sha text)
-        path (str root "/" label ".txt") archive-root (str root "/archive")
+  (let [text (str/join "\n" (map :text rows))
+        pdf (synthetic-pdf/document (map :text rows)) source-sha (sha pdf)
+        path (str root "/" label ".pdf") archive-root (str root "/archive")
         manifest {:sha256 source-sha :discovery-url (str "https://example.invalid/" label)
-                  :final-url (str "https://example.invalid/" label ".txt")
+                  :final-url (str "https://example.invalid/" label ".pdf")
                   :acquisition-method "Generated local synthetic demo, no network acquisition"
-                  :retrieved-at "2026-09-23T00:00:00Z" :content-type "text/plain"
+                  :retrieved-at "2026-09-23T00:00:00Z" :content-type "application/pdf"
                   :publisher "Synthetic demo federation" :relationship :publisher :mirror-of nil}]
-    (spit path text)
+    (spit path pdf :encoding "UTF-8")
     (Files/setPosixFilePermissions (.toPath (io/file path)) (PosixFilePermissions/fromString "rw-------"))
     (archive/register! archive-root path manifest)
     (let [identity {:source-sha256 source-sha :acquisitions (:acquisitions (archive/inspect archive-root source-sha))
                     :evidence-sha256 [] :actor "synthetic-demo" :config {:synthetic true}
                     :parser-version "synthetic-owner-demo/1" :schema-version 1
-                    :pdfinfo-version "not-applicable-text-fixture" :tool {:name "synthetic-fixture" :version "1" :arguments []}}
+                    :pdfinfo-version "synthetic-pdf-generator/1" :tool {:name "synthetic-fixture" :version "1" :arguments []}}
           artifact (merge identity
                           {:job-id (sha (pr-str (canonical identity))) :processed-at "2026-09-23T00:00:00Z"
                            :pdf-page-count 1 :raw-text text :publication {:status :blocked}

@@ -1,9 +1,11 @@
 (ns freediving.source-pages
-  "Private, observation-bound PDF evidence. Coordinates remain extracted text lines."
+  "Private, observation-bound PDF and retained HTML evidence."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [freediving.archive :as archive]
+            [freediving.aida-html :as html]
+            [freediving.html-evidence :as html-evidence]
             [freediving.observations :as observations])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
@@ -46,7 +48,7 @@
         receipt (read-edn (read-private (io/file root "derivations" (str job ".edn"))))
         bytes (read-private (io/file root "derived-objects" h)) a (read-edn bytes)]
     (when-not (and (= receipt {:job-id job :artifact-sha256 h}) (= h (sha bytes))
-                   (= job (:job-id a)) (= job (digest (select-keys a observations/identity-keys)))
+                   (= job (:job-id a)) (= job (digest (select-keys a (if (= 4 (:schema-version a)) html/identity-keys observations/identity-keys))))
                    (= source (:source-sha256 a))) (fail! "Extraction identity mismatch"))
     (let [file (io/file root "objects" source) b (read-private file)
           acquired (archive/inspect root source) evidence (set (archive/extraction-evidence root))]
@@ -54,8 +56,8 @@
                      (every? (set (:acquisitions acquired)) (:acquisitions a))
                      (every? evidence (:evidence-sha256 a))) (fail! "Extraction provenance missing"))
       (when-not (= source (sha b)) (fail! "Source SHA-256 mismatch"))
-      (when-not (str/starts-with? (String. b 0 (min 8 (alength b)) "US-ASCII") "%PDF-") (fail! "Source is not a PDF"))
-      {:artifact a :artifact-sha256 h :source-bytes b})))
+      (when-not (or (= 4 (:schema-version a)) (str/starts-with? (String. b 0 (min 8 (alength b)) "US-ASCII") "%PDF-")) (fail! "Source is not a PDF"))
+      {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a) a) :artifact-sha256 h :source-bytes b})))
 (defn- source-lines [artifact payload]
   (vec (or (:source-lines payload)
            (for [p (:pages artifact) :when (= (:page p) (get-in payload [:coordinates :page]))
@@ -63,8 +65,8 @@
              (assoc l :page (:page p))))))
 (defn- bound-row! [{:keys [artifact artifact-sha256] :as verified} row]
   (let [ordinal (:ordinal row) payload (:payload row)
-        positions (or (when (seq (:source-lines payload)) (mapv #(select-keys % [:page :line]) (:source-lines payload)))
-                      [(select-keys (:coordinates payload) [:page :line])])]
+        positions (if (= 4 (:schema-version artifact)) [(select-keys (:coordinates payload) [:table :row])] (or (when (seq (:source-lines payload)) (mapv #(select-keys % [:page :line]) (:source-lines payload)))
+                                                                                                                [(select-keys (:coordinates payload) [:page :line])]))]
     (when-not (and (= (:job-id row) (:job-id artifact)) (= artifact-sha256 (:artifact-sha256 row))
                    (= (:source-sha256 row) (:source-sha256 artifact))
                    (nat-int? ordinal) (< ordinal (count (:candidates artifact)))
@@ -77,8 +79,19 @@
       (fail! "Observation is not bound to registered extraction"))
     verified))
 (defn- bind-row! [root row] (bound-row! (verified-artifact! root row) row))
+(defn inspect-html!
+  "Return verified HTML row/context as data only. Never serve executable source HTML."
+  [{:keys [archive-root] :as config} row]
+  (when-not (= #{:archive-root :cache-root} (set (keys config))) (fail! "Invalid source configuration"))
+  (let [{:keys [artifact]} (bind-row! archive-root row)
+        _ (when-not (= 4 (:schema-version artifact)) (fail! "Source is not HTML"))
+        context (html-evidence/bound-context! artifact (:payload row) (:ordinal row) (:source-sha256 row))
+        identity (merge context (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
+                        {:coordinate-system :html-table-rows :parser-version (:parser-version artifact) :schema-version (:schema-version artifact)})]
+    (assoc identity :render-id (digest identity))))
+
 (defn verify-corpus!
-  "Verify all database rows, reading each registered extraction and PDF once."
+  "Verify all database rows against each registered extraction and retained source."
   [archive-root corpus]
   (when-not (seq corpus) (fail! "Real corpus must not be empty"))
   (doseq [[_ rows] (group-by :job-id corpus)]

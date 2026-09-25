@@ -1,13 +1,14 @@
 (ns freediving.archive
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.walk :as walk])
   (:import [java.nio.file Files Paths StandardCopyOption StandardOpenOption LinkOption]
            [java.security MessageDigest]
            [java.nio.channels FileChannel]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.net URI]
-           [java.time OffsetDateTime]
+           [java.time OffsetDateTime LocalDate]
            [java.util HexFormat]))
 
 (defn- path [s] (Paths/get (str s) (make-array String 0)))
@@ -23,7 +24,7 @@
 
 (defn- canonical [manifest]
   (binding [*print-length* nil *print-level* nil]
-    (pr-str (into (sorted-map) manifest))))
+    (pr-str (walk/postwalk #(if (map? %) (into (sorted-map) %) %) manifest))))
 (defn- acquisition-id [manifest]
   (.formatHex (HexFormat/of)
               (.digest (MessageDigest/getInstance "SHA-256")
@@ -32,16 +33,73 @@
 (defn- fail! [message] (throw (ex-info message {})))
 (defn- valid-hash? [v] (and (string? v) (re-matches #"[0-9a-f]{64}" v)))
 (defn- text? [v] (and (string? v) (not (str/blank? v))))
+(defn- timing-route? [^URI u]
+  ;; Official CMAS archive redirects observed 2026-09-25. Only these public
+  ;; schedule/result routes may retain a fragment.
+  (and (= "https" (.getScheme u))
+       (= -1 (.getPort u))
+       (case (.getHost u)
+         "results-ws.microplustimingservices.com"
+         (and (= "/CMAS/Results/" (.getRawPath u))
+              (re-matches #"/[0-9]+/schedule-bydate" (or (.getRawFragment u) "")))
+         "cmas.microplustimingservices.com"
+         (and (= "/" (.getRawPath u))
+              (re-matches #"/(?:competition-schedule/[0-9]+|event-detail/FRD/[0-9]+/[0-9]+/[0-9]+/[0-9]+/[0-9]+/result)"
+                          (or (.getRawFragment u) "")))
+         false)))
+
+(defn- aida-session-route? [^URI u]
+  ;; Official EventPage/4350 links observed 2026-09-25. Do not decode or
+  ;; normalize queries: only the literal public day selector is supported.
+  (and (= "https" (.getScheme u))
+       (= "www.aidainternational.org" (.getHost u))
+       (= -1 (.getPort u))
+       (re-matches #"/StartList/[0-9]+" (or (.getRawPath u) ""))
+       (or (and (nil? (.getRawQuery u)) (= "start" (.getRawFragment u)))
+           (and (nil? (.getRawFragment u))
+                (re-matches #"day_index=[0-9]+" (or (.getRawQuery u) ""))))))
+
 (defn- url? [v]
   (try (let [u (URI. v)]
          (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
-              (nil? (.getUserInfo u)) (nil? (.getRawQuery u)) (nil? (.getRawFragment u))))
+              (nil? (.getUserInfo u))
+              (or (and (nil? (.getRawQuery u))
+                       (or (nil? (.getRawFragment u)) (timing-route? u)))
+                  (aida-session-route? u))))
        (catch Exception _ false)))
+(defn- browser-state? [state]
+  (and (map? state)
+       (= #{:selected-date :filters :representation :rendered-sha256} (set (keys state)))
+       (string? (:selected-date state))
+       (re-matches #"[0-9]{4}-[0-9]{2}-[0-9]{2}" (:selected-date state))
+       (try (LocalDate/parse (:selected-date state)) (catch Exception _ false))
+       (= :rendered-dom (:representation state))
+       (valid-hash? (:rendered-sha256 state))
+       (map? (:filters state))
+       (every? (fn [[k v]]
+                 (case k
+                   :discipline (contains? #{:all :sta :dyn :dynb :dnf :cwt :cwtb :cnf :fim} v)
+                   :gender (contains? #{:all :men :women} v)
+                   false))
+               (:filters state))))
+
+(defn- provenance? [p final-url]
+  (and (map? p)
+       (= #{:publisher-url :redirect-chain} (set (keys (dissoc p :browser-state))))
+       (or (not (contains? p :browser-state)) (browser-state? (:browser-state p)))
+       (url? (:publisher-url p))
+       (vector? (:redirect-chain p))
+       (seq (:redirect-chain p))
+       (every? url? (:redirect-chain p))
+       (= final-url (peek (:redirect-chain p)))))
+
 (defn- validate! [manifest]
   (when-not (and (map? manifest)
                  (= #{:sha256 :discovery-url :final-url :acquisition-method :retrieved-at
                       :content-type :publisher :relationship :mirror-of}
-                    (set (keys manifest)))
+                    (set (keys (dissoc manifest :provenance))))
+                 (or (not (contains? manifest :provenance))
+                     (provenance? (:provenance manifest) (:final-url manifest)))
                  (valid-hash? (:sha256 manifest))
                  (every? url? ((juxt :discovery-url :final-url) manifest))
                  (every? text? ((juxt :acquisition-method :publisher) manifest))
@@ -129,6 +187,11 @@
   (private! object false)
   (when-not (= digest (sha256 object)) (fail! "Archived object SHA-256 mismatch")))
 
+(defn- verified-browser-evidence! [root manifest]
+  (when-let [digest (get-in manifest [:provenance :browser-state :rendered-sha256])]
+    (private! (io/file root "evidence") true)
+    (verified-object! (io/file root "evidence" digest) digest)))
+
 (defn read-manifest
   "Read exactly one canonical EDN manifest, without evaluating code."
   [file]
@@ -163,6 +226,7 @@
              id (acquisition-id manifest)
              record (io/file root "acquisitions" (str id ".edn"))
              existed? (exists? record)]
+         (verified-browser-evidence! root manifest)
          (safe-path! object)
          (safe-path! record)
          ;; Only recognizable private staging files may be removed after a terminated writer.
@@ -195,7 +259,10 @@
         {:sha256 digest
          :artifact-path (str object)
          :acquisitions (->> (.listFiles (io/file root "acquisitions"))
-                            (map verified-record!)
+                            (map (fn [file]
+                                   (let [record (verified-record! file)]
+                                     (verified-browser-evidence! root (:manifest record))
+                                     record)))
                             (filter #(= digest (get-in % [:manifest :sha256])))
                             (sort-by :acquisition-id)
                             vec)}))))

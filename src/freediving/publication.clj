@@ -1,6 +1,8 @@
 (ns freediving.publication
   "Explicit private extraction validation. Reviewer DB capability is authority; actor is audit text."
-  (:require [clojure.edn :as edn] [clojure.java.io :as io] [clojure.string :as str])
+  (:require [clojure.edn :as edn] [clojure.java.io :as io] [clojure.string :as str]
+            [freediving.aida-html :as html]
+            [freediving.html-evidence :as html-evidence])
   (:import [java.sql DriverManager Connection] [java.security MessageDigest] [java.util HexFormat]))
 (defn- fail! [message] (throw (ex-info message {})))
 (defn- encode [v] (binding [*print-length* nil *print-level* nil] (pr-str v)))
@@ -22,6 +24,8 @@
     (.setAutoCommit c false)
     (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
 (def current-policy "extraction-publication/1")
+(def html-policy "extraction-publication/2")
+(def supported-policies #{current-policy html-policy})
 (def allowed-uncertainties
   #{:owner-review-required :reconciliation-unreviewed :event-date-not-evidenced
     :card-not-evidenced :penalty-unit-not-evidenced :category-not-evidenced
@@ -55,7 +59,7 @@
                  {:schema-version 3})))
 (defn- nonblank? [x] (and (string? x) (not (str/blank? x))))
 (defn- target [c {:keys [job-id ordinal]}]
-  (or (first (query c "SELECT o.*,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
+  (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
       (fail! "Unknown observation version")))
 (defn- provenance [o]
   {:job-id (:job_id o) :ordinal (:ordinal o) :candidate-id (:candidate_id o)
@@ -98,8 +102,17 @@
            (and (= :decimal (:notation x)) (= 1 (count (:components x)))))
        (or (nil? (:fraction x)) (and (string? (:fraction x)) (re-matches #"[0-9]+" (:fraction x))))
        (= (count (:fraction x)) (:fraction-digits x))))
-(defn- blockers [{:keys [observation payload artifact fields]}]
-  (let [refs (evidence-lines artifact) coord (select-keys (:coordinates payload) [:page :line])
+(defn- html-context! [{:keys [observation payload artifact]}]
+  (let [context (html-evidence/bound-context! artifact payload (:ordinal observation) (:source_sha256 observation))]
+    (when-not (and (= (:artifact_sha256 observation) (html-evidence/sha256 (:artifact_bytes observation)))
+                   (= (:job_id observation) (:job-id artifact) (html/digest (select-keys artifact html/identity-keys)))
+                   (= (:candidate_id observation) (html/digest [(:source_sha256 observation) [(:coordinates context)]])))
+      (fail! "HTML observation envelope mismatch")) context))
+(defn- blockers [{:keys [observation payload artifact fields] :as s} policy]
+  (let [html? (html-evidence/html? artifact)
+        context (when html? (try (html-context! s) (catch Exception _ nil)))
+        refs (if html? (if context #{(:coordinates context)} #{}) (evidence-lines artifact))
+        coord (html-evidence/coordinates artifact payload)
         uncertainties (concat (:unresolved-reasons payload) (get-in artifact [:publication :reasons]))
         invalid-fields (for [[k v] (:fields payload)
                              :when (and (#{:invalid :ambiguous} (:status v))
@@ -116,7 +129,14 @@
                     (when-not (some (fn [a] (let [m (:manifest a)]
                                               (and (http-url? (:final-url m)) (nonblank? (:publisher m))
                                                    (= (:source_sha256 observation) (:sha256 m))))) (:acquisitions artifact)) [:missing-source-citation])
-                    (map (fn [x] [:unresolved-extraction-error x]) (remove allowed-uncertainties uncertainties))
+                    (when (and html? (not= html-policy policy)) [:html-policy-required])
+                    (when (and html? (not (nonblank? (:event-name context)))) [:missing-event-heading])
+                    (when (and html? (not (nonblank? (:event-date context)))) [:missing-event-date])
+                    (when (and html? (pos? (get-in artifact [:reconciliation :unsupported-table-count] 0))) [:unsupported-html-layout])
+                    (when html? (concat (:context-errors context) (map #(vector :substantive-source-flag %) (:flags payload))))
+                    (map (fn [x] [:unresolved-extraction-error x])
+                         (remove (cond-> allowed-uncertainties
+                                   (and html? (= html-policy policy)) (into #{:html-review-not-supported :coverage-not-established})) uncertainties))
                     (map (fn [x] [:invalid-field x]) invalid-fields))))))
 (defn- active-policy [c]
   (:policy_version (first (query c "SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1"))))
@@ -128,18 +148,18 @@
                  (execute! c "INSERT INTO freediving.publication_policy_events(policy_version,reason) VALUES(?,?)" version reason)
                  {:policy-version (active-policy c)})))
 (defn- diagnosis [c t]
-  (let [s (state c t) reasons (blockers s) last-decision (last (rows c "publication_decisions" t))
-        active (active-policy c)
-        eligible (and (= current-policy active) (empty? reasons) (= "validate" (:action last-decision))
-                      (= current-policy (:policy_version last-decision))
+  (let [s (state c t) active (active-policy c) reasons (blockers s active) last-decision (last (rows c "publication_decisions" t))
+        policy (if (supported-policies active) active current-policy)
+        eligible (and (contains? supported-policies active) (empty? reasons) (= "validate" (:action last-decision))
+                      (= policy (:policy_version last-decision))
                       (= (:review-revision s) (:review_revision last-decision)))]
-    {:policy-version current-policy :revision (or (:revision last-decision) 0)
+    {:policy-version policy :revision (or (:revision last-decision) 0)
      :review-revision (:review-revision s) :observation (provenance (:observation s))
-     :ready? (and (= current-policy active) (empty? reasons)) :active-policy-version active :eligible? (boolean eligible)
-     :reasons (vec (concat reasons (when (not= current-policy active) [:policy-inactive]) (cond (nil? last-decision) [:validation-required]
-                                                                                                (= "revoke" (:action last-decision)) [:validation-revoked]
-                                                                                                (not= current-policy (:policy_version last-decision)) [:policy-version-changed]
-                                                                                                (not= (:review-revision s) (:review_revision last-decision)) [:review-revision-changed])))}))
+     :ready? (and (contains? supported-policies active) (empty? reasons)) :active-policy-version active :eligible? (boolean eligible)
+     :reasons (vec (concat reasons (when (not (contains? supported-policies active)) [:policy-inactive]) (cond (nil? last-decision) [:validation-required]
+                                                                                                               (= "revoke" (:action last-decision)) [:validation-revoked]
+                                                                                                               (not= policy (:policy_version last-decision)) [:policy-version-changed]
+                                                                                                               (not= (:review-revision s) (:review_revision last-decision)) [:review-revision-changed])))}))
 (defn- read-snapshot [url f]
   (with-open [c (connect url)]
     (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
@@ -163,18 +183,23 @@
                    (fail! "Publication reviewer database capability required"))
                  (query c "SELECT pg_advisory_xact_lock(781246915)")
                  (query c "SELECT pg_advisory_xact_lock(hashtextextended(?,11))" (str (:job-id r) "/" (:ordinal r)))
+                 (let [s (state c r)]
+                   (when (html-evidence/html? (:artifact s)) (html-context! s)))
                  (if-let [old (first (query c "SELECT * FROM freediving.publication_decisions WHERE id=?" (:id r)))]
                    (do (when-not (= r (:request (body old))) (fail! "Conflicting idempotency key")) (body old))
                    (let [d (diagnosis c r) s (state c r)
-                         refs (evidence-lines (:artifact s)) page (get-in s [:payload :coordinates :page])]
+                         html? (html-evidence/html? (:artifact s))
+                         coord (html-evidence/coordinates (:artifact s) (:payload s))
+                         refs (if html? #{(:coordinates (html-context! s))} (evidence-lines (:artifact s)))
+                         page (get-in s [:payload :coordinates :page])]
                      (when-not (= (:base-revision r) (:revision d)) (fail! "Stale publication revision"))
                      (when-not (= (:review-revision r) (:review-revision d)) (fail! "Stale review revision"))
-                     (when-not (= current-policy (:policy-version r)) (fail! "Stale policy version"))
+                     (when-not (= (:policy-version d) (:policy-version r)) (fail! "Stale policy version"))
                      (when-not (= (:observation r) (:observation d)) (fail! "Observation provenance mismatch"))
                      (when-not (and (vector? (:evidence r)) (seq (:evidence r))
-                                    (some #{(select-keys (get-in s [:payload :coordinates]) [:page :line])} (:evidence r))
-                                    (every? #(and (= #{:page :line} (set (keys %)))
-                                                  (= page (:page %)) (contains? refs %)) (:evidence r)))
+                                    (some #{coord} (:evidence r))
+                                    (every? #(and (= (if html? #{:table :row} #{:page :line}) (set (keys %)))
+                                                  (or html? (= page (:page %))) (contains? refs %)) (:evidence r)))
                        (fail! "Invalid evidence references"))
                      (when (and (= :validate (:action r))
                                 (not= {:source-visual-accuracy true :no-unresolved-substantive-errors true} (:attestations r)))
@@ -184,7 +209,7 @@
                      (let [record (assoc r :revision (inc (:revision d)) :request r)
                            o (:observation d)]
                        (execute! c "INSERT INTO freediving.publication_decisions(id,job_id,ordinal,revision,review_revision,policy_version,action,candidate_id,artifact_sha256,source_sha256,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-                                 (:id r) (:job-id r) (:ordinal r) (:revision record) (:review-revision r) current-policy (name (:action r))
+                                 (:id r) (:job-id r) (:ordinal r) (:revision record) (:review-revision r) (:policy-version r) (name (:action r))
                                  (:candidate-id o) (:artifact-sha256 o) (:source-sha256 o) (encode record))
                        (body (first (query c "SELECT * FROM freediving.publication_decisions WHERE id=?" (:id r))))))))))
 

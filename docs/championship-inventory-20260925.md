@@ -1,0 +1,130 @@
+# Official championship acquisition, 25 September 2026
+
+Cutoff: 2026-09-25. This is a dated discovery and acquisition inventory, not a complete results corpus. Scope is completed CMAS and AIDA world championships in 2025-2026, including discovered category divisions. Unmet coverage and implementation acceptance remain in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+`Acquired` means bytes and provenance are retained privately, not reviewed or published. `Unresolved` means coverage has not been established. `Unavailable` describes an observed failed access path, not proof that the source does not exist. Planned schedules do not establish actual result dates or zero attempts for omitted categories.
+
+## Event inventory
+
+| Championship | Official evidence and discovered sessions | Acquisition/coverage at cutoff |
+| --- | --- | --- |
+| CMAS 2025 indoor, Athens, seniors/juniors | [Event](https://www.cmas.org/freediving-events/2025-cmas-world-championship-freediving-indoor.html), [information pack](https://www.cmas.org/media/com_eventbooking/2025%20SENIORS-JUNIORS%20WC%20Freediving-Pool-Athens%20infopack%20March.pdf): May 18-25 overall. Planned competition May 20 DNF; May 21 DYN-BF; May 22 8x50 and 2x50; May 23 STA and 4x50; May 24 DYN. | Legacy selectors 1 and 2 together expose 42 acquired result JSON views across seven disciplines and junior/senior/master men/women. All 30 configured PDF links returned 404. Selector 2 covers distance; selector 1 covers static/speed. All 792 transport rows are inventoried by category; sporting semantics and historical-mirror discrepancies remain unresolved. See the [source gap audit](championship-source-gaps-20260925.md). |
+| CMAS 2025 indoor masters, Athens | Same pack places masters on the same competition days; separate [archive entry](https://www.cmas.org/document/2025,-cmas-world-championship-freediving-indoor-masters/download.html). | Selector 1 is not masters-only: both legacy selectors contain junior/senior/master categories. Result JSON has 214 master transport rows across seven disciplines; M1/M2 and some M3 men labels are present. Primary PDFs remain unavailable through observed configured links. The mirror now has a complete row census and bounded PDF/JSON discrepancy audit; source disagreement and category completeness remain unresolved. |
+| CMAS 2025 depth seniors, Mytikas | [Event](https://www.cmas.org/freediving-events/cmas-2025-world-championship-freediving-depth.html), [pack](https://www.cmas.org/media/com_eventbooking/2025%20SENIORS%20WC%20Freediving-OUTDOOR%20infopack.pdf): September 5-18 overall. Planned September 9/10 CWT M/W, 11/12 FIM M/W, 14/15 CNF M/W, 16/17 CWT-BF M/W. | Eight senior result PDFs acquired from competition 3 across all four disciplines and both genders. Actual FIM dates are September 12/13. Competition 3 explicitly contains Mytikas seniors/masters; competition 4 identifies unrelated Asian junior finswimming. The federation event link is stale or incorrect. Distinct timing/federation CWT files are not automatically revisions. |
+| CMAS 2025 depth masters, Mytikas | [Event](https://www.cmas.org/freediving-events/cmas-2025-world-championship-freediving-depth-masters.html), [pack](https://www.cmas.org/media/com_eventbooking/MASTERS%202025%20WC%20Freediving-OUTDOOR%20infopack.pdf): September 5-18. Same planned discipline sequence. [M1 men CWT result](https://www.cmas.org/media/com_eventbooking/Result_CWT-MM1_M.pdf) is dated September 10, unlike the planned men's September 9 date. | Twelve masters result PDFs acquired from competition 3: men M3 and M1+M2 in each discipline; women M1 in FIM/CNF/CWT-BF and M1+M3 in CWT. All 352 rows across the 20 senior/masters timing PDFs are reconciled to retained source evidence; absent category headings and genuine review remain unresolved. |
+| CMAS 2026 indoor seniors/juniors, Novi Sad | [Event](https://www.cmas.org/freediving-events/2026-cmas-world-championship-freediving-indoor-juniors-seniors.html): June 9-15 overall. Acquired result headers: June 11 DNF and 8x50; June 12 DYN-BF and 2x50; June 13 STA and 4x50; June 14 DYN. | 32-page official PDF acquired. Source census accounts for 478 rows: 295 distance rows and 183 STA/speed rows. All seven disciplines have senior and junior men/women headings. All 478 rows are now structurally extracted; see batches 6 and 7 below. Timing semantics and extraction review remain unresolved. |
+| CMAS 2026 indoor masters, Novi Sad | [Official results](https://www.cmas.org/document/2026,-cmas-world-championship-freediving-indoor-masters/download.html), same four result dates/disciplines as seniors/juniors. | 34-page official PDF acquired. Source census accounts for 170 rows: 117 distance rows and 53 STA/speed rows. Present category headings listed below; missing headings remain unresolved. |
+| CMAS 2026 depth, Roatan | [Event](https://www.cmas.org/freediving-events/2026-cmas-world-championship-freediving-depth.html): August 14-27, seniors and masters. Nine linked result sessions: CWT M, CWT W, FIM M, FIM W, CWT M continuation, CNF M, CNF W, CWT-BF M, CWT-BF W. | All nine unit result/document API responses retained, including August 17 CWT men and August 21 continuation. Seven result PDFs acquired, 15 pages and 180 independently inventoried source rows. Linked CWT men PDF returned 404; first CWT unit has no linked PDF. PDF table dates and category counts are detailed in [batch 5 evidence](cmas-timing-acquisition-20260925.md#batch-5-2026-depth-reconciliation). CWT-men coverage and continuation overlap remain unresolved. |
+| AIDA 2025 pool, Wakayama, event 4349 | [Official attempts](https://www.aidainternational.org/StartList/4349): June 28 DYNB, June 29 DNF, July 1 STA, July 2 DYN. | All four displayed tabs acquired and independently reconciled: 193, 176, 162, 182 rows, 713 total; men/women present. Fresh complete DOM captures supplement preserved truncated originals. Coverage is limited to exposed views. |
+| AIDA 2025 depth, Limassol, event 4350 | [Official event and schedule](https://www.aidainternational.org/EventPage/4350): September 20-October 3 overall. Eight result dates: September 23 CNF W; 24 CNF M; 25 CWTB W; 26 CWTB M; 28 FIM W; 29 FIM M; October 1 CWT M; October 2 CWT W. | All eight displayed result dates acquired and independently reconciled: 36, 51, 51, 59, 50, 56, 49, 49 rows, 401 total. Actual date/discipline/gender cells checked. The official page extends beyond the earlier announcement's October 1 end date. |
+| AIDA 2026 pool, Budapest, event 4852 | [Official event](https://www.aidainternational.org/EventPage/4852): May 30-June 7 overall. Displayed result dates and schedule: June 2 DYNB; June 3 DNF; June 5 STA; June 6 DYN. | All four displayed result dates acquired and independently reconciled: 220, 209, 187, 212 rows, 828 total; men/women present. Complete chunked DOM recaptures retained separately. |
+
+The [CMAS archive](https://www.cmas.org/freediving/results.html) has separate masters sections. Its para section has no 2025-2026 completed-result entry at this cutoff. That does not establish absence of para participation inside another championship. Dedicated AIDA junior/master/para editions were not established by this discovery; category completeness remains unresolved.
+
+The [AIDA 2026 depth event](https://aidainternational.org/EventPage/4987), September 27-October 10, and [CMAS 2026 para championship](https://www.cmas.org/freediving/calendar.html), November 25-30, are outside the completed-event cutoff. World Games, cups, local and continental competitions and pre-2025 history are excluded. Rankings are supplemental publications, not additional attempts or independent corroboration.
+
+## Acquired CMAS masters category headings
+
+The 2026 masters PDF contains these headings; an absent heading is not a zero-result declaration. M1/M2/M3 are retained publisher labels, without inferred age boundaries.
+
+| Date | Discipline | Present headings |
+| --- | --- | --- |
+| June 11 | DNF | M1 men/women, M2 men/women, M3 men |
+| June 11 | 8x50 | M1 men/women |
+| June 12 | DYN-BF | M1, M2, M3 men/women |
+| June 12 | 2x50 | M1 men/women, M2 men/women, M3 men |
+| June 13 | STA | M1, M2, M3 men/women |
+| June 13 | 4x50 | M1 men/women, M2 women, M3 men |
+| June 14 | DYN | M1, M2, M3 men/women |
+
+## Batch 1 retained sources and access evidence
+
+The first isolated private root is `data/championship-restart-20260925-b01/` in the preserved batch 1 checkout. Its original DOM evidence includes capture defects identified below; hash integrity did not establish DOM completeness. It contains incoming response bytes/metadata, separate browser DOM evidence, a content-addressed archive and replayable extraction artifacts. Earlier corpora and public data were not modified. Real names and source bytes are not Git fixtures. Acquisition is not held-out identity eligibility, extraction approval or publication authority.
+
+| Official PDF | Bytes | SHA-256 |
+| --- | ---: | --- |
+| [2026 indoor seniors/juniors](https://www.cmas.org/document/2026,-cmas-world-championship-freediving-indoor/download.html) | 3,048,637 | `f403777b250b7ae816adea945db4cd5ddea51be7349c2efa57046a08671a5758` |
+| [2026 indoor masters](https://www.cmas.org/document/2026,-cmas-world-championship-freediving-indoor-masters/download.html) | 3,314,467 | `b221351a6043d820384b0745903c146bcb6e4ffa58c7e17984d032a43156e0c6` |
+| [2025 CWT senior men](https://www.cmas.org/media/com_eventbooking/Result_CWT-MS_M.pdf) | 160,801 | `2c0d8cd66d9ccb9fbef9ab6bd76ca94d38942c099ad13984bc07e6f2f89183f3` |
+| [2025 CWT senior women](https://www.cmas.org/media/com_eventbooking/Result_CWT-WS_W.pdf) | 132,920 | `dbaa2eeb572c1ccd851897e7fa39cbbf8ee3717312570062c0a5ff9e1a739c92` |
+
+All four returned HTTP 200 and `application/pdf`, with verified PDF signatures. The known CWT URLs were supplied by issue #8; the current event page does not directly link them. Their manifest discovery URL records the issue, not an invented archive-to-PDF link.
+
+Observed CMAS HTTP 303 destinations, followed by HTTP 200 `text/html`:
+
+| Archive entry | Final URL |
+| --- | --- |
+| 2025 indoor | `https://results-ws.microplustimingservices.com/CMAS/Results/#/2/schedule-bydate` |
+| 2025 indoor masters | `https://results-ws.microplustimingservices.com/CMAS/Results/#/1/schedule-bydate` |
+| 2025 depth | `https://cmas.microplustimingservices.com/#/competition-schedule/3` |
+| 2025 depth masters | `https://cmas.microplustimingservices.com/event-detail/4` |
+| 2026 depth | `https://cmas.microplustimingservices.com/#/competition-schedule/30` |
+
+The two older indoor responses share one byte hash; the three newer app shells share another. Shared shell bytes do not establish shared events/results. Each acquisition preserves its full destination and discovery context. These HTML shells are not result-bearing documents.
+
+AIDA direct scripted access was unavailable (HTTP 403 in the discovery check); the internal browser returned HTTP 200 without a login or challenge. Authentication requirements were not established. No cookies or credentials were exported. Captures retain the decoded HTTP response body re-encoded as UTF-8, not compressed wire bytes; separate serialized DOM evidence records the selected `li.active a.days`. No discipline/gender selector was exposed in these attempt views, so filters are `{}`. Wakayama date clicks reload the same URL; Limassol's official schedule also supplies `?day_index=3`, which selects September 23. Both selection mechanisms require retained date evidence.
+
+Full source hashes, acquisition IDs, retrieval timestamps, MIME types and redirect chains remain in private manifests. Registration and extraction replay results are recorded beside the archive. Synthetic tests establish changed-byte retention and tamper rejection; no genuine publisher revision relationship is claimed.
+
+## Batch 1 replay result
+
+Fifteen acquisitions share twelve source-byte objects. Every unchanged registration replay skipped duplicate creation. Nine result sources were passed through the existing extractors; all nine repeated extraction calls reused their jobs. The five AIDA responses produced 749 candidates, with selected dates and row counts matching the captured browser views and deterministic source replay passing. The CMAS CWT PDFs produced 44 men and 29 women candidates. These are parser counts, not owner accuracy attestations or database imports.
+
+The existing Novi Sad parser supports only junior DNF in this source: 11 candidates from the first two senior/junior PDF pages, with pages 3-32 explicitly unsupported. All 34 masters pages remain unsupported, so its zero parsed candidates must not be described as zero sporting attempts. All extraction artifacts remain private and publication-blocked. No PostgreSQL corpus, review decision or public projection was changed in this acquisition slice.
+
+
+## Batch 2 reconciliation and limits at acquisition
+
+The private root is `data/championship-restart-20260925-b02/`, with separate `aida/` and `cmas/` archives. The CMAS corpus was copied from its isolated worker checkout with all 790 file hashes verified; the original remains intact. Batch 1's 117-file tree digest is unchanged. No raw source bytes or names were committed to Git.
+
+AIDA now covers 16 unique response views and 1,942 source rows: 713 Wakayama, 401 Limassol and 828 Budapest. All are parsed; none is owner-reviewed. Independent response-to-extraction checks passed 118,462 comparisons, including names, exact cells, coordinates, zeros, cards, remarks and unknown states. Eight fresh pool captures add separate extraction versions, not additional attempts. Full evidence and per-session counts are in [AIDA ingestion](aida-html-ingestion.md#restart-session-reconciliation-25-september-2026).
+
+The audit found all eight original pool DOMs truncated, seven within result cells. Original response HTML and extractions were intact. Fresh pool response hashes match the originals, and complete chunked DOMs now agree with selected dates and every source cell after standard HTML newline normalization. Earlier defective evidence remains unchanged, with its limits explicitly retained. A valid hash verifies supplied bytes, not completeness of a browser capture.
+
+Batch 2 registered 19 AIDA acquisitions across two archives, representing 15 distinct response hashes. All registrations/extractions replayed without duplication. Including five earlier artifacts, the independent audit checked 24 versions and 3,483 versioned rows with 212,463 comparisons and zero source-to-parser mismatches. This is automated reconciliation, not reviewer attestation or sporting-result revision matching.
+
+CMAS retained 194 HTTP response bodies: 161 successful acquisitions sharing 150 objects, plus 33 failed responses kept separately. The 27 valid PDFs contain 38 pages. At batch 2, three senior women's PDFs produced 77 candidates; 24 PDFs covering 35 pages were unsupported. Forty-two indoor result JSON views and 29 depth unit result views remain unparsed supporting evidence. One indoor response has invalid UTF-8. Thirty configured indoor PDF URLs and the linked 2026 CWT men PDF returned 404. Details, actual category/date evidence and distinct timing document hashes are in [CMAS timing acquisition](cmas-timing-acquisition-20260925.md).
+
+No database import, real review decision, policy activation, deployment or public event replacement occurred. Missing-source coverage, unsupported PDF layouts, JSON decoding, revision/continuation matching, HTML review/public citations and reversible event replacement remain acceptance gates in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## Batch 3 2025 depth extraction
+
+On 25 September 2026, schema-2 parser `cmas-2025-depth/1` added support for 17 of the acquired 2025 timing PDFs. Three women's CWT/FIM/CNF PDFs retain `cmas-women-depth/1` and their earlier jobs. Across all 20 PDFs and 23 pages, 352 source rows are retained: 332 parsed and 20 explicitly unparsed on headerless continuation pages. Those pages contain seven CWT men rows, nine FIM men rows and four CWT-BF men rows. No gap is represented as zero attempts.
+
+Independent source comparison found no missing/extra rows or remaining field/context/evidence mismatches; all 587 nonblank lines were accounted for exactly once. Seven rendered page samples supported layout checks without owner attestation. All 27 PDF extraction replays skipped, including the 17 new parser jobs. Printed category, discipline and row evidence are retained without inferring units, citizenship, identity, cards or success. The isolated private root is `data/championship-restart-20260925-b03/`; earlier corpora and extraction jobs remain intact. [Timing extraction evidence](cmas-timing-acquisition-20260925.md#batch-3-2025-depth-extraction) records the parser boundary. All results remain unreviewed and publication-blocked; no database import, real review, deployment or policy change occurred. Remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+A separate comparison of the two batch 1 federation CWT PDFs verified all 73 rows and 96 nonblank lines with no missing/extra rows or remaining mismatches. Across those two documents and the 20 timing PDFs, 425 document-version rows are accounted for: 405 parsed and 20 unparsed. Overlapping documents are not deduplicated into unique attempts or automatically matched as publisher revisions. Separate evidence remains in `data/championship-restart-20260925-b03/b01-audit/`.
+
+## Batch 4 continuation reconciliation
+
+On the same cutoff date, `cmas-2025-depth/2` resolved the 20 headerless continuation rows using PDF word positions and source-backed page context: seven CWT men, nine FIM men and four CWT-BF men. All 352 timing rows now parse, with every field checked against the independent source baseline and all 587 nonblank lines accounted for exactly once. Thirty-nine absent numeric cells and one literal zero in those continuation rows remain distinct. Three continuation-page renders support the position checks without supplying owner attestation.
+
+Seventeen new schema-2 jobs preserve the earlier parser jobs; the three women's and seven unsupported 2026 depth jobs remain unchanged. All 27 repeated extractions skip duplicate creation. The two legacy federation jobs also remain unchanged, with their 73 rows reconciled separately. Combined coverage is 425 document-version rows, all parsed, without deduplication or inferred supersession. The legacy men's evidence-envelope limitations remain explicit.
+
+Private source copies, reproducible audits and replay reports are retained in `data/championship-restart-20260925-b04/`. [Batch 4 evidence](cmas-timing-acquisition-20260925.md#batch-4-geometry-backed-continuations) describes the parser and preservation checks. This adds no source acquisition, database import, genuine review, policy activation or public cutover. Remaining championship coverage and publication acceptance stay in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## Batch 5 2026 depth reconciliation
+
+Parser `cmas-2026-depth/1` adds all 180 source rows across seven retained Roatan PDFs and 15 pages. Independent raw/typed/context/geometry checks pass, with all 407 nonblank lines accounted for exactly once. All pages were rendered and inspected; this supplies no owner attestation. Seven new jobs preserve prior unsupported artifacts; all 27 timing-document reruns reuse their jobs. Earlier 352 timing rows and 73 legacy federation rows remain unchanged, for 605 document-version rows across the retained depth PDFs. These counts do not establish unique attempts or supersession.
+
+Both CWT-men sessions remain outside PDF coverage. Missing category headings remain unresolved, and no JSON result is substituted for an unavailable PDF. [Batch 5 evidence](cmas-timing-acquisition-20260925.md#batch-5-2026-depth-reconciliation) records per-document/category counts, unknown values, source replay and private artifacts. All results remain unreviewed and publication-blocked. No database import, real review, deployment, policy activation or event replacement occurred; remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+
+## Batch 6 indoor source census
+
+The two retained 2026 Novi Sad PDFs contain 648 result rows across all 66 pages. A source-only census was frozen before comparison with the distance parser. It records every table heading, date, row boundary and nonblank line. Thirty-three pages contain 412 distance rows; the other 33 contain 236 STA/speed rows. Counts describe rows in these documents, without establishing unique attempts, absent categories or publisher revision relationships.
+
+| Source | DNF | DYN-BF | DYN | STA | 8x50 | 2x50 | 4x50 | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Seniors/juniors | 91 | 96 | 108 | 70 | 35 | 36 | 42 | 478 |
+| Masters | 33 | 42 | 42 | 35 | 2 | 11 | 5 | 170 |
+| Total | 124 | 138 | 150 | 105 | 37 | 47 | 47 | 648 |
+
+Distance categories retain the printed junior/senior men/women and masters M1/M2/M3 labels. Masters DNF has no M3-women heading; the omission does not establish zero attempts. No age ranges are inferred. The 236 STA/speed rows remain explicitly unresolved by this distance slice. [Batch 6 evidence](cmas-timing-acquisition-20260925.md#batch-6-2026-indoor-distance) records extraction and reconciliation results. All extraction candidates remain unreviewed and publication-blocked; remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+
+## Batch 7 indoor timing source reconciliation
+
+The new timing parser retains the other 236 rows on 33 pages: 105 STA, 37 8X50, 47 2X50 and 47 4X50. Combined with the preserved 412 distance candidates, the two retained PDFs contain 648 structurally extracted rows on 66 pages. This is complete coverage of these acquired PDF rows, not complete championship/category coverage or review approval.
+
+Source semantics remain explicit gaps: STA uses distance/metre headings over timing-shaped tokens, 2X50/4X50 leaves its first result column unlabeled, and timing component units are not established. Exact tokens, blanks, zeros, notes, printed context and geometry remain available without conversion or inferred penalties. [Batch 7 evidence](cmas-timing-acquisition-20260925.md#batch-7-2026-indoor-sta-and-speed) records per-category counts, source ambiguities and reproducible checks. Missing master headings remain unresolved. All rows remain private, unreviewed and publication-blocked; the remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).

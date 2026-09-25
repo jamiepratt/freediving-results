@@ -1,12 +1,14 @@
 (ns freediving.public-results
   "Read-only public projection. Refresh requires a trusted reviewer database capability."
   (:require [clojure.edn :as edn] [clojure.java.io :as io] [clojure.string :as str]
-            [freediving.publication :as publication])
+            [freediving.html-evidence :as html-evidence]
+            [freediving.event-selections :as selections])
   (:import [java.sql DriverManager Connection] [java.security MessageDigest] [java.util HexFormat]))
 (def public-field-keys
   #{:source-name :representation :federation :event-name :event-date :discipline :category
     :rank :performance :unit :announced :announced-unit :points :penalty :penalty-unit
     :declared-depth :attempted-depth :final-depth :final-distance :realized-distance :duration :source-name-fragments
+    :document-title :remarks :announced-performance :realised-performance :record-badge
     :status :card :notes :final-time :realized-time :final-duration :realized-duration :split-time})
 (defn- scalar? [v] (or (nil? v) (string? v) (number? v) (boolean? v) (keyword? v)))
 (defn public-fields [fields]
@@ -19,6 +21,22 @@
                        [k (cond-> (into {} (filter (fn [[_ value]] (scalar? value))
                                                    (select-keys v [:raw :minutes :seconds :centiseconds :hundredths :milliseconds :notation :unit :value :fraction :fraction-digits])))
                             (and (vector? (:components v)) (every? number? (:components v))) (assoc :components (:components v)))]))) fields)))
+(defn html-public-fields [payload context]
+  {:original (-> (public-fields (:parsed payload))
+                 (assoc :document-title (get-in payload [:parsed :event-name])
+                        :event-name (:event-name context) :event-date (:event-date context)))
+   :raw-values (public-fields
+                (into {} (keep (fn [[header field]]
+                                 (when (contains? (get-in payload [:raw :fields]) header)
+                                   [field (get-in payload [:raw :fields header])])))
+                      {"Diver" :source-name "Name" :source-name "Nationality" :representation
+                       "Discipline" :discipline "AP" :announced-performance "Announced" :announced-performance
+                       "RP" :realised-performance "Result" :realised-performance "Card" :card
+                       "Remarks" :remarks "Points" :points "Penalties" :penalty "#" :rank}))})
+(defn- citation-url [value]
+  (try (let [u (java.net.URI. value)]
+         (when (and (#{"http" "https"} (.getScheme u)) (.getHost u) (nil? (.getUserInfo u))) value))
+       (catch Exception _ nil)))
 (defn- fail! [s] (throw (ex-info s {})))
 (defn- sha [s] (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes ^String s "UTF-8"))))
 (defn- result-id [job ordinal] (sha (str job "/" ordinal)))
@@ -36,33 +54,57 @@
   (with-open [c (DriverManager/getConnection url)]
     (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
     (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
-(defn migrate! [url reviewer-role public-role]
-  (doseq [role [reviewer-role public-role]]
-    (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
-  (when (= reviewer-role public-role) (fail! "Separate public role required"))
+(defn migrate!
+  ([url reviewer-role public-role] (migrate! url reviewer-role public-role {}))
+  ([url reviewer-role public-role {:keys [defer-html-view?]}]
+   (doseq [role [reviewer-role public-role]]
+     (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
+   (when (= reviewer-role public-role) (fail! "Separate public role required"))
+   (transaction url
+                (fn [c]
+                  (query c "SELECT pg_advisory_xact_lock(781246914)")
+                  (doseq [role [reviewer-role public-role]]
+                    (let [r (first (query c "SELECT rolsuper,rolcreaterole,rolcreatedb,rolbypassrls FROM pg_roles WHERE rolname=?" role))]
+                      (when (or (nil? r) (some true? (vals r))
+                                (seq (query c "SELECT roleid FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=?)" role))
+                                (seq (query c "SELECT oid FROM pg_class WHERE relnamespace=to_regnamespace('freediving') AND pg_has_role(?,relowner,'MEMBER')" role))
+                                (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(?,nspowner,'MEMBER')" role))
+                                (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(?,datdba,'MEMBER')" role)))
+                        (fail! "Projection roles must be restricted without ownership or memberships"))))
+                  (doseq [[version resource] [[4 "migrations/004-public-results.sql"]
+                                              [9 "migrations/009-html-public-results.sql"]]
+                          :when (not (and defer-html-view? (= 9 version)))]
+                    (let [sql (slurp (io/resource resource)) checksum (sha sql)]
+                      (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=?" version))]
+                        (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
+                        (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(?,?)" version checksum)))))
+                  (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " public-role ",PUBLIC"))
+                  (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " public-role ",PUBLIC"))
+                  (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " public-role))
+                  (execute! c (str "GRANT SELECT ON freediving.public_results TO " public-role))
+                  (when (selections/installed? c)
+                    (execute! c (str "GRANT SELECT ON freediving.public_event_coverage TO " public-role)))
+                  (execute! c (str "GRANT SELECT,INSERT,UPDATE,DELETE ON freediving.public_projection_cache TO " reviewer-role))
+                  {:schema-version (if defer-html-view? 4 9)}))))
+(defn activate-html-policy!
+  "Explicit owner checkpoint; hides old validations until revalidated under policy 2."
+  [url acknowledgement reason]
+  (when-not (and (= "hide-existing-public-results" acknowledgement)
+                 (string? reason) (not (str/blank? reason)))
+    (fail! "Explicit publication invalidation acknowledgement and reason required"))
   (transaction url
                (fn [c]
-                 (query c "SELECT pg_advisory_xact_lock(781246914)")
-                 (doseq [role [reviewer-role public-role]]
-                   (let [r (first (query c "SELECT rolsuper,rolcreaterole,rolcreatedb,rolbypassrls FROM pg_roles WHERE rolname=?" role))]
-                     (when (or (nil? r) (some true? (vals r))
-                               (seq (query c "SELECT roleid FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=?)" role))
-                               (seq (query c "SELECT oid FROM pg_class WHERE relnamespace=to_regnamespace('freediving') AND pg_has_role(?,relowner,'MEMBER')" role))
-                               (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(?,nspowner,'MEMBER')" role))
-                               (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(?,datdba,'MEMBER')" role)))
-                       (fail! "Projection roles must be restricted without ownership or memberships"))))
-                 (let [sql (slurp (io/resource "migrations/004-public-results.sql")) checksum (sha sql)]
-                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=4"))]
-                     (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
-                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(4,?)" checksum))))
-                 (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " public-role ",PUBLIC"))
-                 (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " public-role ",PUBLIC"))
-                 (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " public-role))
-                 (execute! c (str "GRANT SELECT ON freediving.public_results TO " public-role))
-                 (execute! c (str "GRANT SELECT,INSERT,UPDATE,DELETE ON freediving.public_projection_cache TO " reviewer-role))
-                 {:schema-version 4})))
+                 (query c "SELECT pg_advisory_xact_lock(781246915)")
+                 (when-not (= (sha (slurp (io/resource "migrations/009-html-public-results.sql")))
+                              (:sha256 (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=9"))))
+                   (fail! "Verified migration 9 required"))
+                 (when-not (= "extraction-publication/1"
+                              (:policy_version (first (query c "SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1"))))
+                   (fail! "Expected active policy 1"))
+                 (execute! c "INSERT INTO freediving.publication_policy_events(policy_version,reason) VALUES('extraction-publication/2',?)" reason)
+                 {:policy-version "extraction-publication/2"})))
 (defn- eligible-rows [c]
-  (query c "SELECT p.* FROM freediving.publication_decisions p WHERE p.action='validate' AND p.policy_version=? AND p.policy_version=(SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM freediving.publication_decisions n WHERE n.job_id=p.job_id AND n.ordinal=p.ordinal AND n.revision>p.revision) AND p.review_revision=COALESCE((SELECT max(r.revision) FROM freediving.review_decisions r WHERE r.job_id=p.job_id AND r.ordinal=p.ordinal),0)" publication/current-policy))
+  (query c "SELECT p.* FROM freediving.publication_decisions p WHERE p.action='validate' AND p.policy_version IN ('extraction-publication/1','extraction-publication/2') AND p.policy_version=(SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM freediving.publication_decisions n WHERE n.job_id=p.job_id AND n.ordinal=p.ordinal AND n.revision>p.revision) AND p.review_revision=COALESCE((SELECT max(r.revision) FROM freediving.review_decisions r WHERE r.job_id=p.job_id AND r.ordinal=p.ordinal),0)"))
 (defn- safe-identity [identity eligible]
   (when (= :matched (:outcome identity))
     (let [id (:identity-id identity)]
@@ -75,13 +117,22 @@
                (let [local? (not (contains? ref :job-id))
                      target (str (:job-id ref) ":" (:ordinal ref))]
                  (when (or local? (contains? eligible target))
-                   (merge (select-keys ref [:page :line])
+                   (merge (select-keys ref [:page :line :table :row])
                           {:result-id (if local? (result-id job ordinal) (result-id (:job-id ref) (:ordinal ref)))})))) refs)))
 (defn- projection [c validation eligible]
   (let [{:keys [job_id ordinal]} validation
-        o (first (query c "SELECT o.payload_edn,e.artifact_bytes,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE o.job_id=? AND ordinal=?" job_id ordinal))
+        o (first (query c "SELECT o.payload_edn,o.candidate_id,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE o.job_id=? AND ordinal=?" job_id ordinal))
         payload (edn/read-string (:payload_edn o))
         artifact (edn/read-string (String. ^bytes (:artifact_bytes o) "UTF-8"))
+        html-context (when (html-evidence/html? artifact)
+                       (when-not (and (= (:artifact_sha256 o) (html-evidence/sha256 (:artifact_bytes o)))
+                                      (= job_id (:job-id artifact))
+                                      (= {:job-id job_id :ordinal ordinal :candidate-id (:candidate_id o)
+                                          :artifact-sha256 (:artifact_sha256 o) :source-sha256 (:source_sha256 o)}
+                                         (:observation (edn/read-string (:body_edn validation)))))
+                         (fail! "HTML validation provenance mismatch"))
+                       (html-evidence/bound-context! artifact payload ordinal (:source_sha256 o)))
+        html-values (when html-context (html-public-fields payload html-context))
         ps (into {} (map (fn [r] [(:id r) (edn/read-string (:body_edn r))])
                          (query c "SELECT id,body_edn FROM freediving.review_proposals WHERE job_id=? AND ordinal=?" job_id ordinal)))
         ds (mapv #(assoc (edn/read-string (:body_edn %)) :recorded-at (str (:recorded_at %))) (query c "SELECT body_edn,recorded_at FROM freediving.review_decisions WHERE job_id=? AND ordinal=? ORDER BY revision" job_id ordinal))
@@ -103,43 +154,65 @@
                                 :after (get (public-fields {field (if (= :reverse (:action d)) (:before p) (:after p))}) field)
                                 :reason (:reason d) :correction-reason (:reason p) :evidence refs
                                 :effective? (= (:id d) (get-in state [:active field]))}))) ds))
-        original (public-fields (:parsed payload))
+        original (or (:original html-values) (public-fields (:parsed payload)))
+        effective (cond-> (public-fields (:fields state))
+                    html-context (assoc :document-title (get-in payload [:parsed :event-name])
+                                        :event-name (if (get-in state [:active :event-name])
+                                                      (get-in state [:fields :event-name]) (:event-name html-context))))
         supported? (every? (fn [[field event-id]]
                              (or (nil? event-id) (not (public-field-keys field))
                                  (seq (evidence (:evidence (ps (:proposal-id (by-id event-id)))) job_id ordinal eligible))))
                            (:active state))]
     (when supported?
       {:result-id (result-id job_id ordinal)
-       :citations (mapv #(merge (select-keys (:manifest %) [:discovery-url :final-url :publisher :relationship :mirror-of])
-                                {:source-sha256 (:source_sha256 o)}) (:acquisitions artifact))
-       :source-position (select-keys (:coordinates payload) [:page :line])
-       :original original :raw-values (public-fields (get-in payload [:raw :fields]))
-       :effective (public-fields (:fields state)) :correction-audit audit
+       :citations (mapv (fn [acquisition]
+                          (let [m (:manifest acquisition)]
+                            (merge (select-keys m [:publisher :relationship])
+                                   {:source-sha256 (:source_sha256 o)
+                                    :discovery-url (citation-url (:discovery-url m))
+                                    :final-url (citation-url (:final-url m))
+                                    :mirror-of (citation-url (:mirror-of m))}
+                                   (select-keys html-context [:event-name :event-date :selected-discipline :selected-gender])
+                                   (:coordinates html-context)))) (:acquisitions artifact))
+       :source-position (html-evidence/coordinates artifact payload)
+       :original original :raw-values (or (:raw-values html-values) (public-fields (get-in payload [:raw :fields])))
+       :effective effective :correction-audit audit
        :identity (if identity-id {:status :approved :id identity-id} {:status :unresolved})
-       :unknown-fields (vec (sort (filter #(nil? (get (:fields state) %)) public-field-keys)))
+       :unknown-fields (vec (sort (filter #(nil? (get effective %)) public-field-keys)))
        :coverage {:scope :pilot :completeness :partial}})))
-(defn refresh! [url]
-  (transaction url
-               (fn [c]
+(defn refresh-on! [c]
       ;; One snapshot for all records and dependencies. Changes after this snapshot invalidate the view.
-                 (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.public_projection_cache','INSERT') AND has_table_privilege(current_user,'freediving.publication_decisions','INSERT') AS allowed")))
-                   (fail! "Projection reviewer capability required"))
-                 (query c "SELECT pg_advisory_xact_lock(781246915)")
-                 (let [validations (eligible-rows c)
-                       projected (loop [vs validations]
-                                   (let [eligible (set (map #(str (:job_id %) ":" (:ordinal %)) vs))
-                                         pairs (vec (keep (fn [v] (when-let [p (projection c v eligible)] [v p])) vs))]
-                                     (if (= (count pairs) (count vs)) pairs (recur (mapv first pairs)))))
-                       review-count (:n (first (query c "SELECT count(*) AS n FROM freediving.review_decisions")))
-                       validation-count (:n (first (query c "SELECT count(*) AS n FROM freediving.publication_decisions")))]
-                   (execute! c "DELETE FROM freediving.public_projection_cache")
-                   (doseq [[v p] projected]
-                     (execute! c "INSERT INTO freediving.public_projection_cache(result_id,job_id,ordinal,validation_id,policy_version,review_count,validation_count,source_name,identity_id,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?)"
-                               (:result-id p) (:job_id v) (:ordinal v) (:id v) publication/current-policy review-count validation-count
-                               (get-in p [:original :source-name]) (get-in p [:identity :id]) (binding [*print-length* nil *print-level* nil] (pr-str p))))
-                   {:refreshed (count projected)}))))
+  (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.public_projection_cache','INSERT') AND has_table_privilege(current_user,'freediving.publication_decisions','INSERT') AS allowed")))
+    (fail! "Projection reviewer capability required"))
+  (query c "SELECT pg_advisory_xact_lock(781246915)")
+  (let [plan (selections/projection-plan c (eligible-rows c))
+        validations (:validations plan)
+        projected (loop [vs validations]
+                    (let [eligible (set (map #(str (:job_id %) ":" (:ordinal %)) vs))
+                          pairs (vec (keep (fn [v] (when-let [p (projection c v eligible)] [v (merge p (dissoc (get (:metadata plan) [(:job_id v) (:ordinal v)]) :validation-id))])) vs))
+                          counts (frequencies (keep #(get-in % [1 :event-selection :id]) pairs))
+                          pairs (filterv (fn [[_ p]] (let [id (get-in p [:event-selection :id])]
+                                                       (or (nil? id) (= (get (:expected plan) id) (get counts id))))) pairs)]
+                      (if (= (count pairs) (count vs)) pairs (recur (mapv first pairs)))))
+        review-count (:n (first (query c "SELECT count(*) AS n FROM freediving.review_decisions")))
+        validation-count (:n (first (query c "SELECT count(*) AS n FROM freediving.publication_decisions")))]
+    (execute! c "DELETE FROM freediving.public_projection_cache")
+    (doseq [[v p] projected]
+      (execute! c "INSERT INTO freediving.public_projection_cache(result_id,job_id,ordinal,validation_id,policy_version,review_count,validation_count,source_name,identity_id,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?)"
+                (:result-id p) (:job_id v) (:ordinal v) (:id v) (:policy_version v) review-count validation-count
+                (get-in p [:original :source-name]) (get-in p [:identity :id]) (binding [*print-length* nil *print-level* nil] (pr-str p))))
+    (when (selections/installed? c)
+      (let [snapshot (selections/snapshot-on c)]
+        (execute! c "UPDATE freediving.public_projection_cache SET selection_count=?,relationship_count=?,proposal_count=?" (:selections snapshot) (:relationships snapshot) (:proposals snapshot))))
+    (selections/refresh-coverage! c)
+    {:refreshed (count projected)}))
+(defn refresh! [url] (transaction url refresh-on!))
 (defn results [url]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results ORDER BY result_id"))))
+(defn listing-snapshot [url]
+  (transaction url (fn [c]
+                     {:results (mapv (comp edn/read-string :body_edn) (query c "SELECT body_edn FROM freediving.public_results ORDER BY result_id"))
+                      :events (or (selections/event-coverage c) [])})))
 (defn search-source-name [url exact-name]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results WHERE source_name=? ORDER BY result_id" exact-name))))
 (defn result [url id]
@@ -147,13 +220,16 @@
 (defn athlete-history [url id]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results WHERE identity_id=? ORDER BY result_id" id))))
 (defn coverage [url]
-  (transaction url #(assoc (first (query % "SELECT count(*) AS results,count(DISTINCT identity_id) AS approved_identities FROM freediving.public_results")) :scope :pilot :completeness :partial)))
+  (transaction url #(assoc (first (query % "SELECT count(*) AS results,count(DISTINCT identity_id) AS approved_identities FROM freediving.public_results")) :scope :pilot :completeness :partial :events (or (selections/event-coverage %) []))))
 (defn -main [& [command & args]]
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (println (pr-str
                 (case command
                   "migrate" (if (= 2 (count args)) (apply migrate! url args) (fail! "Expected reviewer and public roles"))
+                  "activate-html-policy" (if (= 2 (count args))
+                                           (apply activate-html-policy! url args)
+                                           (fail! "Expected acknowledgement and reason"))
                   "refresh" (if (empty? args) (refresh! url) (fail! "Unexpected arguments"))
                   "list" (if (empty? args) (results url) (fail! "Unexpected arguments"))
                   "coverage" (if (empty? args) (coverage url) (fail! "Unexpected arguments"))

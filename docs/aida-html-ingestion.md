@@ -24,11 +24,15 @@ Each candidate retains its 1-based document table and table-row coordinates, exa
 
 Date context comes from the selected date in the archived HTML. Ranking discipline/gender come from selected options. Acquisition evidence must record filters: AIDA's date selector changes session state and reloads the same URL. A URL alone cannot reproduce that selection. Archive any result-bearing dynamic payload required by another layout; this parser does not implement arbitrary live JSON feeds.
 
-The `:event-name` field currently retains the document title, which is generic on older event pages. Their specific event heading remains in the archived HTML. Points and penalties retain source text without numeric coercion. These limitations remain visible rather than being filled from inferred context.
+The archive now accepts structured browser acquisition context and verifies separately retained DOM evidence. See the [manifest contract](../README.md#manifest-contract). Official AIDA schedule links can also include an allowed literal `day_index` query; retain it together with the observed selected date. The [25 September inventory](championship-inventory-20260925.md) records the isolated restart corpus. The session audit below covers all exposed result dates for Wakayama 2025, Limassol 2025 and Budapest 2026. These private acquisitions do not replace the earlier corpus or establish complete championship coverage beyond those views.
+
+The immutable parser's `:event-name` field retains the document title, which can be generic. The separate HTML review evidence path reads the retained event header and selected date without rewriting that original field or changing parser version 1. A document title alone does not establish an event name. Points and penalties retain source text without numeric coercion.
 
 Duplicate extraction/import calls reuse the same immutable job and observations when source bytes, acquisition evidence, parser, actor and config are unchanged. Changed source bytes or processing identity produce another retained version. This does not deduplicate athletes, rank and attempt listings, or mirrored publications into one sporting result.
 
-HTML observations remain blocked from publication. The current review/publication path requires PDF page/line evidence; this change does not authorize HTML validation, identity merging, corrections or public release.
+Private HTML inspection and review use exact table/row evidence. Optional publication policy `extraction-publication/2` supports HTML citations after explicit reviewer validation; policy 1 continues to block HTML. Installing code and migration 9 does not activate policy 2. Activation and genuine decisions remain separate owner checkpoints. See [publication policy](publication-policy.md) and [private inspection](local-source-inspection.md).
+
+Inspection verifies the retained source and extraction before presenting event/date/filter context and row cells as inert text. It does not execute publisher scripts or fetch publisher assets. Evidence remains bound to the exact source, job, artifact, candidate and observation. A different capture or extraction requires fresh decisions, even if its rows look identical. Automated replay and reconciliation never supply the reviewer's accuracy attestations.
 
 ## Measured acquisition, 24 September 2026
 
@@ -59,3 +63,67 @@ CMAS remains on `freediving.extraction/extract!` and the existing PDF/text path.
 A new isolated PostgreSQL corpus imported seven sources and 769 observations: 405 pilot attempts, 96 supplemental HTML rankings, 42 historical-format rows, 182 mirrored PDF rankings and 44 official CMAS PDF rows. All seven extraction and import reruns skipped duplicates. Source replay, every stored candidate payload and every artifact matched the archive; an independent HTML parser checked all 543 HTML rows and 5,933 field comparisons. Every row remains unreviewed. Changed-source revision retention and tamper rejection were demonstrated with synthetic fixtures, not invented publisher revisions.
 
 Private acquisition, comparison and import evidence is kept under the batch's ignored `data/aida-html-ingestion-20260924-04/` directory. Real source documents and names are not fixtures in Git. Automated tests use synthetic HTML and existing synthetic PDF fixtures.
+
+
+## Restart session reconciliation, 25 September 2026
+
+The retained official attempt views cover all exposed result dates for three events. Dates and discipline/gender below were checked against actual result rows, not inferred from schedules.
+
+| Event | Selected date | Result scope | Source rows |
+| --- | --- | --- | ---: |
+| Wakayama 4349 | 2025-06-28 | DYNB, female/male | 193 |
+| Wakayama 4349 | 2025-06-29 | DNF, female/male | 176 |
+| Wakayama 4349 | 2025-07-01 | STA, female/male | 162 |
+| Wakayama 4349 | 2025-07-02 | DYN, female/male | 182 |
+| Limassol 4350 | 2025-09-23 | CNF, female | 36 |
+| Limassol 4350 | 2025-09-24 | CNF, male | 51 |
+| Limassol 4350 | 2025-09-25 | CWTB, female | 51 |
+| Limassol 4350 | 2025-09-26 | CWTB, male | 59 |
+| Limassol 4350 | 2025-09-28 | FIM, female | 50 |
+| Limassol 4350 | 2025-09-29 | FIM, male | 56 |
+| Limassol 4350 | 2025-10-01 | CWT, male | 49 |
+| Limassol 4350 | 2025-10-02 | CWT, female | 49 |
+| Budapest 4852 | 2026-06-02 | DYNB, female/male | 220 |
+| Budapest 4852 | 2026-06-03 | DNF, female/male | 209 |
+| Budapest 4852 | 2026-06-05 | STA, female/male | 187 |
+| Budapest 4852 | 2026-06-06 | DYN, female/male | 212 |
+
+Sources: [Wakayama](https://www.aidainternational.org/StartList/4349), [Limassol](https://www.aidainternational.org/StartList/4350), [Budapest](https://www.aidainternational.org/StartList/4852). All 16 retained responses returned HTTP 200 and contain one supported table. Their 1,942 rows comprise 713 Wakayama, 401 Limassol and 828 Budapest attempts. The second batch added 11 previously missing sessions and 1,193 rows. All rows parsed; zero unsupported tables or unparsed rows were found in these views. All 1,942 remain unresolved for owner review.
+
+An independent Python standard-library HTML parser read the retained response bytes directly, independently of jsoup. It compared every source row and cell range, decoded text, table/row coordinate, selected date, all 26 parsed fields and their known/unknown/invalid states, parse/review status and contradiction flags. The 16 unique source views passed 118,462 comparisons. Including eight separately retained recapture extraction versions, 24 artifacts and 3,483 versioned rows passed 212,463 comparisons with zero mismatches. These are source-to-parser checks, not independent publisher corroboration or reviewer attestation.
+
+The unique rows retain 1,597 white, 121 yellow and 224 red cards, 232 zero-point values and seven explicit zero-metre realised performances. There are 34,466 parsed field states and 16,026 unknown states, with zero invalid field states. Source card and remark text remain separate from parser/review status; no additional sporting-result status was invented. In particular, zero points were not converted to disqualification. Categories, penalties, time units and other absent values retain the existing unknown semantics.
+
+The audit discovered that a single browser evaluation returning a large DOM string can contain a literal `[Truncated]` marker. All eight original pool DOM captures were truncated; seven lost result cells, while Wakayama July 1 retained the full table but lost later document content. Their response HTML and schema-4 extraction were intact. Hash verification alone could not detect this capture defect: it correctly verified the incomplete bytes that had been supplied.
+
+All eight pool views were recaptured using 50,000-character DOM slices, checking the concatenated character length and absence of truncation markers. Each new response SHA-256 exactly matched its earlier response. New timestamps and DOM hashes were registered as separate acquisitions; original evidence was preserved unchanged. Every one of the 16 views now has a complete DOM capture whose selected date and every result cell agree with the response after HTML-standard CRLF/CR-to-LF normalization. This normalization is reported separately from exact source-byte/cell comparisons. Fresh DOM evidence does not retroactively attest to an earlier capture.
+
+Batch two retains 19 registered AIDA acquisitions across two isolated archives: 11 new sessions plus eight pool recaptures, representing 15 distinct response hashes. Twenty physical response captures include an unregistered duplicate September 25 capture retained during navigation verification. Archive registration and extraction reruns reused all 19 jobs/acquisitions; schema-4 replay validation also passed for the five earlier artifacts. No production parser changes were necessary.
+
+Private evidence is under `data/championship-restart-20260925-b02/aida/`. Initial captures and `archive/` preserve the original acquisition history; `recaptures/` contains fresh pool captures and its separate archive. Reproduction scripts are `register_extract.clj`, `recaptures/register_extract.clj` and `reconcile.py`. The final audit is `recaptures/reconciliation-report.json`, with row-level checks in `recaptures/reconciliation-rows.jsonl` and input/artifact paths in `recaptures/reconciliation-input.json`. The first batch remains unchanged at its original private path.
+
+With both private corpora still at their recorded locations, reproduce from the batch-two checkout:
+
+```sh
+clojure -M data/championship-restart-20260925-b02/aida/register_extract.clj
+clojure -M data/championship-restart-20260925-b02/aida/recaptures/register_extract.clj
+python3 data/championship-restart-20260925-b02/aida/reconcile.py data/championship-restart-20260925-b02/aida/recaptures
+```
+
+No database import, owner decisions, HTML publication support, identity merges or public replacement occurred during that acquisition audit. Rankings, alternative exports and publisher revisions are not silently deduplicated by this session audit. Remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## HTML review support verification
+
+The subsequent HTML review implementation replayed all 24 retained artifacts, representing 3,483 versioned rows, without modifying their archives. Every artifact retained an unambiguous event-branding header and matching selected date; no acquisition-context conflict was found. This validates compatibility of the evidence path, not capture completeness, sporting-result semantics or owner approval. Original truncated DOM records and later complete captures remain separate.
+
+Synthetic PostgreSQL and HTTP checks exercise explicit HTML validation, PDF coexistence, source/version tampering, unauthorized requests, identity reversal and validation revocation. Public projections expose exact citations and source tokens without private source dumps. Real source rows remain unreviewed. Policy activation, real-corpus import, reviewed event replacement and genuine owner decisions were not performed by this implementation.
+
+The later [event-selection API](event-selections.md) adds separately reviewed public cutover and rollback. Its strict source-bound scope requirements do not automatically enroll these HTML captures. Missing event/venue/round/session or own-row participant mappings cannot be replaced by names, ranks, hashes or guessed constants. HTML validation remains a separate decision and transfers no identity or selection authority.
+
+## Isolated restart import
+
+The subsequent [corpus audit](championship-corpus-20260925.md) imported all 24 retained AIDA versions and 3,483 observations into a separate local database. All unchanged retries skipped; exact source replay and independent payload checks passed. Original captures and recaptures remain distinct. No review, identity approval, policy activation or event selection occurred.
+
+## Dated-view scope audit
+
+The [September 25 scope audit](aida-scope-audit-20260925.md) checked all 3,483 retained rows and separately archived the three official EventPage schedules and venue descriptions. The opt-in [dated-view contract](event-selections.md#explicit-aida-dated-views) supports partial scoping using existing exact source bindings, with full-artifact ambiguity rejection. It changes neither extraction identity nor stored observations. Schedules do not establish row discipline, round or attempt identity; one Limassol row differs from its date's scheduled discipline/category. Exact private descriptors remain unapproved.

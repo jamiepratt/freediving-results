@@ -1,6 +1,6 @@
-# Private source-page inspection
+# Private source inspection
 
-The local owner interface can inspect an explicitly configured real corpus without recording decisions. Source pages, extracted lines, original tokens, parsed values and effective reviewed values remain private. This supports [issue #1](https://github.com/jamiepratt/freediving-results/issues/1); opening an image is not an owner review or publication approval.
+The local owner interface can inspect an explicitly configured real corpus without recording decisions. PDF pages and HTML rows, original tokens, parsed values and effective reviewed values remain private. This supports [issue #1](https://github.com/jamiepratt/freediving-results/issues/1); opening source evidence is not an owner review or publication approval.
 
 ## Prepare an isolated corpus
 
@@ -67,6 +67,10 @@ Read-only mode hides decision controls and rejects proposal, review, publication
 
 Filter cases and open a comparison. The page viewer provides page navigation and zoom, while the evidence panel retains the selected observation's exact text coordinates and provenance. Moving to another page changes the displayed image context; it does not move the observation. Text line numbers and text-extraction column offsets are not PDF geometry. No row bounding boxes are inferred. Compare rendered glyphs with the exact extracted strings; discrepancies and shared/ambiguous rows remain unresolved.
 
+Schema-4 HTML observations open a separate text inspection panel with the retained event context, selected date, table/row, headers, decoded cells and exact row markup. Markup is displayed as text; publisher scripts, images and other assets never execute or load. This is inspection of the retained evidence, not a reconstruction of the publisher's visual page. The original document title remains distinct from the event header. Missing or ambiguous context cannot be supplied by a URL or inferred from a generic title.
+
+HTML evidence uses 1-based table/row coordinates. Review and validation forms retain those coordinates without substituting page/line numbers. The source endpoint accepts only the exact registered job and ordinal; it rechecks source bytes, artifact identity and parser replay. Loading the exact row in the current authenticated session is required before an accuracy attestation, and the source is checked again on validation. Neither loading the row nor replaying it creates a reviewer decision.
+
 ## Deliberate review enablement
 
 When the owner chooses to conduct actual review, stop the inspection server, use the separate restricted `reviews_owner` database role and explicitly add `:review-enabled? true` to the real configuration. A read-only inspector cannot enable review. This changes authority and presents the existing proposal and separate decision/validation controls. Capability login and CSRF checks still apply. Do not enable it merely to inspect pages.
@@ -85,7 +89,7 @@ Resume with `scripts/local-postgres.sh start data/source-inspection/postgres17 5
 
 ## Trust boundary
 
-Only the owner server serves PNG pages; the public server has no archive or page route and refuses inspection/reviewer database roles. Requests identify a registered observation and a bounded page number, never a path or URL. Source bytes and extraction binding are verified before rendering and before serving cached output. Rendering identity includes the source, installed rendering tool and configuration. Corrupt or mismatched cached artifacts are rejected. No remote fetching or external browser assets are used.
+Only the owner server serves PNG pages and private HTML row JSON; the public server has no archive or inspection route and refuses inspection/reviewer database roles. Requests identify a registered observation and, for PDFs, a bounded page number, never a path or URL. Source bytes and extraction binding are verified before rendering and before serving cached output. Rendering identity includes the source, installed rendering tool and configuration. Corrupt or mismatched cached artifacts are rejected. No remote fetching or external browser assets are used.
 
 This is a trusted-local pilot with private filesystem storage and point-in-time database authority checks, not an internet-facing service or an operating-system sandbox against a malicious local user. Keep both listeners on loopback. Production authentication, expanded corpus coverage, genuine reviews and evaluation remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 

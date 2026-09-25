@@ -1,13 +1,17 @@
 (ns freediving.publication-test
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
             [freediving.aida-html :as html]
+            [freediving.archive :as archive]
             [freediving.aida-html-test :as html-fixture]
             [freediving.archive-test :as archive-fixture]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.reviews-test :as review-fixture]
-            [freediving.publication :as publication]))
+            [freediving.publication :as publication]
+            [freediving.depth-2026-test :as pdf-fixture]
+            [freediving.indoor-2026-test :as indoor-fixture]
+            [freediving.indoor-time-2026-test :as time-fixture]))
 (def reviewer review-fixture/reviewer)
 (use-fixtures :each (fn [f]
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
@@ -77,7 +81,7 @@
       (is (= (last (publication/history reviewer t)) (publication/decide! reviewer revoked))))
     (publication/decide! reviewer (assoc (request t "again") :base-revision 3))
     (is (thrown? Exception (publication/activate-policy! reviewer "extraction-publication/2" "Forbidden")))
-    (publication/activate-policy! fixture/admin "extraction-publication/2" "New required evidence policy")
+    (publication/activate-policy! fixture/admin "extraction-publication/3" "New required evidence policy")
     (is (false? (:eligible? (publication/diagnose reviewer t))))
     (is (false? (:ready? (publication/diagnose reviewer t))))
     (is (thrown? Exception (publication/activate-policy! fixture/admin publication/current-policy "Cannot resurrect old validation")))
@@ -179,3 +183,100 @@
       (is (false? (:eligible? diagnosis)))
       (is (some #{[:unresolved-extraction-error :html-review-not-supported]} (:reasons diagnosis))))
     (is (thrown? Exception (publication/decide! reviewer (request target "html-not-pdf"))))))
+(defn html-sample
+  ([] (html-sample {}))
+  ([{:keys [prefix cells config browser] :or {prefix "<div class='site-header__branding'><img alt='Synthetic championship'></div>" cells (assoc html-fixture/cells 10 "") config {}}}]
+   (let [dir (archive-fixture/workspace) root (str dir "/archive")
+         hash (html-fixture/register-html root (str dir "/source.html") (str prefix (html-fixture/document cells)))
+         _ (when browser
+             (let [retained (archive/retain-evidence! root (.getBytes "Synthetic retained DOM evidence" "UTF-8"))
+                   manifest (:manifest (first (:acquisitions (archive/inspect root hash))))]
+               (archive/register! root (str dir "/source.html")
+                                  (assoc manifest :provenance {:publisher-url "https://example.org/" :redirect-chain [(:final-url manifest)]
+                                                               :browser-state (merge {:representation :rendered-dom :rendered-sha256 (:sha256 retained)} browser)}))))
+         job (:job-id (html/extract! root hash {:actor "synthetic" :config config}))]
+     (observations/import! fixture/app root job)
+     {:job-id job :ordinal 0})))
+(defn html-request [t id] (assoc (request t id) :evidence [{:table 1 :row 2}]))
+(deftest html-validation-requires-explicit-policy-and-reviewer-authority
+  (let [t (html-sample) pdf (sample)]
+    (publication/decide! reviewer (request pdf "old-pdf"))
+    (is (false? (:ready? (publication/diagnose reviewer t))))
+    (is (:eligible? (publication/diagnose reviewer pdf)))
+    (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+    (is (:ready? (publication/diagnose reviewer t)))
+    (is (false? (:eligible? (publication/diagnose reviewer pdf))))
+    (let [r (html-request t "html-validate")]
+      (doseq [bad [(assoc r :attestations {}) (assoc r :policy-version "extraction-publication/1")
+                   (assoc r :evidence [{:page 1 :line 1}]) (assoc r :evidence [{:table 1 :row 1}])
+                   (assoc-in r [:observation :source-sha256] "wrong")]]
+        (is (thrown? Exception (publication/decide! reviewer bad))))
+      (is (thrown? Exception (publication/decide! fixture/app r)))
+      (publication/decide! reviewer r)
+      (is (:eligible? (publication/diagnose reviewer t)))
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer t))))
+      (publication/decide! reviewer (assoc r :id "revoke-html" :base-revision 1 :action :revoke :attestations {}))
+      (is (false? (:eligible? (publication/diagnose reviewer t)))))))
+(deftest html-substantive-context-and-new-extractions-remain-unvalidated
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (doseq [options [{:prefix ""} {:prefix "<h1>A</h1><h1>B</h1>"} {:cells html-fixture/cells}
+                   {:browser {:selected-date "2025-06-29" :filters {}}}]]
+    (let [t (html-sample options)]
+      (is (false? (:ready? (publication/diagnose reviewer t))))
+      (is (thrown? Exception (publication/decide! reviewer (html-request t (str "blocked-" (:job-id t))))))))
+  (let [t (html-sample) newer (html-sample {:config {:rerun true}})]
+    (publication/decide! reviewer (html-request t "original-html"))
+    (is (:eligible? (publication/diagnose reviewer t)))
+    (is (false? (:eligible? (publication/diagnose reviewer newer))))
+    (is (thrown? Exception (publication/decide! reviewer (merge (html-request t "copied-html") newer))))
+    (reviews/propose! fixture/app (assoc (review-fixture/proposal t "html-identity") :evidence [{:table 1 :row 2}]))
+    (reviews/decide! reviewer {:id "identity-approved" :proposal-id "html-identity" :base-revision 0 :action :approve :actor "owner" :reason "Explicit identity review"})
+    (is (false? (:eligible? (publication/diagnose reviewer t))))
+    (publication/decide! reviewer (assoc (html-request t "revalidated-html") :base-revision 1))
+    (is (:eligible? (publication/diagnose reviewer t)))
+    (reviews/decide! reviewer {:id "identity-reversed" :event-id "identity-approved" :base-revision 1 :action :reverse :actor "owner" :reason "Undo"})
+    (is (false? (:eligible? (publication/diagnose reviewer t))))))
+(deftest html-persisted-source-tampering-is-rejected
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (let [t (html-sample) original (html-request t "html-original")]
+    (publication/decide! reviewer original)
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+    (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_sha256='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'")
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+    (is (thrown? Exception (publication/decide! reviewer original)))
+    (is (false? (:ready? (publication/diagnose reviewer t))))
+    (is (false? (:eligible? (publication/diagnose reviewer t))))
+    (is (thrown? Exception (publication/decide! reviewer (assoc (html-request t "html-forged") :base-revision 1))))
+    (is (thrown? Exception (reviews/propose! fixture/app (assoc (review-fixture/proposal t "forged-review") :evidence [{:table 1 :row 2}]))))))
+
+(deftest mixed-indoor-source-semantics-block-only-timing-rows
+  (let [pages (into [(str (indoor-fixture/header)
+                          (indoor-fixture/row 640 ["1" "DISTANCE Person" "AIN" "100" "100"]))]
+                    (for [[d day left final] [["STA" "13" "05:03" "05:03"]
+                                              ["2X50" "12" "00:36.35" "00:36.35"]
+                                              ["4X50" "13" "03:23.30" "03:23.30"]
+                                              ["8X50" "11" "" "07:52:05"]]]
+                      (str (if (= d "STA") (indoor-fixture/header d "SENIORS - MEN" day)
+                               (time-fixture/speed-header d "SENIORS - MEN" day))
+                           (indoor-fixture/row 640 ["1" "TIMING Person" "AIN" left final]))))
+        {:keys [root result]} (pdf-fixture/extract-stream pages)
+        _ (observations/import! fixture/app root (:job-id result))
+        targets (mapv #(hash-map :job-id (:job-id result) :ordinal %) (range 5))
+        diagnoses (publication/diagnose-many reviewer targets)
+        row-request (fn [t id]
+                      (assoc (request t id) :evidence
+                             [(select-keys (get-in result [:candidates (:ordinal t) :coordinates]) [:page :line])]))]
+    (is (= 5 (count (:candidates result))))
+    (is (= [true false false false false] (mapv :ready? diagnoses)))
+    (is (every? false? (map :eligible? diagnoses)))
+    (is (every? #(some #{[:unresolved-extraction-error :source-semantics-unresolved]} (:reasons %)) (rest diagnoses)))
+    (is (= :unreviewed (get-in result [:candidates 0 :review-status])))
+    (doseq [t (rest targets)]
+      (is (thrown-with-msg? Exception #"Extraction not eligible for validation" (publication/decide! reviewer (row-request t (str "blocked-" (:ordinal t)))))))
+    (let [t (first targets)]
+      (publication/decide! reviewer (row-request t "synthetic-distance-validation"))
+      (is (:eligible? (publication/diagnose reviewer t)))
+      (is (every? false? (map :eligible? (publication/diagnose-many reviewer (rest targets)))))
+      (publication/decide! reviewer (assoc (row-request t "synthetic-distance-revocation")
+                                           :action :revoke :base-revision 1 :attestations {}))
+      (is (false? (:eligible? (publication/diagnose reviewer t)))))))

@@ -54,7 +54,19 @@
                        checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=5"))]
                      (when-not (= checksum (:sha256 old)) (fail! :checksum-conflict))
-                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(5,?)" checksum))))
+                     (do
+                       (execute! c sql)
+                       (execute! c "INSERT INTO freediving.schema_migrations VALUES(5,?)" checksum)
+                       ;; Historical migration 5 replaces the public view. Restore
+                       ;; the newest installed, checksummed definition only.
+                       (when-let [newer (first (query c "SELECT version,sha256 FROM freediving.schema_migrations WHERE version IN (9,10) ORDER BY version DESC LIMIT 1"))]
+                         (let [resource (if (= 10 (:version newer)) "migrations/010-event-selections.sql" "migrations/009-html-public-results.sql")
+                               sql (slurp (io/resource resource))
+                               checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))
+                               view-sql (re-find #"(?s)CREATE OR REPLACE VIEW freediving\.public_results\b.*?;" sql)]
+                           (when-not (= checksum (:sha256 newer)) (fail! :checksum-conflict))
+                           (when-not view-sql (fail! :missing-public-view))
+                           (execute! c view-sql))))))
                  ;; Restoring without ACLs restores default PUBLIC EXECUTE even when
                  ;; the migration checksum is present. Reapply its function boundary.
                  (execute! c "REVOKE ALL ON FUNCTION freediving.correction_target_version(text),freediving.submit_correction(uuid,text,text,text,text,text,text),freediving.stamp_correction_triage() FROM PUBLIC")

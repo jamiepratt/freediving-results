@@ -38,14 +38,44 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all seven checksummed
+JAR dependencies. It takes a private database backup, applies all ten checksummed
 migrations without seeding data, switches the release, verifies readiness, provisions
 the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations
 remain forward-applied; inspect the backup before any database rollback. No GitHub
 push automatically deploys this project.
 
-Before migration or activation, `deploy/prepare_database.py` reads the root-private
+## HTML publication policy checkpoint
+
+Normal deployment applies migration 9 but leaves the active publication policy unchanged. Policy-1 PDF validations and projections remain valid. HTML publication requires policy 2; deploying this code does not activate it or approve any observation.
+
+Activation is a separate database-owner operation. Before it, retain a verified private database backup, identify the affected public rows, obtain authorization for their temporary withdrawal, and prepare genuine source review under policy 2. Activation immediately hides policy-1 rows. Each row needs a fresh explicit validation under policy 2 and a projection refresh; existing reviews are preserved as history, not copied into new validations.
+
+From the matching repository checkout with Clojure CLI installed, with `FREEDIVING_MIGRATION_URL` supplied privately for the intended database, the manual helper is:
+
+```sh
+scripts/activate-html-publication.sh hide-existing-public-results "Authorized reason for policy transition"
+```
+
+The packaged VPS release contains the same guarded API. From that release directory, with `FREEDIVING_DATABASE_URL` supplied privately using the database-owner migration capability, invoke it without requiring Clojure CLI:
+
+```sh
+java -cp 'src:resources:lib/*' clojure.main -m freediving.public-results activate-html-policy hide-existing-public-results "Authorized reason for policy transition"
+```
+
+The guard verifies migration 9's checksum and active policy 1 before appending policy 2. It does not deploy, seed, validate or refresh records. Never put credentials in the reason. No real activation or deployment was performed while implementing this support. Policy identifiers cannot be reused; application rollback alone cannot restore policy-1 visibility. Any later rollback needs an explicitly supported fresh policy and fresh validations.
+
+The existing custom domain remains `poc.alphacompose.com`. Genuine event replacement and corpus approval remain gates in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## Event selection checkpoint
+
+Migration 10 installs append-only event selections and public visibility checks. Normal deployment applies it without choosing an event or activating a publication policy. Before a real cutover, retain the normal database backup, reconcile the exact scoped source inventory and gaps, and obtain current extraction validations and relationship decisions. The first cutover also requires an explicit retained baseline for eligible observations outside that scope. See [the private selection contract](event-selections.md).
+
+Selection is an explicit reviewer action, separate from deployment. Its transaction refreshes public projections atomically. Rollback appends a reviewed selection only while the historical approvals and relationships remain valid under the current policy. Reverting application code or restoring old validation IDs cannot authorize publication. No real selection, activation or deployment occurred during synthetic verification.
+
+## Database preparation
+
+Before normal release migration and application activation, `deploy/prepare_database.py` reads the root-private
 `migration.env` and `public.env` as data, without sourcing shell code. The migration,
 public-read and correction-submit URLs must name the same loopback host, port and
 database, using their separate bootstrap roles. The backup uses that database and

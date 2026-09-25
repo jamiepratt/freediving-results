@@ -4,6 +4,9 @@
             [clojure.java.io :as io]
             [freediving.extraction-test :as fixture]
             [freediving.extraction :as extraction]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
+            [freediving.archive-test :as archive-fixture]
             [freediving.source-pages :as pages]))
 
 (defn sample
@@ -111,3 +114,57 @@
     ;; The timeout must release the sole render slot and remove temporary files.
     (is (= 1 (get-in (pages/render! config row 1) [:metadata :page])))
     (is (empty? (filter #(.startsWith (.getName %) "render-") (.listFiles (io/file (:cache-root config))))))))
+
+(defn html-sample []
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        source (str "<h1>Synthetic Pool Championship</h1><script>fetch('https://private.invalid/')</script>"
+                    (html-fixture/document html-fixture/cells))
+        sha (html-fixture/register-html root (str dir "/source.html") source)
+        receipt (html/extract! root sha {:actor "synthetic-test" :config {}})
+        a (edn/read-string (slurp (:artifact-path receipt))) c (first (:candidates a))]
+    [{:archive-root root :cache-root (str root "-pages")}
+     {:job-id (:job-id a) :artifact-sha256 (:artifact-sha256 receipt) :source-sha256 sha
+      :candidate-id (html/digest [sha [(:coordinates c)]]) :ordinal 0 :payload c}]))
+
+(deftest html-source-inspection-is-exact-text-and-not-a-pdf
+  (let [[config row] (html-sample)
+        inspect (requiring-resolve 'freediving.source-pages/inspect-html!)
+        result (inspect config row)]
+    (is (pages/verify-corpus! (:archive-root config) [row]))
+    (is (= (:coordinates (:payload row)) (:coordinates result)))
+    (is (= (:source-sha256 row) (:source-sha256 result)))
+    (is (= (:artifact-sha256 row) (:artifact-sha256 result)))
+    (is (nil? (:page result)))
+    (is (= "Synthetic Pool Championship" (:event-name result)))
+    (is (string? (:raw-row result)))
+    (doseq [bad [(assoc row :ordinal 99) (assoc row :candidate-id (apply str (repeat 64 "a")))
+                 (assoc-in row [:payload :coordinates :row] 999) (assoc row :job-id "../escape")]]
+      (is (thrown? Exception (inspect config bad))))
+    (is (thrown? Exception (pages/render! config row 1)))
+    (spit (str (:archive-root config) "/objects/" (:source-sha256 row)) "modified")
+    (is (thrown? Exception (inspect config row)))))
+
+(deftest html-inspection-rejects-rehashed-forged-parser-evidence
+  (let [[config row] (html-sample) root (:archive-root config)
+        artifact-file (str root "/derived-objects/" (:artifact-sha256 row))
+        original (edn/read-string (slurp artifact-file))
+        forged (assoc-in original [:candidates 0 :parsed :points] "forged")
+        bytes (.getBytes (pr-str forged) "UTF-8")
+        hash (.formatHex (java.util.HexFormat/of) (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        path (java.nio.file.Paths/get (str root "/derived-objects/" hash) (make-array String 0))]
+    (java.nio.file.Files/write path bytes (make-array java.nio.file.OpenOption 0))
+    (java.nio.file.Files/setPosixFilePermissions path (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------"))
+    (spit (str root "/derivations/" (:job-id row) ".edn") (pr-str {:job-id (:job-id row) :artifact-sha256 hash}))
+    (is (thrown? Exception (pages/inspect-html! config (assoc row :artifact-sha256 hash :payload (first (:candidates forged))))))))
+
+(defn pdf-with-table-hints []
+  (let [[config row] (sample) root (:archive-root config)
+        a (edn/read-string (slurp (str root "/derived-objects/" (:artifact-sha256 row))))
+        a (update-in a [:candidates 0 :coordinates] assoc :table 99 :row 99)
+        bytes (.getBytes (pr-str a) "UTF-8")
+        hash (.formatHex (java.util.HexFormat/of) (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        path (java.nio.file.Paths/get (str root "/derived-objects/" hash) (make-array String 0))]
+    (java.nio.file.Files/write path bytes (make-array java.nio.file.OpenOption 0))
+    (java.nio.file.Files/setPosixFilePermissions path (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------"))
+    (spit (str root "/derivations/" (:job-id row) ".edn") (pr-str {:job-id (:job-id row) :artifact-sha256 hash}))
+    [config (assoc row :artifact-sha256 hash :payload (first (:candidates a)))]))
