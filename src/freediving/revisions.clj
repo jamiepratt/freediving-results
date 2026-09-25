@@ -114,27 +114,41 @@
         html-values (when (= 4 (:schema-version (:artifact target)))
                       (source-scope/html-values! (:artifact target) (:ordinal (:reference d))))]
     (when-not (= (:reference d) (:reference target)) (fail! "Descriptor provenance mismatch"))
-    (when-not (and (= #{:reference :scope} (set (keys d))) (map? (:scope d))) (fail! "Invalid descriptor"))
-    (into {} (for [[k b] (:scope d)]
-               (do (when (and html-values
-                              (not (or (= [:html-scope k] (:path b))
-                                       (= [:candidates (:ordinal (:reference d)) :raw :fields
-                                           ({:source-name "Diver" :discipline "Discipline" :category "Gender"} k)] (:path b)))))
-                     (fail! "Unsupported typed HTML scope source"))
-                   (when (and (#{:bib :source-athlete-id :source-name :attempt} k) (not (or (= :candidates (first (:path b)))
-                                                                                            (and (= :html-scope (first (:path b))) (= k (second (:path b)))))))
-                     (fail! "Participant scope requires own-row source evidence"))
-                   (when (and (= :html-scope (first (:path b))) (not= k (second (:path b))))
-                     (fail! "Typed scope field mismatch"))
-                   (when-not (= (:reference d) (:reference b)) (fail! "Scope provenance mismatch"))
-                   [k (let [v (binding-value c b)]
-                        (when-not (and (or (string? v) (number? v)) (not (and (string? v) (str/blank? v))))
-                          (fail! "Scope source values must be nonblank scalars")) v)])))))
+    (when-not (and (= (if (:scope-contract d) #{:reference :scope :scope-contract} #{:reference :scope}) (set (keys d)))
+                   (or (not (contains? d :scope-contract)) (= :aida-date-view/v1 (:scope-contract d)))
+                   (map? (:scope d))) (fail! "Invalid descriptor"))
+    (when (:scope-contract d)
+      (when-not (and html-values
+                     (every? #(contains? (:scope d) %) source-scope/daily-fields)
+                     (every? (set (concat source-scope/daily-fields [:source-name :event-name])) (keys (:scope d))))
+        (fail! "Incomplete or unsupported daily scope"))
+      (source-scope/daily-values! (:artifact target)))
+    (into (if (:scope-contract d) {:scope-contract (:scope-contract d)} {})
+          (for [[k b] (:scope d)]
+            (do (when (and html-values
+                           (not (or (= [:html-scope k] (:path b))
+                                    (= [:candidates (:ordinal (:reference d)) :raw :fields
+                                        ({:source-name "Diver" :discipline "Discipline" :category "Gender"} k)] (:path b)))))
+                  (fail! "Unsupported typed HTML scope source"))
+                (when (and (#{:bib :source-athlete-id :source-name :attempt} k) (not (or (= :candidates (first (:path b)))
+                                                                                         (and (= :html-scope (first (:path b))) (= k (second (:path b)))))))
+                  (fail! "Participant scope requires own-row source evidence"))
+                (when (and (= :html-scope (first (:path b))) (not= k (second (:path b))))
+                  (fail! "Typed scope field mismatch"))
+                (when-not (= (:reference d) (:reference b)) (fail! "Scope provenance mismatch"))
+                [k (let [v (binding-value c b)]
+                     (when-not (and (or (string? v) (number? v)) (not (and (string? v) (str/blank? v))))
+                       (fail! "Scope source values must be nonblank scalars")) v)])))))
 (def event-fields [:federation :event-id :date :venue :discipline :category :round :session])
+(def date-view-fields [:scope-contract :federation :event-id :date :discipline :category])
+(defn scope-fields [scope]
+  (if (= :aida-date-view/v1 (:scope-contract scope)) date-view-fields event-fields))
+(defn event-scope [scope] (select-keys scope (scope-fields scope)))
 (defn- present? [v] (and (some? v) (not (and (string? v) (str/blank? v)))))
 (defn- match [a b]
-  (let [fields (cond-> event-fields (or (contains? a :attempt) (contains? b :attempt)) (conj :attempt))
-        scoped? (every? #(and (present? (a %)) (= (a %) (b %))) fields)
+  (let [fields (cond-> (scope-fields a) (or (contains? a :attempt) (contains? b :attempt)) (conj :attempt))
+        scoped? (and (= (:scope-contract a) (:scope-contract b))
+                     (every? #(and (present? (a %)) (= (a %) (b %))) fields))
         athlete? (some #(and (present? (a %)) (= (a %) (b %))) [:source-athlete-id :bib])
         conflicting? (some #(and (present? (a %)) (present? (b %)) (not= (a %) (b %))) [:source-athlete-id :bib])]
     (cond (and scoped? athlete? (not conflicting?)) :possible-revision

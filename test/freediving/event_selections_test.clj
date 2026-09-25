@@ -1,5 +1,6 @@
 (ns freediving.event-selections-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is use-fixtures]]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
             [freediving.revisions :as revisions]
@@ -263,3 +264,83 @@
 
 (deftest html-and-pdf-projection-remains-compatible-after-migration-ten
   (public-fixture/html-and-pdf-validation-coexist-with-exact-public-citation-and-revocation))
+
+(def daily-gap "Daily view only; venue, round and session are not established.")
+(defn daily-request [id members selected]
+  (assoc (request id members selected)
+         :event-scope (assoc (select-keys revision-fixture/daily-values [:federation :event-id :date :discipline :category]) :scope-contract :aida-date-view/v1)
+         :coverage {:completeness :partial :gaps [daily-gap]}))
+(deftest daily-view-selection-preserves-explicit-partial-scope-through-rollback
+  (let [a (revision-fixture/daily-descriptor
+           (revision-fixture/html-sample (revision-fixture/daily-document) "https://www.aidainternational.org/StartList/4349"))
+        first-request (daily-request "daily-first" [a] [])]
+    (selections/select! reviewer first-request)
+    (is (= :aida-date-view/v1 (get-in (public/coverage reader-url) [:events 0 :event :scope-contract])))
+    (is (= [daily-gap] (get-in (public/coverage reader-url) [:events 0 :gaps])))
+    (selections/select! reviewer (update-in (daily-request "daily-second" [a] []) [:coverage :gaps] conj "Additional unreviewed source versions"))
+    (selections/rollback! reviewer {:id "daily-restore" :actor "owner" :reason "restore" :selection-id "daily-first" :base (selections/snapshot reviewer)})
+    (is (= [daily-gap] (get-in (public/coverage reader-url) [:events 0 :gaps])))
+    (is (= 3 (count (selections/history reviewer (:event-scope first-request)))))))
+
+(deftest daily-view-cannot-claim-complete-or-hide-missing-scope
+  (let [a (revision-fixture/daily-descriptor
+           (revision-fixture/html-sample (revision-fixture/daily-document) "https://www.aidainternational.org/StartList/4349"))]
+    (doseq [coverage [{:completeness :complete :gaps []}
+                      {:completeness :partial :gaps ["Something missing"]}]]
+      (is (thrown-with-msg? Exception #"Daily view requires" (selections/select! reviewer (assoc (daily-request "unsupported" [a] []) :coverage coverage)))))))
+
+(defn validate-daily! [d id]
+  (let [target (select-keys (:reference d) [:job-id :ordinal])
+        diagnosis (publication/diagnose reviewer target)]
+    (publication/decide! reviewer
+                         (merge target {:id id :action :validate :base-revision (:revision diagnosis)
+                                        :review-revision (:review-revision diagnosis) :policy-version "extraction-publication/2"
+                                        :observation (:observation diagnosis) :evidence [{:table 1 :row 2}]
+                                        :actor "synthetic" :reason "Synthetic source review"
+                                        :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}}))))
+(deftest daily-view-publication-still-requires-exact-validation-and-reviewed-replacement
+  (let [source (str/replace (revision-fixture/daily-document) "Dqsp" "")
+        a (revision-fixture/daily-descriptor (revision-fixture/html-sample source "https://www.aidainternational.org/StartList/4349"))
+        b (revision-fixture/daily-descriptor (revision-fixture/html-sample (str/replace source "<td></td>" "<td>Revised synthetic report</td>") "https://www.aidainternational.org/StartList/4349"))]
+    (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic daily view verification")
+    (is (thrown-with-msg? Exception #"current extraction validation" (selections/select! reviewer (daily-request "unvalidated" [a] [(selected a "absent")]))))
+    (validate-daily! a "daily-va") (validate-daily! b "daily-vb")
+    (is (thrown-with-msg? Exception #"Daily view requires" (selections/select! reviewer (assoc (daily-request "complete" [a] [(selected a "daily-va")]) :coverage {:completeness :complete :gaps []}))))
+    (revisions/propose! fixture/app
+                        (assoc (revision-fixture/proposal a b "daily-link")
+                               :revision-evidence [{:kind :correction-note :binding {:reference (:reference b) :path [:candidates 0 :raw :fields "Remarks"] :value "Revised synthetic report"}}]))
+    (selections/select! reviewer (daily-request "daily-old" [a b] [(selected a "daily-va")]))
+    (let [old-id (:result-id (first (public/results reader-url)))]
+      (is (= 1 (count (public/results reader-url))))
+      (is (thrown-with-msg? Exception #"Unreviewed" (selections/select! reviewer (daily-request "daily-unreviewed" [a b] [(selected b "daily-vb")]))))
+      (decide-link! "daily-confirm" "daily-link" :confirm)
+      (selections/select! reviewer (daily-request "daily-new" [a b] [(assoc (selected b "daily-vb") :relationship-id "daily-link")]))
+      (is (= 1 (count (public/results reader-url))))
+      (is (not= old-id (:result-id (first (public/results reader-url)))))
+      (is (= [daily-gap] (get-in (first (public/results reader-url)) [:coverage :gaps])))
+      (selections/rollback! reviewer {:id "daily-old-again" :actor "synthetic" :reason "restore" :selection-id "daily-old" :base (selections/snapshot reviewer)})
+      (is (= [old-id] (mapv :result-id (public/results reader-url)))))))
+
+(deftest daily-scope-aliases-cannot-enroll-the-same-participant-as-two-events
+  (let [a (revision-fixture/daily-descriptor (revision-fixture/html-sample (revision-fixture/daily-document) "https://www.aidainternational.org/StartList/4349"))
+        b (assoc-in (revision-fixture/daily-descriptor (revision-fixture/html-sample (str/replace (revision-fixture/daily-document) "Female" "F") "https://www.aidainternational.org/StartList/4349")) [:scope :category :value] "F")]
+    (selections/select! reviewer (daily-request "daily-female" [a] []))
+    (is (thrown-with-msg? Exception #"Overlapping daily" (selections/select! reviewer (assoc-in (daily-request "daily-f" [b] []) [:event-scope :category] "F"))))))
+
+(deftest daily-views-must-enroll-explicitly-instead-of-bypassing-coverage-in-retained
+  (let [pdf (sample "strict/1" revision-fixture/scope)
+        daily (revision-fixture/daily-descriptor (revision-fixture/html-sample (str/replace (revision-fixture/daily-document) "Dqsp" "") "https://www.aidainternational.org/StartList/4349"))]
+    (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic retained check")
+    (validate-daily! daily "daily-retained-validation")
+    (is (thrown-with-msg? Exception #"Daily views require explicit enrollment" (selections/select! reviewer (assoc (request "strict" [pdf] []) :retained [{:descriptor daily :validation-id "daily-retained-validation"}]))))))
+
+(deftest daily-profile-uuid-casing-cannot-create-a-second-attempt
+  (let [profile "https://www.aidainternational.org/Profile-abcdefab-abcd-abcd-abcd-abcdefabcdef"
+        upper "https://www.aidainternational.org/Profile-ABCDEFAB-ABCD-ABCD-ABCD-ABCDEFABCDEF"
+        source (-> (revision-fixture/daily-document) (str/replace "Dqsp" "") (str/replace revision-fixture/daily-profile profile))
+        make-descriptor (fn [source href]
+                          (assoc-in (revision-fixture/daily-descriptor (revision-fixture/html-sample source "https://www.aidainternational.org/StartList/4349")) [:scope :source-athlete-id :value] href))
+        a (make-descriptor source profile) b (make-descriptor (str/replace source profile upper) upper)]
+    (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic UUID casing check")
+    (validate-daily! a "lower") (validate-daily! b "upper")
+    (is (thrown-with-msg? Exception #"attempt|identifiers" (selections/select! reviewer (daily-request "both" [a b] [(selected a "lower") (selected b "upper")]))))))

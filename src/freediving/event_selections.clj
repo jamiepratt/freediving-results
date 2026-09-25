@@ -1,7 +1,8 @@
 (ns freediving.event-selections
   "Explicit source-bound event cutovers. Selection never grants extraction or identity approval."
   (:require [clojure.edn :as edn] [clojure.java.io :as io] [clojure.string :as str]
-            [freediving.revisions :as revisions])
+            [freediving.revisions :as revisions]
+            [freediving.source-scope :as source-scope])
   (:import [java.sql Connection DriverManager] [java.security MessageDigest] [java.util HexFormat]))
 (defn- fail! [message] (throw (ex-info message {})))
 (defn- encode [x] (binding [*print-length* nil *print-level* nil] (pr-str x)))
@@ -53,7 +54,7 @@
                           [:policy "SELECT max(revision) AS n FROM freediving.publication_policy_events"]]]
              [k (:n (first (query c sql)))])))
 (defn snapshot [url] (transaction url snapshot-on))
-(defn- event-key [scope] (sha (encode (mapv scope revisions/event-fields))))
+(defn- event-key [scope] (sha (encode (mapv scope (revisions/scope-fields scope)))))
 (declare scope!)
 (defn- records [c]
   (mapv (fn [row]
@@ -76,7 +77,7 @@
   (let [scope (revisions/descriptor-values c d)
         payload (edn/read-string (:payload_edn (first (query c "SELECT payload_edn FROM freediving.observations WHERE job_id=? AND ordinal=?" (get-in d [:reference :job-id]) (get-in d [:reference :ordinal])))))]
     (when (= :ranking (:source-family payload)) (fail! "Ranking records are not sporting attempts"))
-    (when-not (and (every? #(nonblank? (str (get scope % ""))) revisions/event-fields)
+    (when-not (and (every? #(nonblank? (str (get scope % ""))) (revisions/scope-fields scope))
                    (some #(nonblank? (str (get scope % ""))) [:bib :source-athlete-id]))
       (fail! "Complete event and own-row athlete scope required")) scope))
 (defn- equivalent? [c a b]
@@ -98,18 +99,25 @@
       {:status (if (= :confirmed-replacement (:status named)) :confirmed-correction :history-unavailable)
        :previous-values :unknown})))
 (defn- same-attempt? [a b]
-  (and (or (nil? (:attempt a)) (nil? (:attempt b)) (= (:attempt a) (:attempt b)))
-       (some #(and (some? (a %)) (= (a %) (b %))) [:bib :source-athlete-id])))
+  (or (and (= :aida-date-view/v1 (:scope-contract a) (:scope-contract b))
+           (= (source-scope/daily-collision-key a) (source-scope/daily-collision-key b)))
+      (and (or (nil? (:attempt a)) (nil? (:attempt b)) (= (:attempt a) (:attempt b)))
+           (some #(and (some? (a %)) (= (a %) (b %))) [:bib :source-athlete-id]))))
+(def daily-view-gap "Daily view only; venue, round and session are not established.")
 (defn- check! [c r rs]
   (let [members (:members r) selected (:selected r) scope (:event-scope r)
         values (mapv #(scope! c %) members)
         refs (set (map :reference members)) rels (relationships c)
         previous (some #(when (= scope (:event-scope %)) %) (latest rs))]
-    (when-not (and (map? scope) (= (set revisions/event-fields) (set (keys scope)))
+    (when-not (and (map? scope) (= (set (revisions/scope-fields scope)) (set (keys scope)))
                    (vector? members) (seq members) (vector? selected)
                    (= (count refs) (count members))
-                   (every? #(= scope (select-keys % revisions/event-fields)) values))
+                   (every? #(= scope (revisions/event-scope %)) values))
       (fail! "Exact scoped event inventory required"))
+    (when (and (= :aida-date-view/v1 (:scope-contract scope))
+               (not (and (= :partial (get-in r [:coverage :completeness]))
+                         (some #{daily-view-gap} (get-in r [:coverage :gaps])))))
+      (fail! "Daily view requires partial coverage and the explicit missing-scope gap"))
     (when-not (and (#{:partial :complete} (get-in r [:coverage :completeness]))
                    (= #{:completeness :gaps} (set (keys (:coverage r))))
                    (vector? (get-in r [:coverage :gaps]))
@@ -117,13 +125,18 @@
                    (if (= :partial (get-in r [:coverage :completeness])) (seq (get-in r [:coverage :gaps])) (empty? (get-in r [:coverage :gaps]))))
       (fail! "Explicit scoped coverage and gaps required"))
     (doseq [other (latest rs) :when (not= scope (:event-scope other))]
+      (when (and (= :aida-date-view/v1 (:scope-contract scope))
+                 (= :aida-date-view/v1 (get-in other [:event-scope :scope-contract]))
+                 (some (set (map source-scope/daily-collision-key values))
+                       (map #(source-scope/daily-collision-key (scope! c %)) (:members other))))
+        (fail! "Overlapping daily participant under distinct source scope spellings"))
       (when (some refs (map :reference (:members other))) (fail! "Observation already belongs to another event scope")))
     (doseq [{:keys [descriptor]} (:retained (first rs))
             :when (refs (:reference descriptor))]
-      (when-not (= scope (select-keys (scope! c descriptor) revisions/event-fields))
+      (when-not (= scope (revisions/event-scope (scope! c descriptor)))
         (fail! "Observation retained under another event scope")))
     (doseq [{:keys [descriptor]} (:retained (first rs))
-            :when (= scope (select-keys (scope! c descriptor) revisions/event-fields))]
+            :when (= scope (revisions/event-scope (scope! c descriptor)))]
       (when-not (refs (:reference descriptor)) (fail! "Previous retained event inventory cannot be omitted")))
     (when-not (every? refs (map :reference (:members previous))) (fail! "Previous event inventory cannot be silently omitted"))
     (when-not (= (count selected) (count (set (map :reference selected)))) (fail! "Duplicate selected observation"))
@@ -160,7 +173,9 @@
           (fail! "Invalid or contradictory retained inventory"))
         (when-not (every? classified existing) (fail! "Initial cutover must retain or explicitly inventory every eligible observation"))
         (doseq [{:keys [descriptor validation-id]} retained]
-          (when (= scope (select-keys (scope! c descriptor) revisions/event-fields)) (fail! "Same event cannot be retained outside inventory"))
+          (when (= :aida-date-view/v1 (:scope-contract descriptor))
+            (fail! "Daily views require explicit enrollment with partial coverage"))
+          (when (= scope (revisions/event-scope (scope! c descriptor))) (fail! "Same event cannot be retained outside inventory"))
           (validation! c {:reference (:reference descriptor) :validation-id validation-id}))))
     (when (and (seq rs) (contains? r :retained)) (fail! "Retained baseline is fixed at initial cutover"))))
 (defn projection-plan [c validations]
@@ -170,7 +185,7 @@
                 (let [active (latest rs) rels (relationships c)
                       claimed (set (map :event-scope active))
                       retained (for [{:keys [descriptor validation-id]} (:retained (first rs))
-                                     :when (not (claimed (select-keys (scope! c descriptor) revisions/event-fields)))]
+                                     :when (not (claimed (revisions/event-scope (scope! c descriptor))))]
                                  {:reference (:reference descriptor) :validation-id validation-id})
                       entries (concat (map #(vector % nil) retained)
                                       (for [r active entry (:selected r)] [entry r]))

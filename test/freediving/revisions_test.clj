@@ -1,5 +1,6 @@
 (ns freediving.revisions-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is use-fixtures]]
             [freediving.observations :as observations]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
@@ -294,3 +295,69 @@
   (doseq [filters [{} {:discipline :all :gender :all} {:discipline :dynb :gender :women}]]
     (let [ref (html-sample (html-fixture/document html-fixture/cells) "https://example.org/StartList/1" filters)]
       (is (= [] (revisions/candidates fixture/app (html-descriptor ref {:discipline "DYNB" :category "Female"}) []))))))
+
+(def daily-profile "https://www.aidainternational.org/Profile-00000000-0000-0000-0000-000000000001")
+(def daily-values {:federation "AIDA" :event-id "4349" :date "2025-06-28"
+                   :discipline "DYNB" :category "Female" :source-athlete-id daily-profile})
+(defn daily-document []
+  (str "<h1>Synthetic championship</h1>"
+       (html-fixture/document (assoc html-fixture/cells 1 (str "<a href='" daily-profile "'>Synthetic Person</a>")))))
+(defn daily-descriptor [ref]
+  (assoc (html-descriptor ref daily-values) :scope-contract :aida-date-view/v1))
+(deftest explicit-aida-date-view-contract-yields-only-a-possible-match
+  (let [a (daily-descriptor (html-sample (daily-document) "https://www.aidainternational.org/StartList/4349"))
+        b (daily-descriptor (html-sample (str (daily-document) "<!-- recapture -->") "https://www.aidainternational.org/StartList/4349"))]
+    (is (= [:possible-revision] (mapv :match (revisions/candidates fixture/app b [a]))))
+    (is (= [:unmatched] (mapv :match (revisions/candidates fixture/app (dissoc b :scope-contract) [a]))))))
+
+(deftest daily-scope-requires-complete-unique-participant-context-across-the-artifact
+  (let [duplicate (str/replace (daily-document) "</tbody>" (str "<tr>" (apply str (map #(str "<td>" % "</td>") (assoc html-fixture/cells 1 (str "<a href='" daily-profile "'>Same person second round</a>")))) "</tr></tbody>"))
+        a (daily-descriptor (html-sample duplicate "https://www.aidainternational.org/StartList/4349"))]
+    (is (thrown-with-msg? Exception #"Ambiguous daily participant" (revisions/candidates fixture/app a []))))
+  (let [a (daily-descriptor (html-sample (daily-document) "https://www.aidainternational.org/StartList/4349"))]
+    (doseq [k (keys daily-values)]
+      (is (thrown-with-msg? Exception #"daily scope" (revisions/candidates fixture/app (update a :scope dissoc k) []))))
+    (doseq [k [:venue :round :session :attempt :bib]]
+      (is (thrown? Exception (revisions/candidates fixture/app (assoc-in a [:scope k] (get-in a [:scope :event-id])) [])))))
+  (let [a (daily-descriptor (html-sample (str/replace (daily-document) "<h1>" "<h1 hidden>") "https://www.aidainternational.org/StartList/4349"))]
+    (is (thrown-with-msg? Exception #"daily source context" (revisions/candidates fixture/app a [])))))
+
+(deftest daily-scope-refuses-incomplete-or-unsupported-row-census
+  (doseq [source [(str (daily-document) "<table><tr><td>Second attempt not parsed</td></tr></table>")
+                  (str/replace (daily-document) "</tbody>" "<tr><td>2</td><td>Malformed second participant</td></tr></tbody>")]]
+    (let [a (daily-descriptor (html-sample source "https://www.aidainternational.org/StartList/4349"))]
+      (is (thrown-with-msg? Exception #"daily row census" (revisions/candidates fixture/app a []))))))
+
+(deftest daily-participant-ambiguity-cannot-be-hidden-by-source-spelling
+  (doseq [[discipline gender] [[" DYNB " "Female"] ["DYNB" "F"] ["dynb" "FEMALE"]]]
+    (let [second-row (str "<tr>" (apply str (map #(str "<td>" % "</td>") (assoc html-fixture/cells 1 (str "<a href='" daily-profile "'>Same participant</a>") 3 gender 4 discipline))) "</tr>")
+          source (str/replace (daily-document) "</tbody>" (str second-row "</tbody>"))
+          a (daily-descriptor (html-sample source "https://www.aidainternational.org/StartList/4349"))]
+      (is (thrown-with-msg? Exception #"Ambiguous daily participant" (revisions/candidates fixture/app a []))))))
+
+(deftest daily-contract-binds-exact-fields-versions-and-distinct-dates-events
+  (let [a (daily-descriptor (html-sample (daily-document) "https://www.aidainternational.org/StartList/4349"))
+        next-date (assoc-in (daily-descriptor (html-sample (str/replace (daily-document) "2025-06-28" "2025-06-29") "https://www.aidainternational.org/StartList/4349")) [:scope :date :value] "2025-06-29")
+        other-event (assoc-in (daily-descriptor (html-sample (daily-document) "https://www.aidainternational.org/StartList/4350")) [:scope :event-id :value] "4350")]
+    (is (= [:unmatched :unmatched] (mapv :match (revisions/candidates fixture/app a [next-date other-event]))))
+    (doseq [[field value] [[:event-id "4350"] [:date "2025-06-29"] [:category "Male"] [:source-athlete-id (str/replace daily-profile "0001" "0002")]]]
+      (is (thrown? Exception (revisions/candidates fixture/app (assoc-in a [:scope field :value] value) []))))
+    (is (thrown? Exception (revisions/candidates fixture/app (assoc-in a [:scope :date :path] [:context :event-date]) [])))
+    (is (thrown? Exception (revisions/candidates fixture/app (assoc-in a [:scope :date :reference] (:reference next-date)) [])))
+    (is (thrown? Exception (revisions/candidates fixture/app (assoc a :scope-contract :unknown/v1) [])))
+    (let [b (daily-descriptor (html-sample (str (daily-document) "<!-- version b -->") "https://www.aidainternational.org/StartList/4349"))
+          c (daily-descriptor (html-sample (str (daily-document) "<!-- version c -->") "https://www.aidainternational.org/StartList/4349"))]
+      (is (= [:ambiguous :ambiguous] (mapv :match (revisions/candidates fixture/app c [a b])))))))
+
+(deftest rehashed-daily-context-cannot-manufacture-a-date
+  (let [ref (html-sample (daily-document) "https://www.aidainternational.org/StartList/4349")
+        artifact (:artifact (observations/inspect fixture/app (:job-id ref)))
+        bytes (.getBytes (pr-str (assoc-in artifact [:context :event-date] "2099-01-01")) "UTF-8")
+        hash (html-evidence/sha256 bytes)
+        forged-ref (assoc ref :artifact-sha256 hash)]
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin)
+                s (.prepareStatement c "UPDATE freediving.extractions SET artifact_bytes=?,artifact_sha256=? WHERE job_id=?")]
+      (.setBytes s 1 bytes) (.setString s 2 hash) (.setString s 3 (:job-id ref)) (.executeUpdate s))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+    (is (thrown-with-msg? Exception #"replay" (revisions/candidates fixture/app (assoc-in (daily-descriptor forged-ref) [:scope :date :value] "2099-01-01") [])))))

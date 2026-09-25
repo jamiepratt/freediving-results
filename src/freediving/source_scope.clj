@@ -28,14 +28,8 @@
                                        (or (get-in % [:manifest :final-url]) ""))) (:acquisitions artifact))]
     (when (and (seq ids) (every? some? ids) (= 1 (count (set ids)))) (first ids))))
 
-(defn html-values!
-  "Replay the complete extraction before exposing typed, visible source facts.
-  No title, row number, rank, start order, or inferred venue/round/session."
-  [artifact ordinal]
-  (let [event-id (registered-event artifact)
-        payload (get (:candidates artifact) ordinal)
-        context (evidence/bound-context! artifact payload ordinal (:source-sha256 artifact))
-        doc (Jsoup/parse ^String (:raw-html artifact))
+(defn- row-values! [artifact ordinal event-id context doc]
+  (let [payload (get (:candidates artifact) ordinal)
         table (nth (.select doc "table") (dec (get-in payload [:coordinates :table])) nil)
         row (when table (nth (vec (filter #(identical? table (.closest % "table")) (.select table "tr"))) (dec (get-in payload [:coordinates :row])) nil))
         fields (get-in payload [:raw :fields])
@@ -71,3 +65,45 @@
            :category (or (get fields "Gender") (when (= gender (:selected-gender context)) gender))
            :source-name (get fields "Diver")
            :source-athlete-id profile})))
+
+(defn html-values!
+  "Replay the complete extraction before exposing typed, visible source facts."
+  [artifact ordinal]
+  (row-values! artifact ordinal (registered-event artifact)
+               (evidence/bound-context! artifact (get (:candidates artifact) ordinal) ordinal (:source-sha256 artifact))
+               (Jsoup/parse ^String (:raw-html artifact))))
+
+(def daily-fields [:federation :event-id :date :discipline :category :source-athlete-id])
+(defn daily-collision-key
+  "Conservative ambiguity key only; never rewrites source bindings or asserts a match."
+  [values]
+  (let [normalize #(some-> % str/trim str/upper-case)
+        gender (normalize (:category values))]
+    [(:federation values) (:event-id values) (:date values)
+     (normalize (:discipline values))
+     (get {"M" "MALE" "MEN" "MALE" "F" "FEMALE" "WOMEN" "FEMALE"} gender gender)
+     (some-> (:source-athlete-id values) str/lower-case)]))
+
+(defn daily-values!
+  "Read-only opt-in daily view audit. Replay all rows; require visible event context
+  and unique exact source-profile keys across the whole artifact. This proves
+  neither event completeness, round/session meaning nor cross-source identity."
+  [artifact]
+  (let [event-id (registered-event artifact)
+        context (evidence/bound-context! artifact (first (:candidates artifact)) 0 (:source-sha256 artifact))
+        doc (Jsoup/parse ^String (:raw-html artifact))
+        _ (when-not (and (zero? (get-in artifact [:reconciliation :unsupported-table-count]))
+                         (every? #(and (= :attempts (:source-family %)) (= :parsed (:parse-status %))) (:candidates artifact))
+                         (= (reduce + (map :data-row-count (:tables artifact))) (count (:candidates artifact))))
+            (throw (ex-info "Incomplete daily row census" {})))
+        values (mapv (fn [ordinal]
+                       (let [table (get-in artifact [:candidates ordinal :coordinates :table])]
+                         (row-values! artifact ordinal event-id
+                                      (assoc context :headers (:headers (first (filter #(= table (:table %)) (:tables artifact))))) doc)))
+                     (range (count (:candidates artifact))))]
+    (when-not (and (seq values)
+                   (every? (fn [v] (every? #(and (string? (v %)) (not (str/blank? (v %)))) (conj daily-fields :event-name))) values))
+      (throw (ex-info "Incomplete daily source context" {})))
+    (when-not (= (count values) (count (set (map daily-collision-key values))))
+      (throw (ex-info "Ambiguous daily participant across source rows" {})))
+    values))
