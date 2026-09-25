@@ -1,6 +1,7 @@
 (ns freediving.extraction-test
   (:require [clojure.test :refer [deftest is]]
             [freediving.extraction :as extraction]
+            [freediving.indoor-2026 :as indoor-2026]
             [freediving.aida :as aida]
             [freediving.athens :as athens]
             [freediving.archive :as archive]
@@ -677,13 +678,14 @@
                                 "(1 Synthetic NAME GBR 82,5 82,5) Tj ET"))
         [root digest] (with-redefs [synthetic-pdf (constantly pdf)] (registered-pdf))
         opts {:actor "synthetic-novi-sad" :config {}}
-        receipt (extraction/extract! root digest opts)
+        old-extract! #(with-redefs [indoor-2026/supported? (constantly false)] (extraction/extract! root digest opts))
+        receipt (old-extract!)
         r (edn/read-string (slurp (:artifact-path receipt)))]
     (is (= "cmas-novi-sad-dnf-juniors/1" (:parser-version r)))
     (is (= 3 (:schema-version r)))
     (is (= 1 (get-in r [:reconciliation :parsed-count])))
     (is (= 82.5M (get-in r [:candidates 0 :parsed :final-distance])))
-    (is (= :skipped (:run-status (extraction/extract! root digest opts))))))
+    (is (= :skipped (:run-status (old-extract!))))))
 
 (deftest novi-sad-conflicting-section-evidence-fails-closed
   (doseq [extra ["SENIORS – WOMEN" "DYN" "JUNE, 12, 2026" "NOVI SAD, SERBIA JUNE, 12, 2026"]]

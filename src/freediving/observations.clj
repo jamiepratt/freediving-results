@@ -128,7 +128,8 @@
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
       {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a)
                      (cond-> (validate-pages! a)
-                       (extraction/requires-geometry-validation? a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
+                       (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
+                       (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 4 (:schema-version artifact))
     (let [p (select-keys (:coordinates candidate) [:table :row])]

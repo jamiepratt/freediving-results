@@ -6,6 +6,7 @@
             [freediving.aida :as aida]
             [freediving.athens :as athens]
             [freediving.novi-sad :as novi-sad]
+            [freediving.indoor-2026 :as indoor-2026]
             [freediving.depth-2025 :as depth-2025]
             [freediving.depth-2026 :as depth-2026]
             [freediving.depth :as depth]))
@@ -108,12 +109,29 @@
   (and (depth-2026/supported? pages)
        (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported? athens/supported? novi-sad/supported?])))
 
+(defn legacy-novi-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= novi-sad/parser-version (:parser-version artifact))))
+
+(defn- indoor-selected? [pages]
+  (and (indoor-2026/supported? pages)
+       (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported? athens/supported?])))
+
 (defn requires-geometry-validation?
-  "Recognize geometry artifacts even after an identity downgrade, preserving legacy dispatch."
-  [artifact]
-  (or (#{depth-2025/geometry-parser-version depth-2026/parser-version} (:parser-version artifact))
-      (contains? artifact :geometry-xml) (contains? (:tool artifact) :geometry-arguments)
-      (and (seq (:candidates artifact)) (depth-2026-selected? (map :text (:pages artifact))))))
+  "Recognize geometry artifacts even after identity or page-evidence downgrades.
+   The archive-aware arity is required at the import trust boundary."
+  ([artifact]
+   (or (#{depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version} (:parser-version artifact))
+       (contains? artifact :geometry-xml) (contains? (:tool artifact) :geometry-arguments)
+       (and (seq (:candidates artifact))
+            (or (depth-2026-selected? (map :text (:pages artifact)))
+                (and (indoor-selected? (map :text (:pages artifact))) (not (legacy-novi-artifact? artifact)))))))
+  ([root artifact]
+   (or (requires-geometry-validation? artifact)
+       (when (and (seq (:candidates artifact)) (not (legacy-novi-artifact? artifact)))
+         (let [source (archive/inspect root (:source-sha256 artifact))
+               raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+               pages (str/split raw #"\f" -1)]
+           (or (indoor-selected? pages) (depth-2026-selected? pages)))))))
 
 (defn extract!
   "Extract registered PDF to private versioned EDN. Config is retained verbatim as
@@ -136,15 +154,16 @@
          depth-2025? (and (not depth?) (depth-2025/supported? pages))
          aida? (aida/supported? pages)
          athens? (and (not aida?) (athens/supported? pages))
+         indoor? (and (not (or depth? depth-2025? aida? athens?)) (indoor-2026/supported? pages))
          novi? (novi-sad/supported? pages)
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
-                   :schema-version (cond depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
+                   :parser-version (cond indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
+                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
-                           (or depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
+                           (or indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
          job-id (digest identity)]
      (archive/derive! root job-id
                       (fn []
@@ -152,8 +171,8 @@
                               page-count (some-> (re-find #"(?m)^Pages:\s+(\d+)\s*$" info) second parse-long)]
                           (when-not (= page-count (count pages))
                             (throw (ex-info "Extracted page count does not match PDF" {:expected page-count :actual (count pages)})))
-                          (merge (if (or depth-2025? depth-2026?)
-                                   ((if depth-2026? depth-2026/parse-pages-with-geometry depth-2025/parse-pages-with-geometry) pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
+                          (merge (if (or indoor? depth-2025? depth-2026?)
+                                   ((cond indoor? indoor-2026/parse-pages-with-geometry depth-2026? depth-2026/parse-pages-with-geometry :else depth-2025/parse-pages-with-geometry) pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
                                    (parse-pages pages)) identity
                                  {:job-id job-id :processed-at (str (java.time.Instant/now))
                                   :raw-text raw :tool-stderr (:err result)
@@ -164,7 +183,7 @@
    Legacy PDF contracts are deliberately not reinterpreted by this validator."
   [root artifact]
   (when-not (and (= 2 (:schema-version artifact))
-                 (#{depth-2025/geometry-parser-version depth-2026/parser-version} (:parser-version artifact))
+                 (#{depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version} (:parser-version artifact))
                  (= "pdftotext" (get-in artifact [:tool :name]))
                  (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
                  (= ["-bbox-layout" "-enc" "UTF-8"] (get-in artifact [:tool :geometry-arguments])))
@@ -175,11 +194,25 @@
         xml (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
         segments (vec (str/split raw #"\f" -1))
         pages (if (= "" (last segments)) (pop segments) segments)
-        replay ((if (= depth-2026/parser-version (:parser-version artifact)) depth-2026/parse-pages-with-geometry depth-2025/parse-pages-with-geometry) pages xml)]
+        replay ((cond (= indoor-2026/parser-version (:parser-version artifact)) indoor-2026/parse-pages-with-geometry (= depth-2026/parser-version (:parser-version artifact)) depth-2026/parse-pages-with-geometry :else depth-2025/parse-pages-with-geometry) pages xml)]
     (when-not (and (= version (get-in artifact [:tool :version]))
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
       (throw (ex-info "Geometry extraction differs from archived source replay" {})))
+    artifact))
+
+(defn validate-legacy-novi-artifact!
+  "Keep the immutable junior-only parser usable while rejecting identity downgrades."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (novi-sad/parse-pages pages)]
+    (when-not (and (legacy-novi-artifact? artifact)
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "Legacy Novi Sad extraction differs from archived source replay" {})))
     artifact))
 
 (defn -main [& args]
