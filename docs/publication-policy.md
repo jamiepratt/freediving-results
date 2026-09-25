@@ -8,6 +8,8 @@ The [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-4-geo
 
 The [2026 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-5-2026-depth-reconciliation) adds 180 parsed rows across seven PDFs using `cmas-2026-depth/1`, preserving earlier unsupported jobs. Raw values, category/date context, medals, records and geometry remain source-bound; unknown units and blank statuses stay unknown. Missing CWT-men sources remain explicit gaps. All new rows remain unreviewed and publication-blocked. No review approval transfers to them, and this parser change activates no policy or database migration.
 
+The [2026 Novi Sad distance extraction](cmas-timing-acquisition-20260925.md#batch-6-2026-indoor-distance) retains 412 distance rows across senior, junior and printed master categories. Geometry-backed schema-2 jobs preserve the older junior-only artifacts. Blank finals, zeros and source notes remain distinct. The other 236 STA/speed source rows remain unsupported. All distance rows remain unreviewed and publication-blocked; reconciliation supplies no visual-accuracy attestation or inherited approval. No policy activation or database migration is included.
+
 ## Separate decisions
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.

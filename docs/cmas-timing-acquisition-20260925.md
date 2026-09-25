@@ -194,3 +194,37 @@ python3 data/championship-restart-20260925-b05/b05-audit/reconcile.py data/champ
 ```
 
 All 180 new rows remain unreviewed and publication-blocked. This batch adds no source acquisitions, database observations, genuine reviews, identity decisions, policy activation, deployment or public replacement. Remaining coverage, revision, import and publication acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+
+## Batch 6 2026 indoor distance
+
+Schema-2 parser `cmas-2026-indoor-distance/1` handles the retained Novi Sad DNF, DYN-BF and DYN tables. PDF word positions assign realized and final distance independently, including blank cells. The printed `(m)` headers establish metres. Exact names, representation codes, rank, decimal spelling, category, date and notes remain source-bound. Master labels do not establish age ranges; representation codes do not establish citizenship.
+
+The senior/junior PDF contributes 295 distance rows and the masters PDF 117, across 33 pages. Senior/junior pages 4, 13, 30 and 32 repeat table headers without championship/category headings; the preceding valid distance section supplies retained context evidence. Conflicting context, unsupported intervening pages and ambiguous geometry fail closed. The old `cmas-novi-sad-dnf-juniors/1` implementation and its 11-row artifact remain recoverable.
+
+| Category | DNF | DYN-BF | DYN |
+| --- | ---: | ---: | ---: |
+| Junior men | 5 | 4 | 6 |
+| Junior women | 6 | 7 | 8 |
+| Senior men | 45 | 48 | 51 |
+| Senior women | 35 | 37 | 43 |
+| Masters M1 men | 12 | 15 | 16 |
+| Masters M1 women | 5 | 9 | 9 |
+| Masters M2 men | 9 | 7 | 6 |
+| Masters M2 women | 1 | 1 | 3 |
+| Masters M3 men | 6 | 9 | 7 |
+| Masters M3 women | No heading | 1 | 1 |
+
+Two junior DNF final cells are blank; 42 other finals contain literal zero. Nine distance notes wrap across text lines. Commas and the source's dot decimal are retained literally alongside parsed numbers. One row prints realized `196,5` and final `196,0` without a penalty; the parser preserves both without calculating a penalty. Announced distance, penalty and card remain unknown because the columns are absent. Medal and record text stays in the complete notes field; separate medal/record fields remain unknown. Blank status remains unknown; only explicit DSQ/DNS text supplies status.
+
+The independent inventory covers all 66 source pages, 648 result rows and 1,090 nonblank lines. The remaining 236 rows occupy 33 STA/speed pages and remain explicitly unsupported in this version: 183 senior/junior and 53 masters. Missing master category headings are unresolved coverage, not zero attempts. Source-only field and geometry expectations were frozen before parser comparison. Six representative renders were inspected for blank cells, dense tables, continuation headings, centered values, decimal spelling and wrapped notes. These automated checks and visual inspections supply no owner attestation.
+
+Independent comparison of all 412 rows passed with zero field, context, evidence or row-geometry differences. All 1,090 nonblank lines are accounted for exactly once: 421 distance-row evidence lines and 669 noncandidate lines, including unsupported source rows. Fifteen deliberately corrupted reports were rejected, covering names, values, blanks, context, geometry, missing/duplicate rows, field states, source lines, coordinates, notes, coverage and publication state. The batch coordinator separately reproduced the frozen census and final comparison.
+
+Two new distance jobs replay without duplication and pass archived-source geometry validation. All 27 timing/depth jobs and both legacy federation jobs retain their IDs and artifact hashes; the 24 historical geometry validators pass. Independent comparisons still match all 352 timing, 73 legacy federation and 180 Roatan rows. The 44 legacy men's evidence-envelope gaps remain explicit. All 1,386 copied historical files remain hash-identical. Both older Novi Sad artifacts, including the 11 parsed junior rows and unsupported masters artifact, pass the legacy source replay validator.
+
+Final validation passed: indoor namespace 14 tests / 67 assertions, pipeline version registration one test / two assertions, and combined archive/extraction/HTML suite 154 tests / 1,031 assertions. Ordered delimiter repair and lint gates were clean. Observed RED/GREEN cycles cover columns, wraps, continuation, actual layout boundaries, conflicting headers, blank/zero/status values, version registration and forged imports. Import validation consults the archived PDF when parser identity or page text is rewritten, and rejects rehashed values, geometry and identity downgrades before database access. Genuine old Novi artifacts use exact legacy source replay. No migration is required.
+
+Private evidence is retained under `data/championship-restart-20260925-b06/`: `b06-audit/` contains source expectations, complete page inventory, geometry and rendered samples; `b06-parent-review/` contains independently reproduced source censuses and public extraction reports; `b06-history-check/` contains historical replay checks. `history/` preserves the batch 5 tree and `indoor-archive/` preserves batch 1 archive history alongside new distance jobs. Development probes use a separate preliminary archive and are not final corpus jobs. Real source documents and names are excluded from Git fixtures.
+
+No source acquisition, database import, genuine review, identity decision, policy activation, deployment or public replacement occurred. All 412 extracted rows remain private, unreviewed and publication-blocked. STA/speed support and the remaining source, revision, import and publication acceptance stay in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
