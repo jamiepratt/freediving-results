@@ -1,6 +1,6 @@
 # CMAS timing-service acquisition, 25 September 2026
 
-This private acquisition supplements the [championship inventory](championship-inventory-20260925.md). It establishes retained source coverage, not row reconciliation, owner approval, identity decisions or public replacement. Remaining acceptance is tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+This private acquisition supplements the [championship inventory](championship-inventory-20260925.md). The batch 2 record establishes retained source coverage; the dated batch 3 section records subsequent 2025 depth extraction. Neither grants owner approval, identity decisions or public replacement. Remaining acceptance is tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 ## Evidence chain and the 2025 depth discrepancy
 
@@ -67,12 +67,64 @@ The views reference 30 distinct PDF filenames. All 30 URLs constructed by the pu
 
 One result response is not valid UTF-8: `incoming/indoor-2-TFSEF011CLAS07 001.JSON`, SHA-256 `84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84`, first failure at byte offset 12982. A Latin-1 byte-preserving inspection exposed its ASCII header fields only; it is not an approved decoding for athlete names. Raw bytes remain intact. The other 41 result views decode as UTF-8. No independent row/cell reconciliation or CMAS JSON parser was implemented.
 
-## Private artifacts and validation
+## Batch 2 private artifacts and validation
 
 Integrated private root: `data/championship-restart-20260925-b02/cmas/`. Its original acquisition root is `/Users/jamiep/.codex/worktrees/b02-cmas/freediving-results/data/championship-restart-20260925-b02-cmas/`; the coordinator verifies hashes when copying the retained corpus. Original manifest source paths remain provenance, not rewritten history. `incoming/` holds responses plus SHA-256/byte-count/status/MIME/retrieval/discovery metadata; `archive/` holds 161 successful HTTP acquisitions sharing 150 content-addressed objects. Failed response bodies remain outside the successful archive. The successful objects include 27 verified PDF signatures totaling 38 pages. All 194 retained response metadata hashes and lengths were independently recomputed. Thirty-three failed HTTP responses remain outside successful registration: the 30 indoor links, CWT men 2026 link, a duplicate first indoor PDF probe and an erroneous comma-bearing indoor archive probe. The corrected federation URL and redirect are retained separately.
 
-`registration-input.edn` and `acquisition-report.edn` retain exact manifests and duplicate-registration results: every repeated registration skipped. `extraction-report.edn` records 27 existing-parser extraction jobs, each replay skipped. Only three 2025 senior women's PDFs are currently supported: CWT 29, FIM 30 and CNF 18 candidates, 77 total. The remaining 24 PDFs/35 pages are explicitly unsupported, not zero-result sources. No genuine publisher revision matching, full-field reconciliation, reviewer attestation or database import occurred.
+`registration-input.edn` and `acquisition-report.edn` retain exact manifests and duplicate-registration results: every repeated registration skipped. `extraction-report.edn` records 27 existing-parser extraction jobs, each replay skipped. At batch 2, only three 2025 senior women's PDFs were supported: CWT 29, FIM 30 and CNF 18 candidates, 77 total. The remaining 24 PDFs/35 pages were explicitly unsupported, not zero-result sources. No genuine publisher revision matching, full-field reconciliation, reviewer attestation or database import occurred in that acquisition batch.
 
-The supported jobs use `cmas-women-depth/1`, schema 2: `c3-doc11.pdf` CWT (SHA-256 `5028e652c49758e4a6a5e442457b65fd57b92055edadbf30477887e6c371561c`), `c3-doc23.pdf` FIM (`b732612eb386fff9781e5c119429289bcdd38bcf11c268252fe58cc1b55172c9`) and `c3-doc33.pdf` CNF (`425037388b725fe22dcb521be0aff88e4c285b8f71ad585c7840017dc4be7124`). The timing CWT men's `c3-doc6.pdf` (`8a71457edfed39f01fe03771fcd8478de1cf0b59ed16cd8bf95e36518a150985`) is distinct from batch 1's federation PDF (`2c0d8cd66d9ccb9fbef9ab6bd76ca94d38942c099ad13984bc07e6f2f89183f3`). Its header says `Freediving Depth`; the existing schema 1 `cmas-cwt-men/1` fallback requires `Freediving Outdoor` and marks it unsupported. Thus batch 1's 44 parsed men cannot be assumed to describe this new timing document. Even the two CWT women's PDFs differ in byte hash. No source equivalence or automatic revision relationship was asserted.
+The supported jobs use `cmas-women-depth/1`, schema 2: `c3-doc11.pdf` CWT (SHA-256 `5028e652c49758e4a6a5e442457b65fd57b92055edadbf30477887e6c371561c`), `c3-doc23.pdf` FIM (`b732612eb386fff9781e5c119429289bcdd38bcf11c268252fe58cc1b55172c9`) and `c3-doc33.pdf` CNF (`425037388b725fe22dcb521be0aff88e4c285b8f71ad585c7840017dc4be7124`). The timing CWT men's `c3-doc6.pdf` (`8a71457edfed39f01fe03771fcd8478de1cf0b59ed16cd8bf95e36518a150985`) is distinct from batch 1's federation PDF (`2c0d8cd66d9ccb9fbef9ab6bd76ca94d38942c099ad13984bc07e6f2f89183f3`). Its header says `Freediving Depth`; at batch 2, the schema 1 `cmas-cwt-men/1` fallback required `Freediving Outdoor` and marked it unsupported. Thus batch 1's 44 parsed men cannot be assumed to describe this new timing document. Even the two CWT women's PDFs differ in byte hash. No source equivalence or automatic revision relationship was asserted.
 
-`coverage-summary.json` retains per-PDF pages/hashes/header dates, all unit counts, indoor headers and the decoding exception. `indoor-pdf-link-evidence.json` maps all 42 views to 30 configured filenames. `route-discovery-evidence.json` records selected current routes. All acquisitions are private and publication-blocked. Batch 1 evidence is unchanged. This research-only slice changes no parser or product behavior; RED/GREEN tests do not apply. Existing archive verification and actual registration/extraction replay provide the applicable validation.
+`coverage-summary.json` retains per-PDF pages/hashes/header dates, all unit counts, indoor headers and the decoding exception. `indoor-pdf-link-evidence.json` maps all 42 views to 30 configured filenames. `route-discovery-evidence.json` records selected current routes. All acquisitions are private and publication-blocked. Batch 1 evidence is unchanged. That research-only batch changed no parser or product behavior; RED/GREEN tests do not apply. Existing archive verification and actual registration/extraction replay provide the applicable validation.
+
+## Batch 3 2025 depth extraction
+
+On 25 September 2026, schema-2 parser `cmas-2025-depth/1` added the 17 previously unsupported 2025 timing PDFs: senior men in all four disciplines, senior women CWT-BF and the twelve masters documents. The three supported women's CWT/FIM/CNF documents retain `cmas-women-depth/1`. Changed parser identities preserve earlier unsupported jobs; no filename or byte difference establishes a sporting-result revision.
+
+The parser uses printed discipline/category context, including combined masters subsections and inline CWT categories. It supports the inspected split headers, DSQ penalties, explicit zero depth for DNS and record text. Declared, attempted and final depth remain separate. Exact names, representation codes, status, notes, row lines and metadata lines are retained; unknown values remain unknown. Malformed headings, contradictory context and ambiguous rows fail closed. It does not infer units, nationality, identities, cards or successful results. HTML and 2026 parser behavior is unchanged.
+
+All 20 PDFs contain 23 pages and 352 source rows. Of these, 332 parse and 20 remain explicitly unparsed:
+
+| Source | Discipline | Printed category/division | Source rows | Parsed | Unparsed |
+| --- | --- | --- | ---: | ---: | ---: |
+| `c3-doc6.pdf` | CWT | Men seniors | 44 | 37 | 7 |
+| `c3-doc7.pdf` | CWT | Men M3 | 3 | 3 | 0 |
+| `c3-doc11.pdf` | CWT | Women seniors | 29 | 29 | 0 |
+| `c3-doc12.pdf` | CWT | Women M1 (4), M3 (1) | 5 | 5 | 0 |
+| `c3-doc13.pdf` | CWT | Men M1 (8), M2 (6) | 14 | 14 | 0 |
+| `c3-doc16.pdf` | FIM | Men seniors | 44 | 35 | 9 |
+| `c3-doc17.pdf` | FIM | Men M3 | 3 | 3 | 0 |
+| `c3-doc23.pdf` | FIM | Women seniors | 30 | 30 | 0 |
+| `c3-doc24.pdf` | FIM | Women M1 | 4 | 4 | 0 |
+| `c3-doc25.pdf` | FIM | Men M1 (10), M2 (6) | 16 | 16 | 0 |
+| `c3-doc28.pdf` | CNF | Men seniors | 30 | 30 | 0 |
+| `c3-doc29.pdf` | CNF | Men M3 | 1 | 1 | 0 |
+| `c3-doc33.pdf` | CNF | Women seniors | 18 | 18 | 0 |
+| `c3-doc34.pdf` | CNF | Women M1 | 7 | 7 | 0 |
+| `c3-doc35.pdf` | CNF | Men M1 (8), M2 (6) | 14 | 14 | 0 |
+| `c3-doc38.pdf` | CWT-BF | Men seniors | 39 | 35 | 4 |
+| `c3-doc39.pdf` | CWT-BF | Men M3 | 2 | 2 | 0 |
+| `c3-doc43.pdf` | CWT-BF | Women seniors | 27 | 27 | 0 |
+| `c3-doc44.pdf` | CWT-BF | Women M1 | 6 | 6 | 0 |
+| `c3-doc45.pdf` | CWT-BF | Men M1 (11), M2 (5) | 16 | 16 | 0 |
+| **Total** | | | **352** | **332** | **20** |
+
+All unparsed rows are on page 2 of `c3-doc6.pdf`, `c3-doc16.pdf` and `c3-doc38.pdf`, respectively seven, nine and four rows.
+
+Numeric token counts cannot distinguish absent interior columns on these pages. Exact text remains available for review without shifting values into inferred fields. Absent category headings and unavailable sources remain separate coverage gaps.
+
+Independent comparison against source text and a separate row inventory matched all 352 rows to parsed or explicitly unresolved candidates, with no missing/extra rows or remaining field/context/evidence mismatches. All 587 nonblank lines are accounted for exactly once. Source statuses total 232 blank, 72 `PEN`, 36 `DSQ`, 11 `DNS` and one literal `WR MM3`; blank status remains unknown. Two source depth cells contain zero: one parsed on CWT men's page 1 and one retained unresolved on page 2. Seven rendered page samples supported glyph/layout checks. Three initial audit-only note representation differences were independently adjudicated against Poppler text and renders; original audit logs remain retained. Neither automated comparison nor visual sampling supplies owner attestation. This comparison covers the 20 timing PDFs; the two earlier federation documents were checked separately below.
+
+The separate batch 1 comparison verified the older federation CWT PDFs: 44 men and 29 women rows, all 73 parsed, with zero missing/extra rows or field/context/evidence mismatches and all 96 nonblank lines accounted for exactly once. The men's source has no declared-depth column; that value remains unknown. Its legacy schema-1 artifact lacks some field envelopes, `:source-lines` and `:metadata-evidence`; exact coordinates, `:raw :line` and source header context were independently verified without rewriting that artifact. The women's 29 rows had no structural gaps. Private `b01-audit/` retains this separate comparison. Together the 22 acquired 2025 PDFs contain 425 document-version rows: 405 parsed and 20 unparsed. These are not deduplicated unique attempts or verified publisher revisions.
+
+Re-extraction across all 27 retained PDFs created 17 new job IDs; all 27 unchanged replays skipped. The three women's jobs and seven unsupported 2026 jobs retained their IDs. All 790 copied historical files remained byte-identical after extraction, and the 68 audit files were verified when copied. Private `audit/final-summary.json`, `census.json`, `comparison.json` and `job-identities.json` retain totals, source hashes, row outcomes and old/new job IDs. The combined test suite passed 114 tests and 816 assertions, including parser identity/replay compatibility.
+
+The isolated private root is `data/championship-restart-20260925-b03/`, containing `cmas/`, `extract_replay.clj`, `new-extractions.json` and `audit/`. Earlier corpora remain intact. All rows remain unreviewed and publication-blocked. This batch imports no observations, creates no real reviewer attestations and changes no publication policy or deployment. Remaining extraction and coverage acceptance is tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+Reproduce in the checkout retaining this private corpus. Use fresh replay destinations so existing reports remain intact:
+
+```sh
+clojure -M data/championship-restart-20260925-b03/extract_replay.clj data/championship-restart-20260925-b03/cmas/archive data/championship-restart-20260925-b03/cmas/extraction-report.edn data/championship-restart-20260925-b03/replayed-extractions.json
+cp -R data/championship-restart-20260925-b03/audit data/championship-restart-20260925-b03/audit-replay
+python3 data/championship-restart-20260925-b03/audit-replay/compare.py data/championship-restart-20260925-b03/replayed-extractions.json
+```

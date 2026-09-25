@@ -4,6 +4,8 @@ This implementation is a local readiness boundary for [issue #1](https://github.
 
 The isolated [2025-2026 championship acquisition](championship-inventory-20260925.md) retains source provenance, browser-state evidence and automated AIDA row reconciliation. Those checks are not reviewer attestations. It does not activate a policy, import historical approvals, replace events or authorize publication. HTML review/publication remains blocked; its acceptance and event cutover are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
+The subsequent [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-3-2025-depth-extraction) retains 352 source rows across 20 PDFs: 332 parsed and 20 headerless continuation rows unresolved. New parser `cmas-2025-depth/1` and retained `cmas-women-depth/1` jobs remain unreviewed and publication-blocked. Parser success or automated reconciliation supplies no visual-accuracy attestation. No observations, real reviews or policy activation were added by that batch.
+
 ## Separate decisions
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.
