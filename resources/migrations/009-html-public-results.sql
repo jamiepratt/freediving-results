@@ -1,6 +1,6 @@
 -- Additive policy compatibility. Does not activate a publication policy.
 CREATE OR REPLACE VIEW freediving.public_results WITH (security_barrier=true) AS
-SELECT c.result_id,c.source_name,c.identity_id,c.body_edn
+SELECT c.result_id,c.source_name,c.identity_id,c.body_edn,encode(sha256(convert_to(c.validation_id,'UTF8')),'hex') AS correction_version
 FROM freediving.public_projection_cache c
 JOIN freediving.publication_decisions p ON p.id=c.validation_id
 WHERE p.action='validate'

@@ -1,5 +1,8 @@
 (ns freediving.correction-http-test
   (:require [clojure.data.json :as json]
+            [clojure.java.shell :as shell]
+            [freediving.evaluation-labels :as labels]
+            [freediving.revisions :as revisions]
             [freediving.corrections :as corrections]
             [freediving.public-server-test :as http]
             [clojure.test :refer [deftest is use-fixtures run-tests]]
@@ -116,3 +119,60 @@
       (is (= 429 (:status (send "203.0.113.1" 6))))
       (is (= 200 (:status (send "203.0.113.2" 7))))
       (finally (server/stop! app)))))
+
+(defn deploy! []
+  (let [r (shell/sh "java" "-cp" (System/getProperty "java.class.path") "clojure.main" "-m" "freediving.deployment"
+                    :env (assoc (into {} (System/getenv)) "FREEDIVING_MIGRATION_URL" fixture/admin))]
+    (is (zero? (:exit r)) (:err r))))
+(deftest normal-deployment-fresh-and-historical-upgrade-preserve-corrections-and-policy
+  (doseq [mode [:fresh :historical :standalone]
+          :let [historical? (= mode :historical)]]
+    (fixture/sql! fixture/admin "DROP SCHEMA freediving CASCADE")
+    (when (not= mode :fresh)
+      (observations/migrate! fixture/admin "observations_app")
+      (reviews/migrate! fixture/admin "observations_app" "reviews_owner")
+      (publication/migrate! fixture/admin "reviews_owner")
+      (public/migrate! fixture/admin "reviews_owner" "reviews_public" {:defer-html-view? historical?})
+      (corrections/migrate! fixture/admin "reviews_owner" "corrections_submit")
+      (labels/migrate! fixture/admin "reviews_owner" :real)
+      (revisions/migrate! fixture/admin "observations_app" "reviews_owner")
+      (when historical?
+        (fixture/sql! fixture/admin "DO $$ BEGIN IF EXISTS(SELECT 1 FROM freediving.schema_migrations WHERE version=9) THEN RAISE EXCEPTION 'Not a historical upgrade'; END IF; END $$")))
+    (let [t (when historical? (sample/sample))]
+      (when t (sample/validate! t "historical") (public/refresh! sample/reviewer))
+      (deploy!)
+      (deploy!)
+      (when t (is (= 1 (count (public/results sample/reader-url)))))
+      (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic deployment checkpoint")
+      (is (= [] (public/results sample/reader-url)))
+      (let [t (or t (sample/sample)) d (publication/diagnose sample/reviewer t)
+            request (merge t {:id "policy2" :action :validate :base-revision (:revision d)
+                              :review-revision (:review-revision d) :policy-version "extraction-publication/2"
+                              :observation (:observation d) :evidence [{:page 1 :line 1}] :actor "synthetic"
+                              :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true} :reason "Synthetic validation"})]
+        (publication/decide! sample/reviewer request)
+        (public/refresh! sample/reviewer)
+        (is (= 1 (count (public/results sample/reader-url))))
+        (let [app (server/start! {:database-url sample/reader-url :submission-database-url submit-url :port 0})]
+          (try
+            (let [row (first (public/results sample/reader-url))
+                  detail (http/request (:url app) (str "/api/results/" (:result-id row)))
+                  correction {:id (str (UUID/randomUUID)) :result-id (:result-id row)
+                              :version (get-in detail [:body :correction :version])
+                              :suggestion "90 m" :reason "Synthetic source" :evidence "https://example.org/results.pdf page 1"}]
+              (is (= 200 (:status detail)))
+              (is (string? (:version correction)))
+              (is (= 200 (:status (post (:url app) correction))))
+              (publication/decide! sample/reviewer (assoc request :id "revoke" :action :revoke :base-revision (inc (:base-revision request))))
+              (is (= 404 (:status (http/request (:url app) (str "/api/results/" (:result-id row)))))))
+            (finally (server/stop! app))))))))
+
+(deftest standalone-correction-install-refuses-unverified-html-view-and-rolls-back
+  (fixture/sql! fixture/admin "DROP SCHEMA freediving CASCADE")
+  (observations/migrate! fixture/admin "observations_app")
+  (reviews/migrate! fixture/admin "observations_app" "reviews_owner")
+  (publication/migrate! fixture/admin "reviews_owner")
+  (public/migrate! fixture/admin "reviews_owner" "reviews_public")
+  (fixture/sql! fixture/admin "UPDATE freediving.schema_migrations SET sha256=repeat('0',64) WHERE version=9")
+  (is (thrown? Exception (corrections/migrate! fixture/admin "reviews_owner" "corrections_submit")))
+  (is (false? (fixture/sql! fixture/admin "DO $$ BEGIN IF EXISTS(SELECT 1 FROM freediving.schema_migrations WHERE version=5) OR to_regclass('freediving.correction_requests') IS NOT NULL THEN RAISE EXCEPTION 'Partial correction install'; END IF; END $$"))))

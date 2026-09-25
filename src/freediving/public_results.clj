@@ -53,33 +53,36 @@
   (with-open [c (DriverManager/getConnection url)]
     (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
     (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
-(defn migrate! [url reviewer-role public-role]
-  (doseq [role [reviewer-role public-role]]
-    (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
-  (when (= reviewer-role public-role) (fail! "Separate public role required"))
-  (transaction url
-               (fn [c]
-                 (query c "SELECT pg_advisory_xact_lock(781246914)")
-                 (doseq [role [reviewer-role public-role]]
-                   (let [r (first (query c "SELECT rolsuper,rolcreaterole,rolcreatedb,rolbypassrls FROM pg_roles WHERE rolname=?" role))]
-                     (when (or (nil? r) (some true? (vals r))
-                               (seq (query c "SELECT roleid FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=?)" role))
-                               (seq (query c "SELECT oid FROM pg_class WHERE relnamespace=to_regnamespace('freediving') AND pg_has_role(?,relowner,'MEMBER')" role))
-                               (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(?,nspowner,'MEMBER')" role))
-                               (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(?,datdba,'MEMBER')" role)))
-                       (fail! "Projection roles must be restricted without ownership or memberships"))))
-                 (doseq [[version resource] [[4 "migrations/004-public-results.sql"]
-                                             [9 "migrations/009-html-public-results.sql"]]]
-                   (let [sql (slurp (io/resource resource)) checksum (sha sql)]
-                     (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=?" version))]
-                       (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
-                       (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(?,?)" version checksum)))))
-                 (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " public-role ",PUBLIC"))
-                 (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " public-role ",PUBLIC"))
-                 (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " public-role))
-                 (execute! c (str "GRANT SELECT ON freediving.public_results TO " public-role))
-                 (execute! c (str "GRANT SELECT,INSERT,UPDATE,DELETE ON freediving.public_projection_cache TO " reviewer-role))
-                 {:schema-version 9})))
+(defn migrate!
+  ([url reviewer-role public-role] (migrate! url reviewer-role public-role {}))
+  ([url reviewer-role public-role {:keys [defer-html-view?]}]
+   (doseq [role [reviewer-role public-role]]
+     (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
+   (when (= reviewer-role public-role) (fail! "Separate public role required"))
+   (transaction url
+                (fn [c]
+                  (query c "SELECT pg_advisory_xact_lock(781246914)")
+                  (doseq [role [reviewer-role public-role]]
+                    (let [r (first (query c "SELECT rolsuper,rolcreaterole,rolcreatedb,rolbypassrls FROM pg_roles WHERE rolname=?" role))]
+                      (when (or (nil? r) (some true? (vals r))
+                                (seq (query c "SELECT roleid FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=?)" role))
+                                (seq (query c "SELECT oid FROM pg_class WHERE relnamespace=to_regnamespace('freediving') AND pg_has_role(?,relowner,'MEMBER')" role))
+                                (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(?,nspowner,'MEMBER')" role))
+                                (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(?,datdba,'MEMBER')" role)))
+                        (fail! "Projection roles must be restricted without ownership or memberships"))))
+                  (doseq [[version resource] [[4 "migrations/004-public-results.sql"]
+                                              [9 "migrations/009-html-public-results.sql"]]
+                          :when (not (and defer-html-view? (= 9 version)))]
+                    (let [sql (slurp (io/resource resource)) checksum (sha sql)]
+                      (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=?" version))]
+                        (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
+                        (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(?,?)" version checksum)))))
+                  (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " public-role ",PUBLIC"))
+                  (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " public-role ",PUBLIC"))
+                  (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " public-role))
+                  (execute! c (str "GRANT SELECT ON freediving.public_results TO " public-role))
+                  (execute! c (str "GRANT SELECT,INSERT,UPDATE,DELETE ON freediving.public_projection_cache TO " reviewer-role))
+                  {:schema-version (if defer-html-view? 4 9)}))))
 (defn activate-html-policy!
   "Explicit owner checkpoint; hides old validations until revalidated under policy 2."
   [url acknowledgement reason]
