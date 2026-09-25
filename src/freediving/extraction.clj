@@ -6,6 +6,7 @@
             [freediving.aida :as aida]
             [freediving.athens :as athens]
             [freediving.novi-sad :as novi-sad]
+            [freediving.depth-2025 :as depth-2025]
             [freediving.depth :as depth]))
 
 (def parser-version "cmas-cwt-men/1")
@@ -80,6 +81,7 @@
 
 (defn parse-pages [pages]
   (cond (depth/supported? pages) (depth/parse-pages pages)
+        (depth-2025/supported? pages) (depth-2025/parse-pages pages)
         (aida/supported? pages) (aida/parse-pages pages)
         (athens/supported? pages) (athens/parse-pages pages)
         (novi-sad/supported? pages) (novi-sad/parse-pages pages)
@@ -118,13 +120,14 @@
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
          depth? (depth/supported? pages)
+         depth-2025? (depth-2025/supported? pages)
          aida? (aida/supported? pages)
          athens? (and (not aida?) (athens/supported? pages))
          novi? (novi-sad/supported? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond depth? depth/parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
-                   :schema-version (cond depth? 2 aida? 2 athens? 3 novi? 3 :else 1)
+                   :parser-version (cond depth? depth/parser-version depth-2025? depth-2025/parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
+                   :schema-version (cond depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}}
          job-id (digest identity)]

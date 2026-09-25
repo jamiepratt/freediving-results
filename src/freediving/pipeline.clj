@@ -8,6 +8,7 @@
             [freediving.extraction :as extraction]
             [freediving.aida :as aida]
             [freediving.athens :as athens]
+            [freediving.depth-2025 :as depth-2025]
             [freediving.depth :as depth]
             [freediving.novi-sad :as novi-sad]
             [freediving.observations :as observations]
@@ -57,7 +58,7 @@
       (when-not (and (= h (sha bytes)) (= id (:job-id value))) (fail! :invalid-private-reference))
       value)))
 (defn- versions []
-  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version depth/parser-version novi-sad/parser-version]
+  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version depth/parser-version depth-2025/parser-version novi-sad/parser-version]
    :candidates {:version candidates/packet-version :config candidates/default-config}
    :tools (mapv (fn [tool]
                   (let [r (shell/sh tool "-v")]
