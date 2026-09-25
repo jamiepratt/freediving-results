@@ -24,6 +24,50 @@
 (defn source [rows] (.getBytes (json/write-str (assoc headers "data" rows)) "UTF-8"))
 (def provenance {:view-url view-url :json-url json-url})
 
+(deftest athens-bi-fins-cgr1-keeps-each-source-row-unreviewed
+  (doseq [category ["JUF" "JUM" "MAF" "MAM" "SEF" "SEM"]]
+    (let [source-data (-> headers
+                          (assoc "jsonfilename" (str "TF" category "016CLAS07 001.JSON")
+                                 "tipologia" "016")
+                          (assoc-in ["Competition" "Cod"] "016")
+                          (assoc-in ["Competition" "Eng"] "Dynamic Apnea Bi Fins")
+                          (assoc-in ["Category" "Cod"] category)
+                          (assoc-in ["Event" "Date"] "21/05/2025")
+                          (assoc "data" [(assoc row "PlaCod" "120")
+                                         (assoc row "PlaCod" "120" "PlaLane" "2")]))
+          page (str/replace (str/replace view-url "/MAM/" (str "/" category "/"))
+                            "/011/" "/016/")
+          response (str/replace json-url "TFMAM011" (str "TF" category "016"))
+          result (indoor/parse-result (.getBytes (json/write-str source-data) "UTF-8")
+                                      {:view-url page :json-url response})]
+      (is (= "cmas-2025-indoor-json/4" (:parser-version result)))
+      (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
+      (is (= ["120" "120"] (mapv #(get-in % [:raw "PlaCod"]) (:candidates result))))
+      (is (every? #(and (= :unreviewed (:review-status %))
+                        (= :blocked (:selection-status %))) (:candidates result)))
+      (is (= :blocked (get-in result [:publication :status]))))))
+
+(deftest athens-bi-fins-requires-its-observed-result-binding
+  (let [source-data (-> headers
+                        (assoc "jsonfilename" "TFMAM016CLAS07 001.JSON" "tipologia" "016")
+                        (assoc-in ["Competition" "Cod"] "016")
+                        (assoc-in ["Competition" "Eng"] "Dynamic Apnea Bi Fins")
+                        (assoc-in ["Event" "Date"] "21/05/2025")
+                        (assoc "data" [row]))
+        page (str/replace view-url "/011/" "/016/")
+        response (str/replace json-url "TFMAM011" "TFMAM016")
+        parse (fn [data url]
+                (indoor/parse-result (.getBytes (json/write-str data) "UTF-8")
+                                     {:view-url url :json-url response}))]
+    (doseq [data [(assoc-in source-data ["Event" "Date"] "20/05/2025")
+                  (assoc-in source-data ["Competition" "Eng"] "Dynamic Apnea Without Fin")
+                  (assoc-in source-data ["Round" "Cod"] "006")
+                  (assoc-in source-data ["Heat" "Cod"] "002")]]
+      (is (thrown? clojure.lang.ExceptionInfo (parse data page))))
+    (doseq [url [(str/replace page "/007/" "/006/")
+                 (str/replace page "/001" "/002")]]
+      (is (thrown? clojure.lang.ExceptionInfo (parse source-data url))))))
+
 (def sef-source-sha256
   "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84")
 (defn sef-source-bytes []
@@ -162,6 +206,8 @@
       (is (= view-url (:view-url artifact)))
       (is (= json-url (:json-url artifact)))
       (is (= artifact (indoor/validate-artifact! root artifact)))
+      (let [previous (assoc artifact :parser-version "cmas-2025-indoor-json/3")]
+        (is (= previous (indoor/validate-artifact! root previous))))
       (let [prior (-> artifact
                       (assoc :parser-version "cmas-2025-indoor-json/2")
                       (dissoc :unparsed-rows)

@@ -9,10 +9,15 @@
            [java.security MessageDigest]
            [java.util HexFormat]))
 
-(def parser-version "cmas-2025-indoor-json/3")
+(def parser-version "cmas-2025-indoor-json/4")
+(def previous-parser-version "cmas-2025-indoor-json/3")
 (def prior-parser-version "cmas-2025-indoor-json/2")
 (def legacy-parser-version "cmas-2025-indoor-json/1")
 (def dnf-categories #{"JUF" "JUM" "MAF" "MAM" "SEF" "SEM"})
+(def ^:private supported-competitions
+  {"011" {:name "Dynamic Apnea Without Fin" :date "20/05/2025"}
+   "016" {:name "Dynamic Apnea Bi Fins" :date "21/05/2025"
+          :round "007" :heat "001"}})
 (def ^:private sef-source-sha256
   "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84")
 (def ^:private sef-invalid-byte-offset 12982)
@@ -104,14 +109,17 @@
                    (= (:round route) (header-code source "Round"))
                    (= (:heat route) (header-code source "Heat"))
                    (= "TF" (header-code source "Sport"))
-                   (= "011" (:competition route))
-                   (= "Dynamic Apnea Without Fin" (get-in source ["Competition" "Eng"]))
+                   (let [{:keys [name date round heat]} (get supported-competitions (:competition route))]
+                     (and name
+                          (= name (get-in source ["Competition" "Eng"]))
+                          (= date (get-in source ["Event" "Date"]))
+                          (or (nil? round) (= round (:round route)))
+                          (or (nil? heat) (= heat (:heat route)))))
                    (contains? dnf-categories (:category route))
                    (= (:competition route) (get source "tipologia"))
                    (= (str (header-code source "Sport") (:category route)
                            (:competition route) "CLAS" (subs (:round route) 1) " " (:heat route) ".JSON") filename)
                    (response-url? json-url (:family route) filename)
-                   (= "20/05/2025" (get-in source ["Event" "Date"]))
                    (vector? rows) (seq rows) (every? valid-row? rows)
                    (or (not quarantine?) (= 50 (count rows))))
       (fail! "Unsupported or ambiguous CGR1 result structure"))
@@ -146,6 +154,11 @@
      :publication {:status :blocked :reasons [:owner-review-required :source-semantics-unresolved
                                               :coverage-not-established]}}))
 (declare parse-prior-result)
+(defn- parse-previous-result [bytes provenance]
+  (let [result (parse-result bytes provenance)]
+    (when-not (= "011" (:competition (codes (:view-url provenance))))
+      (fail! "Previous parser cannot replay bi-fins source"))
+    (assoc result :parser-version previous-parser-version)))
 (defn- parse-legacy-result [bytes provenance]
   (-> (parse-prior-result bytes provenance)
       (assoc :parser-version legacy-parser-version)
@@ -158,7 +171,7 @@
                       candidates)))))
 
 (defn- parse-prior-result [bytes provenance]
-  (let [result (parse-result bytes provenance)]
+  (let [result (parse-previous-result bytes provenance)]
     (when (seq (:unparsed-rows result))
       (fail! "Prior parser cannot replay quarantined source"))
     (-> result
@@ -193,13 +206,15 @@
   "Replay source bytes and page binding from the registered archive."
   [root artifact]
   (when-not (and (= 5 (:schema-version artifact))
-                 (#{legacy-parser-version prior-parser-version parser-version} (:parser-version artifact))
+                 (#{legacy-parser-version prior-parser-version previous-parser-version parser-version}
+                  (:parser-version artifact))
                  (= tool (:tool artifact)))
     (fail! "Unsupported CMAS JSON extraction contract"))
   (let [{:keys [source bytes view-url json-url]} (registered-source root (:source-sha256 artifact))
         expected ((case (:parser-version artifact)
                     "cmas-2025-indoor-json/1" parse-legacy-result
                     "cmas-2025-indoor-json/2" parse-prior-result
+                    "cmas-2025-indoor-json/3" parse-previous-result
                     parse-result)
                   bytes {:view-url view-url :json-url json-url})]
     (when-not (and (= (:acquisitions source) (:acquisitions artifact))
