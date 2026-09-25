@@ -24,7 +24,7 @@ Each candidate retains its 1-based document table and table-row coordinates, exa
 
 Date context comes from the selected date in the archived HTML. Ranking discipline/gender come from selected options. Acquisition evidence must record filters: AIDA's date selector changes session state and reloads the same URL. A URL alone cannot reproduce that selection. Archive any result-bearing dynamic payload required by another layout; this parser does not implement arbitrary live JSON feeds.
 
-The archive now accepts structured browser acquisition context and verifies separately retained DOM evidence. See the [manifest contract](../README.md#manifest-contract). Official AIDA schedule links can also include an allowed literal `day_index` query; retain it together with the observed selected date. The [25 September inventory](championship-inventory-20260925.md) records an isolated restart capture of all four Wakayama date tabs and one Limassol depth session. These private acquisitions do not replace the earlier corpus or establish complete championship coverage.
+The archive now accepts structured browser acquisition context and verifies separately retained DOM evidence. See the [manifest contract](../README.md#manifest-contract). Official AIDA schedule links can also include an allowed literal `day_index` query; retain it together with the observed selected date. The [25 September inventory](championship-inventory-20260925.md) records the isolated restart corpus. The session audit below covers all exposed result dates for Wakayama 2025, Limassol 2025 and Budapest 2026. These private acquisitions do not replace the earlier corpus or establish complete championship coverage beyond those views.
 
 The `:event-name` field currently retains the document title, which is generic on older event pages. Their specific event heading remains in the archived HTML. Points and penalties retain source text without numeric coercion. These limitations remain visible rather than being filled from inferred context.
 
@@ -61,3 +61,51 @@ CMAS remains on `freediving.extraction/extract!` and the existing PDF/text path.
 A new isolated PostgreSQL corpus imported seven sources and 769 observations: 405 pilot attempts, 96 supplemental HTML rankings, 42 historical-format rows, 182 mirrored PDF rankings and 44 official CMAS PDF rows. All seven extraction and import reruns skipped duplicates. Source replay, every stored candidate payload and every artifact matched the archive; an independent HTML parser checked all 543 HTML rows and 5,933 field comparisons. Every row remains unreviewed. Changed-source revision retention and tamper rejection were demonstrated with synthetic fixtures, not invented publisher revisions.
 
 Private acquisition, comparison and import evidence is kept under the batch's ignored `data/aida-html-ingestion-20260924-04/` directory. Real source documents and names are not fixtures in Git. Automated tests use synthetic HTML and existing synthetic PDF fixtures.
+
+
+## Restart session reconciliation, 25 September 2026
+
+The retained official attempt views cover all exposed result dates for three events. Dates and discipline/gender below were checked against actual result rows, not inferred from schedules.
+
+| Event | Selected date | Result scope | Source rows |
+| --- | --- | --- | ---: |
+| Wakayama 4349 | 2025-06-28 | DYNB, female/male | 193 |
+| Wakayama 4349 | 2025-06-29 | DNF, female/male | 176 |
+| Wakayama 4349 | 2025-07-01 | STA, female/male | 162 |
+| Wakayama 4349 | 2025-07-02 | DYN, female/male | 182 |
+| Limassol 4350 | 2025-09-23 | CNF, female | 36 |
+| Limassol 4350 | 2025-09-24 | CNF, male | 51 |
+| Limassol 4350 | 2025-09-25 | CWTB, female | 51 |
+| Limassol 4350 | 2025-09-26 | CWTB, male | 59 |
+| Limassol 4350 | 2025-09-28 | FIM, female | 50 |
+| Limassol 4350 | 2025-09-29 | FIM, male | 56 |
+| Limassol 4350 | 2025-10-01 | CWT, male | 49 |
+| Limassol 4350 | 2025-10-02 | CWT, female | 49 |
+| Budapest 4852 | 2026-06-02 | DYNB, female/male | 220 |
+| Budapest 4852 | 2026-06-03 | DNF, female/male | 209 |
+| Budapest 4852 | 2026-06-05 | STA, female/male | 187 |
+| Budapest 4852 | 2026-06-06 | DYN, female/male | 212 |
+
+Sources: [Wakayama](https://www.aidainternational.org/StartList/4349), [Limassol](https://www.aidainternational.org/StartList/4350), [Budapest](https://www.aidainternational.org/StartList/4852). All 16 retained responses returned HTTP 200 and contain one supported table. Their 1,942 rows comprise 713 Wakayama, 401 Limassol and 828 Budapest attempts. The second batch added 11 previously missing sessions and 1,193 rows. All rows parsed; zero unsupported tables or unparsed rows were found in these views. All 1,942 remain unresolved for owner review.
+
+An independent Python standard-library HTML parser read the retained response bytes directly, independently of jsoup. It compared every source row and cell range, decoded text, table/row coordinate, selected date, all 26 parsed fields and their known/unknown/invalid states, parse/review status and contradiction flags. The 16 unique source views passed 118,462 comparisons. Including eight separately retained recapture extraction versions, 24 artifacts and 3,483 versioned rows passed 212,463 comparisons with zero mismatches. These are source-to-parser checks, not independent publisher corroboration or reviewer attestation.
+
+The unique rows retain 1,597 white, 121 yellow and 224 red cards, 232 zero-point values and seven explicit zero-metre realised performances. There are 34,466 parsed field states and 16,026 unknown states, with zero invalid field states. Source card and remark text remain separate from parser/review status; no additional sporting-result status was invented. In particular, zero points were not converted to disqualification. Categories, penalties, time units and other absent values retain the existing unknown semantics.
+
+The audit discovered that a single browser evaluation returning a large DOM string can contain a literal `[Truncated]` marker. All eight original pool DOM captures were truncated; seven lost result cells, while Wakayama July 1 retained the full table but lost later document content. Their response HTML and schema-4 extraction were intact. Hash verification alone could not detect this capture defect: it correctly verified the incomplete bytes that had been supplied.
+
+All eight pool views were recaptured using 50,000-character DOM slices, checking the concatenated character length and absence of truncation markers. Each new response SHA-256 exactly matched its earlier response. New timestamps and DOM hashes were registered as separate acquisitions; original evidence was preserved unchanged. Every one of the 16 views now has a complete DOM capture whose selected date and every result cell agree with the response after HTML-standard CRLF/CR-to-LF normalization. This normalization is reported separately from exact source-byte/cell comparisons. Fresh DOM evidence does not retroactively attest to an earlier capture.
+
+Batch two retains 19 registered AIDA acquisitions across two isolated archives: 11 new sessions plus eight pool recaptures, representing 15 distinct response hashes. Twenty physical response captures include an unregistered duplicate September 25 capture retained during navigation verification. Archive registration and extraction reruns reused all 19 jobs/acquisitions; schema-4 replay validation also passed for the five earlier artifacts. No production parser changes were necessary.
+
+Private evidence is under `data/championship-restart-20260925-b02/aida/`. Initial captures and `archive/` preserve the original acquisition history; `recaptures/` contains fresh pool captures and its separate archive. Reproduction scripts are `register_extract.clj`, `recaptures/register_extract.clj` and `reconcile.py`. The final audit is `recaptures/reconciliation-report.json`, with row-level checks in `recaptures/reconciliation-rows.jsonl` and input/artifact paths in `recaptures/reconciliation-input.json`. The first batch remains unchanged at its original private path.
+
+With both private corpora still at their recorded locations, reproduce from the batch-two checkout:
+
+```sh
+clojure -M data/championship-restart-20260925-b02/aida/register_extract.clj
+clojure -M data/championship-restart-20260925-b02/aida/recaptures/register_extract.clj
+python3 data/championship-restart-20260925-b02/aida/reconcile.py data/championship-restart-20260925-b02/aida/recaptures
+```
+
+No database import, owner decisions, HTML publication support, identity merges or public replacement occurred. Rankings, alternative exports and publisher revisions are not silently deduplicated by this session audit. Remaining acceptance and later work stay in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
