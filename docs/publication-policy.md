@@ -2,6 +2,8 @@
 
 This implementation is a local readiness boundary for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). It does not deploy a site or approve the real pilot corpus. All real observations remain private; synthetic decisions do not count as owner-reviewed pilot cases.
 
+The isolated [2025-2026 championship acquisition](championship-inventory-20260925.md) adds source provenance and browser-state evidence only. It does not activate a policy, import historical approvals, replace events or authorize publication. HTML review/publication remains blocked; its acceptance and event cutover are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
 ## Separate decisions
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.

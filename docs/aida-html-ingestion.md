@@ -24,6 +24,8 @@ Each candidate retains its 1-based document table and table-row coordinates, exa
 
 Date context comes from the selected date in the archived HTML. Ranking discipline/gender come from selected options. Acquisition evidence must record filters: AIDA's date selector changes session state and reloads the same URL. A URL alone cannot reproduce that selection. Archive any result-bearing dynamic payload required by another layout; this parser does not implement arbitrary live JSON feeds.
 
+The archive now accepts structured browser acquisition context and verifies separately retained DOM evidence. See the [manifest contract](../README.md#manifest-contract). Official AIDA schedule links can also include an allowed literal `day_index` query; retain it together with the observed selected date. The [25 September inventory](championship-inventory-20260925.md) records an isolated restart capture of all four Wakayama date tabs and one Limassol depth session. These private acquisitions do not replace the earlier corpus or establish complete championship coverage.
+
 The `:event-name` field currently retains the document title, which is generic on older event pages. Their specific event heading remains in the archived HTML. Points and penalties retain source text without numeric coercion. These limitations remain visible rather than being filled from inferred context.
 
 Duplicate extraction/import calls reuse the same immutable job and observations when source bytes, acquisition evidence, parser, actor and config are unchanged. Changed source bytes or processing identity produce another retained version. This does not deduplicate athletes, rank and attempt listings, or mirrored publications into one sporting result.

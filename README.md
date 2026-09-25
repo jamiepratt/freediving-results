@@ -1,6 +1,6 @@
 # Freediving results: local evidence and extraction
 
-This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, imports those artifacts into immutable PostgreSQL observations, and records reversible owner review decisions separately. It supports CMAS CWT men, CMAS women CWT/FIM/CNF depth results, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All real pilot observations remain unreviewed. Pilot acceptance, identity review and publication scope live in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1), which remains open.
+This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, imports those artifacts into immutable PostgreSQL observations, and records reversible owner review decisions separately. It supports CMAS CWT men, CMAS women CWT/FIM/CNF depth results, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. All real pilot observations remain unreviewed. Current acquisition scope is tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8); the [25 September championship inventory](docs/championship-inventory-20260925.md) records acquired sources and unresolved coverage. Identity evaluation remains separate in [issue #6](https://github.com/jamiepratt/freediving-results/issues/6).
 
 ## Local owner review demo
 
@@ -41,7 +41,7 @@ Both commands emit one EDN result. `import` returns `:sha256` and `:acquisition-
 
 ## Manifest contract
 
-The example at `test/fixtures/manifest.edn` is the complete schema. Every key is required; extra keys are rejected.
+The example at `test/fixtures/manifest.edn` is the base schema. Every listed key is required. The optional `:provenance` extension below is also accepted; other extra keys are rejected. Existing flat manifests and acquisition IDs remain compatible.
 
 | Key | Required value |
 | --- | --- |
@@ -55,7 +55,22 @@ The example at `test/fixtures/manifest.edn` is the complete schema. Every key is
 | `:relationship` | `:publisher`, `:mirror`, or explicitly `:unknown` |
 | `:mirror-of` | Identified original publisher or source for `:mirror`; otherwise `nil` |
 
-URLs with user credentials, query strings, or fragments are rejected to reduce accidental credential storage. Do not place secrets, session data, or access tokens in any field or source file. URL paths and free text are not credential scanners. A source that needs a query URL cannot currently be represented faithfully; do not strip meaningful URL information merely to bypass validation.
+URLs with user credentials, unsupported query strings or fragments are rejected to reduce accidental credential storage. Strict exceptions preserve observed official source context: HTTPS Microplus schedule/result routes and AIDA `StartList/<numeric-id>?day_index=<numeric-index>` or `StartList/<numeric-id>#start`. Only the literal allowed forms pass; additional parameters, encoded keys, credentials and arbitrary fragments remain rejected. Supported Microplus fragments are `/competition-schedule/<id>` and `/event-detail/FRD/<five numeric IDs>/result` on `cmas.microplustimingservices.com/`, and `/<id>/schedule-bydate` on `results-ws.microplustimingservices.com/CMAS/Results/`. These exceptions require the exact host/path and default HTTPS port. Do not strip meaningful URL context to bypass validation. Do not place secrets, session data or access tokens in any field or source file. URL paths and free text are not credential scanners.
+
+Optional `:provenance` requires `:publisher-url` and a nonempty `:redirect-chain` vector, beginning with the requested acquisition URL, followed by observed redirect destinations, ending at `:final-url`. A discovery page need not be the requested download URL. It may additionally contain `:browser-state`:
+
+```clojure
+{:publisher-url "https://www.aidainternational.org/"
+ :redirect-chain ["https://www.aidainternational.org/StartList/4349"]
+ :browser-state {:selected-date "2025-06-28"
+                 :filters {}
+                 :representation :rendered-dom
+                 :rendered-sha256 "SHA256_OF_RETAINED_DOM_BYTES"}}
+```
+
+Retain DOM bytes with `freediving.archive/retain-evidence!` before registration and use its returned SHA-256. Registration and inspection verify that evidence exists and has not changed. All browser-state keys are required when supplied. Filters are empty when no filter selector was exposed; supported keys are `:discipline` (`:all`, `:sta`, `:dyn`, `:dynb`, `:dnf`, `:cwt`, `:cwtb`, `:cnf`, `:fim`) and `:gender` (`:all`, `:men`, `:women`). Record only observed values. The source representation, such as decoded response HTML re-encoded as UTF-8, belongs in `:acquisition-method`; DOM evidence is separate. These declarations bind context to an acquisition, but do not prove the declared selection agrees with the source. Verify that agreement during acquisition/reconciliation.
+
+Unchanged bytes and manifest replay reuse the acquisition ID. Changed bytes, timestamps or selected context retain distinct acquisitions; nested map ordering does not change identity. Distinct acquisitions are not automatic sporting-result revisions or independent corroboration.
 
 These declarations record acquisition evidence; validation does not prove a publisher claim or fetch a URL. MIME type is not inferred from the bytes. Mirror links are recorded as supplied, never inferred from URL equivalence. Different acquisitions with the same content hash share one artifact and are not independent evidence.
 
