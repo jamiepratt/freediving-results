@@ -441,3 +441,112 @@ for [#4](https://github.com/jamiepratt/freediving-results/issues/4) and
 Fresh held-out owner review remains [#6](https://github.com/jamiepratt/freediving-results/issues/6);
 actual billing and broader pilot/release limits remain
 [#1](https://github.com/jamiepratt/freediving-results/issues/1).
+
+### Question-local structure protocol
+
+`freediving-question-local-v1` selects `shadow-adapters/10` through
+`prepare-batches`, including batch size 1. It requires `jev-1.13.0`, native
+diagnostics 2, no companions, and batch size 1 or 2. The original
+`freediving-source/1` closed evidence schema remains unchanged.
+
+Shared `state` contains the exact original freediving guidance. Each Choice
+question carries structured `instructions` with complete `left` and `right`
+source records and a `question` explicitly referencing them. Criteria and
+advisory semantics are unchanged. Only structure and necessary references
+change; no source enrichment or wording experiment is included. The same pair
+has identical question content in either batch size, including unknowns,
+source rows and extraction uncertainty. No other pair appears in its question
+or shared state. The [official API](https://docs.typesafe.ai/api#question-types)
+supports structured question instructions and question-specific data.
+
+Requests retain the protocol descriptor and new adapter identity. Historical
+protocols, request identities and replay behavior remain unchanged. Strict
+response validation, numerical diagnostics, terminal stopping, one attempt,
+sequential HTTP, per-request accounting and durable replay are retained.
+The local protocol rejects companions and other batch sizes to keep the
+structure experiment bounded. Direct `prepare-request` remains the historical
+single-question API; use `prepare-batches` with size 1 for this new protocol.
+
+Offline tests verify evidence isolation, identical per-pair questions across
+batch sizes, unchanged guidance/criteria, invalid configuration rejection,
+strict probability validation with valid sibling retention, and zero-call
+replay. These transport tests establish no model accuracy.
+
+### Repeated structure-only experiment, 2026-09-25
+
+Before dispatch, [issue #6](https://github.com/jamiepratt/freediving-results/issues/6)
+recorded code `b593795e0ee1769dcab5eb46b4ce236eab233b83` and frozen private receipt
+SHA-256 `a9c4ba6955eaf3d538295ff9008e19ea6fdf8ccc2e292aeeaf92f49c6c9a8b05`.
+The predeclared order was S1, B1, B2, S2: single, double, double, single.
+All used the original 48 cases/order, consecutive pairing, identical guidance
+and per-pair questions, model `jev-1.13.0`, one HTTP request at a time, one
+attempt, no companions, 15-second deadlines, 49,152/65,536-byte request/response
+limits and native diagnostics 2. A terminal error stopped its arm; other
+predeclared controls continued. No replacement or adaptive rerun was added.
+
+| Measure | S1 | B1 | B2 | S2 |
+| --- | ---: | ---: | ---: | ---: |
+| Requests completed / planned | 29/48 | 24/24 | 24/24 | 48/48 |
+| Questions dispatched | 29 | 48 | 48 | 48 |
+| Match / no-match / abstain | 15/11/2 | 29/17/2 | 29/17/2 | 29/17/2 |
+| Errors / undispatched pairs | 20/19 | 0/0 | 0/0 | 0/0 |
+| Decisive coverage, all 48 pairs | 54.17% | 95.83% | 95.83% | 95.83% |
+| False merges / negative labels | 0/19 | 0/19 | 0/19 | 0/19 |
+| Missed matches / positive labels | 0/29 | 0/29 | 0/29 | 0/29 |
+| Request-loop wall time, seconds | 22.481 | 22.242 | 22.222 | 38.165 |
+| Summed HTTP latency, seconds | 21.593 | 21.578 | 21.563 | 36.911 |
+| Request latency median / p95, ms | 719/884 | 889/949 | 877/988 | 729/981 |
+| Input tokens | 157,835 | 247,477 | 247,477 | 261,157 |
+| Output tokens | 1,262 | 2,013 | 2,013 | 2,085 |
+| Actual billed cost | Unknown | Unknown | Unknown | Unknown |
+
+S1 request 29 returned HTTP 200 with probabilities match 0.81, no_match 0.01,
+abstain 0.17. Their decoded sum was 0.9900000000000001, failing the unchanged
+strict `abs(sum - 1) < 0.00001` contract. Its outcome remains an error; the
+remaining 19 pairs were not dispatched. The cause of the deviation is unknown.
+S1's partial run cannot support a whole-corpus timing or accuracy comparison.
+There were 125 requests and 173 questions in total; 172 valid pair outcomes.
+
+All jointly valid choices agreed, within and between arms. Paired probability
+comparisons below use maximum absolute component change and mean absolute
+change across all three components of jointly valid pairs.
+
+| Comparison | Jointly valid | Changed distributions | Maximum | Mean |
+| --- | ---: | ---: | ---: | ---: |
+| S1 vs S2, single repeat | 28 | 25 | 0.05 | 0.01286 |
+| B1 vs B2, double repeat | 48 | 39 | 0.08 | 0.01333 |
+| S1 vs B1 | 28 | 24 | 0.08 | 0.01571 |
+| S1 vs B2 | 28 | 25 | 0.07 | 0.01381 |
+| S2 vs B1 | 48 | 37 | 0.10 | 0.01431 |
+| S2 vs B2 | 48 | 39 | 0.09 | 0.01194 |
+
+Observed between-arm probability changes were similar in scale to repeat
+variation. These controls establish neither a causal batching effect nor
+probability equivalence. The completed double runs used half the requests and
+about 58% of S2's request-loop time in this local experiment. Two repeats,
+a partial single arm, fixed order/pairing, shared people/documents, and provider
+variability limit generalization. These are development diagnostics; existing
+labels and historical outcomes informed the protocol. No unbiased improvement,
+calibrated accuracy, or production-safety claim follows. Historical A/F remain
+descriptive references only. Token counters are not billed-cost receipts.
+
+Independent PDF re-extraction reproduced all 48 source inputs from six PDFs,
+96 parsed records and 437 source references. The original 50 owner decisions
+retain two unknowns outside scoring. No richer facts, owner reasons or prior
+model answers entered requests. The protocol is frozen at the identity above;
+fresh selection and scoring remain blocked on the owner's sample size,
+collection scope, false-merge criterion and genuine new reviews in #6.
+
+The owner receipt verified before/after live execution and replay. All 13
+logical authority-table fingerprints and 430 inventoried historical files
+retained their prior state. Replay made zero provider calls, reproduced the
+identical report and left all 653 run-store files' bytes, modes and modification
+times unchanged. The live credential/service-token scan found no retained
+secrets. Adapter validation passed 84 tests / 1,610 assertions, with clean
+ordered delimiter repair and lint. Paired choices, probabilities, exact requests,
+source evidence and owner data remain private; only aggregates are committed.
+
+Raw run identity:
+`c0efa8b594952b4e7886b43a347ab5f97c6a365d5ddef60f272330e8231ebc90`.
+The partial S1 is preserved permanently. Its validation failure is not repaired
+or erased by successful controls, and no probability normalization was added.
