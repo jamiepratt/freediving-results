@@ -209,13 +209,19 @@
 
 (defn html-sample
   ([source] (html-sample source "https://example.org/StartList/1"))
-  ([source url]
+  ([source url] (html-sample source url nil))
+  ([source url filters]
    (let [dir (archive-fixture/workspace) root (str dir "/archive") file (str dir "/source.html")
          hash (html-evidence/sha256 (.getBytes source "UTF-8"))
          _ (spit file source)
-         _ (archive/register! root file (-> archive-fixture/manifest
-                                            (assoc :sha256 hash :content-type "text/html" :final-url url)
-                                            (dissoc :provenance)))
+         evidence (when filters (archive/retain-evidence! root (.getBytes source "UTF-8")))
+         manifest (cond-> (-> archive-fixture/manifest
+                              (assoc :sha256 hash :content-type "text/html" :final-url url)
+                              (dissoc :provenance))
+                    filters (assoc :provenance {:publisher-url "https://example.org/" :redirect-chain [url]
+                                                :browser-state {:selected-date "2025-06-28" :filters filters
+                                                                :representation :rendered-dom :rendered-sha256 (:sha256 evidence)}}))
+         _ (archive/register! root file manifest)
          a (html/extract! root hash {:actor "synthetic" :config {}})]
      (observations/import! fixture/app root (:job-id a))
      (revisions/reference fixture/app {:job-id (:job-id a) :ordinal 0}))))
@@ -277,3 +283,14 @@
     (is (thrown-with-msg? Exception #"replay" (revisions/candidates fixture/app (html-descriptor forged-ref {:date "2099-01-01"}) [])))
     (is (thrown-with-msg? Exception #"replay" (revisions/candidates fixture/app
                                                                     {:reference forged-ref :scope {:source-name {:reference forged-ref :path [:candidates 0 :raw :fields "Diver"] :value "ÉXAMPLE  & Person"}}} [])))))
+
+(deftest acquisition-filters-must-agree-with-row-without-selected-controls
+  (doseq [filters [{:discipline :dyn} {:gender :men}]]
+    (let [ref (html-sample (html-fixture/document html-fixture/cells) "https://example.org/StartList/1" filters)]
+      (is (thrown-with-msg? Exception #"Conflicting" (revisions/candidates fixture/app
+                                                                           (html-descriptor ref {:discipline "DYNB" :category "Female"}) [])))
+      (is (thrown-with-msg? Exception #"Conflicting" (revisions/candidates fixture/app
+                                                                           {:reference ref :scope {:discipline {:reference ref :path [:candidates 0 :raw :fields "Discipline"] :value "DYNB"}}} [])))))
+  (doseq [filters [{} {:discipline :all :gender :all} {:discipline :dynb :gender :women}]]
+    (let [ref (html-sample (html-fixture/document html-fixture/cells) "https://example.org/StartList/1" filters)]
+      (is (= [] (revisions/candidates fixture/app (html-descriptor ref {:discipline "DYNB" :category "Female"}) []))))))

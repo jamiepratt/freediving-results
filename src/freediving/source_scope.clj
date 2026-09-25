@@ -49,8 +49,12 @@
         profile (when (and (= 1 (count links)) (visible? (first links)))
                   (let [href (.attr (first links) "href")]
                     (when (re-matches #"https://www\.aidainternational\.org/Profile-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" href) href)))]
-    (doseq [[selected raw] [[discipline (get fields "Discipline")]
-                            [gender (get fields "Gender")]]]
+    (doseq [[selected raw] (concat [[discipline (get fields "Discipline")]
+                                    [gender (get fields "Gender")]]
+                                   (mapcat (fn [acquisition]
+                                             [[(some-> (get-in acquisition [:filters :discipline]) name) (get fields "Discipline")]
+                                              [(some-> (get-in acquisition [:filters :gender]) name) (get fields "Gender")]])
+                                           (:acquisition-context context)))]
       (let [normalize #(some-> % str/trim str/upper-case)
             canon #(get {"M" "MALE" "MEN" "MALE" "F" "FEMALE" "WOMEN" "FEMALE"} (normalize %) (normalize %))]
         (when (and selected raw (not= "ALL" (normalize selected)) (not= (canon selected) (canon raw)))
