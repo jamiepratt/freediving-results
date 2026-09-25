@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [freediving.owner-server :as server]
             [freediving.source-pages-test :as pages-fixture]
+            [freediving.aida-html-test :as html-fixture]
             [freediving.publication-test :as publication-fixture]
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
@@ -286,3 +287,51 @@
                           (server/start! c))))
   (is (thrown? Exception
                (server/start! (assoc (config) :database-url (System/getenv "FREEDIVING_TEST_PUBLIC_URL"))))))
+
+(deftest html-inspection-is-private-bound-and-rechecked-before-attestation
+  (let [[page-config row] (pages-fixture/html-sample)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        s (server/start! (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        path (str "/api/source-html?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (is (= 401 (:status (request s "GET" path nil {}))))
+      (let [h (login s)
+            validation (merge target {:id "html-validate" :action "validate" :actor "synthetic-test"
+                                      :reason "Inspected synthetic HTML"})]
+        (is (= 403 (:status (request s "POST" "/api/publication" validation h))))
+        (let [response (request s "GET" path nil h)]
+          (is (= 200 (:status response)))
+          (is (= ["application/json; charset=utf-8"] (get-in response [:headers "content-type"])))
+          (is (= ["no-store"] (get-in response [:headers "cache-control"])))
+          (is (= (:source-sha256 row) (get-in response [:body :source-sha256])))
+          (is (= (get-in row [:payload :coordinates]) (get-in response [:body :coordinates])))
+          (is (nil? (get-in response [:body :page])))
+          (is (= "Synthetic Pool Championship" (get-in response [:body :event-name]))))
+        (is (= 400 (:status (request s "GET" (str path "&path=../../etc/passwd") nil h))))
+        (is (= 400 (:status (request s "GET" (str path "&row=999") nil h))))
+        (is (= 400 (:status (request s "POST" "/api/publication" validation h))))
+        (spit (str (:archive-root page-config) "/objects/" (:source-sha256 row)) "changed source")
+        (is (= 400 (:status (request s "POST" "/api/publication" validation h))))
+        (is (= 400 (:status (request s "GET" path nil h))))
+        (let [new-h (login s)]
+          (is (= 403 (:status (request s "POST" "/api/publication" validation new-h))))))
+      (finally (server/stop! s)))))
+
+(deftest html-validation-requires-inspection-and-explicit-attestations
+  (let [[source-config row] (with-redefs [html-fixture/cells (assoc html-fixture/cells 10 "")] (pages-fixture/html-sample))
+        _ (observations/import! fixture/app (:archive-root source-config) (:job-id row))
+        _ (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic test only")
+        s (server/start! (merge (dissoc (config) :demo?) source-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        path (str "/api/source-html?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (let [h (login s) validation (publication-fixture/html-request target "html-valid")]
+        (is (= 403 (:status (request s "POST" "/api/publication" validation h))))
+        (is (= 200 (:status (request s "GET" path nil h))))
+        (is (= 400 (:status (request s "POST" "/api/publication" (assoc validation :attestations {}) h))))
+        (is (= 200 (:status (request s "POST" "/api/publication" validation h))))
+        (is (:eligible? (publication/diagnose publication-fixture/reviewer target)))
+        (is (= 200 (:status (request s "POST" "/api/publication" (assoc validation :id "html-revoke" :action "revoke" :base-revision 1 :attestations {}) h))))
+        (is (false? (:eligible? (publication/diagnose publication-fixture/reviewer target)))))
+      (finally (server/stop! s)))))

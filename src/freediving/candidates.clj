@@ -38,7 +38,7 @@
 (defn- anchor [row]
   {:identity-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
    :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
-                     (select-keys (or (first (:source-lines row)) (get-in row [:payload :coordinates])) [:page :line]))})
+                     (select-keys (or (first (:source-lines row)) (get-in row [:payload :coordinates])) [:page :line :table :row]))})
 (defn- name-keys [row]
   (when (and (= "result-row" (:kind row)) (= :parsed (get-in row [:payload :parse-status])))
     (comparison-keys (get-in row [:payload :parsed :source-name]))))
