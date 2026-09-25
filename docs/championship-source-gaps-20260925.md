@@ -43,6 +43,8 @@ The existing parser's 794 candidates comprise 792 result rows and two detached t
 
 A separate name-text diagnostic yields 702 possible correspondences, without confirming athlete identity or attempt equivalence. Of these, 701 categories, 644 representation strings and 624 final-value tokens agree. Differences include PDF `CMAS1` versus JSON `CMA`, zero versus blank values, and a speed-8x50 master-women category discrepancy. Rank/order cannot safely align PDF overall standings with per-heat JSON. All unmatched rows, unparsed rows and differences remain explicit private evidence. The mirror is not substituted into the restart corpus.
 
+The subsequent [Athens mirror audit](athens-mirror-audit-20260925.md) independently accounts for all 792 PDF rows and both extraction fragments. It separates extraction losses from confirmed PDF/JSON source differences, with complete private unmatched-row and collision ledgers. This does not recover the missing official PDFs or authorize mirror substitution.
+
 ## Roatan CWT-men coverage
 
 The [official event page](https://www.cmas.org/freediving-events/2026-cmas-world-championship-freediving-depth.html) explicitly calls day 5 a continuation of day 1. This establishes the publisher's session description, not supersession or a reviewed row relationship.

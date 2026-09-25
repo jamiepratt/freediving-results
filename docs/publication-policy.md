@@ -89,4 +89,6 @@ The [local public interface](local-public-results.md) reads these restricted pro
 
 ## Restart corpus diagnostic
 
+The separate [Athens mirror audit](athens-mirror-audit-20260925.md) grants no publication authority. Its source-only baseline and JSON diagnostic correspondences are not reviewed attempts or confirmed replacements. Detached glyphs, shared-cell ambiguity and genuine source disagreements remain explicit; automated agreement cannot clear them.
+
 The [isolated corpus audit](championship-corpus-20260925.md) found 604 of 4,736 imported observations structurally ready under the unchanged initial policy, with zero eligible or public rows. Readiness is not an accuracy attestation. The two current indoor artifacts block all 648 contained rows because their artifact-level timing semantics remain unresolved; AIDA requires separately authorized policy 2. All real authority tables remain empty.
