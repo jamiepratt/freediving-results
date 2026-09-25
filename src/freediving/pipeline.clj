@@ -58,7 +58,7 @@
       (when-not (and (= h (sha bytes)) (= id (:job-id value))) (fail! :invalid-private-reference))
       value)))
 (defn- versions []
-  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version depth/parser-version depth-2025/parser-version novi-sad/parser-version]
+  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version depth/parser-version depth-2025/parser-version depth-2025/geometry-parser-version novi-sad/parser-version]
    :candidates {:version candidates/packet-version :config candidates/default-config}
    :tools (mapv (fn [tool]
                   (let [r (shell/sh tool "-v")]

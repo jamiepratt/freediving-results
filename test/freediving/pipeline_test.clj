@@ -209,3 +209,9 @@
     (with-redefs [depth-2025/parser-version "cmas-2025-depth/test-next"]
       (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
       (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))
+
+(deftest geometry-depth-parser-version-change-requires-new-registration
+  (let [{:keys [job config job-id]} (setup)]
+    (with-redefs [depth-2025/geometry-parser-version "cmas-2025-depth/test-next"]
+      (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
+      (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))

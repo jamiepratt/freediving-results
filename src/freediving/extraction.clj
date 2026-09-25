@@ -120,16 +120,17 @@
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
          depth? (depth/supported? pages)
-         depth-2025? (depth-2025/supported? pages)
+         depth-2025? (and (not depth?) (depth-2025/supported? pages))
          aida? (aida/supported? pages)
          athens? (and (not aida?) (athens/supported? pages))
          novi? (novi-sad/supported? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond depth? depth/parser-version depth-2025? depth-2025/parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
+                   :parser-version (cond depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
                    :schema-version (cond depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
-                   :tool {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}}
+                   :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
+                           depth-2025? (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
          job-id (digest identity)]
      (archive/derive! root job-id
                       (fn []
@@ -137,10 +138,35 @@
                               page-count (some-> (re-find #"(?m)^Pages:\s+(\d+)\s*$" info) second parse-long)]
                           (when-not (= page-count (count pages))
                             (throw (ex-info "Extracted page count does not match PDF" {:expected page-count :actual (count pages)})))
-                          (merge (parse-pages pages) identity
+                          (merge (if depth-2025?
+                                   (depth-2025/parse-pages-with-geometry pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
+                                   (parse-pages pages)) identity
                                  {:job-id job-id :processed-at (str (java.time.Instant/now))
                                   :raw-text raw :tool-stderr (:err result)
                                   :pdf-page-count page-count}))) on-progress))))
+
+(defn validate-geometry-artifact!
+  "Replay /2 geometry and layout from the hash-verified archived PDF before import.
+   Legacy PDF contracts are deliberately not reinterpreted by this validator."
+  [root artifact]
+  (when-not (and (= 2 (:schema-version artifact))
+                 (= depth-2025/geometry-parser-version (:parser-version artifact))
+                 (= "pdftotext" (get-in artifact [:tool :name]))
+                 (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
+                 (= ["-bbox-layout" "-enc" "UTF-8"] (get-in artifact [:tool :geometry-arguments])))
+    (throw (ex-info "Invalid geometry extraction contract" {})))
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        version (str/trim (:err (command! "pdftotext" "-v")))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        xml (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (depth-2025/parse-pages-with-geometry pages xml)]
+    (when-not (and (= version (get-in artifact [:tool :version]))
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "Geometry extraction differs from archived source replay" {})))
+    artifact))
 
 (defn -main [& args]
   (try
