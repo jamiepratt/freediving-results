@@ -117,3 +117,17 @@
    :criteria {:match "Combined source evidence supports the same person"
               :no_match "Reliable substantive evidence supports different people"
               :abstain "Material ambiguity or insufficient reliable evidence"}})
+
+(def question-local-descriptor
+  (assoc descriptor :protocol-id :freediving-question-local-v1
+         :context-policy :question-local-evidence
+         :question "Compare exactly the records in `left` and `right`. The question key is only an output identifier, not an inference selector."))
+
+(defn question-local
+  "Retain complete source records and criteria; move only references and structure."
+  [input]
+  (validate-input! input)
+  {:type "choice"
+   :instructions {:left (:left input) :right (:right input)
+                  :question (:question question-local-descriptor)}
+   :criteria (:criteria (question "/left" "/right"))})
