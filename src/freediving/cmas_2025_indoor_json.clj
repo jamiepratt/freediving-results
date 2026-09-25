@@ -9,17 +9,23 @@
            [java.security MessageDigest]
            [java.util HexFormat]))
 
-(def parser-version "cmas-2025-indoor-json/5")
+(def parser-version "cmas-2025-indoor-json/6")
+(def v5-parser-version "cmas-2025-indoor-json/5")
 (def v4-parser-version "cmas-2025-indoor-json/4")
 (def previous-parser-version "cmas-2025-indoor-json/3")
 (def prior-parser-version "cmas-2025-indoor-json/2")
 (def legacy-parser-version "cmas-2025-indoor-json/1")
 (def result-categories #{"JUF" "JUM" "MAF" "MAM" "SEF" "SEM"})
 (def ^:private supported-competitions
-  {"011" {:name "Dynamic Apnea Without Fin" :date "20/05/2025"}
-   "016" {:name "Dynamic Apnea Bi Fins" :date "21/05/2025"
+  {"001" {:name "Static Apnea" :date "23/05/2025" :sport "NU"
+          :family "1" :kind "static" :round "007" :heat "001"}
+   "011" {:name "Dynamic Apnea Without Fin" :date "20/05/2025" :sport "TF"
+          :family "2" :kind "dynamic"}
+   "016" {:name "Dynamic Apnea Bi Fins" :date "21/05/2025" :sport "TF"
+          :family "2" :kind "dynamic"
           :round "007" :heat "001"}
-   "026" {:name "Dynamic Apnea" :date "24/05/2025"
+   "026" {:name "Dynamic Apnea" :date "24/05/2025" :sport "TF"
+          :family "2" :kind "dynamic"
           :round "007" :heat "001"}})
 (def ^:private sef-source-sha256
   "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84")
@@ -61,15 +67,15 @@
   (try
     (let [u (URI. view-url)
           [_ family kind category competition round heat]
-          (re-matches #"/([2])/(dynamic)-result-json/([A-Z]{3})/([0-9]{3})/([0-9]{3})/([0-9]{3})"
+          (re-matches #"/([12])/(dynamic|static)-result-json/([A-Z]{3})/([0-9]{3})/([0-9]{3})/([0-9]{3})"
                       (or (.getRawFragment u) ""))]
       (when-not (and (= "https" (.getScheme u))
                      (= "results.microplustimingservices.com" (.getHost u))
                      (= -1 (.getPort u)) (= "/CMAS/Results/" (.getRawPath u))
                      (nil? (.getRawQuery u)) (nil? (.getUserInfo u))
-                     (= family "2") (= kind "dynamic"))
+                     (#{["2" "dynamic"] ["1" "static"]} [family kind]))
         (fail! "Unsupported CMAS result page URL"))
-      {:family family :category category :competition competition :round round :heat heat})
+      {:family family :kind kind :category category :competition competition :round round :heat heat})
     (catch java.net.URISyntaxException _ (fail! "Malformed CMAS result page URL"))))
 (defn- response-url? [url family filename]
   (try
@@ -85,13 +91,17 @@
   (let [value (get-in source [key "Cod"])]
     (when-not (populated? value) (fail! (str "Missing " key " code")))
     value))
-(defn- valid-row? [row]
+(defn- valid-row? [row static?]
   (and (map? row)
        (every? #(string? (get row %))
                ["PlaCod" "PlaName" "PlaSurname" "PlaNat" "PlaCat" "b"
                 "PlaLane" "MemPrest" "MemPoint"])
        (every? #(populated? (get row %))
-               ["PlaCod" "PlaName" "PlaSurname" "PlaNat" "PlaCat" "b" "PlaLane"])))
+               ["PlaCod" "PlaName" "PlaSurname" "PlaNat" "b" "PlaLane"])
+       (if static?
+         (and (string? (get row "PlaCatEff"))
+              (or (populated? (get row "PlaCat")) (populated? (get row "PlaCatEff"))))
+         (populated? (get row "PlaCat")))))
 (defn parse-result
   "Parse source-bound CGR1 bytes with separately observed page and response URLs.
    The exact archived SEF anomaly quarantines row 19; other bytes require strict UTF-8."
@@ -111,19 +121,25 @@
                    (= (:competition route) (header-code source "Competition"))
                    (= (:round route) (header-code source "Round"))
                    (= (:heat route) (header-code source "Heat"))
-                   (= "TF" (header-code source "Sport"))
-                   (let [{:keys [name date round heat]} (get supported-competitions (:competition route))]
+                   (let [{:keys [name date sport family kind round heat]}
+                         (get supported-competitions (:competition route))]
                      (and name
+                          (= sport (header-code source "Sport"))
+                          (= family (:family route)) (= kind (:kind route))
                           (= name (get-in source ["Competition" "Eng"]))
                           (= date (get-in source ["Event" "Date"]))
                           (or (nil? round) (= round (:round route)))
-                          (or (nil? heat) (= heat (:heat route)))))
+                          (or (nil? heat) (= heat (:heat route)))
+                          (or (not= kind "static")
+                              (and (= "HEATS" (get-in source ["Round" "Eng"]))
+                                   (= date (get-in source ["Heat" "UffDate"]))))))
                    (contains? result-categories (:category route))
                    (= (:competition route) (get source "tipologia"))
                    (= (str (header-code source "Sport") (:category route)
                            (:competition route) "CLAS" (subs (:round route) 1) " " (:heat route) ".JSON") filename)
                    (response-url? json-url (:family route) filename)
-                   (vector? rows) (seq rows) (every? valid-row? rows)
+                   (vector? rows) (seq rows)
+                   (every? #(valid-row? % (= "static" (:kind route))) rows)
                    (or (not quarantine?) (= 50 (count rows))))
       (fail! "Unsupported or ambiguous CGR1 result structure"))
     {:parser-version parser-version :raw-json (when-not quarantine? text) :view-url view-url
@@ -133,13 +149,22 @@
                          {:coordinates {:row-index-zero-based index}
                           :source-page-url view-url
                           :raw row
-                          :parsed {:source-pla-code (get row "PlaCod")
-                                   :source-name (str (get row "PlaSurname") " " (get row "PlaName"))
-                                   :representation (get row "PlaNat")
-                                   :category (get row "PlaCat")
-                                   :heat (get row "b") :lane (get row "PlaLane")
-                                   :performance-token (get row "MemPrest")
-                                   :points-token (get row "MemPoint")}
+                          :parsed (cond-> {:source-pla-code (get row "PlaCod")
+                                           :source-name (str (get row "PlaSurname") " " (get row "PlaName"))
+                                           :representation (get row "PlaNat")
+                                           :category (if (and (= "static" (:kind route))
+                                                              (not (populated? (get row "PlaCat"))))
+                                                       (get row "PlaCatEff") (get row "PlaCat"))
+                                           :heat (get row "b") :lane (get row "PlaLane")
+                                           :performance-token (get row "MemPrest")
+                                           :points-token (get row "MemPoint")}
+                                    (= "static" (:kind route))
+                                    (assoc :performance-unit :unknown :points-unit :unknown
+                                           :time-token (when (re-matches #"[0-9]+:[0-9]{2}\.[0-9]{2}"
+                                                                         (get row "MemPrest"))
+                                                         (get row "MemPrest"))
+                                           :status-token (when (= "DSQ" (get row "MemPrest"))
+                                                           (get row "MemPrest"))))
                           :parse-status :parsed :review-status :unreviewed :selection-status :blocked})
                        (remove (fn [[index _]] (and quarantine? (= 19 index)))
                                (map-indexed vector rows)))
@@ -157,8 +182,13 @@
      :publication {:status :blocked :reasons [:owner-review-required :source-semantics-unresolved
                                               :coverage-not-established]}}))
 (declare parse-prior-result)
-(defn- parse-v4-result [bytes provenance]
+(defn- parse-v5-result [bytes provenance]
   (let [result (parse-result bytes provenance)]
+    (when (= "static" (:kind (codes (:view-url provenance))))
+      (fail! "Version 5 parser cannot replay static apnea source"))
+    (assoc result :parser-version v5-parser-version)))
+(defn- parse-v4-result [bytes provenance]
+  (let [result (parse-v5-result bytes provenance)]
     (when-not (#{"011" "016"} (:competition (codes (:view-url provenance))))
       (fail! "Version 4 parser cannot replay dynamic apnea source"))
     (assoc result :parser-version v4-parser-version)))
@@ -215,7 +245,7 @@
   [root artifact]
   (when-not (and (= 5 (:schema-version artifact))
                  (#{legacy-parser-version prior-parser-version previous-parser-version
-                    v4-parser-version parser-version}
+                    v4-parser-version v5-parser-version parser-version}
                   (:parser-version artifact))
                  (= tool (:tool artifact)))
     (fail! "Unsupported CMAS JSON extraction contract"))
@@ -225,6 +255,7 @@
                     "cmas-2025-indoor-json/2" parse-prior-result
                     "cmas-2025-indoor-json/3" parse-previous-result
                     "cmas-2025-indoor-json/4" parse-v4-result
+                    "cmas-2025-indoor-json/5" parse-v5-result
                     parse-result)
                   bytes {:view-url view-url :json-url json-url})]
     (when-not (and (= (:acquisitions source) (:acquisitions artifact))

@@ -24,6 +24,64 @@
 (defn source [rows] (.getBytes (json/write-str (assoc headers "data" rows)) "UTF-8"))
 (def provenance {:view-url view-url :json-url json-url})
 
+(def static-view-url "https://results.microplustimingservices.com/CMAS/Results/#/1/static-result-json/JUF/001/007/001")
+(def static-json-url "https://results.microplustimingservices.com/CMAS/ExportPOST/export/CMAS_1/NUJUF001CLAS07%20001.JSON")
+(def static-headers
+  (-> headers
+      (assoc "jsonfilename" "NUJUF001CLAS07 001.JSON" "tipologia" "001")
+      (assoc-in ["Sport" "Cod"] "NU")
+      (assoc-in ["Competition" "Cod"] "001")
+      (assoc-in ["Competition" "Eng"] "Static Apnea")
+      (assoc-in ["Category" "Cod"] "JUF")
+      (assoc-in ["Category" "Eng"] "Junior Women")
+      (assoc-in ["Round" "Eng"] "HEATS")
+      (assoc-in ["Heat" "Eng"] "Heat 1")
+      (assoc-in ["Heat" "UffDate"] "23/05/2025")
+      (assoc-in ["Event" "Date"] "23/05/2025")))
+(def static-row
+  (assoc row "PlaCat" "" "PlaCatEff" "JUNIORS" "b" "1"
+         "MemPrest" "4:05.00" "MemPoint" "" "MemFields" [{"V" ""} {"V" "4:05.00"}]))
+(defn static-source [rows] (.getBytes (json/write-str (assoc static-headers "data" rows)) "UTF-8"))
+
+(deftest athens-static-cgr1-preserves-time-and-status-tokens
+  (let [rows [static-row (assoc static-row "PlaCod" "100002" "PlaLane" "2"
+                                "MemPrest" "DSQ" "MemFields" [{"V" ""} {"V" "DSQ"}])]
+        result (indoor/parse-result (static-source rows)
+                                    {:view-url static-view-url :json-url static-json-url})]
+    (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
+    (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
+    (is (= ["4:05.00" "DSQ"] (mapv #(get-in % [:parsed :performance-token]) (:candidates result))))
+    (is (= ["4:05.00" nil] (mapv #(get-in % [:parsed :time-token]) (:candidates result))))
+    (is (= [nil "DSQ"] (mapv #(get-in % [:parsed :status-token]) (:candidates result))))
+    (is (= ["" ""] (mapv #(get-in % [:parsed :points-token]) (:candidates result))))
+    (is (= ["JUNIORS" "JUNIORS"] (mapv #(get-in % [:parsed :category]) (:candidates result))))
+    (is (every? #(= :unknown (get-in % [:parsed :performance-unit])) (:candidates result)))
+    (is (every? #(= :unknown (get-in % [:parsed :points-unit])) (:candidates result)))
+    (is (every? #(and (= :unreviewed (:review-status %)) (= :blocked (:selection-status %)))
+                (:candidates result)))
+    (is (= :blocked (get-in result [:publication :status])))))
+
+(deftest athens-static-requires-exact-route-and-header-binding
+  (let [parse (fn [data page response]
+                (indoor/parse-result (.getBytes (json/write-str (assoc data "data" [static-row])) "UTF-8")
+                                     {:view-url page :json-url response}))]
+    (doseq [bad-data [(assoc-in static-headers ["Event" "Date"] "24/05/2025")
+                      (assoc-in static-headers ["Round" "Eng"] "Final")
+                      (assoc-in static-headers ["Heat" "UffDate"] "24/05/2025")
+                      (assoc-in static-headers ["Competition" "Eng"] "Dynamic Apnea")
+                      (assoc-in static-headers ["Sport" "Cod"] "TF")
+                      (assoc static-headers "jsonfilename" "NUJUF026CLAS07 001.JSON")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (parse bad-data static-view-url static-json-url))))
+    (doseq [bad-page [(str/replace static-view-url "/JUF/" "/JUM/")
+                      (str/replace static-view-url "/007/" "/006/")
+                      (str/replace static-view-url "static-result-json" "dynamic-result-json")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (parse static-headers bad-page static-json-url))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (parse static-headers static-view-url
+                        (str/replace static-json-url "CMAS_1" "CMAS_2"))))))
+
 (deftest athens-dynamic-apnea-cgr1-keeps-source-rows-unreviewed
   (doseq [category ["JUF" "JUM" "MAF" "MAM" "SEF" "SEM"]]
     (let [source-data (-> headers
@@ -39,7 +97,7 @@
           response (str/replace json-url "TFMAM011" (str "TF" category "026"))
           result (indoor/parse-result (.getBytes (json/write-str source-data) "UTF-8")
                                       {:view-url page :json-url response})]
-      (is (= "cmas-2025-indoor-json/5" (:parser-version result)))
+      (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
       (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
       (is (= ["DSQ" "DSQ"] (mapv #(get-in % [:parsed :performance-token]) (:candidates result))))
       (is (every? #(and (= :unreviewed (:review-status %))
@@ -62,7 +120,7 @@
           response (str/replace json-url "TFMAM011" (str "TF" category "016"))
           result (indoor/parse-result (.getBytes (json/write-str source-data) "UTF-8")
                                       {:view-url page :json-url response})]
-      (is (= "cmas-2025-indoor-json/5" (:parser-version result)))
+      (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
       (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
       (is (= ["120" "120"] (mapv #(get-in % [:raw "PlaCod"]) (:candidates result))))
       (is (every? #(and (= :unreviewed (:review-status %))
@@ -228,6 +286,8 @@
       (is (= view-url (:view-url artifact)))
       (is (= json-url (:json-url artifact)))
       (is (= artifact (indoor/validate-artifact! root artifact)))
+      (let [v5 (assoc artifact :parser-version "cmas-2025-indoor-json/5")]
+        (is (= v5 (indoor/validate-artifact! root v5))))
       (let [v4 (assoc artifact :parser-version "cmas-2025-indoor-json/4")]
         (is (= v4 (indoor/validate-artifact! root v4))))
       (let [previous (assoc artifact :parser-version "cmas-2025-indoor-json/3")]
