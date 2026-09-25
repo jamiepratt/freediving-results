@@ -51,10 +51,16 @@ Normal deployment applies migration 9 but leaves the active publication policy u
 
 Activation is a separate database-owner operation. Before it, retain a verified private database backup, identify the affected public rows, obtain authorization for their temporary withdrawal, and prepare genuine source review under policy 2. Activation immediately hides policy-1 rows. Each row needs a fresh explicit validation under policy 2 and a projection refresh; existing reviews are preserved as history, not copied into new validations.
 
-From the migrated release, with `FREEDIVING_MIGRATION_URL` supplied privately for the intended database, the exact manual checkpoint is:
+From the matching repository checkout with Clojure CLI installed, with `FREEDIVING_MIGRATION_URL` supplied privately for the intended database, the manual helper is:
 
 ```sh
 scripts/activate-html-publication.sh hide-existing-public-results "Authorized reason for policy transition"
+```
+
+The packaged VPS release contains the same guarded API. From that release directory, with `FREEDIVING_DATABASE_URL` supplied privately using the database-owner migration capability, invoke it without requiring Clojure CLI:
+
+```sh
+java -cp 'src:resources:lib/*' clojure.main -m freediving.public-results activate-html-policy hide-existing-public-results "Authorized reason for policy transition"
 ```
 
 The guard verifies migration 9's checksum and active policy 1 before appending policy 2. It does not deploy, seed, validate or refresh records. Never put credentials in the reason. No real activation or deployment was performed while implementing this support. Policy identifiers cannot be reused; application rollback alone cannot restore policy-1 visibility. Any later rollback needs an explicitly supported fresh policy and fresh validations.
