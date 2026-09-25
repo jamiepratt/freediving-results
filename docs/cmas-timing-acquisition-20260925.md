@@ -128,3 +128,32 @@ clojure -M data/championship-restart-20260925-b03/extract_replay.clj data/champi
 cp -R data/championship-restart-20260925-b03/audit data/championship-restart-20260925-b03/audit-replay
 python3 data/championship-restart-20260925-b03/audit-replay/compare.py data/championship-restart-20260925-b03/replayed-extractions.json
 ```
+
+## Batch 4 geometry-backed continuations
+
+On 25 September 2026, `cmas-2025-depth/2` added the 20 previously unparsed page-2 rows: seven in `c3-doc6.pdf` (CWT men), nine in `c3-doc16.pdf` (FIM men) and four in `c3-doc38.pdf` (CWT-BF men). All 20 timing PDFs now contain 352 parsed rows across 23 pages. The batch 3 table above remains the historical `/1` outcome.
+
+The parser supplements exact Poppler layout lines with `pdftotext -bbox-layout` word positions. It maps an unambiguous prior-page column-heading block to physical columns, then requires an exact word-sequence match for each continuation row. This accommodates headings whose physical lines differ from Poppler's layout text. It does not count numeric tokens to assign fields. All 39 absent numeric cells in the target rows remain unknown; the literal achieved-depth zero remains zero. In particular, a DSQ row with a penalty and blank final depth retains both fields separately.
+
+Inherited context requires the same event/date, matching report timestamp and page dimensions, sequential page numbers and an unambiguous preceding table. Unexpected content, contradictory headings, malformed geometry and ambiguous word matches fail closed. The extension deliberately handles the evidenced adjacent-page layout; it does not establish cross-document continuation or publisher revision relationships.
+
+Schema 2's existing page/line, raw-value and candidate contract is preserved. Raw bbox XML, matched row words, header positions and source metadata supplement that contract. Parser `/2` and geometry tool arguments create distinct immutable jobs. Text-only `/1` remains available without changed historical semantics. Before importing a `/2` artifact, source replay compares its layout, geometry and parsed output with the hash-verified PDF under the recorded Poppler version. Rehashed field or geometry changes are rejected. No database migration or publication-policy change is required.
+
+The independent audit freshly reproduced all 352 source rows from PDF geometry, matched every raw and typed field and checked all 587 nonblank layout lines exactly once. All 20 target rows and their 163 words also match independent Poppler bbox evidence. Three continuation-page renders were inspected at 1132 by 1600 pixels. Earlier seven-page samples and note adjudications remain preserved; this is not exhaustive visual review of all glyphs or owner attestation. Source status totals remain 232 blank, 72 `PEN`, 36 `DSQ`, 11 `DNS` and one literal `WR MM3`; both source depth zeros are now parsed.
+
+Public extraction replay produced 17 new `/2` jobs. The three women's jobs and seven unsupported 2026 depth jobs retain their IDs; all 27 repeated calls skip duplicate creation. The separate legacy federation comparison still matches 73 rows and 96 nonblank lines, with unchanged job IDs and explicit historic men's evidence-envelope gaps. Together these sources account for 425 document-version rows, all parsed, without declaring unique attempts or supersession.
+
+The isolated private root is `data/championship-restart-20260925-b04/`. It preserves the complete 914-file batch 3 tree; a separately copied 63-file legacy archive supports compatibility replay. New reports and scripts live under `b04-audit/`, including `copy-verification.json`, `continuation-source-baseline.json`, `baseline-reproduction.json`, `new-extractions.json`, `comparison.json`, `geometry-comparison.json`, `legacy-replay.json` and `METHOD.md`. Source expectations were established before new parser output. Initial provisional parser probes remain separate from final replay evidence.
+
+Final verification passed 126 tests and 902 assertions, including synthetic missing-column, context-reset, malformed-geometry, legacy-output and rehashed-artifact regressions. The narrow depth suite passed 29 tests and 214 assertions; two targeted pipeline version tests passed four assertions. Clojure repair and lint gates were clean. All 17 new artifacts passed archived-source replay validation, and all 914 historical files plus 63 legacy files remained hash-identical. An independent coordinator rerun reproduced the zero-difference row and geometry comparisons.
+
+All extracted rows remain unreviewed and publication-blocked. This batch performs no database import, real review, identity decision, deployment, policy activation or public replacement. Remaining source/layout, revision and publication acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+To reproduce from the checkout retaining the private corpus, use new output paths and a copied audit directory so previous reports remain intact:
+
+```sh
+clojure -M data/championship-restart-20260925-b04/b04-audit/replay.clj data/championship-restart-20260925-b04/cmas/archive data/championship-restart-20260925-b04/new-extractions.json data/championship-restart-20260925-b04/replayed-extractions.json
+cp -R data/championship-restart-20260925-b04/b04-audit data/championship-restart-20260925-b04/audit-replay
+python3 data/championship-restart-20260925-b04/audit-replay/compare.py data/championship-restart-20260925-b04/replayed-extractions.json
+python3 data/championship-restart-20260925-b04/audit-replay/compare_geometry.py data/championship-restart-20260925-b04/replayed-extractions.json
+```

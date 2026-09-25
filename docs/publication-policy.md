@@ -4,7 +4,7 @@ This implementation is a local readiness boundary for [issue #1](https://github.
 
 The isolated [2025-2026 championship acquisition](championship-inventory-20260925.md) retains source provenance, browser-state evidence and automated AIDA row reconciliation. Those checks are not reviewer attestations. It does not activate a policy, import historical approvals, replace events or authorize publication. HTML review/publication remains blocked; its acceptance and event cutover are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
-The subsequent [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-3-2025-depth-extraction) retains 352 source rows across 20 PDFs: 332 parsed and 20 headerless continuation rows unresolved. New parser `cmas-2025-depth/1` and retained `cmas-women-depth/1` jobs remain unreviewed and publication-blocked. Parser success or automated reconciliation supplies no visual-accuracy attestation. No observations, real reviews or policy activation were added by that batch.
+The [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-4-geometry-backed-continuations) retains 352 parsed source rows across 20 PDFs, including 20 geometry-backed continuation rows. New `cmas-2025-depth/2` jobs supplement preserved `/1` artifacts; retained `cmas-women-depth/1` jobs remain unchanged. All are unreviewed and publication-blocked. Source replay and automated reconciliation supply no visual-accuracy attestation. These extraction batches added no observations, real reviews or policy activation.
 
 ## Separate decisions
 
