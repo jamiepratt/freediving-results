@@ -36,7 +36,7 @@ Rollback appends another selection for the same scope; it does not delete histor
 
 Multi-edge revision chains remain deliberately unsupported. Active reviewed pairs cannot share endpoints, so branching, cycles and chained replacement are refused. Do not describe pairwise synthetic tests as complete multi-generation publisher history.
 
-Existing HTML inspection, validation and citations remain supported under policy 2. Selection does not extend the revision descriptor's source-binding paths. A retained HTML event heading or selected date alone is insufficient to supply all required event, venue, category, round, session and participant mappings. Such observations remain outside this strict selection contract until their scope is source-backed and reviewed. Synthetic selection fixtures do not establish those mappings for real AIDA rows.
+Existing HTML inspection, validation and citations remain supported under policy 2. Typed AIDA bindings now expose replayed event routes, visible event/date context and exact own-row fields/profile links through the revision descriptor. No separately typed venue, round or session was established in the retained attempt tables, so these observations still cannot satisfy the complete selection scope. A location embedded in a championship name is not automatically a venue. Start order and rank remain unavailable as bibs or attempt identifiers. The [isolated corpus audit](championship-corpus-20260925.md) imports these observations without enrolling or approving them.
 
 ## Public display
 

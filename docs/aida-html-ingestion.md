@@ -119,3 +119,7 @@ The subsequent HTML review implementation replayed all 24 retained artifacts, re
 Synthetic PostgreSQL and HTTP checks exercise explicit HTML validation, PDF coexistence, source/version tampering, unauthorized requests, identity reversal and validation revocation. Public projections expose exact citations and source tokens without private source dumps. Real source rows remain unreviewed. Policy activation, real-corpus import, reviewed event replacement and genuine owner decisions were not performed by this implementation.
 
 The later [event-selection API](event-selections.md) adds separately reviewed public cutover and rollback. Its strict source-bound scope requirements do not automatically enroll these HTML captures. Missing event/venue/round/session or own-row participant mappings cannot be replaced by names, ranks, hashes or guessed constants. HTML validation remains a separate decision and transfers no identity or selection authority.
+
+## Isolated restart import
+
+The subsequent [corpus audit](championship-corpus-20260925.md) imported all 24 retained AIDA versions and 3,483 observations into a separate local database. All unchanged retries skipped; exact source replay and independent payload checks passed. Original captures and recaptures remain distinct. No review, identity approval, policy activation or event selection occurred.

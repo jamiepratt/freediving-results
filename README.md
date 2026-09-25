@@ -20,6 +20,8 @@ The [local correction workflow](docs/local-corrections.md) accepts private evide
 
 The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the versioned dataset, held-out grouping, rules/Jev/LLM adapters, private restartable traces and synthetic comparison command. The [reviewed-label bridge](docs/local-reviewed-labels.md) verifies explicit pair decisions against PostgreSQL before owner metrics and detects stale exports. The optional [local Agent-o-rama module](docs/local-rama-evaluation.md) runs that verified evaluator through opaque receipt references. File assertions remain separate; synthetic databases remain synthetic. No live provider benchmark or genuine owner labels are included. Shadow outcomes cannot approve identities or publish results.
 
+The [isolated championship corpus audit](docs/championship-corpus-20260925.md) records 55 imported versions and 4,736 unreviewed observations, exact source replay, zero public rows, no reviewer decisions and a verified backup restoration.
+
 ## Local import orchestration
 
 For new AIDA sources, prefer supported [official HTML attempt tables](docs/aida-html-ingestion.md). The separate schema-4 API preserves table/row evidence and imports private observations. Private HTML inspection and explicit review are supported; HTML publication requires separately activated policy 2 and fresh extraction validation. CMAS retains its PDF/text path.

@@ -86,3 +86,7 @@ The development helper uses loopback trust authentication. Another local process
 Projection preparation and public reads load the bounded pilot into memory. A simultaneous refresh can return PostgreSQL serialization failure `40001`; retry the complete refresh. Its transaction either commits a complete snapshot or leaves the previous cache intact, with the visibility checks still applied. Public reads already in a repeatable-read transaction retain their earlier snapshot until that transaction ends.
 
 The [local public interface](local-public-results.md) reads these restricted projections. Further pilot coverage, genuine owner review, [anonymous correction triage](local-corrections.md), evaluation and production acceptance remain tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+
+## Restart corpus diagnostic
+
+The [isolated corpus audit](championship-corpus-20260925.md) found 604 of 4,736 imported observations structurally ready under the unchanged initial policy, with zero eligible or public rows. Readiness is not an accuracy attestation. The two current indoor artifacts block all 648 contained rows because their artifact-level timing semantics remain unresolved; AIDA requires separately authorized policy 2. All real authority tables remain empty.
