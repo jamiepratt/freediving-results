@@ -15,14 +15,14 @@
                           (str (distance/header "STA" "SENIORS - WOMEN" "13")
                                (distance/row 640 ["1" "SAMPLE Person" "AIN" "07:21" "07:20" "GOLD MEDAL"])))
         c (first (:candidates result))]
-    (is (= "cmas-2026-indoor-time/1" (:parser-version result)))
+    (is (= "cmas-2026-indoor-time/2" (:parser-version result)))
     (is (= :parsed (:parse-status c)))
     (is (= ["07:21" "07:20"] (mapv #(get-in c [:parsed %]) [:realized-value :final-value])))
     (is (= {:realized-value "Realized Distance (m)" :final-value "Final Distance (m)"}
            (get-in c [:parsed :column-labels])))
     (is (every? nil? (map #(get-in c [:parsed %]) [:unit :realized-time :final-time :realized-duration :final-duration :penalty])))
     (is (some #{:sta-distance-header-conflict} (:unresolved-reasons c)))
-    (is (some #{:source-semantics-unresolved} (get-in result [:publication :reasons])))))
+    (is (some #{:source-semantics-unresolved} (:unresolved-reasons c)))))
 
 (defn speed-header [discipline category day]
   (str (distance/text-at 120 750 "2026 CMAS WORLD CHAMPIONSHIP FREEDIVING INDOOR")
@@ -141,6 +141,14 @@
         {:keys [root receipt result]} (fixture/extract-stream stream)]
     (is (= result (extraction/validate-geometry-artifact! root result)))
     (doseq [changed [(assoc-in result [:candidates 0 :parsed :final-value] "99:99")
+                     (update-in result [:candidates 0 :unresolved-reasons] #(filterv (complement #{:source-semantics-unresolved}) %))
+                     (-> result
+                         (update-in [:candidates 0 :unresolved-reasons] #(filterv (complement #{:source-semantics-unresolved}) %))
+                         (update-in [:publication :reasons] conj :source-semantics-unresolved))
+                     (update-in result [:candidates 0 :unresolved-reasons] conj :unknown-error)
+                     (assoc-in result [:candidates 0 :coordinates :page] 2)
+                     (assoc-in result [:candidates 0 :parsed :event-date] "2026-06-13")
+                     (assoc result :parser-version "cmas-2026-indoor-time/1")
                      (assoc-in result [:candidates 0 :parsed :unit] "seconds")
                      (assoc-in result [:candidates 0 :parsed :column-labels :unlabeled-value] "Realized time")
                      (assoc-in result [:candidates 0 :raw :fields :final-value] "99:99")
@@ -155,7 +163,7 @@
             encoded (pr-str (assoc changed :job-id job)) hash (fixture/sha encoded)]
         (spit (str root "/derived-objects/" hash) encoded)
         (spit (str root "/derivations/" job ".edn") (pr-str (assoc receipt :job-id job :artifact-sha256 hash)))
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay|geometry extraction contract"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay|geometry extraction contract|Invalid candidate page"
                               (observations/import! nil root job)))))))
 
 (deftest new-time-jobs-are-idempotent-and-old-distance-jobs-replay-unchanged
@@ -173,3 +181,40 @@
     (is (= bytes (slurp (:artifact-path old))))
     (is (= historical (extraction/validate-geometry-artifact! root historical)))
     (is (= (first (:candidates historical)) (first (:candidates (edn/read-string (slurp (:artifact-path receipt)))))))))
+
+(deftest historical-time-jobs-replay-with-global-blocker-and-distinct-identity
+  (let [streams [(str (distance/header) (distance/row 640 ["1" "DISTANCE Person" "AIN" "100" "100"]))
+                 (str (speed-header "8X50" "SENIORS - MEN" "11")
+                      (distance/row 640 ["1" "TIMING Person" "AIN" "" "07:52:05"]))]
+        {:keys [root hash options receipt result]} (fixture/extract-stream streams)
+        old (with-redefs [time-parser/parser-version time-parser/legacy-parser-version
+                          time-parser/parse-pages-with-geometry time-parser/parse-legacy-pages-with-geometry]
+              (extraction/extract! root hash options))
+        bytes (slurp (:artifact-path old))
+        historical (edn/read-string bytes)]
+    (is (= "cmas-2026-indoor-time/1" (:parser-version historical)))
+    (is (not= (:job-id receipt) (:job-id old)))
+    (is (= historical (extraction/validate-geometry-artifact! root historical)))
+    (is (some #{:source-semantics-unresolved} (get-in historical [:publication :reasons])))
+    (is (not-any? #{:source-semantics-unresolved} (get-in historical [:candidates 1 :unresolved-reasons])))
+    (is (= (first (:candidates historical)) (first (:candidates result))))
+    (is (= (get-in historical [:candidates 1])
+           (get-in (update-in result [:candidates 1 :unresolved-reasons] #(filterv (complement #{:source-semantics-unresolved}) %)) [:candidates 1])))
+    (is (= (:pages historical) (:pages result)))
+    (is (= (:reconciliation historical) (:reconciliation result)))
+    (is (= :skipped (:run-status (extraction/extract! root hash options))))
+    (is (= bytes (slurp (:artifact-path old))))))
+
+(deftest mixed-malformed-timing-sections-never-inherit-distance-readiness
+  (let [distance-page (str (distance/header) (distance/row 640 ["1" "DISTANCE Person" "AIN" "100" "100"]))
+        timing-page (str (speed-header "4X50" "SENIORS - MEN" "13")
+                         (distance/row 640 ["1" "TIMING Person" "AIN" "bad-token" "03:20.00"]))]
+    (doseq [pages [[distance-page timing-page] [timing-page distance-page]]]
+      (let [{:keys [result]} (fixture/extract-stream pages)
+            rows (:candidates result)
+            distance-row (first (filter #(= "DISTANCE Person" (get-in % [:parsed :source-name])) rows))
+            malformed (filter #(= :unparsed (:parse-status %)) rows)]
+        (is (= 1 (get-in result [:reconciliation :parsed-count])))
+        (is (seq malformed))
+        (is (not-any? #{:source-semantics-unresolved} (:unresolved-reasons distance-row)))
+        (is (every? #(some #{:source-semantics-unresolved} (:unresolved-reasons %)) malformed))))))

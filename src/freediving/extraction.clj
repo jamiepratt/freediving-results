@@ -129,7 +129,7 @@
   "Recognize geometry artifacts even after identity or page-evidence downgrades.
    The archive-aware arity is required at the import trust boundary."
   ([artifact]
-   (or (#{athens-geometry/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version} (:parser-version artifact))
+   (or (#{athens-geometry/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version indoor-time/legacy-parser-version} (:parser-version artifact))
        (contains? artifact :geometry-xml) (contains? (:tool artifact) :geometry-arguments)
        (and (seq (:candidates artifact))
             (or (depth-2026-selected? (map :text (:pages artifact)))
@@ -193,7 +193,7 @@
    Legacy PDF contracts are deliberately not reinterpreted by this validator."
   [root artifact]
   (when-not (and (= (if (= athens-geometry/parser-version (:parser-version artifact)) 3 2) (:schema-version artifact))
-                 (#{athens-geometry/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version} (:parser-version artifact))
+                 (#{athens-geometry/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version indoor-time/legacy-parser-version} (:parser-version artifact))
                  (= "pdftotext" (get-in artifact [:tool :name]))
                  (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
                  (= ["-bbox-layout" "-enc" "UTF-8"] (get-in artifact [:tool :geometry-arguments])))
@@ -204,7 +204,7 @@
         xml (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
         segments (vec (str/split raw #"\f" -1))
         pages (if (= "" (last segments)) (pop segments) segments)
-        replay ((cond (= athens-geometry/parser-version (:parser-version artifact)) athens-geometry/parse-pages-with-geometry (= indoor-time/parser-version (:parser-version artifact)) indoor-time/parse-pages-with-geometry (= indoor-2026/parser-version (:parser-version artifact)) indoor-2026/parse-pages-with-geometry (= depth-2026/parser-version (:parser-version artifact)) depth-2026/parse-pages-with-geometry :else depth-2025/parse-pages-with-geometry) pages xml)]
+        replay ((cond (= athens-geometry/parser-version (:parser-version artifact)) athens-geometry/parse-pages-with-geometry (= indoor-time/legacy-parser-version (:parser-version artifact)) indoor-time/parse-legacy-pages-with-geometry (= indoor-time/parser-version (:parser-version artifact)) indoor-time/parse-pages-with-geometry (= indoor-2026/parser-version (:parser-version artifact)) indoor-2026/parse-pages-with-geometry (= depth-2026/parser-version (:parser-version artifact)) depth-2026/parse-pages-with-geometry :else depth-2025/parse-pages-with-geometry) pages xml)]
     (when-not (and (= version (get-in artifact [:tool :version]))
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))

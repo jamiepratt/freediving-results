@@ -4,7 +4,8 @@
             [freediving.novi-sad :as legacy]
             [freediving.indoor-2026 :as distance]
             [freediving.depth-2025 :as geometry]))
-(def parser-version "cmas-2026-indoor-time/1")
+(def legacy-parser-version "cmas-2026-indoor-time/1")
+(def parser-version "cmas-2026-indoor-time/2")
 (defn supported? [pages]
   (and (distance/supported? pages)
        (some #(re-find #"(?m)^\s*(?:STA|[248]X50)(?:\s|$)" %) pages)))
@@ -151,7 +152,9 @@
                       :noncandidate-lines (vec (mapcat :noncandidate-lines processed)) :status :unreviewed}
      :publication {:status :blocked :reasons [:owner-review-required :reconciliation-unreviewed]}}))
 
-(defn parse-pages-with-geometry [pages xml]
+(defn parse-legacy-pages-with-geometry
+  "Immutable /1 replay, including its artifact-wide semantics blocker."
+  [pages xml]
   (let [old (distance/parse-pages-with-geometry pages xml)
         timed (parse-time-pages pages xml)
         active (set (map #(get-in % [:coordinates :page]) (:candidates timed)))
@@ -163,7 +166,7 @@
         unsupported (vec (remove active (get-in old [:reconciliation :unsupported-pages])))
         parsed (count (filter #(= :parsed (:parse-status %)) candidates))]
     (-> old
-        (assoc :parser-version parser-version :candidates candidates
+        (assoc :parser-version legacy-parser-version :candidates candidates
                :status (if (seq unsupported) :partial-unsupported-needs-parser :needs-review)
                :pages (mapv (fn [p t] (if (active (:page p)) t p)) (:pages old) (:pages timed)))
         (update :reconciliation merge
@@ -171,3 +174,19 @@
                  :unresolved-count (count candidates) :unsupported-pages unsupported
                  :coverage (if (seq unsupported) :partial :complete) :noncandidate-lines noncandidate})
         (assoc :publication {:status :blocked :reasons [:owner-review-required :reconciliation-unreviewed :source-semantics-unresolved]}))))
+
+(defn parse-pages-with-geometry
+  "The /2 contract preserves source claims and localizes unresolved timing semantics.
+   Distance candidates are copied unchanged. Unsupported pages remain unsupported."
+  [pages xml]
+  (-> (parse-legacy-pages-with-geometry pages xml)
+      (assoc :parser-version parser-version)
+      (update :candidates
+              (fn [rows]
+                (mapv (fn [row]
+                        (if (some #{:time-unit-not-explicit :malformed-or-unsupported-time-row}
+                                  (:unresolved-reasons row))
+                          (update row :unresolved-reasons conj :source-semantics-unresolved)
+                          row)) rows)))
+      (update-in [:publication :reasons]
+                 #(filterv (complement #{:source-semantics-unresolved}) %))))

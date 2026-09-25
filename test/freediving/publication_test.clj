@@ -8,7 +8,10 @@
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.reviews-test :as review-fixture]
-            [freediving.publication :as publication]))
+            [freediving.publication :as publication]
+            [freediving.depth-2026-test :as pdf-fixture]
+            [freediving.indoor-2026-test :as indoor-fixture]
+            [freediving.indoor-time-2026-test :as time-fixture]))
 (def reviewer review-fixture/reviewer)
 (use-fixtures :each (fn [f]
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
@@ -245,3 +248,35 @@
     (is (false? (:eligible? (publication/diagnose reviewer t))))
     (is (thrown? Exception (publication/decide! reviewer (assoc (html-request t "html-forged") :base-revision 1))))
     (is (thrown? Exception (reviews/propose! fixture/app (assoc (review-fixture/proposal t "forged-review") :evidence [{:table 1 :row 2}]))))))
+
+(deftest mixed-indoor-source-semantics-block-only-timing-rows
+  (let [pages (into [(str (indoor-fixture/header)
+                          (indoor-fixture/row 640 ["1" "DISTANCE Person" "AIN" "100" "100"]))]
+                    (for [[d day left final] [["STA" "13" "05:03" "05:03"]
+                                              ["2X50" "12" "00:36.35" "00:36.35"]
+                                              ["4X50" "13" "03:23.30" "03:23.30"]
+                                              ["8X50" "11" "" "07:52:05"]]]
+                      (str (if (= d "STA") (indoor-fixture/header d "SENIORS - MEN" day)
+                               (time-fixture/speed-header d "SENIORS - MEN" day))
+                           (indoor-fixture/row 640 ["1" "TIMING Person" "AIN" left final]))))
+        {:keys [root result]} (pdf-fixture/extract-stream pages)
+        _ (observations/import! fixture/app root (:job-id result))
+        targets (mapv #(hash-map :job-id (:job-id result) :ordinal %) (range 5))
+        diagnoses (publication/diagnose-many reviewer targets)
+        row-request (fn [t id]
+                      (assoc (request t id) :evidence
+                             [(select-keys (get-in result [:candidates (:ordinal t) :coordinates]) [:page :line])]))]
+    (is (= 5 (count (:candidates result))))
+    (is (= [true false false false false] (mapv :ready? diagnoses)))
+    (is (every? false? (map :eligible? diagnoses)))
+    (is (every? #(some #{[:unresolved-extraction-error :source-semantics-unresolved]} (:reasons %)) (rest diagnoses)))
+    (is (= :unreviewed (get-in result [:candidates 0 :review-status])))
+    (doseq [t (rest targets)]
+      (is (thrown-with-msg? Exception #"Extraction not eligible for validation" (publication/decide! reviewer (row-request t (str "blocked-" (:ordinal t)))))))
+    (let [t (first targets)]
+      (publication/decide! reviewer (row-request t "synthetic-distance-validation"))
+      (is (:eligible? (publication/diagnose reviewer t)))
+      (is (every? false? (map :eligible? (publication/diagnose-many reviewer (rest targets)))))
+      (publication/decide! reviewer (assoc (row-request t "synthetic-distance-revocation")
+                                           :action :revoke :base-revision 1 :attestations {}))
+      (is (false? (:eligible? (publication/diagnose reviewer t)))))))
