@@ -34,8 +34,8 @@
 (defn- valid-hash? [v] (and (string? v) (re-matches #"[0-9a-f]{64}" v)))
 (defn- text? [v] (and (string? v) (not (str/blank? v))))
 (defn- timing-route? [^URI u]
-  ;; Official CMAS archive redirects observed 2026-09-25. Query strings remain
-  ;; forbidden; only these public schedule routes may retain a fragment.
+  ;; Official CMAS archive redirects observed 2026-09-25. Only these public
+  ;; schedule/result routes may retain a fragment.
   (and (= "https" (.getScheme u))
        (= -1 (.getPort u))
        (case (.getHost u)
@@ -44,13 +44,28 @@
               (re-matches #"/[0-9]+/schedule-bydate" (or (.getRawFragment u) "")))
          "cmas.microplustimingservices.com"
          (and (= "/" (.getRawPath u))
-              (re-matches #"/competition-schedule/[0-9]+" (or (.getRawFragment u) "")))
+              (re-matches #"/(?:competition-schedule/[0-9]+|event-detail/FRD/[0-9]+/[0-9]+/[0-9]+/[0-9]+/[0-9]+/result)"
+                          (or (.getRawFragment u) "")))
          false)))
+
+(defn- aida-session-route? [^URI u]
+  ;; Official EventPage/4350 links observed 2026-09-25. Do not decode or
+  ;; normalize queries: only the literal public day selector is supported.
+  (and (= "https" (.getScheme u))
+       (= "www.aidainternational.org" (.getHost u))
+       (= -1 (.getPort u))
+       (re-matches #"/StartList/[0-9]+" (or (.getRawPath u) ""))
+       (or (and (nil? (.getRawQuery u)) (= "start" (.getRawFragment u)))
+           (and (nil? (.getRawFragment u))
+                (re-matches #"day_index=[0-9]+" (or (.getRawQuery u) ""))))))
 
 (defn- url? [v]
   (try (let [u (URI. v)]
          (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
-              (nil? (.getUserInfo u)) (nil? (.getRawQuery u)) (or (nil? (.getRawFragment u)) (timing-route? u))))
+              (nil? (.getUserInfo u))
+              (or (and (nil? (.getRawQuery u))
+                       (or (nil? (.getRawFragment u)) (timing-route? u)))
+                  (aida-session-route? u))))
        (catch Exception _ false)))
 (defn- browser-state? [state]
   (and (map? state)

@@ -273,3 +273,50 @@
     (is (= "abc" (slurp (:artifact-path (archive/inspect root (:sha256 manifest))))))
     (is (= "def" (slurp (:artifact-path (archive/inspect root (:sha256 changed))))))
     (is (= :skipped (:status (archive/register! root source changed {:report-status true}))))))
+
+(deftest observed-aida-session-links-preserve-context
+  (doseq [url ["https://www.aidainternational.org/StartList/4350#start"
+               "https://www.aidainternational.org/StartList/4350?day_index=3"
+               "https://www.aidainternational.org/StartList/4350?day_index=12"]]
+    (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+          contextual (assoc manifest :discovery-url url :final-url url :provenance
+                            {:publisher-url "https://example.org/" :redirect-chain [url]})]
+      (spit source "abc")
+      (let [receipt (archive/register! root source contextual)]
+        (is (= receipt (archive/register! root source contextual)))
+        (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest))))))))))
+
+(deftest observed-cmas-result-link-preserves-context
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        url "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/result"
+        contextual (assoc manifest :final-url url :provenance
+                          {:publisher-url "https://www.cmas.org/" :redirect-chain [url]})]
+    (spit source "abc")
+    (let [receipt (archive/register! root source contextual)]
+      (is (= receipt (archive/register! root source contextual)))
+      (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest)))))))))
+
+(deftest session-and-result-route-allowlists-reject-unobserved-context
+  (doseq [url (concat
+               (map #(str "https://www.aidainternational.org/StartList/4350" %)
+                    ["?day_index=3&token=secret" "?day_index=3&day_index=4"
+                     "?%64ay_index=3" "?day_index=%33" "?day_index=-3"
+                     "?day_index=3#start" "?day_index=3;token=secret"
+                     "?day_index=" "?token=3" "#secret" "#%73tart"])
+               ["https://www.aidainternational.org:8443/StartList/4350?day_index=3"
+                "http://www.aidainternational.org/StartList/4350?day_index=3"
+                "https://www.aidainternational.org.evil.org/StartList/4350?day_index=3"
+                "https://user:secret@www.aidainternational.org/StartList/4350?day_index=3"
+                "https://www.aidainternational.org/EventPage/4350?day_index=3"
+                "https://www.aidainternational.org/StartList/%34%33%35%30?day_index=3"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/4/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/OTHER/30/110/655/588/3559/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/token/result"
+                "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/655/588/3559/result?token=secret"
+                "https://cmas.microplustimingservices.com/?token=secret#/event-detail/FRD/30/110/655/588/3559/result"])]
+    (let [dir (workspace) source (str dir "/source")]
+      (spit source "abc")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                            (archive/register! (str dir "/archive") source (assoc manifest :final-url url)))
+          url))))
