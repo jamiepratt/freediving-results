@@ -228,3 +228,44 @@ Final validation passed: indoor namespace 14 tests / 67 assertions, pipeline ver
 Private evidence is retained under `data/championship-restart-20260925-b06/`: `b06-audit/` contains source expectations, complete page inventory, geometry and rendered samples; `b06-parent-review/` contains independently reproduced source censuses and public extraction reports; `b06-history-check/` contains historical replay checks. `history/` preserves the batch 5 tree and `indoor-archive/` preserves batch 1 archive history alongside new distance jobs. Development probes use a separate preliminary archive and are not final corpus jobs. Real source documents and names are excluded from Git fixtures.
 
 No source acquisition, database import, genuine review, identity decision, policy activation, deployment or public replacement occurred. All 412 extracted rows remain private, unreviewed and publication-blocked. STA/speed support and the remaining source, revision, import and publication acceptance stay in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## Batch 7 2026 indoor STA and speed
+
+The remaining 33 pages of the same retained Novi Sad PDFs contain 236 source rows: 105 STA, 37 8X50, 47 2X50 and 47 4X50. Seniors/juniors contribute 183 rows and masters 53. Dates are June 11 for 8X50, June 12 for 2X50, and June 13 for STA/4X50.
+
+| Category | STA | 8X50 | 2X50 | 4X50 |
+| --- | ---: | ---: | ---: | ---: |
+| Junior men | 5 | 4 | 5 | 5 |
+| Junior women | 5 | 9 | 10 | 11 |
+| Senior men | 36 | 11 | 12 | 13 |
+| Senior women | 24 | 11 | 9 | 13 |
+| Masters M1 men | 13 | 1 | 4 | 2 |
+| Masters M1 women | 4 | 1 | 1 | 1 |
+| Masters M2 men | 8 | No heading | 3 | No heading |
+| Masters M2 women | 2 | No heading | 1 | 1 |
+| Masters M3 men | 7 | No heading | 2 | 1 |
+| Masters M3 women | 1 | No heading | No heading | No heading |
+
+Rendered source headings contain substantive ambiguities. STA prints `Realized Distance (m)` and `Final Distance (m)` above timing-shaped tokens. The first value column in 2X50 and 4X50 has no printed heading; the second is labelled `Final Result (time)`. 8X50 labels its sole value column `Final Result (time)`. These labels establish neither a seconds conversion nor the meaning of the unlabeled column. The masters 8X50 token `07:52:05` is preserved without interpreting its three components. Missing headings do not establish zero participation, and master labels do not establish age ranges.
+
+The source-only baseline was frozen before implementation comparison. All 468 nonblank lines on the timing pages partition into 240 row-evidence lines and 228 headings, including four wrapped notes. Six blank cells and ten literal zero cells remain distinct. Independent geometry checks verified every column assignment, including the one populated first column beside a blank final and the fully blank DSQ rows. Nine representative renders supported layout checks. The coordinator reproduced all six frozen baseline files with identical hashes; these checks supply no owner attestation.
+
+
+Schema-2 `cmas-2026-indoor-time/1` composes the frozen distance parser with the timing layouts. All 648 source rows are structurally parsed: 478 senior/junior and 170 masters, including the 236 timing rows. Distance candidate payloads retain their earlier contract. Each timing page must supply its own championship, discipline, category, date and column evidence; header-only timing continuations remain unsupported. Malformed headers, contradictory context, invalid geometry and crossing column boundaries fail closed.
+
+STA retains source-neutral realized/final value strings and their exact conflicting labels; typed time and duration fields remain unknown. Speed retains the unlabeled first value separately and interprets final tokens only as notation components, preserving leading zeros in the original strings. Units, normalized durations, penalties, announced values, cards and split/lap times are not inferred. Medal/record text remains in notes. Blank status stays unknown; explicit DSQ/DNS text supplies status. The acquired timing rows contain 16 DSQ notes and no DNS; synthetic regressions cover DNS.
+
+The new artifacts carry `source-semantics-unresolved`, which remains a substantive blocker under the existing publication policy. Source extraction coverage does not resolve contradictory headings or authorize publishing these rows. Earlier distance and legacy parser versions remain independently replayable.
+
+Independent comparison matched all 648 rows, including every new timing field, context, source line and geometry word. All 1,090 nonblank lines partition exactly into 661 candidate-evidence lines and 429 headings. Thirty-five deliberately corrupted reports were rejected, including missing/duplicate documents, altered counters, blank/zero substitutions, invented units, changed column labels, lost notes, altered geometry and removed publication blockers.
+
+Historical regression preserved all 27 timing/depth job IDs and artifact hashes plus both legacy federation jobs. Independent comparisons still match 352 timing, 73 legacy and 180 depth rows, including the 20 geometry-backed continuation rows and 163 words. All 412 older distance candidate maps are exactly unchanged. Thirty-two source validations passed, including the two new timing jobs and duplicated retained Novi artifacts. All 1,390 copied historical files remain hash-identical; the 44 preexisting legacy men's evidence-envelope gaps remain explicit.
+
+
+Final private extraction jobs are `cff457431610c929a54970f77477aa5e44679a34cab1db74a7af4f3e6e54ee61` (senior/junior) and `f1aa775d5f181f64398eed0045dc7a6c75a63cb42548380c5c510220ec48f530` (masters). Both unchanged reruns skip creation and pass archived-source validation. Rehashed field, label, geometry, metadata and parser-identity changes are rejected before database access. These are new extraction versions, not additional sporting attempts or confirmed publisher revisions.
+
+Five observed RED/GREEN cycles covered STA cells and conflicting units, speed columns/notation, the measured note-glyph inset, literal speed zero and pipeline version registration. Additional regressions cover blank/interior cells, DNS/DSQ, wrapped notes, category/context boundaries, malformed headers/geometry, source replay and immutable history. Ordered delimiter repair and lint passed. The new namespace passed 10 tests and 80 assertions; targeted pipeline registration passed one test and two assertions. Final combined archive/extraction/HTML coverage passed 164 tests and 1,111 assertions. No database suite was run in this batch.
+
+Private evidence is retained under `data/championship-restart-20260925-b07/`. `b07-audit/` holds source-only expectations, geometry role checks, rendered samples, the frozen manifest, comparator and negative controls. `b07-parent-review/` holds independently reproduced baseline hashes, final public extraction reports and the repeated full-row comparison. `b07-history-check/run.py` reproduces historical checks; its method records archive-copy requirements. `implementation/METHOD.md` records actual RED/GREEN cycles and regression limits. Preliminary probes remain separate from the final `indoor-archive/`; `history-freeze.json` identifies the preserved files. Real names and source documents remain excluded from Git fixtures.
+
+No source acquisition, database import, genuine review, identity decision, policy activation, deployment or public replacement occurred. Unavailable 2025 indoor PDFs, missing 2026 CWT-men sources, invalid-UTF8 supporting JSON, absent category headings, timing semantics, reviewed revision/missing-predecessor matching and publication acceptance remain explicit in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
