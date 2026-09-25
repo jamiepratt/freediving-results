@@ -157,3 +157,40 @@ cp -R data/championship-restart-20260925-b04/b04-audit data/championship-restart
 python3 data/championship-restart-20260925-b04/audit-replay/compare.py data/championship-restart-20260925-b04/replayed-extractions.json
 python3 data/championship-restart-20260925-b04/audit-replay/compare_geometry.py data/championship-restart-20260925-b04/replayed-extractions.json
 ```
+
+## Batch 5 2026 depth reconciliation
+
+The seven acquired Roatan result PDFs contain 180 source rows across 15 pages. An independent source census was frozen before comparison with the new parser output. Per-table dates below come from the PDFs; championship range dates and report-generation timestamps remain separate evidence.
+
+| Source | Discipline | Table date | Printed divisions and rows | Pages | Source rows |
+| --- | --- | --- | --- | ---: | ---: |
+| `c30-doc48.pdf` | CWT | August 18 | Women: seniors 20, M1 2, M2 1 | 1 | 23 |
+| `c30-doc49.pdf` | FIM | August 19 | Men: seniors 24, M1 5, M2 1, M3 2 | 2 | 32 |
+| `c30-doc50.pdf` | FIM | August 20 | Women: seniors 22, M1 2 | 1 | 24 |
+| `c30-doc59.pdf` | CNF | August 23 | Men: seniors 24, M1 5, M2 1 | 3 | 30 |
+| `c30-doc60.pdf` | CNF | August 24 | Women: seniors 16, M1 1 | 2 | 17 |
+| `c30-doc61.pdf` | CWT-BF | August 25 | Men: seniors 23, M1 5, M2 1, M3 2 | 4 | 31 |
+| `c30-doc63.pdf` | CWT-BF | August 26 | Women: seniors 21, M1 2 | 2 | 23 |
+| **Total** | | | | **15** | **180** |
+
+All 15 pages were rendered at 1131 by 1600 pixels and inspected for layout, wrapped notes and category boundaries. Source statuses are 156 blank, 22 `DSQ` and two `DNS`. Blank status remains unknown, including rows with penalties. The source has 25 blank final-result cells, including one ranked senior women's CWT-BF row. Its final result is not calculated from other columns. No literal numeric zero occurs in these seven documents; zero preservation is a synthetic regression requirement. Medal and record columns remain separate from notes.
+
+These documents do not cover either CWT-men session: unit 3551 has no linked PDF and the unit 3559 continuation's linked PDF returned 404. Retained JSON is supporting evidence, not a substitute for those PDFs. No attempt deduplication, cross-document continuation or supersession is inferred. Absent category headings remain unresolved coverage.
+
+Schema-2 parser `cmas-2026-depth/1` parses all 180 rows. Each page must establish its own printed discipline/date, column headings and category; category transitions within a page are explicit. Poppler word positions preserve blank interior cells and bind wrapped notes to their source row. Unknown or competing category boundaries, invalid dates, malformed geometry and numeric boxes crossing column boundaries fail closed. Exact row text, constituent lines, header/category evidence, column geometry and raw bbox XML remain available. All units and blank statuses stay unknown; records and medals are not inferred from rank.
+
+The final independent comparison passed 1,980 raw-cell checks, 2,880 typed/context-field checks and 1,496 source-word checks, including exact candidate geometry. All 407 nonblank lines are accounted for exactly once: 191 row-evidence lines, including 11 wrapped notes, and 216 metadata/footer lines. Six deliberate audit-report corruptions were detected, covering raw values, typed values, geometry, source lines, publication state and invented nationality. The batch coordinator independently reproduced the frozen source census and final zero-difference comparison. These checks and visual inspection provide no owner attestation.
+
+Public extraction created seven new jobs alongside the preserved unsupported artifacts. The 20 timing jobs from 2025 retain their IDs; all 27 repeated extractions skip duplicate creation. All 24 geometry jobs pass archived-source replay validation. The 352 earlier timing rows and 73 separate legacy federation rows still match their independent baselines; both legacy job IDs remain unchanged. Together these PDFs account for 605 document-version rows, without claiming unique attempts. The legacy men's evidence-envelope gaps remain explicit. All 1,113 copied historical files remain hash-identical to the original batch 4 tree.
+
+Tests passed: the new namespace has 14 tests and 62 assertions; combined extraction/archive/HTML coverage has 140 tests and 964 assertions; targeted pipeline version registration has one test and two assertions. Repair and lint gates passed. Synthetic regressions cover zeros, absent interior cells, page/category boundaries, wrapped notes, malformed input, immutable prior jobs, idempotency, rehashed tampering and preserved legacy dispatch/import contracts. No database migration is required.
+
+The private root is `data/championship-restart-20260925-b05/`. `b05-audit/` contains frozen source expectations, rendered pages, `new-extractions.json`, `comparison.json`, `history-verification.json`, `comparator-negative-controls.json`, `final-summary.json` and reproducible scripts. `b05-parent-review/` retains the coordinator's independent reproduction and 24 source-replay validations; `b05-parent-2025/` retains historical comparisons. Parser logs and the observed RED/GREEN history are in the separate `data/b05-parser/` directory.
+
+To repeat the final comparator without replacing its original report:
+
+```sh
+python3 data/championship-restart-20260925-b05/b05-audit/reconcile.py data/championship-restart-20260925-b05/b05-audit/new-extractions.json data/championship-restart-20260925-b05/comparison-rerun.json
+```
+
+All 180 new rows remain unreviewed and publication-blocked. This batch adds no source acquisitions, database observations, genuine reviews, identity decisions, policy activation, deployment or public replacement. Remaining coverage, revision, import and publication acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).

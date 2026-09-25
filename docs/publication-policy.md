@@ -6,6 +6,8 @@ The isolated [2025-2026 championship acquisition](championship-inventory-2026092
 
 The [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-4-geometry-backed-continuations) retains 352 parsed source rows across 20 PDFs, including 20 geometry-backed continuation rows. New `cmas-2025-depth/2` jobs supplement preserved `/1` artifacts; retained `cmas-women-depth/1` jobs remain unchanged. All are unreviewed and publication-blocked. Source replay and automated reconciliation supply no visual-accuracy attestation. These extraction batches added no observations, real reviews or policy activation.
 
+The [2026 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-5-2026-depth-reconciliation) adds 180 parsed rows across seven PDFs using `cmas-2026-depth/1`, preserving earlier unsupported jobs. Raw values, category/date context, medals, records and geometry remain source-bound; unknown units and blank statuses stay unknown. Missing CWT-men sources remain explicit gaps. All new rows remain unreviewed and publication-blocked. No review approval transfers to them, and this parser change activates no policy or database migration.
+
 ## Separate decisions
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.
