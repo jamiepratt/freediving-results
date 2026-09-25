@@ -550,3 +550,78 @@ Raw run identity:
 `c0efa8b594952b4e7886b43a347ab5f97c6a365d5ddef60f272330e8231ebc90`.
 The partial S1 is preserved permanently. Its validation failure is not repaired
 or erased by successful controls, and no probability normalization was added.
+
+### Owner-approved 81-case held-out run, 2026-09-25
+
+The owner selected 81 cases and approved their existing assistant judgments and
+reasons by reference in [issue #6](https://github.com/jamiepratt/freediving-results/issues/6#issuecomment-5835653016).
+The reasons remain assistant-authored. The original blank approval CSV and
+seven earlier owner adjudications are preserved outside this selected sample.
+Labels comprise 46 match and 35 no-match decisions. These are file-backed owner
+assertions, not database-verified review exports.
+
+The sample preserves the selected packet's exact IDs/order: 36 Croatian Open
+2026 and 45 Italian Open Outdoor 2026 comparisons, 116 apparent source people
+without cross-case reuse, two documents/events and one publisher. Owner
+attestations cover development document/family and selected-person disjointness;
+hidden aliases and copies remain possible. Independent checks reproduced all
+162 selected PDF rows and 980 source-evidence entries. Labels and reasons stayed
+outside provider inputs.
+
+Before dispatch, the batch froze S1 then B1: 81 single-question requests followed
+by 41 consecutive two-question requests, with a final singleton. Per-pair
+questions were identical. The maximum was 122 requests / 162 questions, with
+one HTTP request at a time, one attempt, no replacements or adaptive retries.
+The model, protocol, schema, strict parser and execution limits remained frozen
+at `jev-1.13.0`, `freediving-question-local-v1`, `freediving-source/1` and
+`shadow-adapters/10`; evaluation source remained byte-identical to
+`b593795e0ee1769dcab5eb46b4ce236eab233b83`. This run has no repeated controls and
+cannot isolate a causal batching effect.
+
+| Measure | S1 | B1 |
+| --- | ---: | ---: |
+| Requests completed / planned | 37/81 | 19/41 |
+| Questions dispatched | 37 | 38 |
+| Match / no-match / abstain | 23/13/0 | 24/13/0 |
+| Errors, including undispatched cases | 45 | 44 |
+| Undispatched cases | 44 | 43 |
+| Decisive coverage, all 81 cases | 44.44% | 45.68% |
+| False merges / all negative labels | 0/35 | 0/35 |
+| Missed matches / all positive labels | 0/46 | 0/46 |
+| Request-loop wall time, seconds | 26.738 | 17.385 |
+| Summed HTTP latency, seconds | 25.494 | 16.726 |
+| Request latency median / p95, ms | 657/880 | 883/933 |
+| Input / output tokens | 157,115 / 1,604 | 151,928 / 1,590 |
+| Actual billed cost | Unknown | Unknown |
+
+Both arms returned HTTP 200 with probabilities match 0.93, no_match 0.01,
+abstain 0.05 for the same case. The sum, 0.9900000000000001, failed the unchanged
+strict tolerance of 0.00001. The cause is unestablished. Each arm halted as
+predeclared; B1 retained its valid sibling answer. No normalization or retry was
+introduced. There were 56 HTTP calls / 75 question attempts total. Only 13 of
+35 negative labels received valid predictions in either arm. The zero observed
+errors among valid decisions do not establish acceptance over all 81 cases.
+
+All 36 jointly valid choices agreed. Sixteen probability distributions changed;
+maximum absolute component difference was 0.03 and mean absolute difference was
+0.005185. These partial results establish neither full-sample accuracy nor
+production safety. [Issue #6](https://github.com/jamiepratt/freediving-results/issues/6)
+remains open for its unmet evaluation gate and billing evidence where available.
+
+Private artifacts are in
+`data/heldout-evaluation-81-20260925-b3/` in the saved project. Approval receipt
+SHA-256: `9f4b9a709469b187c19ee3ca66417bd8b6510f704772a706d76f0999c0af2150`;
+frozen request/configuration receipt:
+`a374bebcd20a56de6f2a18acc2c72c1d8556ff184801948390bfe6c65e88826f`;
+live report: `06867c4a793c981dbb1631cb5b749f067b6a2fb13831d63bb656f263ec0f8d76`.
+Run identity:
+`ca12c8b9a0ee0f9899d31d0a370aa0ae79160206448923d9f5abf4003c9dc58f`.
+
+The frozen adapter exposes sanitized diagnostics, not raw HTTP bytes. All
+exposed results, failures and partial-run diagnostics are retained; raw response
+bytes are unavailable by design. Replay made zero calls and reproduced the
+same result/report. All 751 bound files and 351 run-store files retained their
+bytes, modes and modification times. A live credential/service-token scan found
+no retained secrets. The unchanged adapter passed 84 tests / 1,610 assertions;
+private harness delimiter repair, lint and preflight passed. No identity merges,
+publication, deployment or database mutation occurred.
