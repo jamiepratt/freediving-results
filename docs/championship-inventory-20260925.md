@@ -23,6 +23,23 @@ The [CMAS archive](https://www.cmas.org/freediving/results.html) has separate ma
 
 The [AIDA 2026 depth event](https://aidainternational.org/EventPage/4987), September 27-October 10, and [CMAS 2026 para championship](https://www.cmas.org/freediving/calendar.html), November 25-30, are outside the completed-event cutoff. World Games, cups, local and continental competitions and pre-2025 history are excluded. Rankings are supplemental publications, not additional attempts or independent corroboration.
 
+## Athens 2025 indoor acquired-view reconciliation
+
+The private B30 archive contains 42 distinct, hash-checked official federation-linked Microplus `CGR1` JSON Results views: each of seven disciplines has all six discovered category codes. Their 792 source positions are accounted for as 791 imported, unreviewed source-position candidates and one explicitly byte-quarantined DNF seniors-women position 19. The separate B22 parser correction gives 43 extraction versions and 821 versioned observations; these are not additional source positions. Dates below are the JSON `Event.Date` values and agree with the planned discipline days in the [official information pack](https://www.cmas.org/media/com_eventbooking/2025%20SENIORS-JUNIORS%20WC%20Freediving-Pool-Athens%20infopack%20March.pdf). Category codes are retained publisher labels, not resolved age or identity classes.
+
+| Discipline / code | Source date | JUF | JUM | MAF | MAM | SEF | SEM | Total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| DNF / 011 | May 20 | 3 | 10 | 13 | 30 | 50 | 56 | 162 |
+| DYN-BF / 016 | May 21 | 4 | 10 | 15 | 32 | 54 | 62 | 177 |
+| 8x50 / 004 | May 22 | 3 | 6 | 3 | 7 | 10 | 12 | 41 |
+| 2x50 / 002 | May 22 | 5 | 6 | 6 | 14 | 15 | 14 | 60 |
+| STA / 001 | May 23 | 1 | 7 | 10 | 26 | 42 | 43 | 129 |
+| 4x50 / 003 | May 23 | 5 | 6 | 4 | 9 | 17 | 13 | 54 |
+| DYN / 026 | May 24 | 4 | 8 | 12 | 33 | 55 | 57 | 169 |
+| **Total** | | **25** | **53** | **63** | **151** | **243** | **257** | **792** |
+
+This reconciles every row in the **42 discovered views**, not all possible championship sessions, categories or source versions. The configured 2025 indoor PDFs returned 404; omitted result views and category headings cannot be treated as zero attempts. The [historical mirror audit](athens-mirror-audit-20260925.md) remains supporting evidence with source discrepancies and unresolved correspondences, not an approved replacement or independent validation of these JSON results. Direct visits to the CMAS federation event/results page returned 403 during B30; its earlier retained link establishes discovery provenance, without a fresh federation-link verification. Coverage and review gates remain in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
 ## Acquired CMAS masters category headings
 
 The 2026 masters PDF contains these headings; an absent heading is not a zero-result declaration. M1/M2/M3 are retained publisher labels, without inferred age boundaries.
