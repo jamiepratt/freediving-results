@@ -51,6 +51,37 @@ Read `:coordinates` from the exact candidate in `payload_edn` or the inspected a
 
 Private paths above identify packet locations in their retained batch checkouts; they are not Git files or portable paths. B32 Roatan CWT-men evidence is a separate **source-gap audit** of unit JSON and 403s, not an imported replacement corpus; see [source gaps](championship-source-gaps-20260925.md#roatan-cwt-men-coverage). No listed isolated corpus is production; acquisition and import do not grant review, identity, selection or publication authority.
 
+## Portable private corpus bundles
+
+`python3 scripts/portable_corpus.py export SPEC.json BUNDLE` copies an explicit file map into `BUNDLE/payload/` and writes `BUNDLE/index.json`. Keep the spec and bundle in a private destination outside managed worktrees. The index records portable paths, role, byte count and SHA-256 for every file, plus corpus metadata. It does not retain original absolute source paths. A directory entry includes every regular file recursively, including PDFs, JSON, HTML, rendered DOM evidence, acquisition manifests, derivations, row ledgers, review records and a custom PostgreSQL backup when those are supplied. Empty directories are retained. Symlinks, path traversal, duplicate paths, missing files and changed bytes are rejected. The exporter never removes or changes the source files.
+
+Example private spec shape (replace paths, hashes and metadata with the exact corpus being exported):
+
+```json
+{
+  "schema": "portable-corpus-spec/v1",
+  "corpus": "isolated-example",
+  "entries": [
+    {"source": "/absolute/private/archive", "path": "archive", "role": "acquisition-and-extraction-archive"},
+    {"source": "/absolute/private/review", "path": "review", "role": "append-only-review-evidence"},
+    {"source": "/absolute/private/database.dump", "path": "database/database.dump", "role": "postgres-custom-backup"}
+  ],
+  "archive_roots": ["archive"],
+  "receipt_paths": ["review/owner-decision-receipt.json"],
+  "references": [{"path": "review/source.json", "sha256": "replace-with-64-hex-source-hash"}],
+  "metadata": {
+    "scope": "exact isolated corpus, event, session and acquisition coverage",
+    "database_format": "pg_dump custom",
+    "restore_command": "createdb NEW_ISOLATED_DB && pg_restore --no-owner --no-acl --dbname=NEW_ISOLATED_DB database/database.dump",
+    "import_notes": "Record parser version, source hashes and job IDs; replay only into an isolated database"
+  }
+}
+```
+
+`archive_roots` checks that every acquisition manifest names a bundled source object under `objects/<sha256>` and every derivation receipt names a bundled artifact under `derived-objects/<artifact-sha256>`. `receipt_paths` checks a JSON owner receipt's `source` and `result_files` references against bundled bytes. `references` asserts other exact path/hash relationships, including source and artifact hashes cited by row evidence. These checks run again on `verify` and before `restore`. Keep a separate trusted copy of the printed `index_sha256` so a changed index is detectable; SHA-256 is an integrity check, not an author signature.
+
+Run `python3 scripts/portable_corpus.py verify BUNDLE` after copying the bundle. Run `python3 scripts/portable_corpus.py restore BUNDLE FRESH_TARGET` to copy verified payload bytes to a new, nonexistent directory. The restore checks the copied bytes before reporting success and sets private directory/file modes to `0700`/`0600`. The restored `archive/` is then usable by the existing archive and observation CLIs. Restore the database dump with the recorded command into a **new isolated** PostgreSQL database, then compare database extraction jobs, observation counts and review decisions with the retained ledgers. Neither a successful bundle restore nor a database restore approves identity, result selection or publication. Do not include a live PostgreSQL data directory, credentials, cookies, session URLs or raw sources in Git.
+
 ## Detailed evidence
 
 [Dated championship inventory](championship-inventory-20260925.md), [CMAS timing acquisition](cmas-timing-acquisition-20260925.md), [Athens JSON ingestion](cmas-2025-json-ingestion.md), [AIDA HTML ingestion](aida-html-ingestion.md), [source gaps](championship-source-gaps-20260925.md), and [Athens mirror audit](athens-mirror-audit-20260925.md) contain the full reconciliations and known limitations. Keep private names, raw bytes, manifests and row ledgers under ignored `data/`; record future acquisition and coverage work in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8) or [issue #10](https://github.com/jamiepratt/freediving-results/issues/10), not a repo-local plan file.
