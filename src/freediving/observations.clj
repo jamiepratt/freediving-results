@@ -4,7 +4,6 @@
             [clojure.string :as str]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
-            [freediving.depth-2025 :as depth-2025]
             [freediving.aida-html :as html])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
@@ -129,7 +128,7 @@
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
       {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a)
                      (cond-> (validate-pages! a)
-                       (= depth-2025/geometry-parser-version (:parser-version a)) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
+                       (extraction/requires-geometry-validation? a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 4 (:schema-version artifact))
     (let [p (select-keys (:coordinates candidate) [:table :row])]

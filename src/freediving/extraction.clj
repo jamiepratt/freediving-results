@@ -7,6 +7,7 @@
             [freediving.athens :as athens]
             [freediving.novi-sad :as novi-sad]
             [freediving.depth-2025 :as depth-2025]
+            [freediving.depth-2026 :as depth-2026]
             [freediving.depth :as depth]))
 
 (def parser-version "cmas-cwt-men/1")
@@ -85,6 +86,7 @@
         (aida/supported? pages) (aida/parse-pages pages)
         (athens/supported? pages) (athens/parse-pages pages)
         (novi-sad/supported? pages) (novi-sad/parse-pages pages)
+        (depth-2026/supported? pages) (depth-2026/parse-pages-with-geometry pages "")
         :else (parse-cmas-pages pages)))
 
 (defn- canonical [value]
@@ -101,6 +103,17 @@
     (when-not (zero? (:exit result))
       (throw (ex-info "PDF tool failed" {:tool (first args) :exit (:exit result) :stderr (:err result)})))
     result))
+
+(defn- depth-2026-selected? [pages]
+  (and (depth-2026/supported? pages)
+       (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported? athens/supported? novi-sad/supported?])))
+
+(defn requires-geometry-validation?
+  "Recognize geometry artifacts even after an identity downgrade, preserving legacy dispatch."
+  [artifact]
+  (or (#{depth-2025/geometry-parser-version depth-2026/parser-version} (:parser-version artifact))
+      (contains? artifact :geometry-xml) (contains? (:tool artifact) :geometry-arguments)
+      (and (seq (:candidates artifact)) (depth-2026-selected? (map :text (:pages artifact))))))
 
 (defn extract!
   "Extract registered PDF to private versioned EDN. Config is retained verbatim as
@@ -124,13 +137,14 @@
          aida? (aida/supported? pages)
          athens? (and (not aida?) (athens/supported? pages))
          novi? (novi-sad/supported? pages)
+         depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
-                   :schema-version (cond depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
+                   :parser-version (cond depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens/parser-version novi? novi-sad/parser-version :else parser-version)
+                   :schema-version (cond depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
-                           depth-2025? (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
+                           (or depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
          job-id (digest identity)]
      (archive/derive! root job-id
                       (fn []
@@ -138,19 +152,19 @@
                               page-count (some-> (re-find #"(?m)^Pages:\s+(\d+)\s*$" info) second parse-long)]
                           (when-not (= page-count (count pages))
                             (throw (ex-info "Extracted page count does not match PDF" {:expected page-count :actual (count pages)})))
-                          (merge (if depth-2025?
-                                   (depth-2025/parse-pages-with-geometry pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
+                          (merge (if (or depth-2025? depth-2026?)
+                                   ((if depth-2026? depth-2026/parse-pages-with-geometry depth-2025/parse-pages-with-geometry) pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
                                    (parse-pages pages)) identity
                                  {:job-id job-id :processed-at (str (java.time.Instant/now))
                                   :raw-text raw :tool-stderr (:err result)
                                   :pdf-page-count page-count}))) on-progress))))
 
 (defn validate-geometry-artifact!
-  "Replay /2 geometry and layout from the hash-verified archived PDF before import.
+  "Replay versioned geometry and layout from the hash-verified archived PDF before import.
    Legacy PDF contracts are deliberately not reinterpreted by this validator."
   [root artifact]
   (when-not (and (= 2 (:schema-version artifact))
-                 (= depth-2025/geometry-parser-version (:parser-version artifact))
+                 (#{depth-2025/geometry-parser-version depth-2026/parser-version} (:parser-version artifact))
                  (= "pdftotext" (get-in artifact [:tool :name]))
                  (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
                  (= ["-bbox-layout" "-enc" "UTF-8"] (get-in artifact [:tool :geometry-arguments])))
@@ -161,7 +175,7 @@
         xml (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
         segments (vec (str/split raw #"\f" -1))
         pages (if (= "" (last segments)) (pop segments) segments)
-        replay (depth-2025/parse-pages-with-geometry pages xml)]
+        replay ((if (= depth-2026/parser-version (:parser-version artifact)) depth-2026/parse-pages-with-geometry depth-2025/parse-pages-with-geometry) pages xml)]
     (when-not (and (= version (get-in artifact [:tool :version]))
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
