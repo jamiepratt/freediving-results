@@ -49,6 +49,14 @@ The subsequent [Athens mirror audit](athens-mirror-audit-20260925.md) independen
 
 The [official event page](https://www.cmas.org/freediving-events/2026-cmas-world-championship-freediving-depth.html) explicitly calls day 5 a continuation of day 1. This establishes the publisher's session description, not supersession or a reviewed row relationship.
 
+### Fresh result-view audit, 25 September 2026
+
+The retained [unit 3551 result API](https://cmas-api.microplustimingservices.com/api/units/3551/results) has seven rows, 10,642 bytes and SHA-256 `146c9c90514fd7d6ef5bf8fdfe832eebdb94c88f5d2c15480569665c0aa02e45`. The retained [unit 3559 result API](https://cmas-api.microplustimingservices.com/api/units/3559/results) has 24 rows, 36,748 bytes and SHA-256 `bfc73892f1e9fcd01daa86e64b8bdc2f8f0ceaf36ab4a78373ec87651d316f45`. Both earlier response hashes and lengths were recomputed. Their root arrays retain each original zero-based position and all 77 fields per row. The rows identify competition 30, category 110 (`All`), `FRD`, CWT, and men's phase. Unit 3551 records event/phase/unit `661/594/3551`, August 17, seven `SENM` rows; unit 3559 records `655/588/3559`, August 21, 16 `SENM`, five `M1M`, one `M2M` and two `M3M` rows. `UtStatus` is `6` in both responses, but its publisher meaning was not established. Every row carries `ResID`, `ParID`, start order, rank, raw and final result, penalty and reason fields. The IDs do not overlap between units. These are API transport observations, not 31 confirmed unique sporting attempts.
+
+A fresh Chrome visit to the federation event page returned `403: Access Forbidden`; the [Microplus schedule](https://cmas.microplustimingservices.com/#/competition-schedule/30) returned CloudFront 403. The unit 3551 API also returned CloudFront 403 in Chrome, while direct HTTP requests to both units' result and document endpoints returned 403. No human-facing result row, finality label, display order or row-to-API binding could be verified. The route pattern permits constructing result URLs from IDs, but a constructed route is not an observed citation. Consequently the retained JSON remains supporting evidence and no HTML-cited observations were imported. The explicit PDF gaps below remain.
+
+Private `data/b32-roatan-cwt-men-audit/` holds the fresh 403 bodies with status, content type, hash, byte length and retrieval time, plus a row-position ledger pointing to the original B02 responses. Failed responses are separate from the retained successful source versions. The next runnable source slice requires access to the publisher's live human-facing result pages or another official complete attempt-results source, then exact displayed-row reconciliation before a source-bound parser or import.
+
 | Unit | Date in 2026 | API age-group rows | Attempt-results PDF |
 | --- | --- | --- | --- |
 | 3551, event 661 / phase 594 | August 17 | SENM 7 | No document linked |
