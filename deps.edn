@@ -4,7 +4,8 @@
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojure/clojure {:mvn/version "1.12.0"}}
  :mvn/repos {"rpl" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}}
- :aliases {:rama {:extra-paths ["integration/src" "integration/resources"]
+ :aliases {:test-revisions {:extra-paths ["test"] :main-opts ["-m" "freediving.revisions-test"]}
+           :rama {:extra-paths ["integration/src" "integration/resources"]
                  :override-deps {org.clojure/clojure {:mvn/version "1.12.4"}}
                  :extra-deps {com.rpl/rama {:mvn/version "1.9.0"}
                               com.rpl/agent-o-rama {:mvn/version "0.10.0"}}

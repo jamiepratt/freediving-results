@@ -2,6 +2,7 @@
   "Deployment migrations only. Never seeds, reviews or publishes records."
   (:require [freediving.observations :as observations]
             [freediving.reviews :as reviews]
+            [freediving.revisions :as revisions]
             [freediving.publication :as publication]
             [freediving.public-results :as public]
             [freediving.corrections :as corrections]
@@ -15,4 +16,5 @@
     (public/migrate! url "reviews_owner" "reviews_public")
     (corrections/migrate! url "reviews_owner" "corrections_submit")
     (labels/migrate! url "reviews_owner" :real)
-    (println "Applied migrations 1-7; no records published.")))
+    (revisions/migrate! url "observations_app" "reviews_owner")
+    (println "Applied migrations 1-8; no records published.")))
