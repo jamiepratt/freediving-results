@@ -7,6 +7,7 @@
             [freediving.athens :as athens]
             [freediving.athens-geometry :as athens-geometry]
             [freediving.novi-sad :as novi-sad]
+            [freediving.croatia-open :as croatia-open]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -89,6 +90,7 @@
         (aida/supported? pages) (aida/parse-pages pages)
         (athens/supported? pages) (athens/parse-pages pages)
         (novi-sad/supported? pages) (novi-sad/parse-pages pages)
+        (croatia-open/supported? pages) (croatia-open/parse-pages pages)
         (depth-2026/supported? pages) (depth-2026/parse-pages-with-geometry pages "")
         :else (parse-cmas-pages pages)))
 
@@ -114,6 +116,9 @@
 (defn legacy-novi-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= novi-sad/parser-version (:parser-version artifact))))
 
+(defn croatia-open-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= croatia-open/parser-version (:parser-version artifact))))
+
 (defn- athens-selected? [pages]
   (and (athens/supported? pages)
        (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported?])))
@@ -136,7 +141,8 @@
                 (and (indoor-selected? (map :text (:pages artifact))) (not (legacy-novi-artifact? artifact)))))))
   ([root artifact]
    (or (requires-geometry-validation? artifact)
-       (when (and (not (legacy-novi-artifact? artifact)) (not (legacy-athens-artifact? artifact)))
+       (when (and (not (legacy-novi-artifact? artifact)) (not (legacy-athens-artifact? artifact))
+                  (not (croatia-open-artifact? artifact)))
          (let [source (archive/inspect root (:source-sha256 artifact))
                raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
                pages (str/split raw #"\f" -1)]
@@ -166,11 +172,12 @@
          indoor? (and (not (or depth? depth-2025? aida? athens?)) (indoor-2026/supported? pages))
          indoor-time? (and indoor? (indoor-time/supported? pages))
          novi? (novi-sad/supported? pages)
+         croatia? (croatia-open/supported? pages)
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version :else parser-version)
-                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 :else 1)
+                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version :else parser-version)
+                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -237,6 +244,20 @@
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
       (throw (ex-info "Legacy Novi Sad extraction differs from archived source replay" {})))
+    artifact))
+
+(defn validate-croatia-open-artifact!
+  "Replay this source-bound parser against the registered PDF before import."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (croatia-open/parse-pages pages)]
+    (when-not (and (croatia-open-artifact? artifact)
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "Croatian Open extraction differs from archived source replay" {})))
     artifact))
 
 (defn -main [& args]

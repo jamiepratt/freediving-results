@@ -139,6 +139,7 @@
                    (cond-> (validate-pages! a)
                      (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
                      (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
+                     (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
