@@ -1,6 +1,9 @@
 (ns freediving.public-demo-test
   (:require [clojure.test :refer [deftest is]]
             [freediving.public-demo :as demo]
+            [freediving.owner-demo :as owner-demo]
+            [freediving.synthetic-pdf :as synthetic-pdf]
+            [clojure.java.shell :as shell]
             [freediving.corrections :as corrections]
             [clojure.string :as str]
             [freediving.observations-test :as fixture]
@@ -57,3 +60,28 @@
           (is (= 11 (count (public/results reader))))
           (is (= [] (public/search-source-name reader "Synthetic Participant 04")))))
       (finally (fixture/sql! fixture/admin "DROP DATABASE public_demo WITH (FORCE)")))))
+
+(deftest owner-demo-imports-unreviewed-synthetic-evidence
+  (let [url #(str/replace (System/getenv %) "/observations_test?" "/owner_demo?")
+        admin (url "FREEDIVING_TEST_ADMIN_URL") ingest (url "FREEDIVING_TEST_URL")
+        root (.toString (java.nio.file.Files/createTempDirectory "owner-demo-test" (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (fixture/sql! fixture/admin "CREATE DATABASE owner_demo")
+    (try
+      (let [receipt (owner-demo/seed! admin ingest (str root "/fixtures"))]
+        (is (= 5 (get-in receipt [:counts :observations])))
+        (is (= 0 (:decisions receipt)))
+        (is (= [] (public/results (url "FREEDIVING_TEST_PUBLIC_URL"))))
+        (is (thrown-with-msg? Exception #"empty database"
+                              (owner-demo/seed! admin ingest (str root "/again")))))
+      (finally (fixture/sql! fixture/admin "DROP DATABASE owner_demo WITH (FORCE)")))))
+
+(deftest generated-demo-pdf-retains-source-lines
+  (let [lines ["1 Alex Éxample AIN 101 m" "2 Synthetic (test) / sample 95 m"]
+        file (java.io.File/createTempFile "synthetic-demo" ".pdf")]
+    (try
+      (spit file (synthetic-pdf/document lines) :encoding "UTF-8")
+      (let [result (shell/sh "pdftotext" "-layout" "-enc" "UTF-8" (.getPath file) "-")]
+        (is (= 0 (:exit result)))
+        (is (= lines (vec (remove str/blank? (str/split-lines (:out result)))))))
+      (is (thrown-with-msg? Exception #"WinAnsi" (synthetic-pdf/document ["Unsupported 漢"])))
+      (finally (.delete file)))))

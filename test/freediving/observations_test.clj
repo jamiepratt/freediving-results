@@ -26,25 +26,25 @@
 (defn hash-value [v]
   (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes (pr-str (canonical v)) "UTF-8"))))
 (defn synthetic [schema parser]
-  (let [dir (fixture/workspace) root (str dir "/archive") source (str dir "/source")]
-    (spit source "abc")
-    (archive/register! root source fixture/manifest)
-    (let [identity {:source-sha256 (:sha256 fixture/manifest)
-                    :acquisitions (:acquisitions (archive/inspect root (:sha256 fixture/manifest)))
-                    :evidence-sha256 [] :actor "synthetic-test" :config {:layout true}
-                    :parser-version parser :schema-version schema :pdfinfo-version "test"
-                    :tool {:name "pdftotext" :version "test" :arguments ["-layout"]}}
-          lines ["  Éxample  001  " "  Éxample  002  "]
-          candidates (mapv (fn [n line] {:coordinates {:page 1 :line (inc n) :column-start 1 :column-end (inc (count line))}
-                                         :raw {:line line :fields {:source-name "Éxample" :performance (format "%03d" (inc n))}}
-                                         :parsed {:source-name "Éxample" :performance (inc n) :unit nil}
-                                         :parse-status :parsed :review-status :unreviewed
-                                         :future/unknown {:value 1/3 :tokens [nil "  " :x/y]}}) (range) lines)]
-      {:root root :artifact (merge identity {:job-id (hash-value identity) :processed-at "2026-09-23T12:00:00Z"
-                                             :pages [{:page 1 :text (str/join "\n" lines)
-                                                      :lines (mapv (fn [n line] {:line (inc n) :text line}) (range) lines)}]
-                                             :pdf-page-count 1 :raw-text (str/join "\n" lines)
-                                             :candidates candidates :publication {:status :blocked}})})))
+  ;; Authority fixtures intentionally construct versioned legacy artifacts. Register a
+  ;; valid synthetic PDF so the import boundary can inspect its source family.
+  (let [[root digest] (extraction-fixture/registered-pdf)
+        identity {:source-sha256 digest
+                  :acquisitions (:acquisitions (archive/inspect root digest))
+                  :evidence-sha256 [] :actor "synthetic-test" :config {:layout true}
+                  :parser-version parser :schema-version schema :pdfinfo-version "test"
+                  :tool {:name "pdftotext" :version "test" :arguments ["-layout"]}}
+        lines ["  Éxample  001  " "  Éxample  002  "]
+        candidates (mapv (fn [n line] {:coordinates {:page 1 :line (inc n) :column-start 1 :column-end (inc (count line))}
+                                       :raw {:line line :fields {:source-name "Éxample" :performance (format "%03d" (inc n))}}
+                                       :parsed {:source-name "Éxample" :performance (inc n) :unit nil}
+                                       :parse-status :parsed :review-status :unreviewed
+                                       :future/unknown {:value 1/3 :tokens [nil "  " :x/y]}}) (range) lines)]
+    {:root root :artifact (merge identity {:job-id (hash-value identity) :processed-at "2026-09-23T12:00:00Z"
+                                           :pages [{:page 1 :text (str/join "\n" lines)
+                                                    :lines (mapv (fn [n line] {:line (inc n) :text line}) (range) lines)}]
+                                           :pdf-page-count 1 :raw-text (str/join "\n" lines)
+                                           :candidates candidates :publication {:status :blocked}})}))
 (defn publish! [{:keys [root artifact]}]
   (archive/derive! root (:job-id artifact) (constantly artifact) nil))
 (deftest immutable-versioned-observations-retain-exact-evidence

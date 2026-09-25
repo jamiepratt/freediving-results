@@ -4,6 +4,7 @@
             [freediving.observations :as observations]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
+            [freediving.extraction-test :as extraction-fixture]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.candidates :as candidates]))
@@ -167,10 +168,11 @@
   ([transform]
    (let [{:keys [root artifact]} (fixture/synthetic 1 "review-cross-source/1")
          source (str (.getParent (java.io.File. root)) "/cross-source")
-         _ (spit source "distinct synthetic source")
+         pdf (extraction-fixture/synthetic-pdf "BT /F1 12 Tf 40 750 Td (Distinct synthetic source) Tj ET")
+         _ (spit source pdf :encoding "UTF-8")
          hash (.formatHex (java.util.HexFormat/of)
                           (.digest (java.security.MessageDigest/getInstance "SHA-256")
-                                   (.getBytes "distinct synthetic source" "UTF-8")))
+                                   (.getBytes pdf "UTF-8")))
          _ (archive/register! root source (assoc archive-fixture/manifest :sha256 hash))
          artifact (assoc artifact :source-sha256 hash
                          :acquisitions (:acquisitions (archive/inspect root hash)))
