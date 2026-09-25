@@ -93,17 +93,23 @@ function texts(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')
 (async()=>{
  await events.pageshow();
  a.match(texts(),/Partial event coverage/);a.match(texts(),/Session 2 unavailable <script>alert/);
- a.match(texts(),/Confirmed source correction/);a.match(texts(),/Earlier values are not shown/);
+ a.match(texts(),/Reviewed source replacement/);a.match(texts(),/does not establish a change in result values/);a.match(texts(),/Earlier values are not shown/);
  a.match(texts(),/Identity unresolved/);
  a.ok(all(nodes.content).some(n=>n.href==='https://example.org/revised.pdf'));
  a.ok(!all(nodes.content).some(n=>n.tag==='script'||n.innerHTML));
  result={...result,'revision-history':{status:'history-unavailable','previous-values':'unknown'}};
  await events.pageshow();
  a.match(texts(),/Earlier source history unavailable/);a.match(texts(),/No prior values or changes are inferred/);
- a.doesNotMatch(texts(),/Confirmed source correction/);
+ a.doesNotMatch(texts(),/Reviewed source replacement/);
  result={...result,coverage:{scope:'event',completeness:'complete',gaps:[]},'revision-history':null};
  await events.pageshow();a.match(texts(),/Complete coverage for this reviewed event scope/);
  a.doesNotMatch(texts(),/Earlier source history unavailable|Partial event coverage/);
+ global.location.pathname='/';
+ global.fetch=async()=>({ok:true,json:async()=>({results:[],total:0,page:1,pages:0,filters:{},coverage:{scope:'pilot',completeness:'partial',results:0,approved_identities:0,events:[{scope:'event',completeness:'partial',gaps:['Final session source unavailable'],event:{federation:'AIDA','event-id':'Synthetic empty event',date:'2026-01-01',discipline:'STA',category:'women',round:'final',session:'2'}}]}})});
+ await events.pageshow();
+ a.match(texts(),/Reviewed event coverage/);a.match(texts(),/Synthetic empty event/);
+ a.match(texts(),/Final session source unavailable/);a.match(texts(),/Session: 2/);
+ a.match(texts(),/Partial pilot coverage/);a.match(texts(),/No records published yet/);
  console.log('reviewed event coverage and history rendering passed');
 })().catch(e=>{console.error(e);process.exitCode=1});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))

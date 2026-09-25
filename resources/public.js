@@ -83,9 +83,19 @@
       }
     }
     const history = (r['revision-history'] || {}).status;
-    if (history === 'confirmed-correction') n.append(el('p', 'Confirmed source correction. Earlier values are not shown here. See source evidence for this published record.', 'muted'));
+    if (history === 'confirmed-correction') n.append(el('p', 'Reviewed source replacement. A replacement source was confirmed; this does not establish a change in result values. Earlier values are not shown here. See source evidence for this published record.', 'muted'));
     else if (history === 'history-unavailable') n.append(el('p', 'Earlier source history unavailable. No prior values or changes are inferred. See source evidence for this published record.', 'muted'));
     return n;
+  }
+  function eventCoverage(events) {
+    const panel = section('Reviewed event coverage', 'Coverage is limited to the named event scopes. The archive remains a partial pilot.');
+    events.forEach(coverage => {
+      const event = coverage.event || {}, entry = el('article', null, 'audit-entry');
+      entry.append(el('h3', display(event['event-id'])));
+      entry.append(el('p', ['federation', 'date', 'venue', 'discipline', 'category', 'round', 'session'].map(k => label(k) + ': ' + display(event[k])).join(' · '), 'muted'));
+      entry.append(eventContext({coverage})); panel.append(entry);
+    });
+    return panel;
   }
   function resultCards(rows) {
     const list = el('div', null, 'result-list');
@@ -160,6 +170,7 @@
       if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
         main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage, with unpublished and unreviewed gaps · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
+        if (((data.coverage || {}).events || []).length) main.append(eventCoverage(data.coverage.events));
         const heading = el('div', null, 'results-heading'); heading.append(el('h2', 'Public results'), el('p', data.total + ' matching ' + (data.total === 1 ? 'record' : 'records'), 'muted')); main.append(heading);
         if (data.results.length) main.append(resultCards(data.results)); else main.append(el('div', data.coverage.results === 0 ? 'No records published yet. Source records must pass validation before they appear here.' : 'No public results match these filters. Try another source name or clear the filters.', 'empty'));
         const nav = el('nav', null, 'pagination'); nav.setAttribute('aria-label', 'Result pages');
