@@ -84,22 +84,27 @@
     {:reference (envelope row) :artifact artifact}))
 (defn reference "Exact immutable source/version reference; validates stored artifact and row." [url target]
   (transaction url #(-> (verified-target % target) :reference)))
-(defn- binding-value [c binding]
-  (let [{:keys [reference path value]} binding
-        target (verified-target c reference)
-        _ (when-not (or (and (= :candidates (first path)) (= (:ordinal reference) (second path))
-                             (= :raw (nth path 2 nil)) (>= (count path) 4))
-                        (and (= :pages (first path)) (nat-int? (second path))
-                             (= :lines (nth path 2 nil)) (nat-int? (nth path 3 nil))
-                             (= :text (nth path 4 nil)) (= 5 (count path))))
-            (fail! "Evidence path must address source text or the referenced source row"))
-        absent (Object.) actual (get-in (:artifact target) path absent)]
-    (when-not (and (= #{:reference :path :value} (set (keys binding)))
-                   (= reference (:reference target)) (vector? path) (seq path)
-                   (not (identical? absent actual)) (= value actual))
-      (fail! "Evidence provenance or path/value mismatch"))
-    (when-not (and (or (string? value) (number? value)) (not (and (string? value) (str/blank? value))))
-      (fail! "Source evidence values must be nonblank scalars")) value))
+(defn- binding-value
+  ([c binding] (binding-value c binding false))
+  ([c binding revision-evidence?]
+   (let [{:keys [reference path value]} binding
+         target (verified-target c reference)
+         _ (when-not (or (and (= :candidates (first path)) (= (:ordinal reference) (second path))
+                              (= :raw (nth path 2 nil)) (>= (count path) 4))
+                         (and (= :pages (first path)) (nat-int? (second path))
+                              (= :lines (nth path 2 nil)) (nat-int? (nth path 3 nil))
+                              (= :text (nth path 4 nil)) (= 5 (count path)))
+                         (and revision-evidence? (= 4 (count path))
+                              (= :acquisitions (first path)) (nat-int? (second path))
+                              (= [:manifest :final-url] (vec (drop 2 path)))))
+             (fail! "Evidence path must address source text or the referenced source row"))
+         absent (Object.) actual (get-in (:artifact target) path absent)]
+     (when-not (and (= #{:reference :path :value} (set (keys binding)))
+                    (= reference (:reference target)) (vector? path) (seq path)
+                    (not (identical? absent actual)) (= value actual))
+       (fail! "Evidence provenance or path/value mismatch"))
+     (when-not (and (or (string? value) (number? value)) (not (and (string? value) (str/blank? value))))
+       (fail! "Source evidence values must be nonblank scalars")) value)))
 (defn- descriptor [c d]
   (let [target (verified-target c (:reference d))]
     (when-not (= (:reference d) (:reference target)) (fail! "Descriptor provenance mismatch"))
@@ -161,7 +166,7 @@
         (fail! "Typed revision evidence required"))
       (let [b binding]
         (when-not (contains? refs (:reference b)) (fail! "Revision evidence must reference relationship sources"))
-        (binding-value c b)))
+        (binding-value c b true)))
     (if predecessor (match predecessor successor) :missing-predecessor)))
 (defn propose! "Append an unapproved relationship; nil predecessor records unknown history." [url p]
   (transaction url (fn [c]

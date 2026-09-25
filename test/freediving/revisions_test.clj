@@ -185,3 +185,21 @@
     (fixture/sql! fixture/admin "UPDATE freediving.revision_decisions SET action='reject'")
     (is (thrown-with-msg? Exception #"envelope" (revisions/history fixture/app "p")))
     (is (thrown-with-msg? Exception #"envelope" (revisions/diagnostics fixture/app)))))
+(deftest retained-filename-version-is-evidence-only
+  (let [[root digest :as source] (changed-source "Revised only" "2026-09-23T12:00:00Z")
+        url "https://example.org/results-v2.pdf"
+        _ (archive/register! root (:artifact-path (archive/inspect root digest)) (assoc archive-fixture/manifest :sha256 digest :final-url url))
+        b (sample "url-version/2" scope source)
+        artifact (:artifact (observations/inspect fixture/app (get-in b [:reference :job-id])))
+        index (first (keep-indexed (fn [i acquisition] (when (= url (get-in acquisition [:manifest :final-url])) i)) (:acquisitions artifact)))
+        binding {:reference (:reference b) :path [:acquisitions index :manifest :final-url] :value url}
+        p (assoc (proposal nil b "url-version") :revision-evidence [{:kind :version :binding binding}])]
+    (is (= :revised-only (:status (revisions/propose! fixture/app p))))
+    (is (= [(:revision-evidence p)] (mapv #(get-in % [:request :revision-evidence]) (revisions/history fixture/app "url-version"))))
+    (is (= 0 (:revision (revisions/diagnostics fixture/app))))
+    (doseq [bad [(assoc binding :value "https://example.org/forged-v2.pdf")
+                 (assoc binding :path [:acquisitions 999 :manifest :final-url])
+                 (assoc binding :path [:acquisitions index :manifest :retrieved-at] :value "2026-09-23T12:00:00Z")]]
+      (is (thrown? Exception (revisions/propose! fixture/app (assoc p :id "bad" :revision-evidence [{:kind :version :binding bad}])))))
+    (doseq [k [:event-id :bib :source-athlete-id]]
+      (is (thrown? Exception (revisions/candidates fixture/app (assoc-in b [:scope k] binding) []))))))
