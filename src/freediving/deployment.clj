@@ -17,4 +17,4 @@
     (corrections/migrate! url "reviews_owner" "corrections_submit")
     (labels/migrate! url "reviews_owner" :real)
     (revisions/migrate! url "observations_app" "reviews_owner")
-    (println "Applied migrations 1-8; no records published.")))
+    (println "Applied migrations 1-9; no records published.")))

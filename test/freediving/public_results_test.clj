@@ -1,7 +1,11 @@
 (ns freediving.public-results-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.java.shell :as shell]
+            [clojure.java.io :as io]
             [freediving.observations :as observations]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
+            [freediving.archive-test :as archive-fixture]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.reviews-test :as review-fixture]
@@ -151,9 +155,11 @@
       (validate! target (str "validate-" id)))
     (is (= {:refreshed 0} (public/refresh! reviewer)))
     (is (= [] (public/results reader-url)))))
-(deftest policy-activation-hides-old-public-projection-at-database-boundary
+(deftest migration-preserves-pdf-publication-until-explicit-activation
   (let [t (sample)]
     (validate! t "v1") (public/refresh! reviewer)
+    (is (= 1 (count (public/results reader-url))))
+    (public/migrate! fixture/admin "reviews_owner" "reviews_public")
     (is (= 1 (count (public/results reader-url))))
     (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic policy change")
     (is (= [] (public/results reader-url)))
@@ -178,3 +184,90 @@
       (doseq [r (mapv deref workers)] (is (or (= :retry r) (= {:refreshed 1} r))))
       (is (= {:refreshed 1} (public/refresh! reviewer)))
       (is (= 1 (count (public/results reader-url)))))))
+
+(deftest guarded-html-activation-requires-owner-checksum-and-acknowledgement
+  (is (thrown? Exception (public/activate-html-policy! fixture/admin "" "reason")))
+  (is (thrown? Exception (public/activate-html-policy! reader-url "hide-existing-public-results" "reason")))
+  (is (thrown? Exception (public/activate-html-policy! reviewer "hide-existing-public-results" "reason")))
+  (is (= {:policy-version "extraction-publication/2"}
+         (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic activation")))
+  (is (thrown? Exception (public/activate-html-policy! fixture/admin "hide-existing-public-results" "already active"))))
+
+(deftest html-source-values-and-heading-are-sanitized-without-invention
+  (let [payload {:parsed {:event-name "AIDA generic title" :source-name "Synthetic"}
+                 :raw {:html "PRIVATE" :fields {"Diver" "Synthetic" "RP" "90 m" "Card" "WHITE" "Remarks" "NR" "secret" "PRIVATE"}}}
+        result (public/html-public-fields payload {:event-name "Synthetic Championship" :event-date "2025-06-28"})]
+    (is (= "AIDA generic title" (get-in result [:original :document-title])))
+    (is (= "Synthetic Championship" (get-in result [:original :event-name])))
+    (is (= {:source-name "Synthetic" :realised-performance "90 m" :card "WHITE" :remarks "NR"} (:raw-values result)))
+    (is (not (.contains (pr-str result) "PRIVATE")))
+    (is (nil? (get-in (public/html-public-fields payload {}) [:original :event-name])))))
+
+(deftest additive-view-upgrade-retains-existing-pdf-cache-and-detects-checksum-drift
+  (let [t (sample)]
+    (validate! t "v1") (public/refresh! reviewer)
+    ;; Reproduce a deployed v4 view before the additive migration.
+    (fixture/sql! fixture/admin "DROP VIEW freediving.public_results")
+    (fixture/sql! fixture/admin
+                  (subs (slurp (io/resource "migrations/004-public-results.sql"))
+                        (.indexOf (slurp (io/resource "migrations/004-public-results.sql")) "CREATE VIEW")))
+    (fixture/sql! fixture/admin "DELETE FROM freediving.schema_migrations WHERE version=9")
+    (is (= {:schema-version 9} (public/migrate! fixture/admin "reviews_owner" "reviews_public")))
+    (is (= 1 (count (public/results reader-url))))
+    (is (= {:schema-version 9} (public/migrate! fixture/admin "reviews_owner" "reviews_public")))
+    (fixture/sql! fixture/admin "UPDATE freediving.schema_migrations SET sha256=repeat('0',64) WHERE version=9")
+    (is (thrown? Exception (public/migrate! fixture/admin "reviews_owner" "reviews_public")))
+    (is (thrown? Exception (public/activate-html-policy! fixture/admin "hide-existing-public-results" "checksum drift")))
+    (is (= 1 (count (public/results reader-url))))))
+
+(deftest html-and-pdf-validation-coexist-with-exact-public-citation-and-revocation
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        source (str "<h1>Synthetic Championship</h1>" (html-fixture/document (assoc html-fixture/cells 7 "90 m" 10 "")))
+        digest (html-fixture/register-html root (str dir "/source.html") source)
+        receipt (html/extract! root digest {:actor "PRIVATE" :config {}})
+        t {:job-id (:job-id receipt) :ordinal 0} pdf (sample)]
+    (observations/import! fixture/app root (:job-id t))
+    (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic owner checkpoint")
+    (doseq [[target id evidence] [[t "html" [{:table 1 :row 2}]] [pdf "pdf" [{:page 1 :line 1}]]]]
+      (let [d (publication/diagnose reviewer target)]
+        (is (empty? (:blockers d)) (pr-str d))
+        (publication/decide! reviewer
+                             (merge target {:id id :action :validate :base-revision (:revision d)
+                                            :review-revision (:review-revision d) :policy-version "extraction-publication/2"
+                                            :observation (:observation d) :evidence evidence :actor "PRIVATE"
+                                            :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}
+                                            :reason "Synthetic explicit source validation"}))))
+    (is (= {:refreshed 2} (public/refresh! reviewer)))
+    (let [row (first (public/search-source-name reader-url "ÉXAMPLE  & Person"))]
+      (is (= {:table 1 :row 2} (:source-position row)))
+      (is (= "Synthetic Championship" (get-in row [:effective :event-name])))
+      (is (= "Synthetic AIDA event" (get-in row [:original :document-title])))
+      (is (= "90 m" (get-in row [:raw-values :realised-performance])))
+      (is (= "2025-06-28" (get-in row [:citations 0 :event-date])))
+      (is (= digest (get-in row [:citations 0 :source-sha256])))
+      (is (= {:status :unresolved} (:identity row)))
+      (is (not (re-find #"PRIVATE|<table|<h1>|source.html|archive/" (pr-str row)))))
+    (reviews/propose! fixture/app (assoc (review-fixture/proposal t "html-identity") :evidence [{:table 1 :row 2}]))
+    (decide! "approve-html-identity" :approve "html-identity" 0)
+    (is (= [] (public/results reader-url)))
+    (let [d (publication/diagnose reviewer t)]
+      (publication/decide! reviewer
+                           (merge t {:id "html-with-identity" :action :validate :base-revision (:revision d)
+                                     :review-revision (:review-revision d) :policy-version "extraction-publication/2"
+                                     :observation (:observation d) :evidence [{:table 1 :row 2}] :actor "PRIVATE"
+                                     :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}
+                                     :reason "Synthetic explicit revalidation"})))
+    (public/refresh! reviewer)
+    (let [row (first (public/search-source-name reader-url "ÉXAMPLE  & Person")) id (get-in row [:identity :id])]
+      (is (= [row] (public/athlete-history reader-url id)))
+      (decide! "reverse-html-identity" :reverse "approve-html-identity" 1)
+      (is (= [] (public/athlete-history reader-url id))))
+    (let [d (publication/diagnose reviewer t)]
+      (publication/decide! reviewer
+                           (merge t {:id "revoke-html" :action :revoke :base-revision (:revision d)
+                                     :review-revision (:review-revision d) :policy-version "extraction-publication/2"
+                                     :observation (:observation d) :evidence [{:table 1 :row 2}] :actor "PRIVATE"
+                                     :attestations {} :reason "Synthetic revoked"})))
+    (is (= [] (public/search-source-name reader-url "ÉXAMPLE  & Person")))
+    (is (= {:refreshed 1} (public/refresh! reviewer)))
+    (is (= 1 (count (public/results reader-url))))))

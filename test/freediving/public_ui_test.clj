@@ -5,7 +5,7 @@
   (let [r (shell/sh "node" "-e"
                     "const a=require('node:assert/strict'),ui=require('./resources/public.js');
      a.equal(ui.searchURL({q:'A & B',discipline:'STA',page:2}),'/api/results?q=A+%26+B&discipline=STA&page=2&limit=10');
-     a.deepEqual(ui.performance({'final-depth':32}),{label:'Final depth',value:'32'});a.deepEqual(ui.performance({'final-time':{raw:'01:02.30'}}),{label:'Final time',value:'01:02.30'});a.equal(ui.display(null),'Not recorded');a.equal(ui.display({raw:'01:02.30',seconds:62.3}),'01:02.30');
+     a.deepEqual(ui.performance({'final-depth':32}),{label:'Final depth',value:'32'});a.deepEqual(ui.performance({'final-time':{raw:'01:02.30'}}),{label:'Final time',value:'01:02.30'});a.equal(ui.positionLabel({table:2,row:4}),'Source table 2, row 4');a.equal(ui.positionLabel({page:1,line:3}),'Source page 1, line 3');a.equal(ui.display(null),'Not recorded');a.equal(ui.display({raw:'01:02.30',seconds:62.3}),'01:02.30');
      a.equal(ui.display({minutes:1,seconds:2}),'minutes: 1 · seconds: 2');
      a.deepEqual(ui.comparison({original:{performance:12},effective:{performance:13},'raw-values':{performance:'012'}}),[['performance','012','12','13']]);
      a.equal(ui.internalLink('results','a'.repeat(64)),'/results/'+ 'a'.repeat(64));a.equal(ui.internalLink('results','javascript:bad'),null);
@@ -51,11 +51,12 @@ const events={};global.window={addEventListener:(k,v)=>events[k]=v};
 global.location={pathname:'/results/'+ 'a'.repeat(64),search:'',origin:'http://localhost'};
 global.history={pushState:()=>{throw Error('must not navigate')}};
 let post=null;
-global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({correction:{version:'v1'},result:{'result-id':'a'.repeat(64),effective:{'source-name':'Synthetic'}}})};
+global.fetch=async(url,options)=> options.method==='POST' ? (post={url,options},{ok:true,json:async()=>({id:'receipt-123',status:'pending',duplicate:false})}) : {ok:true,json:async()=>({correction:{version:'v1'},result:{'result-id':'a'.repeat(64),effective:{'source-name':'Synthetic'},'source-position':{table:2,row:4},citations:[{publisher:'Synthetic','event-name':'<script>not executed</script>','event-date':'2025-06-28',table:2,row:4,'final-url':'javascript:bad'}]}})};
 require('./resources/public.js');
 function all(n){return [n,...n.children.flatMap(all)]}
 (async()=>{
  await events.pageshow();
+ a.ok(all(nodes.content).some(n=>n.textContent==='Source table 2, row 4'));a.ok(all(nodes.content).some(n=>String(n.textContent).includes('<script>not executed</script>')));a.ok(!all(nodes.content).some(n=>n.tag==='script'));
  const form=all(nodes.content).find(n=>n.attributes['aria-label']==='Suggest a correction');a.ok(form);
  const fields=all(form).filter(n=>n.tag==='textarea');a.equal(fields.length,3);
  fields.forEach(n=>{a.equal(n.required,true);a.ok(n.attributes['aria-describedby']);a.ok(all(form).some(l=>l.tag==='label'&&l.htmlFor===n.id));});

@@ -23,6 +23,7 @@
   }
   function internalLink(kind, id) { return /^(results|athletes)$/.test(kind) && /^[a-f0-9]{64}$/.test(id || '') ? '/' + kind + '/' + id : null; }
   function citationURL(v) { try { const u = new URL(v); return ['https:', 'http:'].includes(u.protocol) && !u.username && !u.password ? u.href : null; } catch (_) { return null; } }
+  function positionLabel(p = {}) { return p.table != null ? 'Source table ' + display(p.table) + ', row ' + display(p.row) : 'Source page ' + display(p.page) + ', line ' + display(p.line); }
   function correctionClient(resultId, version, transport = fetch, newId = () => crypto.randomUUID()) {
     let previous = null;
     return async function (fields) {
@@ -47,7 +48,7 @@
       return receipt;
     };
   }
-  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL, correctionClient};
+  if (typeof module !== 'undefined') module.exports = {searchURL, display, performance, comparison, internalLink, citationURL, positionLabel, correctionClient};
   if (typeof document === 'undefined') return;
   const main = document.getElementById('content'), status = document.getElementById('status'), banner = document.getElementById('demo');
   let sequence = 0;
@@ -86,13 +87,13 @@
     }); return list;
   }
   function evidence(refs) {
-    const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link('Source page ' + display(ref.page) + ', line ' + display(ref.line), internalLink('results', ref['result-id']))); n.append(item); }); return n;
+    const n = el('ul', null, 'evidence'); (refs || []).forEach(ref => { const item = el('li'); item.append(link(positionLabel(ref), internalLink('results', ref['result-id']))); n.append(item); }); return n;
   }
   function correctionForm(r) {
     const panel = section('Suggest a correction', 'No account needed. Requests stay private and pending owner approval. Submitting does not change the published result.');
     const form = el('form', null, 'correction-form'); form.setAttribute('aria-label', 'Suggest a correction');
     const fields = {};
-    [['suggestion', 'Suggested change', 1000, 'State the field and the correct value.'], ['reason', 'Reason for the change', 2000, 'Explain what is wrong with this result.'], ['evidence', 'Evidence citation or reference', 2000, 'Give a source URL or document reference with a page or line. Do not include passwords, access tokens or personal contact details.']].forEach(([key, title, limit, hint]) => {
+    [['suggestion', 'Suggested change', 1000, 'State the field and the correct value.'], ['reason', 'Reason for the change', 2000, 'Explain what is wrong with this result.'], ['evidence', 'Evidence citation or reference', 2000, 'Give a source URL or document reference with a page and line, or table and row. Do not include passwords, access tokens or personal contact details.']].forEach(([key, title, limit, hint]) => {
       const wrap = el('div'), l = el('label', title + ' (required)'); l.htmlFor = 'correction-' + key;
       const input = el('textarea'); input.id = l.htmlFor; input.name = key; input.required = true; input.maxLength = limit; input.rows = key === 'suggestion' ? 3 : 4;
       const help = el('p', hint + ' Maximum ' + limit + ' characters.', 'muted'); help.id = input.id + '-help'; input.setAttribute('aria-describedby', help.id);
@@ -128,8 +129,8 @@
     const audit = section('Public correction history', 'Approved corrections and reversals, with their public reasons and evidence.');
     if (!(r['correction-audit'] || []).length) audit.append(el('p', 'No public corrections recorded.'));
     (r['correction-audit'] || []).forEach(a => { const entry = el('article', null, 'audit-entry'); entry.append(el('p', (a.action === 'reverse' ? 'Reversed' : 'Approved') + ' · ' + label(a.field), 'eyebrow'), el('h3', display(a.before) + ' → ' + display(a.after)), el('p', a.reason || 'No public reason recorded.')); if (a['correction-reason'] && a['correction-reason'] !== a.reason) entry.append(el('p', 'Correction rationale: ' + a['correction-reason'])); entry.append(el('p', display(a['recorded-at']) + (a.action === 'approve' ? (a['effective?'] ? ' · Currently effective' : ' · No longer effective') : ' · Restored the prior value'), 'muted'), evidence(a.evidence)); audit.append(entry); }); main.append(audit);
-    const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', 'Source page ' + display((r['source-position'] || {}).page) + ', line ' + display((r['source-position'] || {}).line)));
-    (r.citations || []).forEach(c => { const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);
+    const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', positionLabel(r['source-position'])));
+    (r.citations || []).forEach(c => { if (c['event-name'] || c['event-date']) sources.append(el('p', 'Event: ' + display(c['event-name']) + ' · Date: ' + display(c['event-date']))); if (c.table != null) { sources.append(el('p', positionLabel(c))); sources.append(el('p', 'Retained filters: discipline ' + display(c['selected-discipline']) + ' · gender ' + display(c['selected-gender']), 'muted')); } const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);
     if (r.correction && typeof r.correction.version === 'string') main.append(correctionForm(r));
     else main.append(el('p', 'Correction requests are currently unavailable for this result.', 'muted'));
   }
@@ -143,7 +144,7 @@
       banner.hidden = !data.demo;
       if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
-        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
+        main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage, with unpublished and unreviewed gaps · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
         const heading = el('div', null, 'results-heading'); heading.append(el('h2', 'Public results'), el('p', data.total + ' matching ' + (data.total === 1 ? 'record' : 'records'), 'muted')); main.append(heading);
         if (data.results.length) main.append(resultCards(data.results)); else main.append(el('div', data.coverage.results === 0 ? 'No records published yet. Source records must pass validation before they appear here.' : 'No public results match these filters. Try another source name or clear the filters.', 'empty'));
         const nav = el('nav', null, 'pagination'); nav.setAttribute('aria-label', 'Result pages');
