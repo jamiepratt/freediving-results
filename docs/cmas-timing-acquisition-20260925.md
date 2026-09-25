@@ -27,7 +27,7 @@ The 20 retained unit result responses contain 352 records. That is a transport c
 
 ## 2026 depth
 
-[Competition 30 documents](https://cmas-api.microplustimingservices.com/api/competitions/30/documents) lists eight `RES` and eight medalist (`MED`) documents. Seven result links returned HTTP 200 PDFs, 15 pages total. Medalist PDFs were not downloaded as attempt sources. The linked CWT men results URL returned HTTP 404; its response body and metadata remain retained as `incoming/c30-doc52.pdf`, which is HTML despite the local suffix and is not registered as a PDF.
+[Competition 30 documents](https://cmas-api.microplustimingservices.com/api/competitions/30/documents) lists eight `RES` and eight medalist (`MED`) documents. Seven result links returned HTTP 200 PDFs, 15 pages total. Medalist PDFs were not downloaded as attempt sources. The linked CWT men results URL returned HTTP 404; its response body and metadata remain retained as `incoming/c30-doc52.pdf`, which is zero bytes with no recorded MIME type and is not registered as a PDF.
 
 All nine schedule units and their result/document API responses were retained:
 
@@ -279,3 +279,7 @@ The inspected tables print rank, name, representation and category, but no athle
 The retained 2026 CWT-men API responses have seven rows in unit 3551 and 24 in unit 3559. Both identify competition 30, but their event/phase/unit identifiers differ: `661/594/3551` versus `655/588/3559`, with event dates 17 and 21 August. Neither `ResID` nor `ParID` overlaps across these responses. This is an observed distinction in the retained API records, not a reviewed conclusion about unique sporting attempts. It does not turn the later continuation into a revision. The first unit has no document entry; the later unit's linked result PDF remains unavailable as recorded above.
 
 Private inspection evidence is retained in batch 8's `data/b08-evidence/genuine-evidence-summary.json`, with a hash inventory of all 790 original CMAS files. Source archives and extraction jobs remain unchanged. No real relationship, identity or publication decision was created. The backend's synthetic validation and its limits are documented in [revision relationships](revision-relationships.md); unresolved source and public replacement acceptance remains in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## Batch 12 source gap audit
+
+The [source gap audit](championship-source-gaps-20260925.md) accounts for all 42 indoor JSON views and 792 transport rows, preserves one undecodable surname byte, and documents remaining discrepancies against the historical Athens mirror. No missing attempt-results PDF was recovered. Fresh Roatan evidence confirms the publisher's continuation label and unchanged result-document gap; a newly retained medalists PDF is supporting evidence only. Original sources and B11 remain unchanged.
