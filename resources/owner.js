@@ -58,7 +58,7 @@
     const target=packet.target,payload=target.payload||{},raw=payload.raw||{},coords=payload.coordinates||{};
     const original=raw.fields?.['source-name']||raw.line||'';
     const label=payload.parsed?.['source-name']||('Unparsed source text: '+(original||'No source name available'));
-    const context='Source '+String(target['job-id']).slice(0,12)+(coords.table?' · table '+coords.table+' · row '+coords.row:' · page '+(coords.page??'?')+' · line '+(coords.line??'?'))+' · observation '+target.ordinal;
+    const context='Source '+String(target['job-id']).slice(0,12)+(target['source-format']==='html'?' · table '+coords.table+' · row '+coords.row:' · page '+(coords.page??'?')+' · line '+(coords.line??'?'))+' · observation '+target.ordinal;
     return {label,context,search:JSON.stringify([payload.parsed,raw,payload['source-lines'],target['job-id'],context,packet.outcome]).toLowerCase()};
   }
   function viewerControls({state,page,count,observationPage,busy}) {
@@ -79,7 +79,7 @@
         const current=++ticket;
         show({state:'loading',target,page});
         try {
-          if(target.payload?.coordinates?.table){const metadata=await request('/api/source-html?'+new URLSearchParams({'job-id':target['job-id'],ordinal:target.ordinal}));if(current===ticket)show({state:'html',target,page:1,metadata});return;}
+          if(target['source-format']==='html'){const metadata=await request('/api/source-html?'+new URLSearchParams({'job-id':target['job-id'],ordinal:target.ordinal}));if(current===ticket)show({state:'html',target,page:1,metadata});return;}
           const query=sourcePageQuery(target,page),metadata=await request('/api/source-page?'+query);
           if(current===ticket)show({state:'ready',target,page,metadata,image:'/api/source-page.png?'+query+'&'+new URLSearchParams({'render-id':metadata['render-id']})});
         } catch(error){if(current===ticket)show({state:'error',target,page,message:error.message});}
@@ -110,7 +110,7 @@
   }
   function targetQuery(t){return new URLSearchParams({'job-id':t['job-id'],ordinal:t.ordinal}).toString();}
   function formData(id){return Object.fromEntries(new FormData($(id)));}
-  function common(f){return {...f,actor:$('actor').value,...(detail?.packet.target.payload.coordinates?.table?{table:$('page').value,row:$('line').value}:{page:$('page').value,line:$('line').value})};}
+  function common(f){return {...f,actor:$('actor').value,...(detail?.packet.target['source-format']==='html'?{table:$('page').value,row:$('line').value}:{page:$('page').value,line:$('line').value})};}
   function lock(value){busy=value;document.querySelectorAll('button').forEach(b=>b.disabled=value);syncPageControls();}
   async function mutate(path,request){
     if(!canReview){status('Read-only inspection: owner review is not enabled.',true);return;}
@@ -152,7 +152,7 @@
   function expandable(title,value){const d=node('details');d.append(node('summary',title),structure(value));return d;}
   function sourceEvidence(e){
     const view=node('div'),table=node('table'),header=node('tr');
-    if(e.coordinates?.table){view.append(structure({coordinates:e.coordinates,context:e.context,'raw-row':e['raw-row'],cells:e.cells}),expandable('Exact source provenance',e));return view;}
+    if(e['source-format']==='html'){view.append(structure({coordinates:e.coordinates,context:e.context,'raw-row':e['raw-row'],cells:e.cells}),expandable('Exact source provenance',e));return view;}
     ['Page','Line','Original source text'].forEach(label=>header.append(node('th',label)));table.append(header);
     (e['source-lines']||[]).forEach(line=>{const row=node('tr');[line.page,line.line,line.text].forEach(value=>row.append(node('td',readable(value))));table.append(row);});
     view.append(table,expandable('Exact source provenance, hashes and acquisitions',Object.fromEntries(Object.entries(e).filter(([key])=>key!=='source-lines'))));return view;
@@ -186,8 +186,8 @@
     });
     if(!d.packet.candidates?.length)$('candidates').append(node('p','No supported candidate retrieved. Unknown and no-match do not establish distinct identities.'));
     $('field').replaceChildren(...Object.keys(fields).filter(k=>fields[k]===null||typeof fields[k]!=='object').map(k=>new Option(human(k),k)),new Option('Identity outcome','identity'));
-    document.querySelector('label[for=page]').textContent=e.coordinates?.table?'Inspected source table':'Inspected source page';document.querySelector('label[for=line]').textContent=e.coordinates?.table?'Inspected source row':'Inspected source line';
-    $('page').value=e.coordinates?.table||e.coordinates?.page||e['source-lines']?.[0]?.page||'';$('line').value=e.coordinates?.row||e.coordinates?.line||e['source-lines']?.[0]?.line||'';
+    document.querySelector('label[for=page]').textContent=e['source-format']==='html'?'Inspected source table':'Inspected source page';document.querySelector('label[for=line]').textContent=e['source-format']==='html'?'Inspected source row':'Inspected source line';
+    $('page').value=e['source-format']==='html'?e.coordinates?.table:(e.coordinates?.page||e['source-lines']?.[0]?.page||'');$('line').value=e['source-format']==='html'?e.coordinates?.row:(e.coordinates?.line||e['source-lines']?.[0]?.line||'');
     $('visual').checked=false;$('substantive').checked=false;$('publication-reason').value='';
     $('publication-state').textContent='Automated prerequisites: '+(d.publication['ready?']?'ready':'blocked')+'. Currently eligible: '+(d.publication['eligible?']?'yes':'no')+'. '+readable(d.publication.reasons);
     $('audit').replaceChildren();
@@ -213,8 +213,8 @@
     $('source-previous').disabled=true;$('source-next').disabled=true;$('source-go').disabled=true;
     $('visual').checked=false;$('substantive').checked=false;$('visual').disabled=hasViewer;
     if(view.state==='empty'){sourceTarget=null;$('source-context').textContent='';return;}
-    $('source-navigation').hidden=!!view.target?.payload?.coordinates?.table;
-    $('source-title').textContent=view.target?.payload?.coordinates?.table?'Registered HTML row and context':'Registered PDF page';
+    $('source-navigation').hidden=view.target?.['source-format']==='html';
+    $('source-title').textContent=view.target?.['source-format']==='html'?'Registered HTML row and context':'Registered PDF page';
     if(view.state==='html'){sourceTarget=view.target;sourcePage=observationPage=sourceCount=1;sourceState='loaded';$('source-context').textContent='Exact retained HTML row. Source markup is displayed as text; scripts and links are inactive.';$('source-image').append(structure(view.metadata));syncPageControls();return;}
     sourceTarget=view.target;sourcePage=view.page;$('source-page').value=sourcePage;$('source-page').removeAttribute('max');
     $('source-context').textContent='Observation '+view.target['job-id']+' / '+view.target.ordinal+' · PDF page '+view.page;

@@ -156,3 +156,15 @@
     (java.nio.file.Files/setPosixFilePermissions path (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------"))
     (spit (str root "/derivations/" (:job-id row) ".edn") (pr-str {:job-id (:job-id row) :artifact-sha256 hash}))
     (is (thrown? Exception (pages/inspect-html! config (assoc row :artifact-sha256 hash :payload (first (:candidates forged))))))))
+
+(defn pdf-with-table-hints []
+  (let [[config row] (sample) root (:archive-root config)
+        a (edn/read-string (slurp (str root "/derived-objects/" (:artifact-sha256 row))))
+        a (update-in a [:candidates 0 :coordinates] assoc :table 99 :row 99)
+        bytes (.getBytes (pr-str a) "UTF-8")
+        hash (.formatHex (java.util.HexFormat/of) (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        path (java.nio.file.Paths/get (str root "/derived-objects/" hash) (make-array String 0))]
+    (java.nio.file.Files/write path bytes (make-array java.nio.file.OpenOption 0))
+    (java.nio.file.Files/setPosixFilePermissions path (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------"))
+    (spit (str root "/derivations/" (:job-id row) ".edn") (pr-str {:job-id (:job-id row) :artifact-sha256 hash}))
+    [config (assoc row :artifact-sha256 hash :payload (first (:candidates a)))]))

@@ -56,7 +56,13 @@
     (is (thrown? clojure.lang.ExceptionInfo (c/packet rows {:job-id "missing" :ordinal 0} {})))))
 
 (deftest html-anchors-retain-table-row-not-pdf-coordinates
-  (let [a (assoc-in (row "a" 0 "s1" "Synthetic Person") [:payload :coordinates] {:table 2 :row 3})
+  (let [a (assoc-in (assoc (row "a" 0 "s1" "Synthetic Person") :source-format :html) [:payload :coordinates] {:table 2 :row 3})
         p (c/packet [a] {:job-id "a" :ordinal 0} {})]
     (is (= {:job-id "a" :ordinal 0 :candidate-id "a0" :source-sha256 "s1" :artifact-sha256 "artifact-a" :table 2 :row 3}
+           (get-in p [:local-identity-anchor :reference])))))
+
+(deftest pdf-table-hints-are-not-html-evidence
+  (let [a (assoc-in (row "a" 0 "s1" "Synthetic Person") [:payload :coordinates] {:page 2 :line 3 :table 99 :row 99})
+        p (c/packet [a] {:job-id "a" :ordinal 0} {})]
+    (is (= {:job-id "a" :ordinal 0 :candidate-id "a0" :source-sha256 "s1" :artifact-sha256 "artifact-a" :page 2 :line 3}
            (get-in p [:local-identity-anchor :reference])))))

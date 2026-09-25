@@ -110,7 +110,7 @@
                                  (when (and source-config (= :validate (:action r)))
                                    (let [t (select-keys r [:job-id :ordinal])
                                          row (some #(when (= t (select-keys % [:job-id :ordinal])) %) (candidates/load-corpus database-url {}))
-                                         html? (contains? (get-in row [:payload :coordinates]) :table)
+                                         html? (= :html (:source-format row))
                                          page (get-in row [:payload :coordinates :page])
                                          seen (get @(:viewed auth) t)]
                                      (when-not (and row seen (if html? (= (get-in row [:payload :coordinates]) (:coordinates seen)) (= page (:page seen))))
@@ -158,8 +158,8 @@
       (let [t (target! e) corpus (candidates/load-corpus database-url {}) row (some #(when (= t (select-keys % [:job-id :ordinal])) %) corpus)]
         (when-not row (fail! 404 "Unknown observation"))
         (if (= path "/api/evidence")
-          (respond (assoc (select-keys row [:job-id :ordinal :source-lines :acquisitions :source-sha256 :artifact-sha256]) :coordinates (get-in row [:payload :coordinates])))
-          (respond (merge mode-info {:packet (assoc (candidates/packet corpus t {}) :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (contains? (get-in row [:payload :coordinates]) :table) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
+          (respond (assoc (select-keys row [:job-id :ordinal :source-format :source-lines :acquisitions :source-sha256 :artifact-sha256]) :coordinates (get-in row [:payload :coordinates])))
+          (respond (merge mode-info {:packet (assoc (candidates/packet corpus t {}) :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
                                      :history (reviews/history database-url t) :publication (publication/diagnose database-url t)
                                      :publication-history (publication/history database-url t) :rubric packets/rubric}))))
       :else (fail! 404 "Unknown endpoint"))))

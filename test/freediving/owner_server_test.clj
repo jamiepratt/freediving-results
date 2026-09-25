@@ -335,3 +335,25 @@
         (is (= 200 (:status (request s "POST" "/api/publication" (assoc validation :id "html-revoke" :action "revoke" :base-revision 1 :attestations {}) h))))
         (is (false? (:eligible? (publication/diagnose publication-fixture/reviewer target)))))
       (finally (server/stop! s)))))
+
+(deftest pdf-table-hints-still-require-pdf-inspection-and-page-line-attestation
+  (let [[page-config row] (pages-fixture/pdf-with-table-hints)
+        _ (observations/import! fixture/app (:archive-root page-config) (:job-id row))
+        s (server/start! (merge (dissoc (config) :demo?) page-config {:mode :real-inspection :review-enabled? true}))
+        target (select-keys row [:job-id :ordinal])
+        q (str "?job-id=" (:job-id row) "&ordinal=0")]
+    (try
+      (let [h (login s) d (publication/diagnose publication-fixture/reviewer target)
+            validation (merge target (select-keys d [:review-revision :policy-version :observation])
+                              {:id "pdf-hints-validate" :base-revision (:revision d) :action "validate" :actor "synthetic-test"
+                               :reason "Inspected PDF with optional table hints" :evidence [{:page 1 :line 3}]
+                               :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}})
+            detail (get-in (request s "GET" (str "/api/detail" q) nil h) [:body :packet])
+            reference (get-in detail [:local-identity-anchor :reference])
+            metadata (request s "GET" (str "/api/source-page" q "&page=1") nil h)]
+        (is (= "pdf" (get-in detail [:target :source-format])))
+        (is (= {:page 1 :line 3} (select-keys reference [:page :line :table :row])))
+        (is (= 400 (:status (request s "GET" (str "/api/source-html" q) nil h))))
+        (is (= 200 (:status (request s "GET" (get-in metadata [:body :image-url]) nil h))))
+        (is (= 200 (:status (request s "POST" "/api/publication" validation h)))))
+      (finally (server/stop! s)))))

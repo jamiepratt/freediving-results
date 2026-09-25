@@ -63,11 +63,18 @@
 (deftest html-evidence-never-fabricates-pdf-coordinates
   (let [r (shell/sh "node" "-e"
                     "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
-                   const d={packet:{target:{'job-id':'j',ordinal:0,payload:{coordinates:{table:2,row:3}}}},effective:{revision:0,fields:{points:1}}};
+                   const d={packet:{target:{'job-id':'j',ordinal:0,'source-format':'html',payload:{coordinates:{table:2,row:3}}}},effective:{revision:0,fields:{points:1}}};
                    const p=ui.proposal(d,{field:'points',category:'substantive-correction',type:'number',value:'2',actor:'owner',reason:'Inspected row',table:2,row:3},'p');
                    assert.deepEqual(p.evidence,[{table:2,row:3}]);assert.match(ui.casePresentation(d.packet).context,/table 2.*row 3/);
                    assert.throws(()=>ui.proposal(d,{field:'points',actor:'owner',reason:'row',table:0,row:3},'p'));
                    (async()=>{let url;let state;const viewer=ui.pageViewer(async u=>{url=u;return {'render-id':'h',coordinates:{table:2,row:3}}},s=>state=s);await viewer.load(d.packet.target,1);assert.equal(url,'/api/source-html?job-id=j&ordinal=0');assert.equal(state.state,'html');assert.equal(state.image,undefined);})().catch(e=>{console.error(e);process.exit(1)});")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest pdf-table-hints-keep-pdf-inspection
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                   const target={'job-id':'pdf',ordinal:0,'source-format':'pdf',payload:{coordinates:{page:2,line:3,table:99,row:99}}};
+                   assert.match(ui.casePresentation({target}).context,/page 2.*line 3/);
+                   (async()=>{let url,state;const v=ui.pageViewer(async u=>{url=u;return {'render-id':'pdf'}},s=>state=s);await v.load(target,2);assert.equal(url,'/api/source-page?job-id=pdf&ordinal=0&page=2');assert.equal(state.state,'ready');})().catch(e=>{console.error(e);process.exit(1)});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.owner-ui-test)]
