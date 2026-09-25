@@ -77,7 +77,7 @@
       (is (= (last (publication/history reviewer t)) (publication/decide! reviewer revoked))))
     (publication/decide! reviewer (assoc (request t "again") :base-revision 3))
     (is (thrown? Exception (publication/activate-policy! reviewer "extraction-publication/2" "Forbidden")))
-    (publication/activate-policy! fixture/admin "extraction-publication/2" "New required evidence policy")
+    (publication/activate-policy! fixture/admin "extraction-publication/3" "New required evidence policy")
     (is (false? (:eligible? (publication/diagnose reviewer t))))
     (is (false? (:ready? (publication/diagnose reviewer t))))
     (is (thrown? Exception (publication/activate-policy! fixture/admin publication/current-policy "Cannot resurrect old validation")))
@@ -179,3 +179,31 @@
       (is (false? (:eligible? diagnosis)))
       (is (some #{[:unresolved-extraction-error :html-review-not-supported]} (:reasons diagnosis))))
     (is (thrown? Exception (publication/decide! reviewer (request target "html-not-pdf"))))))
+(defn html-sample
+  ([] (html-sample {}))
+  ([{:keys [prefix cells config] :or {prefix "<div class='site-header__branding'><img alt='Synthetic championship'></div>" cells (assoc html-fixture/cells 10 "") config {}}}]
+   (let [dir (archive-fixture/workspace) root (str dir "/archive")
+         hash (html-fixture/register-html root (str dir "/source.html") (str prefix (html-fixture/document cells)))
+         job (:job-id (html/extract! root hash {:actor "synthetic" :config config}))]
+     (observations/import! fixture/app root job)
+     {:job-id job :ordinal 0})))
+(defn html-request [t id] (assoc (request t id) :evidence [{:table 1 :row 2}]))
+(deftest html-validation-requires-explicit-policy-and-reviewer-authority
+  (let [t (html-sample) pdf (sample)]
+    (publication/decide! reviewer (request pdf "old-pdf"))
+    (is (false? (:ready? (publication/diagnose reviewer t))))
+    (is (:eligible? (publication/diagnose reviewer pdf)))
+    (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+    (is (:ready? (publication/diagnose reviewer t)))
+    (is (false? (:eligible? (publication/diagnose reviewer pdf))))
+    (let [r (html-request t "html-validate")]
+      (doseq [bad [(assoc r :attestations {}) (assoc r :policy-version "extraction-publication/1")
+                   (assoc r :evidence [{:page 1 :line 1}]) (assoc r :evidence [{:table 1 :row 1}])
+                   (assoc-in r [:observation :source-sha256] "wrong")]]
+        (is (thrown? Exception (publication/decide! reviewer bad))))
+      (is (thrown? Exception (publication/decide! fixture/app r)))
+      (publication/decide! reviewer r)
+      (is (:eligible? (publication/diagnose reviewer t)))
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer t))))
+      (publication/decide! reviewer (assoc r :id "revoke-html" :base-revision 1 :action :revoke :attestations {}))
+      (is (false? (:eligible? (publication/diagnose reviewer t)))))))

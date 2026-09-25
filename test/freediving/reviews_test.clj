@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
             [freediving.extraction-test :as extraction-fixture]
@@ -282,3 +284,19 @@
     (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app t))))
     (is (= [reference] (:evidence (first (reviews/history fixture/app t)))))
     (is (= corpus (candidates/load-corpus fixture/app {})))))
+
+(deftest html-review-references-bind-exact-retained-row
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        target {:job-id job :ordinal 0}]
+    (observations/import! fixture/app root job)
+    (let [p (assoc (proposal target "html") :evidence [{:table 1 :row 2}])]
+      (is (= :propose (:action (reviews/propose! fixture/app p))))
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :id "wrong-row" :evidence [{:table 1 :row 1}]))))
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :id "pdf" :evidence [{:page 1 :line 1}]))))
+      (reviews/decide! reviewer {:id "approve-html" :proposal-id "html" :action :approve :base-revision 0 :actor "owner" :reason "Explicit review"})
+      (is (= :matched (get-in (reviews/effective reviewer target) [:identity :outcome])))
+      (reviews/decide! reviewer {:id "reverse-html" :event-id "approve-html" :action :reverse :base-revision 1 :actor "owner" :reason "Undo"})
+      (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target)))))))
