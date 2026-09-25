@@ -22,6 +22,8 @@ The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the ver
 
 The [isolated championship corpus audit](docs/championship-corpus-20260925.md) records 55 imported versions and 4,736 unreviewed observations, exact source replay, zero public rows, no reviewer decisions and a verified backup restoration.
 
+The [Novi Sad semantics audit](docs/indoor-semantics-audit-20260925.md) preserves all 648 source rows while confining timing warnings to 236 timing candidates in new parser versions. Separate diagnostics make 412 distance rows structurally ready; every row remains unreviewed and ineligible. The existing corpus is unchanged.
+
 The [Athens mirror audit](docs/athens-mirror-audit-20260925.md) separately accounts for 792 historical PDF rows and two detached extraction fragments. It preserves source disagreements against supporting JSON and unresolved glyph/cell evidence without importing the mirror into the restart corpus.
 
 ## Local import orchestration

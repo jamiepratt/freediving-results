@@ -44,3 +44,5 @@ The dedicated database is `championship_b11` on loopback port 55511; the separat
 ## Subsequent AIDA scope audit
 
 The [batch 13 audit](aida-scope-audit-20260925.md) replayed all AIDA rows and produced exact unapproved dated-view descriptors. An explicit partial-only contract removes the need to fabricate venue/round/session fields for this narrower scope. Separate official context captures expose one schedule-result exception; they grant no new authority. B11 remained stopped and unchanged throughout that audit.
+
+The [batch 15 indoor audit](indoor-semantics-audit-20260925.md) creates separate parser-2 artifacts with timing warnings confined to timing rows. In an isolated diagnostic copy, all 412 distance rows pass automated readiness and all 236 timing rows remain blocked; none is eligible. B11 was not started or changed, so its stored versions and the historical readiness counts above remain unchanged.
