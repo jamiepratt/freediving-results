@@ -90,6 +90,15 @@ class PortableCorpusTest(unittest.TestCase):
         index_path.write_text(json.dumps(index))
         self.run_cli("verify", self.bundle, ok=False)
 
+    def test_system_tmp_alias_can_hold_a_relocated_bundle(self):
+        if not Path("/tmp").is_symlink():
+            self.skipTest("system /tmp alias is macOS-specific")
+        self.write_spec()
+        with tempfile.TemporaryDirectory(dir="/tmp") as destination:
+            bundle = Path(destination) / "bundle"
+            self.run_cli("export", self.spec, bundle)
+            self.run_cli("verify", bundle)
+
 
 if __name__ == "__main__":
     unittest.main()

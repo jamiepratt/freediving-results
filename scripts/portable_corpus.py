@@ -29,8 +29,8 @@ def relative(value):
 
 def safe_existing(path):
     path = Path(path).absolute()
-    # macOS exposes its temporary directory through the system /var alias.
-    if str(path) == "/var" or str(path).startswith("/var/"):
+    # macOS exposes system temporary directories through /var and /tmp aliases.
+    if any(str(path) == alias or str(path).startswith(alias + "/") for alias in ("/var", "/tmp")):
         path = Path("/private") / path.relative_to("/")
     for part in (path, *path.parents):
         if part.is_symlink():
