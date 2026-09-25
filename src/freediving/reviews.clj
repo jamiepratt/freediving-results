@@ -1,6 +1,7 @@
 (ns freediving.reviews
   "Append-only local owner review. DB reviewer credentials are the authority; actor is audit text."
   (:require [clojure.edn :as edn]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [freediving.aida-html :as html]
@@ -47,14 +48,22 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=2"))]
                      (when-not (= checksum (:sha256 old)) (fail! "Migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(2,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/012-extraction-reviews.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=12"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "Extraction review migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(12,?)" checksum))))
                  (execute! c (str "REVOKE ALL ON freediving.extractions,freediving.observations FROM " reviewer-role))
                  (doseq [role [ingest-role reviewer-role]]
                    (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " role))
                    (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " role))
                    (execute! c (str "REVOKE ALL ON freediving.review_proposals,freediving.review_decisions FROM " role))
+                   (execute! c (str "REVOKE ALL ON freediving.extraction_reviews FROM " role))
                    (execute! c (str "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions TO " role))
+                   (execute! c (str "GRANT SELECT ON freediving.extraction_reviews TO " role))
                    (execute! c (str "GRANT INSERT ON freediving.review_proposals TO " role)))
                  (execute! c (str "GRANT INSERT ON freediving.review_decisions TO " reviewer-role))
+                 (execute! c (str "GRANT INSERT ON freediving.extraction_reviews TO " reviewer-role))
                  {:schema-version 2})))
 (defn- target [c {:keys [job-id ordinal]}]
   (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
@@ -90,6 +99,53 @@
 (defn history [url t]
   (read-snapshot url (fn [c] (target c t) (vec (concat (proposals c t) (decisions c t))))))
 (defn- nonblank? [v] (and (string? v) (not (str/blank? v))))
+(def ^:private json-reference-keys
+  #{:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256
+    :parser-version :source-page-url :row-index-zero-based})
+(defn- sha256 [^bytes bytes]
+  (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes)))
+(defn- json-reference! [c ref]
+  (when-not (and (map? ref) (= json-reference-keys (set (keys ref)))
+                 (every? nonblank? ((juxt :job-id :candidate-id :source-sha256
+                                          :artifact-sha256 :parser-version :source-page-url) ref))
+                 (nat-int? (:ordinal ref)) (nat-int? (:row-index-zero-based ref)))
+    (fail! "Invalid JSON evidence reference"))
+  (let [o (target c ref)
+        bytes ^bytes (:artifact_bytes o)
+        artifact (edn/read-string (String. bytes "UTF-8"))
+        candidate (get (:candidates artifact) (:ordinal ref))
+        payload (edn/read-string (:payload_edn o))
+        raw-json (:raw-json artifact)
+        source (when (string? raw-json)
+                 (try (json/read-str raw-json) (catch Exception _ nil)))
+        position (:row-index-zero-based ref)
+        coordinate {:row-index-zero-based position}
+        acquired-pages (set (map #(get-in % [:manifest :provenance :source-page-url])
+                                 (:acquisitions artifact)))]
+    (when-not (and (= 5 (:schema-version artifact))
+                   (re-matches #"cmas-2025-indoor-json/[0-9]+" (:parser-version artifact))
+                   (= (:parser-version ref) (:parser-version artifact))
+                   (= (:job-id ref) (:job-id artifact))
+                   (= (:job-id ref) (html/digest (select-keys artifact
+                                                              [:source-sha256 :acquisitions :evidence-sha256
+                                                               :actor :config :parser-version :schema-version :tool])))
+                   (= (:artifact-sha256 ref) (:artifact_sha256 o) (sha256 bytes))
+                   (= (:source-sha256 ref) (:source_sha256 o) (:source-sha256 artifact)
+                      (when raw-json (sha256 (.getBytes ^String raw-json "UTF-8"))))
+                   (= (:candidate-id ref) (:candidate_id o)
+                      (html/digest [(:source-sha256 ref) [coordinate]]))
+                   (= #{(:source-page-url ref)} acquired-pages)
+                   (= (:source-page-url ref) (:view-url artifact) (:source-page-url artifact)
+                      (:source-page-url candidate) (:source-page-url payload))
+                   (= coordinate (select-keys (:coordinates candidate) [:row-index-zero-based])
+                      (select-keys (:coordinates payload) [:row-index-zero-based]))
+                   (= candidate payload)
+                   (vector? (get source "data"))
+                   (< position (count (get source "data")))
+                   (= (:raw payload) (get-in source ["data" position]))
+                   (= "result-row" (:kind o)))
+      (fail! "JSON evidence provenance or source position mismatch"))
+    o))
 (defn- audit! [r]
   (when-not (and (every? nonblank? ((juxt :id :actor :reason) r)) (nat-int? (:base-revision r)))
     (fail! "ID, actor, reason and base-revision required")))
@@ -230,6 +286,87 @@
                                      (:id request) (:job-id t) (:ordinal t) (:revision record) (name action)
                                      (when (not= action :reverse) (:proposal-id request)) (when (= action :reverse) (:event-id request)) (encode record))
                            (existing c "review_decisions" (:id request) request))))))))
+(defn- extraction-events [c t]
+  (mapv body (query c "SELECT * FROM freediving.extraction_reviews WHERE job_id=? AND ordinal=? ORDER BY revision"
+                    (:job-id t) (:ordinal t))))
+(defn- extraction-state [c t]
+  (target c t)
+  (reduce (fn [_ event]
+            (case (:action event)
+              :accept {:revision (:revision event) :status :accepted :active-event (:id event)}
+              :revoke {:revision (:revision event) :status :unreviewed :active-event nil}))
+          {:revision 0 :status :unreviewed :active-event nil}
+          (extraction-events c t)))
+(defn extraction-effective [url t]
+  (read-snapshot url #(extraction-state % t)))
+(defn extraction-history [url t]
+  (read-snapshot url (fn [c] (target c t) (extraction-events c t))))
+(defn- extraction-capability! [c]
+  (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.extraction_reviews','INSERT') AS allowed")))
+    (fail! "Owner extraction review database capability required")))
+(defn- extraction-request! [request]
+  (when-not (and (map? request)
+                 (= #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256
+                      :owner-response :actor :reason}
+                    (set (keys request)))
+                 (every? nonblank? ((juxt :id :job-id :actor :reason) request))
+                 (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
+                 (string? (:owner-receipt-sha256 request))
+                 (re-matches #"[0-9a-f]{64}" (:owner-receipt-sha256 request))
+                 (= #{:task-id :user-message-id :response-annotation-index :selected-text}
+                    (set (keys (:owner-response request))))
+                 (every? nonblank? ((juxt :task-id :user-message-id :selected-text)
+                                    (:owner-response request)))
+                 (nat-int? (get-in request [:owner-response :response-annotation-index]))
+                 (= (select-keys request [:job-id :ordinal])
+                    (select-keys (:evidence request) [:job-id :ordinal]))
+                 (when-let [[_ from to] (re-matches #"Accept ([0-9]+)-([0-9]+)"
+                                                    (get-in request [:owner-response :selected-text]))]
+                   (<= (parse-long from) (get-in request [:evidence :row-index-zero-based])
+                       (parse-long to))))
+    (fail! "Invalid owner extraction acceptance request")))
+(defn accept-extraction! [url request]
+  (extraction-request! request)
+  (transaction url
+               (fn [c]
+                 (extraction-capability! c)
+                 (lock! c request)
+                 (json-reference! c (:evidence request))
+                 (or (existing c "extraction_reviews" (:id request) request)
+                     (let [state (extraction-state c request)]
+                       (when-not (= (:base-revision request) (:revision state))
+                         (fail! "Stale extraction review revision"))
+                       (when (= :accepted (:status state))
+                         (fail! "Extraction position already accepted"))
+                       (let [record (assoc request :action :accept :revision (inc (:revision state))
+                                           :request request)]
+                         (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                   "accept" nil (encode record))
+                         (existing c "extraction_reviews" (:id request) request)))))))
+(defn revoke-extraction! [url request]
+  (when-not (and (map? request)
+                 (= #{:id :job-id :ordinal :base-revision :event-id :actor :reason}
+                    (set (keys request)))
+                 (every? nonblank? ((juxt :id :job-id :event-id :actor :reason) request))
+                 (nat-int? (:ordinal request)) (nat-int? (:base-revision request)))
+    (fail! "Invalid extraction revocation request"))
+  (transaction url
+               (fn [c]
+                 (extraction-capability! c)
+                 (lock! c request)
+                 (or (existing c "extraction_reviews" (:id request) request)
+                     (let [state (extraction-state c request)]
+                       (when-not (= (:base-revision request) (:revision state))
+                         (fail! "Stale extraction review revision"))
+                       (when-not (= (:event-id request) (:active-event state))
+                         (fail! "Only the active extraction acceptance can be revoked"))
+                       (let [record (assoc request :action :revoke :revision (inc (:revision state))
+                                           :request request)]
+                         (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                   "revoke" (:event-id request) (encode record))
+                         (existing c "extraction_reviews" (:id request) request)))))))
 (defn- read-request [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (let [eof (Object.) request (edn/read {:eof eof} r)]
@@ -241,8 +378,10 @@
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (println (encode (case command
                          "migrate" (if (= 2 (count args)) (apply migrate! url args) (fail! "migrate INGEST-ROLE REVIEWER-ROLE"))
-                         ("propose" "decide" "effective" "history")
-                         (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history} command) url (read-request (first args)))
+                         ("propose" "decide" "effective" "history" "accept-extraction" "revoke-extraction" "extraction-effective" "extraction-history")
+                         (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history
+                                                   "accept-extraction" accept-extraction! "revoke-extraction" revoke-extraction!
+                                                   "extraction-effective" extraction-effective "extraction-history" extraction-history} command) url (read-request (first args)))
                              (fail! "Expected one EDN request file"))
-                         (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history REQUEST.edn")))))
+                         (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history|accept-extraction|revoke-extraction|extraction-effective|extraction-history REQUEST.edn")))))
     (catch Exception e (binding [*out* *err*] (println "Review operation failed:" (.getMessage e))) (System/exit 1))))

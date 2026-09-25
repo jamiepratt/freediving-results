@@ -197,7 +197,7 @@
 
 (defn inspector! []
   (fixture/sql! fixture/admin "DO $$ BEGIN CREATE ROLE source_inspector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
-  (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO source_inspector; GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector")
+  (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO source_inspector; GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.extraction_reviews,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector")
   (str/replace publication-fixture/reviewer "user=reviews_owner" "user=source_inspector"))
 
 (deftest registered-pages-stay-private-and-real-inspection-cannot-mutate

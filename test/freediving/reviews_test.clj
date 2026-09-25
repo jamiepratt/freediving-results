@@ -1,5 +1,7 @@
 (ns freediving.reviews-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [freediving.cmas-2025-indoor-json :as indoor-json]
+            [freediving.cmas-2025-indoor-json-test :as indoor-fixture]
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
             [freediving.aida-html :as html]
@@ -24,6 +26,92 @@
   (merge target {:id id :base-revision 0 :category :identity-matching :field :identity
                  :before {:outcome :unknown} :after {:outcome :matched :identity-id "synthetic-person-1"}
                  :evidence [{:page 1 :line 1}] :reason "Synthetic evidence" :actor "test-proposer"}))
+
+(defn json-observation []
+  (let [dir (archive-fixture/workspace) root (str dir "/archive") path (str dir "/source.json")
+        bytes (indoor-fixture/source [indoor-fixture/row (assoc indoor-fixture/row "PlaLane" "2")])
+        hash (html-evidence/sha256 bytes)
+        manifest (assoc archive-fixture/manifest :sha256 hash
+                        :discovery-url indoor-fixture/json-url :final-url indoor-fixture/json-url
+                        :content-type "application/json"
+                        :provenance {:publisher-url indoor-fixture/json-url
+                                     :redirect-chain [indoor-fixture/json-url]
+                                     :source-page-url indoor-fixture/view-url})]
+    (java.nio.file.Files/write (java.nio.file.Paths/get path (make-array String 0)) bytes
+                               (make-array java.nio.file.OpenOption 0))
+    (archive/register! root path manifest)
+    (let [job (:job-id (indoor-json/extract! root hash {:actor "synthetic" :config {}}))]
+      (observations/import! fixture/app root job)
+      (let [inspection (observations/inspect fixture/app job)]
+        {:job-id job :ordinal 0 :candidate-id (:candidate_id (first (:observations inspection)))
+         :source-sha256 hash :artifact-sha256 (html-evidence/sha256 (:artifact-bytes inspection))
+         :parser-version (:parser-version (:artifact inspection))
+         :source-page-url indoor-fixture/view-url :row-index-zero-based 0}))))
+
+(defn extraction-request [ref id]
+  {:id id :job-id (:job-id ref) :ordinal (:ordinal ref) :base-revision 0
+   :evidence ref :owner-receipt-sha256 (apply str (repeat 64 "a"))
+   :owner-response {:task-id "test-task" :user-message-id "test-message"
+                    :response-annotation-index 1 :selected-text "Accept 0-1"}
+   :actor "owner-label" :reason "Synthetic exact-source extraction review"})
+
+(deftest json-extraction-acceptance-is-separate-from-identity-and-publication
+  (let [ref (json-observation) target (select-keys ref [:job-id :ordinal])
+        request (extraction-request ref "accept-zero")
+        accepted (reviews/accept-extraction! reviewer request)]
+    (is (= accepted (reviews/accept-extraction! reviewer request)))
+    (is (= :accept (:action accepted)))
+    (is (= 1 (:revision accepted)))
+    (is (= 1 (:revision (reviews/extraction-effective reviewer target))))
+    (is (= :accepted (:status (reviews/extraction-effective reviewer target))))
+    (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+    (is (= 0 (:revision (reviews/effective reviewer target))))
+    (is (thrown? Exception (reviews/accept-extraction! reviewer
+                                                       (assoc request :identity-id "forged-identity"))))
+    (is (thrown? Exception (reviews/accept-extraction! reviewer
+                                                       (assoc request :selection-status :selected))))
+    (is (= :blocked (get-in (:artifact (observations/inspect fixture/app (:job-id ref))) [:publication :status])))))
+
+(deftest json-extraction-acceptance-rejects-forged-provenance-and-role
+  (let [ref (json-observation) request (extraction-request ref "accept-zero")]
+    (doseq [bad [(assoc ref :row-index-zero-based 1)
+                 (assoc ref :row-index-zero-based 2)
+                 (assoc ref :source-sha256 (apply str (repeat 64 "0")))
+                 (assoc ref :artifact-sha256 (apply str (repeat 64 "0")))
+                 (assoc ref :parser-version "cmas-2025-indoor-json/3")
+                 (assoc ref :candidate-id (apply str (repeat 64 "0")))
+                 (assoc ref :source-page-url "https://example.org/forged")]]
+      (is (thrown? Exception (reviews/accept-extraction! reviewer
+                                                         (assoc request :evidence bad)))))
+    (is (thrown-with-msg? Exception #"capability"
+                          (reviews/accept-extraction! fixture/app request)))
+    (is (= [] (reviews/extraction-history reviewer (select-keys ref [:job-id :ordinal]))))))
+
+(deftest json-extraction-acceptance-has-idempotent-append-only-revocation
+  (let [ref (json-observation) target (select-keys ref [:job-id :ordinal])
+        request (extraction-request ref "accept-zero")
+        accepted (reviews/accept-extraction! reviewer request)
+        revoke (merge target {:id "revoke-zero" :base-revision 1 :event-id "accept-zero"
+                              :actor "owner-label" :reason "Synthetic reconsideration"})]
+    (is (= "reviews_owner" (:db-role accepted)))
+    (is (string? (:recorded-at accepted)))
+    (is (= (:owner-receipt-sha256 request) (:owner-receipt-sha256 accepted)))
+    (is (= (:owner-response request) (:owner-response accepted)))
+    (is (thrown-with-msg? Exception #"idempotency"
+                          (reviews/accept-extraction! reviewer (assoc request :reason "changed"))))
+    (is (thrown-with-msg? Exception #"Stale"
+                          (reviews/accept-extraction! reviewer (assoc request :id "stale"))))
+    (is (thrown-with-msg? Exception #"active"
+                          (reviews/revoke-extraction! reviewer (assoc revoke :event-id "forged"))))
+    (is (= :revoke (:action (reviews/revoke-extraction! reviewer revoke))))
+    (is (= :unreviewed (:status (reviews/extraction-effective reviewer target))))
+    (is (= 2 (:revision (reviews/extraction-effective reviewer target))))
+    (is (= 2 (count (reviews/extraction-history reviewer target))))
+    (is (= (reviews/revoke-extraction! reviewer revoke)
+           (last (reviews/extraction-history reviewer target))))
+    (is (thrown? java.sql.SQLException
+                 (fixture/sql! reviewer "UPDATE freediving.extraction_reviews SET id=id")))
+    (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))))
 (deftest pending-approval-and-reversal-retain-original
   (let [target (sample) before (observations/inspect fixture/app (:job-id target))
         p (reviews/propose! fixture/app (proposal target "p1"))]
