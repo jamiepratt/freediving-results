@@ -226,6 +226,62 @@
       (is (= indoor-json-fixture/view-url (get-in (observations/inspect app job) [:artifact :view-url])))
       (is (= indoor-json-fixture/row (get-in (observations/inspect app job) [:observations 0 :payload :raw]))))))
 
+(deftest archived-sef-import-preserves-forty-nine-rows-and-one-byte-exception
+  (let [bytes (indoor-json-fixture/sef-source-bytes)
+        hash (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes))
+        dir (fixture/workspace)
+        root (str dir "/archive")
+        file (str dir "/SEF.json")
+        manifest (assoc fixture/manifest
+                        :sha256 hash :content-type "application/json"
+                        :discovery-url (:json-url indoor-json-fixture/sef-provenance)
+                        :final-url (:json-url indoor-json-fixture/sef-provenance)
+                        :provenance {:publisher-url "https://www.cmas.org/freediving-events/2025-cmas-world-championship-freediving-indoor.html"
+                                     :redirect-chain [(:json-url indoor-json-fixture/sef-provenance)]
+                                     :source-page-url (:view-url indoor-json-fixture/sef-provenance)})]
+    (is (= "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84" hash))
+    (java.nio.file.Files/write (java.nio.file.Paths/get file (make-array String 0)) bytes
+                               (make-array java.nio.file.OpenOption 0))
+    (archive/register! root file manifest)
+    (let [receipt (indoor-json/extract! root hash {:actor "synthetic" :config {}})
+          job (:job-id receipt)]
+      (is (= :created (:status (observations/import! app root job))))
+      (is (= :skipped (:status (observations/import! app root job))))
+      (let [{:keys [artifact observations]} (observations/inspect app job)
+            positions (mapv #(get-in % [:payload :coordinates :row-index-zero-based]) observations)]
+        (is (= {:sources 1 :versions 1 :observations 49 :candidates 49
+                :result-rows 49 :fragments 0 :unclassified 0}
+               (observations/counts app)))
+        (is (= (vec (remove #{19} (range 50))) positions))
+        (is (= [18 20] (subvec positions 18 20)))
+        (is (= {:source-row-count 50 :candidate-count 49 :unparsed-count 1
+                :unresolved-count 50 :status :unreviewed}
+               (:reconciliation artifact)))
+        (is (= 19 (get-in artifact [:unparsed-rows 0 :coordinates :row-index-zero-based])))
+        (is (= :invalid-utf8 (get-in artifact [:unparsed-rows 0 :reason])))
+        (is (= 12982 (get-in artifact [:unparsed-rows 0 :byte-offset])))
+        (is (= "98" (get-in artifact [:unparsed-rows 0 :raw-byte-hex])))
+        (is (= {:start-inclusive 12789 :end-exclusive 13382
+                :sha256 "17cec89ba54cd1ca192ef0078446eb40ef7a12efa3a98a3b33b0e30967179df3"}
+               (get-in artifact [:unparsed-rows 0 :raw-row-byte-span])))
+        (is (= 1 (count (:unparsed-rows artifact))))
+        (is (= (:view-url indoor-json-fixture/sef-provenance) (:view-url artifact)))
+        (is (= (:view-url indoor-json-fixture/sef-provenance)
+               (get-in observations [19 :payload :source-page-url])))
+        (is (nil? (:raw-json artifact)))
+        (is (= :blocked (get-in artifact [:publication :status])))
+        (is (every? #(and (= :parsed (get-in % [:payload :parse-status]))
+                          (= :unreviewed (get-in % [:payload :review-status]))
+                          (= :blocked (get-in % [:payload :selection-status]))) observations))
+        (is (every? #(not (str/includes? (get-in % [:payload :parsed :source-name]) "\uFFFD"))
+                    observations))
+        (is (= (seq bytes)
+               (seq (archive/read-source-bytes
+                     (:artifact-path (archive/inspect root hash)))))))
+      (spit (:artifact-path receipt) "tampered")
+      (is (thrown-with-msg? Exception #"integrity"
+                            (observations/import! app root job))))))
+
 (deftest html-migration-upgrades-original-constraint-without-changing-pdf-replay
   (let [{:keys [root artifact]} (synthetic 1 "cmas-test/1")
         artifact (assoc-in artifact [:candidates 0 :coordinates :table] 99)

@@ -9,9 +9,16 @@
            [java.security MessageDigest]
            [java.util HexFormat]))
 
-(def parser-version "cmas-2025-indoor-json/2")
+(def parser-version "cmas-2025-indoor-json/3")
+(def prior-parser-version "cmas-2025-indoor-json/2")
 (def legacy-parser-version "cmas-2025-indoor-json/1")
 (def dnf-categories #{"JUF" "JUM" "MAF" "MAM" "SEF" "SEM"})
+(def ^:private sef-source-sha256
+  "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84")
+(def ^:private sef-invalid-byte-offset 12982)
+(def ^:private sef-row-span [12789 13382])
+(def ^:private sef-row-sha256
+  "17cec89ba54cd1ca192ef0078446eb40ef7a12efa3a98a3b33b0e30967179df3")
 (defn- fail! [message] (throw (ex-info message {})))
 (defn- populated? [x] (and (string? x) (not (str/blank? x))))
 (defn- utf8 [bytes]
@@ -22,6 +29,26 @@
                     (.onUnmappableCharacter CodingErrorAction/REPORT))
                   (ByteBuffer/wrap bytes)))
     (catch Exception _ (fail! "Invalid UTF-8 source"))))
+(defn- bytes-sha256 [bytes]
+  (.formatHex (HexFormat/of)
+              (.digest (MessageDigest/getInstance "SHA-256") bytes)))
+(defn- source-text [bytes route]
+  (when-not (bytes? bytes) (fail! "Expected source bytes"))
+  (if (and (= "SEF" (:category route))
+           (= sef-source-sha256 (bytes-sha256 bytes)))
+    (do
+      (when-not (and (= 31246 (alength bytes))
+                     (= 0x98 (bit-and 0xff (aget bytes sef-invalid-byte-offset)))
+                     (= sef-row-sha256
+                        (bytes-sha256 (java.util.Arrays/copyOfRange
+                                       bytes (first sef-row-span) (second sef-row-span)))))
+        (fail! "Archived SEF byte exception does not match source"))
+      ;; The exact archived bytes authorize this one transient ASCII sentinel.
+      ;; Row 19 is removed before candidates or any decoded name are retained.
+      (let [parse-bytes (aclone bytes)]
+        (aset-byte parse-bytes sef-invalid-byte-offset (byte 0x3f))
+        {:text (utf8 parse-bytes) :quarantine? true}))
+    {:text (utf8 bytes) :quarantine? false}))
 (defn- codes [view-url]
   (try
     (let [u (URI. view-url)
@@ -58,14 +85,14 @@
        (every? #(populated? (get row %))
                ["PlaCod" "PlaName" "PlaSurname" "PlaNat" "PlaCat" "b" "PlaLane"])))
 (defn parse-result
-  "Parse exact UTF-8 CGR1 bytes with separately observed page and response URLs.
-   Each result row is retained verbatim and blocked from selection."
+  "Parse source-bound CGR1 bytes with separately observed page and response URLs.
+   The exact archived SEF anomaly quarantines row 19; other bytes require strict UTF-8."
   [bytes {:keys [view-url json-url] :as provenance}]
   (when-not (= #{:view-url :json-url} (set (keys provenance)))
     (fail! "Expected view-url and json-url"))
   (let [route (codes view-url)
-        raw-json (utf8 bytes)
-        source (try (json/read-str raw-json) (catch Exception _ (fail! "Malformed JSON")))
+        {:keys [text quarantine?]} (source-text bytes route)
+        source (try (json/read-str text) (catch Exception _ (fail! "Malformed JSON")))
         headers (dissoc source "data")
         filename (get source "jsonfilename")
         rows (get source "data")]
@@ -85,12 +112,13 @@
                            (:competition route) "CLAS" (subs (:round route) 1) " " (:heat route) ".JSON") filename)
                    (response-url? json-url (:family route) filename)
                    (= "20/05/2025" (get-in source ["Event" "Date"]))
-                   (vector? rows) (seq rows) (every? valid-row? rows))
+                   (vector? rows) (seq rows) (every? valid-row? rows)
+                   (or (not quarantine?) (= 50 (count rows))))
       (fail! "Unsupported or ambiguous CGR1 result structure"))
-    {:parser-version parser-version :raw-json raw-json :view-url view-url
+    {:parser-version parser-version :raw-json (when-not quarantine? text) :view-url view-url
      :source-page-url view-url :json-url json-url
      :headers headers :status :needs-review
-     :candidates (mapv (fn [index row]
+     :candidates (mapv (fn [[index row]]
                          {:coordinates {:row-index-zero-based index}
                           :source-page-url view-url
                           :raw row
@@ -102,13 +130,24 @@
                                    :performance-token (get row "MemPrest")
                                    :points-token (get row "MemPoint")}
                           :parse-status :parsed :review-status :unreviewed :selection-status :blocked})
-                       (range) rows)
-     :reconciliation {:source-row-count (count rows) :candidate-count (count rows)
+                       (remove (fn [[index _]] (and quarantine? (= 19 index)))
+                               (map-indexed vector rows)))
+     :unparsed-rows (if quarantine?
+                      [{:coordinates {:row-index-zero-based 19}
+                        :reason :invalid-utf8 :byte-offset sef-invalid-byte-offset
+                        :raw-byte-hex "98"
+                        :raw-row-byte-span {:start-inclusive (first sef-row-span)
+                                            :end-exclusive (second sef-row-span)
+                                            :sha256 sef-row-sha256}}]
+                      [])
+     :reconciliation {:source-row-count (count rows) :candidate-count (- (count rows) (if quarantine? 1 0))
+                      :unparsed-count (if quarantine? 1 0)
                       :unresolved-count (count rows) :status :unreviewed}
      :publication {:status :blocked :reasons [:owner-review-required :source-semantics-unresolved
                                               :coverage-not-established]}}))
+(declare parse-prior-result)
 (defn- parse-legacy-result [bytes provenance]
-  (-> (parse-result bytes provenance)
+  (-> (parse-prior-result bytes provenance)
       (assoc :parser-version legacy-parser-version)
       (update :candidates
               (fn [candidates]
@@ -117,6 +156,15 @@
                                   (str (get-in candidate [:raw "PlaName"]) " "
                                        (get-in candidate [:raw "PlaSurname"]))))
                       candidates)))))
+
+(defn- parse-prior-result [bytes provenance]
+  (let [result (parse-result bytes provenance)]
+    (when (seq (:unparsed-rows result))
+      (fail! "Prior parser cannot replay quarantined source"))
+    (-> result
+        (assoc :parser-version prior-parser-version)
+        (dissoc :unparsed-rows)
+        (update :reconciliation dissoc :unparsed-count))))
 
 (defn- canonical [value]
   (cond (map? value) (into (sorted-map) (map (fn [[k v]] [k (canonical v)]) value))
@@ -145,11 +193,14 @@
   "Replay source bytes and page binding from the registered archive."
   [root artifact]
   (when-not (and (= 5 (:schema-version artifact))
-                 (#{legacy-parser-version parser-version} (:parser-version artifact))
+                 (#{legacy-parser-version prior-parser-version parser-version} (:parser-version artifact))
                  (= tool (:tool artifact)))
     (fail! "Unsupported CMAS JSON extraction contract"))
   (let [{:keys [source bytes view-url json-url]} (registered-source root (:source-sha256 artifact))
-        expected ((if (= legacy-parser-version (:parser-version artifact)) parse-legacy-result parse-result)
+        expected ((case (:parser-version artifact)
+                    "cmas-2025-indoor-json/1" parse-legacy-result
+                    "cmas-2025-indoor-json/2" parse-prior-result
+                    parse-result)
                   bytes {:view-url view-url :json-url json-url})]
     (when-not (and (= (:acquisitions source) (:acquisitions artifact))
                    (= expected (select-keys artifact (keys expected))))

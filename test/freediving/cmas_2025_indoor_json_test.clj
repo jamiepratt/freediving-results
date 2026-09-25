@@ -1,6 +1,7 @@
 (ns freediving.cmas-2025-indoor-json-test
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [freediving.archive :as archive]
@@ -22,6 +23,50 @@
           "MemPrest" "DSQ" "MemPoint" "" "MemNote" "" "PlaCls" ""})
 (defn source [rows] (.getBytes (json/write-str (assoc headers "data" rows)) "UTF-8"))
 (def provenance {:view-url view-url :json-url json-url})
+
+(def sef-source-sha256
+  "84b1294ebab01c4c173cca7a2d49b9d9c9ccf3349c656f3d01962ec5ee76af84")
+(defn sef-source-bytes []
+  (let [resource (io/resource "freediving/fixtures/sef-2025-athens-dnf.json.gz")]
+    (when-not resource (throw (ex-info "Missing exact SEF test fixture" {})))
+    (let [out (java.io.ByteArrayOutputStream.)]
+      (with-open [in (java.util.zip.GZIPInputStream. (io/input-stream resource))]
+        (io/copy in out))
+      (let [bytes (.toByteArray out)
+            hash (.formatHex (java.util.HexFormat/of)
+                             (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))]
+        (when-not (= sef-source-sha256 hash)
+          (throw (ex-info "SEF test fixture SHA-256 mismatch" {:actual hash})))
+        bytes))))
+(def sef-provenance
+  {:view-url (str/replace view-url "/MAM/" "/SEF/")
+   :json-url (str/replace json-url "TFMAM011" "TFSEF011")})
+
+(deftest archived-seniors-women-quarantines-only-the-invalid-source-row
+  (let [bytes (sef-source-bytes)
+        result (indoor/parse-result bytes sef-provenance)
+        indices (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))]
+    (is (= 50 (get-in result [:reconciliation :source-row-count])))
+    (is (= 49 (get-in result [:reconciliation :candidate-count])))
+    (is (= (vec (remove #{19} (range 50))) indices))
+    (is (= [{:coordinates {:row-index-zero-based 19}
+             :reason :invalid-utf8 :byte-offset 12982 :raw-byte-hex "98"
+             :raw-row-byte-span {:start-inclusive 12789 :end-exclusive 13382
+                                 :sha256 "17cec89ba54cd1ca192ef0078446eb40ef7a12efa3a98a3b33b0e30967179df3"}}]
+           (:unparsed-rows result)))
+    (is (nil? (:raw-json result)))
+    (is (every? #(and (= :parsed (:parse-status %))
+                      (= :unreviewed (:review-status %))
+                      (= :blocked (:selection-status %))) (:candidates result)))
+    (is (= :blocked (get-in result [:publication :status])))))
+
+(deftest malformed-byte-outside-the-archived-sef-source-stays-rejected
+  (let [good (source [row])
+        bytes (byte-array (alength good))]
+    (System/arraycopy good 0 bytes 0 (alength good))
+    (aset-byte bytes 20 (unchecked-byte 0x98))
+    (is (thrown? clojure.lang.ExceptionInfo (indoor/parse-result bytes provenance)))
+    (is (thrown? clojure.lang.ExceptionInfo (indoor/parse-result bytes sef-provenance)))))
 
 (deftest athens-dnf-categories-retain-distinct-source-positions
   (doseq [[category label] [["JUF" "Juniors Women"] ["JUM" "Juniors Men"]
@@ -117,8 +162,15 @@
       (is (= view-url (:view-url artifact)))
       (is (= json-url (:json-url artifact)))
       (is (= artifact (indoor/validate-artifact! root artifact)))
+      (let [prior (-> artifact
+                      (assoc :parser-version "cmas-2025-indoor-json/2")
+                      (dissoc :unparsed-rows)
+                      (update :reconciliation dissoc :unparsed-count))]
+        (is (= prior (indoor/validate-artifact! root prior))))
       (let [legacy (-> artifact
                        (assoc :parser-version "cmas-2025-indoor-json/1")
+                       (dissoc :unparsed-rows)
+                       (update :reconciliation dissoc :unparsed-count)
                        (assoc-in [:candidates 0 :parsed :source-name] "Timothy BECHTEL"))]
         (is (= legacy (indoor/validate-artifact! root legacy))))
       (is (thrown? clojure.lang.ExceptionInfo
