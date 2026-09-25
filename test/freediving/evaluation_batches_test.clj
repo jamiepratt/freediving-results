@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [clojure.data.json :as json]
             [freediving.evaluation-protocol-test :as fixture]
+            [freediving.evaluation-protocol :as protocol]
             [freediving.evaluation-providers-test :as http]
             [freediving.evaluation-providers :as p]
             [freediving.evaluation :as evaluation]
@@ -472,3 +473,66 @@
       (is (= usage (:usage r)))
       (is (nil? (get-in r [:answers "identity_0" :probability-diagnostics])))
       (is (not (str/includes? (pr-str r) "private-source-name"))))))
+
+(defn local-config [url size]
+  (assoc (config url) :identity-protocol :freediving-question-local-v1
+         :native-diagnostics-version 2 :native-batch-size size))
+
+(deftest question-local-evidence-is-identical-across-batch-sizes
+  (let [members (assoc-in (cases) [1 :input :left]
+                          (fixture/record "different-record" "Other Original Name"))
+        singles (p/prepare-batches (local-config "https://example.com" 1) members)
+        batch (first (p/prepare-batches (local-config "https://example.com" 2) members))
+        decode #(json/read-str (:body %) :key-fn keyword)
+        body (decode batch)]
+    (is (= "shadow-adapters/10" (:adapter-version batch)))
+    (is (= :freediving-question-local-v1 (get-in batch [:config :identity-protocol])))
+    (is (= :question-local-evidence (:context-policy batch)))
+    (is (= (:instruction protocol/descriptor) (:state body)))
+    (doseq [i (range 2)]
+      (let [single (decode (nth singles i))
+            q (get-in body [:questions (keyword (str "identity_" i))])]
+        (is (= (:state body) (:state single)))
+        (is (= q (get-in single [:questions :identity_0])))
+        (is (= (select-keys (:input (nth members i)) [:left :right])
+               (select-keys (:instructions q) [:left :right])))
+        (is (= (:criteria (protocol/question "/left" "/right")) (:criteria q)))
+        (is (= #{:left :right :question} (set (keys (:instructions q)))))))
+    (is (not (.contains (:state body) "Other Original Name")))
+    (is (not (.contains (:body (first singles)) "Other Original Name")))
+    (doseq [bad [(assoc (local-config "https://example.com" 2) :native-diagnostics-version 1)
+                 (assoc (local-config "https://example.com" 2) :companion-assessments [:name-variation])
+                 (local-config "https://example.com" 3)
+                 (assoc (local-config "https://example.com" 2) :model "jev-latest")]]
+      (is (thrown? Exception (p/prepare-batches bad members))))))
+
+(deftest question-local-run-retains-strict-validation-and-durable-replay
+  (let [calls (atom 0) dir (runner/root)]
+    (http/with-server
+      (fn [ex]
+        (swap! calls inc)
+        (let [body (json/read-str (slurp (.getRequestBody ex)))]
+          (http/reply! ex 200
+                       (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                        :answers (into {} (map (fn [id] [id (answer "match")])
+                                                               (keys (get body "questions"))))}))))
+      (fn [url]
+        (let [cfg [(local-config url 2)]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! dir (dataset) cfg runtime)
+              report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])]
+          (is (= [:match :match :match] (mapv :outcome (:results report))))
+          (is (= 2 @calls))
+          (is (= receipt (evaluation/run! dir (dataset) cfg runtime)))
+          (is (= 2 @calls))))))
+  (http/with-server
+    (fn [ex] (http/reply! ex 200 (json/write-str {:model "jev-1.13.0" :usage {}
+                                                  :answers {:identity_0 (assoc (answer "match") :probabilities
+                                                                               {:match 0.33 :no_match 0.33 :abstain 0.33})
+                                                            :identity_1 (answer "match")}})))
+    (fn [url]
+      (let [result (p/execute! (first (p/prepare-batches (local-config url 2) (cases)))
+                               {:bearer-token "fixture-secret"})]
+        (is (= :error (:outcome result)))
+        (is (= :match (get-in result [:answers "identity_1" :outcome])))
+        (is (= 0.99 (get-in result [:answers "identity_0" :probability-diagnostics :sum])))))))
