@@ -73,6 +73,20 @@
     form.addEventListener('submit', e => { e.preventDefault(); const data = Object.fromEntries(new FormData(form)); const p = new URLSearchParams(); keys.filter(k => k !== 'page').forEach(k => { if (data[k]) p.set(k, data[k]); }); navigate('/' + (p.size ? '?' + p : '')); });
     return form;
   }
+  function eventContext(r) {
+    const n = el('div', null, 'event-context'), coverage = r.coverage || {};
+    if (coverage.scope === 'event') {
+      n.append(el('p', coverage.completeness === 'complete' ? 'Complete coverage for this reviewed event scope.' : 'Partial event coverage. Other sessions or source records may be unavailable.', 'muted'));
+      if ((coverage.gaps || []).length) {
+        const gaps = el('ul'); gaps.setAttribute('aria-label', 'Event coverage gaps');
+        coverage.gaps.forEach(gap => gaps.append(el('li', display(gap)))); n.append(gaps);
+      }
+    }
+    const history = (r['revision-history'] || {}).status;
+    if (history === 'confirmed-correction') n.append(el('p', 'Confirmed source correction. Earlier values are not shown here. See source evidence for this published record.', 'muted'));
+    else if (history === 'history-unavailable') n.append(el('p', 'Earlier source history unavailable. No prior values or changes are inferred. See source evidence for this published record.', 'muted'));
+    return n;
+  }
   function resultCards(rows) {
     const list = el('div', null, 'result-list');
     rows.forEach(r => {
@@ -83,7 +97,7 @@
       info.append(el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'muted'));
       const tags = el('div', null, 'tags'); tags.append(el('span', 'Category: ' + display(f.category)), el('span', 'Representation: ' + display(f.representation)), el('span', r.identity && r.identity.status === 'approved' ? 'Approved identity link' : 'Identity unresolved')); info.append(tags);
       const perf = performance(f), metric = el('div', null, 'performance'); metric.append(el('span', perf.label), el('strong', perf.value), el('span', 'Unit: ' + display(f.unit)), el('span', 'Status: ' + display(f.status)));
-      card.append(info, metric); list.append(card);
+      info.append(eventContext(r)); card.append(info, metric); list.append(card);
     }); return list;
   }
   function evidence(refs) {
@@ -119,6 +133,7 @@
   function detail(r) {
     const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'lead'));
     const summary = el('div', null, 'summary'); [['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
+    main.append(eventContext(r));
     const identity = section('Athlete connection');
     if (r.identity && r.identity.status === 'approved' && internalLink('athletes', r.identity.id)) identity.append(el('p', 'This record has an active approved identity link.'), link('View approved athlete history →', internalLink('athletes', r.identity.id)));
     else identity.append(el('p', 'Identity unresolved. This validated source record is searchable under its source name; no athlete identity is inferred.'));
@@ -127,7 +142,7 @@
     const scroll = el('div', null, 'table-scroll'); scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', 'Source and corrected values');
     const table = el('table'), head = el('thead'), hr = el('tr'); ['Field', 'Original source token', 'Original parsed value', 'Effective value'].forEach(t => {const th = el('th', t); th.scope = 'col'; hr.append(th); }); head.append(hr); table.append(head); const body = el('tbody'); comparison(r).forEach(([k, ...v]) => { const tr = el('tr'), th = el('th', label(k)); th.scope = 'row'; tr.append(th); v.forEach(x => tr.append(el('td', x))); body.append(tr); }); table.append(body); scroll.append(table); original.append(scroll); main.append(original);
     const audit = section('Public correction history', 'Approved corrections and reversals, with their public reasons and evidence.');
-    if (!(r['correction-audit'] || []).length) audit.append(el('p', 'No public corrections recorded.'));
+    if (!(r['correction-audit'] || []).length) audit.append(el('p', 'No approved field corrections recorded for this source record.'));
     (r['correction-audit'] || []).forEach(a => { const entry = el('article', null, 'audit-entry'); entry.append(el('p', (a.action === 'reverse' ? 'Reversed' : 'Approved') + ' · ' + label(a.field), 'eyebrow'), el('h3', display(a.before) + ' → ' + display(a.after)), el('p', a.reason || 'No public reason recorded.')); if (a['correction-reason'] && a['correction-reason'] !== a.reason) entry.append(el('p', 'Correction rationale: ' + a['correction-reason'])); entry.append(el('p', display(a['recorded-at']) + (a.action === 'approve' ? (a['effective?'] ? ' · Currently effective' : ' · No longer effective') : ' · Restored the prior value'), 'muted'), evidence(a.evidence)); audit.append(entry); }); main.append(audit);
     const sources = section('Source evidence', 'Source representation describes the event entry. It does not establish citizenship.'); sources.append(el('p', positionLabel(r['source-position'])));
     (r.citations || []).forEach(c => { if (c['event-name'] || c['event-date']) sources.append(el('p', 'Event: ' + display(c['event-name']) + ' · Date: ' + display(c['event-date']))); if (c.table != null) { sources.append(el('p', positionLabel(c))); sources.append(el('p', 'Retained filters: discipline ' + display(c['selected-discipline']) + ' · gender ' + display(c['selected-gender']), 'muted')); } const p = el('p'); p.append(el('strong', display(c.publisher) + ' ')); const u = citationURL(c['final-url'] || c['discovery-url']); if (u) { const a = link('Open source citation ↗', u); a.rel = 'noopener noreferrer'; p.append(a); } else p.append(el('span', 'Source link unavailable')); sources.append(p); sources.append(el('p', 'Source relationship: ' + display(c.relationship) + (c['mirror-of'] ? ' · Mirror of: ' + display(c['mirror-of']) : ''), 'muted')); if (c['source-sha256']) { const metadata = el('details'); metadata.append(el('summary', 'Source fingerprint'), el('p', c['source-sha256'], 'muted')); sources.append(metadata); } }); main.append(sources);

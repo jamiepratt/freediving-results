@@ -69,6 +69,44 @@ function all(n){return [n,...n.children.flatMap(all)]}
  console.log('rendered correction form passed');
 })().catch(e=>{console.error(e);process.exitCode=1});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest reviewed-event-coverage-and-source-history-render-without-inferred-deltas
+  (let [r (shell/sh "node" "-e"
+                    "const a=require('node:assert/strict');
+class Element {
+ constructor(tag){this.tag=tag;this.children=[];this.events={};this.attributes={};}
+ append(...items){this.children.push(...items)} replaceChildren(...items){this.children=items}
+ setAttribute(k,v){this.attributes[k]=v} removeAttribute(k){delete this.attributes[k]}
+ addEventListener(k,v){this.events[k]=v}
+}
+const nodes=Object.fromEntries(['content','status','demo'].map(k=>[k,new Element('div')]));
+global.document={getElementById:k=>nodes[k],createElement:t=>new Element(t),addEventListener:()=>{}};
+const events={};global.window={addEventListener:(k,v)=>events[k]=v};
+global.location={pathname:'/results/'+ 'a'.repeat(64),search:'',origin:'http://localhost'};
+let result={'result-id':'a'.repeat(64),original:{'source-name':'Synthetic'},effective:{'source-name':'Synthetic'},
+ 'event-selection':{id:'b'.repeat(64),revision:2},coverage:{scope:'event',completeness:'partial',gaps:['Session 2 unavailable <script>alert(1)</script>']},
+ 'revision-history':{status:'confirmed-correction','previous-values':'unknown'},
+ citations:[{publisher:'Synthetic','final-url':'https://example.org/revised.pdf'}]};
+global.fetch=async()=>({ok:true,json:async()=>({result})});
+require('./resources/public.js');
+function all(n){return [n,...n.children.flatMap(all)]}
+function texts(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')}
+(async()=>{
+ await events.pageshow();
+ a.match(texts(),/Partial event coverage/);a.match(texts(),/Session 2 unavailable <script>alert/);
+ a.match(texts(),/Confirmed source correction/);a.match(texts(),/Earlier values are not shown/);
+ a.match(texts(),/Identity unresolved/);
+ a.ok(all(nodes.content).some(n=>n.href==='https://example.org/revised.pdf'));
+ a.ok(!all(nodes.content).some(n=>n.tag==='script'||n.innerHTML));
+ result={...result,'revision-history':{status:'history-unavailable','previous-values':'unknown'}};
+ await events.pageshow();
+ a.match(texts(),/Earlier source history unavailable/);a.match(texts(),/No prior values or changes are inferred/);
+ a.doesNotMatch(texts(),/Confirmed source correction/);
+ result={...result,coverage:{scope:'event',completeness:'complete',gaps:[]},'revision-history':null};
+ await events.pageshow();a.match(texts(),/Complete coverage for this reviewed event scope/);
+ a.doesNotMatch(texts(),/Earlier source history unavailable|Partial event coverage/);
+ console.log('reviewed event coverage and history rendering passed');
+})().catch(e=>{console.error(e);process.exitCode=1});")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.public-ui-test)]
     (shutdown-agents)
