@@ -38,7 +38,7 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all seven checksummed
+JAR dependencies. It takes a private database backup, applies all eight checksummed
 migrations without seeding data, switches the release, verifies readiness, provisions
 the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations

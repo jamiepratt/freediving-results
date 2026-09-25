@@ -14,6 +14,8 @@ The new `cmas-2026-indoor-time/1` artifacts also carry `source-semantics-unresol
 
 ## Separate decisions
 
+[Result revision relationships](revision-relationships.md) use separate append-only proposals and reviewer decisions. A confirmed replacement or acknowledged missing predecessor is not publication validation or identity approval. Migration 8 does not alter this policy, invalidate existing validations or suppress existing public projections. Public replacement selection remains unimplemented under [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.
 
 Policy `extraction-publication/1` applies to an exact extraction job, artifact hash, candidate ID, source hash and observation ordinal. Validation and revocation append immutable events. The original extraction's `:publication {:status :blocked}` and all original bytes and candidate values remain unchanged. That parser flag records the extraction-time state, not the later validation decision.
