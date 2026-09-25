@@ -59,6 +59,19 @@
            (and (nil? (.getRawFragment u))
                 (re-matches #"day_index=[0-9]+" (or (.getRawQuery u) ""))))))
 
+(defn- cmas-result-page? [v]
+  (try
+    (let [u (URI. v)]
+      (and (= "https" (.getScheme u))
+           (= "results.microplustimingservices.com" (.getHost u))
+           (= -1 (.getPort u))
+           (nil? (.getRawUserInfo u))
+           (nil? (.getRawQuery u))
+           (= "/CMAS/Results/" (.getRawPath u))
+           (re-matches #"/[12]/dynamic-result-json/[A-Z]{3}/[0-9]{3}/[0-9]{3}/[0-9]{3}"
+                       (or (.getRawFragment u) ""))))
+    (catch Exception _ false)))
+
 (defn- url? [v]
   (try (let [u (URI. v)]
          (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
@@ -85,8 +98,9 @@
 
 (defn- provenance? [p final-url]
   (and (map? p)
-       (= #{:publisher-url :redirect-chain} (set (keys (dissoc p :browser-state))))
+       (= #{:publisher-url :redirect-chain} (set (keys (dissoc p :browser-state :source-page-url))))
        (or (not (contains? p :browser-state)) (browser-state? (:browser-state p)))
+       (or (not (contains? p :source-page-url)) (cmas-result-page? (:source-page-url p)))
        (url? (:publisher-url p))
        (vector? (:redirect-chain p))
        (seq (:redirect-chain p))

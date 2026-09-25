@@ -4,6 +4,8 @@
             [clojure.java.shell :as shell]
             [freediving.aida-html :as html]
             [freediving.aida-html-test :as html-fixture]
+            [freediving.cmas-2025-indoor-json :as indoor-json]
+            [freediving.cmas-2025-indoor-json-test :as indoor-json-fixture]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
             [freediving.athens :as athens]
@@ -204,6 +206,25 @@
       (archive/derive! root (:job-id bad) (constantly bad) nil)
       (is (thrown-with-msg? Exception #"HTML source replay" (observations/import! app root (:job-id bad))))
       (is (= 2 (:observations (observations/counts app)))))))
+
+(deftest cmas-json-import-retains-result-page-citation-and-row-evidence
+  (let [dir (fixture/workspace) root (str dir "/archive") file (str dir "/result.json")
+        bytes (indoor-json-fixture/source [indoor-json-fixture/row])
+        hash (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") bytes))
+        manifest (assoc fixture/manifest
+                        :sha256 hash :content-type "application/json"
+                        :final-url indoor-json-fixture/json-url
+                        :provenance {:publisher-url "https://www.cmas.org/freediving-events/2025-cmas-world-championship-freediving-indoor.html"
+                                     :redirect-chain [indoor-json-fixture/json-url]
+                                     :source-page-url indoor-json-fixture/view-url})]
+    (with-open [out (java.io.FileOutputStream. file)] (.write out bytes))
+    (archive/register! root file manifest)
+    (let [job (:job-id (indoor-json/extract! root hash {:actor "synthetic" :config {}}))]
+      (is (= :created (:status (observations/import! app root job))))
+      (is (= :skipped (:status (observations/import! app root job))))
+      (is (= 1 (:observations (observations/counts app))))
+      (is (= indoor-json-fixture/view-url (get-in (observations/inspect app job) [:artifact :view-url])))
+      (is (= indoor-json-fixture/row (get-in (observations/inspect app job) [:observations 0 :payload :raw]))))))
 
 (deftest html-migration-upgrades-original-constraint-without-changing-pdf-replay
   (let [{:keys [root artifact]} (synthetic 1 "cmas-test/1")

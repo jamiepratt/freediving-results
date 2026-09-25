@@ -66,3 +66,13 @@
         p (c/packet [a] {:job-id "a" :ordinal 0} {})]
     (is (= {:job-id "a" :ordinal 0 :candidate-id "a0" :source-sha256 "s1" :artifact-sha256 "artifact-a" :page 2 :line 3}
            (get-in p [:local-identity-anchor :reference])))))
+
+(deftest json-anchors-retain-source-row-and-html-url
+  (let [url "https://results.microplustimingservices.com/CMAS/Results/#/2/dynamic-result-json/MAM/011/007/001"
+        a (-> (row "a" 0 "s1" "BECHTEL Timothy")
+              (assoc :source-format :json :source-page-url url)
+              (assoc-in [:payload :coordinates] {:row-index-zero-based 7}))
+        p (c/packet [a] {:job-id "a" :ordinal 0} {})]
+    (is (= {:job-id "a" :ordinal 0 :candidate-id "a0" :source-sha256 "s1"
+            :artifact-sha256 "artifact-a" :row-index-zero-based 7 :source-page-url url}
+           (get-in p [:local-identity-anchor :reference])))))

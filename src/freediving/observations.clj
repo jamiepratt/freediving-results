@@ -4,7 +4,8 @@
             [clojure.string :as str]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
-            [freediving.aida-html :as html])
+            [freediving.aida-html :as html]
+            [freediving.cmas-2025-indoor-json :as indoor-json])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -64,6 +65,11 @@
           (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=7"))]
             (when-not (= html-checksum (:sha256 old)) (fail! "HTML migration checksum conflict"))
             (do (execute! c html-sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES (7, ?)" html-checksum))))
+        (let [json-sql (slurp (io/resource "migrations/011-cmas-json-extractions.sql"))
+              json-checksum (sha (.getBytes json-sql "UTF-8"))]
+          (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=11"))]
+            (when-not (= json-checksum (:sha256 old)) (fail! "CMAS JSON migration checksum conflict"))
+            (do (execute! c json-sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES (11, ?)" json-checksum))))
         (execute! c "REVOKE ALL ON SCHEMA freediving FROM PUBLIC")
         (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " app-role))
         (execute! c (str "REVOKE ALL ON ALL TABLES IN SCHEMA freediving FROM " app-role))
@@ -72,6 +78,7 @@
         (catch Exception e (.rollback c) (throw e))))))
 
 (def identity-keys [:source-sha256 :acquisitions :evidence-sha256 :actor :config :parser-version :schema-version :pdfinfo-version :tool])
+(def json-identity-keys [:source-sha256 :acquisitions :evidence-sha256 :actor :config :parser-version :schema-version :tool])
 (defn- validate-pages! [a]
   (let [pages (:pages a)
         lines (into {} (for [p pages l (:lines p)] [[(:page p) (:line l)] (:text l)]))]
@@ -109,15 +116,15 @@
     (let [bytes (archive/read-source-bytes (str (io/file root "derived-objects" h)))
           _ (when-not (= h (sha bytes)) (fail! "Artifact integrity mismatch"))
           a (read-edn bytes)]
-      (when-not (#{1 2 3 4} (:schema-version a)) (fail! "Unsupported extraction schema"))
-      (when-not (and (= job-id (:job-id a)) (= job-id (digest (select-keys a (if (= 4 (:schema-version a)) html/identity-keys identity-keys)))))
+      (when-not (#{1 2 3 4 5} (:schema-version a)) (fail! "Unsupported extraction schema"))
+      (when-not (and (= job-id (:job-id a)) (= job-id (digest (select-keys a (if (#{4 5} (:schema-version a)) json-identity-keys identity-keys)))))
         (fail! "Extraction job identity mismatch"))
-      (when-not (and (vector? (:candidates a)) (or (= 4 (:schema-version a)) (vector? (:pages a))) (seq (:acquisitions a))
+      (when-not (and (vector? (:candidates a)) (or (#{4 5} (:schema-version a)) (vector? (:pages a))) (seq (:acquisitions a))
                      (string? (:parser-version a)) (not (str/blank? (:parser-version a))) (map? (:config a))
                      (string? (:actor a)) (not (str/blank? (:actor a)))
                      (vector? (:evidence-sha256 a)) (every? hash? (:evidence-sha256 a))
                      (vector? (:acquisitions a)) (map? (:tool a))
-                     (or (= 4 (:schema-version a)) (string? (:pdfinfo-version a)))
+                     (or (#{4 5} (:schema-version a)) (string? (:pdfinfo-version a)))
                      (string? (:processed-at a))
                      (try (java.time.OffsetDateTime/parse (:processed-at a)) (catch Exception _ false))
                      (every? #(and (string? %) (not (str/blank? %))) ((juxt :name :version) (:tool a)))
@@ -126,19 +133,25 @@
       (let [source (archive/inspect root (:source-sha256 a)) evidence (set (archive/extraction-evidence root))]
         (when-not (every? (set (:acquisitions source)) (:acquisitions a)) (fail! "Acquisition provenance mismatch"))
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
-      {:artifact (if (= 4 (:schema-version a)) (html/validate-artifact! root a)
-                     (cond-> (validate-pages! a)
-                       (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
-                       (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
-                       (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
+      {:artifact (case (:schema-version a)
+                   4 (html/validate-artifact! root a)
+                   5 (indoor-json/validate-artifact! root a)
+                   (cond-> (validate-pages! a)
+                     (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
+                     (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
+                     (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
-  (if (= 4 (:schema-version artifact))
-    (let [p (select-keys (:coordinates candidate) [:table :row])]
-      (when-not (every? pos-int? ((juxt :table :row) p)) (fail! "Invalid HTML candidate coordinates"))
-      [p])
-    (let [p (select-keys (:coordinates candidate) [:page :line])]
-      (when-not (every? pos-int? ((juxt :page :line) p)) (fail! "Invalid candidate coordinates"))
-      (or (when (seq (:source-lines candidate)) (mapv #(select-keys % [:page :line]) (:source-lines candidate))) [p]))))
+  (if (= 5 (:schema-version artifact))
+    (let [index (get-in candidate [:coordinates :row-index-zero-based])]
+      (when-not (nat-int? index) (fail! "Invalid JSON candidate coordinates"))
+      [{:row-index-zero-based index}])
+    (if (= 4 (:schema-version artifact))
+      (let [p (select-keys (:coordinates candidate) [:table :row])]
+        (when-not (every? pos-int? ((juxt :table :row) p)) (fail! "Invalid HTML candidate coordinates"))
+        [p])
+      (let [p (select-keys (:coordinates candidate) [:page :line])]
+        (when-not (every? pos-int? ((juxt :page :line) p)) (fail! "Invalid candidate coordinates"))
+        (or (when (seq (:source-lines candidate)) (mapv #(select-keys % [:page :line]) (:source-lines candidate))) [p])))))
 (defn- classification [a candidate]
   (cond
     (and (= 3 (:schema-version a)) (#{"cmas-athens-pool/4" "cmas-athens-pool/5" "cmas-athens-pool/6" "cmas-athens-pool/7"} (:parser-version a))

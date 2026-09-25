@@ -38,7 +38,13 @@
 (defn- anchor [row]
   {:identity-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
    :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
-                     (select-keys (or (first (:source-lines row)) (get-in row [:payload :coordinates])) (if (= :html (:source-format row)) [:table :row] [:page :line])))})
+                     (select-keys (or (first (:source-lines row)) (get-in row [:payload :coordinates]))
+                                  (case (:source-format row)
+                                    :html [:table :row]
+                                    :json [:row-index-zero-based]
+                                    [:page :line]))
+                     (when (= :json (:source-format row))
+                       (select-keys row [:source-page-url])))})
 (defn- name-keys [row]
   (when (and (= "result-row" (:kind row)) (= :parsed (get-in row [:payload :parse-status])))
     (comparison-keys (get-in row [:payload :parsed :source-name]))))
@@ -137,6 +143,8 @@
                                   (for [p (:pages artifact) :when (= (:page p) (:page coords))
                                         l (:lines p) :when (= (:line l) (:line coords))]
                                     (assoc l :page (:page p))))]
-                    (assoc row :source-format (if (= 4 (:schema-version artifact)) :html :pdf) :acquisitions (:acquisitions artifact) :evidence-sha256 (:evidence-sha256 artifact)
+                    (assoc row :source-format (case (:schema-version artifact) 4 :html 5 :json :pdf)
+                           :source-page-url (:source-page-url artifact)
+                           :acquisitions (:acquisitions artifact) :evidence-sha256 (:evidence-sha256 artifact)
                            :extraction-provenance (select-keys artifact [:config :actor :tool :processed-at :pdfinfo-version])
                            :source-lines (vec lines)))) rows))))))

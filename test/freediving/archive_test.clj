@@ -296,6 +296,38 @@
       (is (= receipt (archive/register! root source contextual)))
       (is (= [contextual] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest)))))))))
 
+(deftest cmas-json-acquisition-retains-generated-result-page
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        json-url "https://results.microplustimingservices.com/CMAS/ExportPOST/export/CMAS_2/TFMAM011CLAS07%20001.JSON"
+        page-url "https://results.microplustimingservices.com/CMAS/Results/#/2/dynamic-result-json/MAM/011/007/001"
+        contextual (assoc manifest
+                          :final-url json-url
+                          :content-type "application/json"
+                          :provenance {:publisher-url "https://www.cmas.org/"
+                                       :redirect-chain [json-url]
+                                       :source-page-url page-url})]
+    (spit source "abc")
+    (let [receipt (archive/register! root source contextual)
+          acquired (first (:acquisitions (archive/inspect root (:sha256 manifest))))]
+      (is (= contextual (:manifest acquired)))
+      (is (= (:acquisition-id receipt) (:acquisition-id acquired)))
+      (is (= json-url (get-in acquired [:manifest :final-url])))
+      (is (= page-url (get-in acquired [:manifest :provenance :source-page-url])))))
+  (doseq [page-url ["http://results.microplustimingservices.com/CMAS/Results/#/2/dynamic-result-json/MAM/011/007/001"
+                    "https://results.microplustimingservices.com.evil.org/CMAS/Results/#/2/dynamic-result-json/MAM/011/007/001"
+                    "https://results.microplustimingservices.com/CMAS/Results/?token=secret#/2/dynamic-result-json/MAM/011/007/001"
+                    "https://results.microplustimingservices.com/CMAS/Results/#/3/dynamic-result-json/MAM/011/007/001"
+                    "https://results.microplustimingservices.com/CMAS/Results/#/2/dynamic-result-json/MAM/011/007/001?token=secret"]]
+    (let [dir (workspace) source (str dir "/source")]
+      (spit source "abc")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                            (archive/register! (str dir "/archive") source
+                                               (assoc manifest :provenance
+                                                      {:publisher-url "https://www.cmas.org/"
+                                                       :redirect-chain [(:final-url manifest)]
+                                                       :source-page-url page-url})))
+          page-url))))
+
 (deftest session-and-result-route-allowlists-reject-unobserved-context
   (doseq [url (concat
                (map #(str "https://www.aidainternational.org/StartList/4350" %)

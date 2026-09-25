@@ -20,4 +20,4 @@
     (revisions/migrate! url "observations_app" "reviews_owner")
     (public/migrate! url "reviews_owner" "reviews_public")
     (selections/migrate! url "reviews_owner")
-    (println "Applied migrations 1-10; no records published.")))
+    (println "Applied migrations 1-11; no records published.")))
