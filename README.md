@@ -4,7 +4,7 @@ This slice registers source bytes and acquisition provenance in a private archiv
 
 ## Local owner review demo
 
-The private [revision relationship backend](docs/revision-relationships.md) retains source-bound candidates, explicit missing predecessors and reversible reviewer decisions. It does not approve identities, validate extraction or change public selection. Real championship revision relationships remain unreviewed.
+The private [revision relationship backend](docs/revision-relationships.md) retains source-bound candidates, explicit missing predecessors and reversible reviewer decisions. Separate [reviewed event selections](docs/event-selections.md) choose exact validated versions for public replacement and rollback. Neither operation approves identities or transfers extraction validation. Real championship revision relationships remain unreviewed.
 
 A private loopback web interface supports [read-only real-source inspection](docs/local-source-inspection.md), including authenticated PDF pages and exact extracted evidence. Review authority requires separate explicit configuration. The [synthetic demo](docs/local-owner-review.md) exercises proposals, approval/rejection/reversal and extraction validation. No real pilot decisions were created during verification.
 

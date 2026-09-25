@@ -14,7 +14,7 @@ The new `cmas-2026-indoor-time/1` artifacts also carry `source-semantics-unresol
 
 ## Separate decisions
 
-[Result revision relationships](revision-relationships.md) use separate append-only proposals and reviewer decisions. A confirmed replacement or acknowledged missing predecessor is not publication validation or identity approval. Migration 8 does not alter this policy, invalidate existing validations or suppress existing public projections. Public replacement selection remains unimplemented under [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+[Result revision relationships](revision-relationships.md) use separate append-only proposals and reviewer decisions. A confirmed replacement or acknowledged missing predecessor is not publication validation or identity approval. Migration 8 alone does not alter this policy or suppress public projections. Migration 10 adds separate [reviewed event selection](event-selections.md), with exact validation IDs, explicit coverage and reversible cutover. Real replacement decisions remain gates in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.
 
@@ -71,7 +71,7 @@ Public records retain original source values separately from effective approved 
 
 Exact original source names remain searchable after a name correction. Source representation codes are not citizenship. Missing metadata stays explicit rather than becoming inferred units, dates, successful results or nationality. Coverage describes only the visible partial pilot; it reveals no private corpus counts.
 
-The trusted reviewer prepares all eligible projections with `refresh!`. A change to any review or publication decision invalidates the cached snapshot globally, so public reads return no stale rows. Revalidate affected observations as needed, then refresh. This conservative whole-pilot refresh is intended for the bounded local corpus.
+The trusted reviewer prepares eligible projections with `refresh!`. Before event enrollment, this includes all eligible observations. After enrollment, the explicit event selections and retained baseline constrain that set; newly validated observations do not silently join a selected event. A change to any review or publication decision invalidates the cached snapshot globally, so public reads return no stale rows. Revalidate affected observations as needed, then refresh. Event selection also tracks relationship and selection authority. This conservative whole-pilot refresh is intended for the bounded local corpus.
 
 Policy activation is a separate append-only database-owner action. Policy version identifiers cannot be reused, so an old version cannot be reactivated to revive its validations. Rollbacks require a fresh version identifier and new validations. An application that does not implement the active policy cannot validate results. Updating code alone does not activate a database policy; deployment of a new policy must explicitly activate it. Real pilot activation changes and validation decisions require separate evidence-backed review.
 
