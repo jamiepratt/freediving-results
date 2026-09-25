@@ -123,3 +123,7 @@ The later [event-selection API](event-selections.md) adds separately reviewed pu
 ## Isolated restart import
 
 The subsequent [corpus audit](championship-corpus-20260925.md) imported all 24 retained AIDA versions and 3,483 observations into a separate local database. All unchanged retries skipped; exact source replay and independent payload checks passed. Original captures and recaptures remain distinct. No review, identity approval, policy activation or event selection occurred.
+
+## Dated-view scope audit
+
+The [September 25 scope audit](aida-scope-audit-20260925.md) checked all 3,483 retained rows and separately archived the three official EventPage schedules and venue descriptions. The opt-in [dated-view contract](event-selections.md#explicit-aida-dated-views) supports partial scoping using existing exact source bindings, with full-artifact ambiguity rejection. It changes neither extraction identity nor stored observations. Schedules do not establish row discipline, round or attempt identity; one Limassol row differs from its date's scheduled discipline/category. Exact private descriptors remain unapproved.
