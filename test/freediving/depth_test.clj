@@ -244,3 +244,13 @@
       (is (= :skipped (:run-status again)))
       (is (= (:artifact-sha256 receipt) (:artifact-sha256 again)))
       (is (= old-bytes (slurp (:artifact-path old)))))))
+
+(deftest malformed-inline-column-boundaries-stay-unparsed
+  (let [h (str "2025 CMAS World Championship Freediving Depth\n09/09/2025\nResult\nCWT MEN SENIORS\n"
+               "DEC.                                                                                                  FINAL\n"
+               "RANK   SURNAME & NAME                NAT   CATEGORY                                   DEPTH PEN.              STATUS   NOTES\n"
+               "                                                                         DEPTH                        DEPTH\n")
+        body "1 Synthetic Person AIN Men Senior 80 80 80"
+        result (extraction/parse-pages [(str h body)])]
+    (is (= :unparsed (get-in result [:candidates 0 :parse-status])))
+    (is (= body (get-in result [:candidates 0 :raw :line])))))

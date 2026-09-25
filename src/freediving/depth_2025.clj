@@ -42,6 +42,11 @@
                      (+ (str/index-of (:text h) "NAT") 1)) (+ (str/index-of (:text u) "DEC.") 2)
                    (+ (str/index-of columns "DEPTH") 2) (+ (str/index-of columns "PEN.") 2)
                    (+ (str/index-of (:text u) "FINAL") 2) (+ (str/index-of columns "STATUS") 3)])
+        cuts (when centers
+               (conj (mapv #(quot (+ %1 %2) 2) centers (rest centers))
+                     (if (str/includes? (:text h) "CATEGORY")
+                       (+ (str/index-of columns "STATUS") 7)
+                       (str/index-of columns "NOTES"))))
         compatible? (and category document-category
                          (if subsection
                            (let [[_ age gender] (re-matches #"(?:Masters|MASTERS) (M[123]) - (Men|Women)" subsection)]
@@ -53,14 +58,13 @@
                     (= 1 (count (filter #(re-matches title-pattern %) texts)))
                     (if full? (and lower (< (:line u) (:line h) (:line lower)))
                         (and mid bottom tail (< (:line u) (:line h) (:line mid) (:line bottom) (:line tail))))
-                    centers (apply < centers))]
+                    centers (apply < centers)
+                    cuts (apply < 0 cuts) (<= (last cuts) (count columns)))]
     {:discipline discipline :category category :document-category document-category
      :event-date (date-value (only-value (distinct (filter #(re-matches #"\d{2}/\d{2}/\d{4}" %) texts))))
      :valid? valid? :header-line (:line (if full? lower tail))
      :inline-category? (and h (str/includes? (:text h) "CATEGORY"))
-     :cuts (when valid? (conj (mapv #(quot (+ %1 %2) 2) centers (rest centers)) (if (str/includes? (:text h) "CATEGORY")
-                                                                                  (+ (str/index-of columns "STATUS") 7)
-                                                                                  (str/index-of columns "NOTES"))))
+     :cuts (when valid? cuts)
      :metadata-evidence (vec (filter #(or (re-matches title-pattern (str/trim (:text %)))
                                           (re-matches section-pattern (str/trim (:text %)))
                                           (re-matches subsection-pattern (str/trim (:text %)))
