@@ -152,7 +152,7 @@
   function expandable(title,value){const d=node('details');d.append(node('summary',title),structure(value));return d;}
   function sourceEvidence(e){
     const view=node('div'),table=node('table'),header=node('tr');
-    if(e['source-format']==='html'){view.append(structure({coordinates:e.coordinates,context:e.context,'raw-row':e['raw-row'],cells:e.cells}),expandable('Exact source provenance',e));return view;}
+    if(e['source-format']==='html'){view.append(structure({coordinates:e.coordinates}),node('p','Inspect the retained row and context in this observation’s registered HTML viewer.'),expandable('Exact source provenance',e));return view;}
     ['Page','Line','Original source text'].forEach(label=>header.append(node('th',label)));table.append(header);
     (e['source-lines']||[]).forEach(line=>{const row=node('tr');[line.page,line.line,line.text].forEach(value=>row.append(node('td',readable(value))));table.append(row);});
     view.append(table,expandable('Exact source provenance, hashes and acquisitions',Object.fromEntries(Object.entries(e).filter(([key])=>key!=='source-lines'))));return view;
