@@ -1,6 +1,7 @@
 (ns freediving.publication-test
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
             [freediving.aida-html :as html]
+            [freediving.archive :as archive]
             [freediving.aida-html-test :as html-fixture]
             [freediving.archive-test :as archive-fixture]
             [freediving.observations :as observations]
@@ -181,9 +182,15 @@
     (is (thrown? Exception (publication/decide! reviewer (request target "html-not-pdf"))))))
 (defn html-sample
   ([] (html-sample {}))
-  ([{:keys [prefix cells config] :or {prefix "<div class='site-header__branding'><img alt='Synthetic championship'></div>" cells (assoc html-fixture/cells 10 "") config {}}}]
+  ([{:keys [prefix cells config browser] :or {prefix "<div class='site-header__branding'><img alt='Synthetic championship'></div>" cells (assoc html-fixture/cells 10 "") config {}}}]
    (let [dir (archive-fixture/workspace) root (str dir "/archive")
          hash (html-fixture/register-html root (str dir "/source.html") (str prefix (html-fixture/document cells)))
+         _ (when browser
+             (let [retained (archive/retain-evidence! root (.getBytes "Synthetic retained DOM evidence" "UTF-8"))
+                   manifest (:manifest (first (:acquisitions (archive/inspect root hash))))]
+               (archive/register! root (str dir "/source.html")
+                                  (assoc manifest :provenance {:publisher-url "https://example.org/" :redirect-chain [(:final-url manifest)]
+                                                               :browser-state (merge {:representation :rendered-dom :rendered-sha256 (:sha256 retained)} browser)}))))
          job (:job-id (html/extract! root hash {:actor "synthetic" :config config}))]
      (observations/import! fixture/app root job)
      {:job-id job :ordinal 0})))
@@ -207,3 +214,34 @@
       (is (= {:outcome :unknown} (:identity (reviews/effective reviewer t))))
       (publication/decide! reviewer (assoc r :id "revoke-html" :base-revision 1 :action :revoke :attestations {}))
       (is (false? (:eligible? (publication/diagnose reviewer t)))))))
+(deftest html-substantive-context-and-new-extractions-remain-unvalidated
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (doseq [options [{:prefix ""} {:prefix "<h1>A</h1><h1>B</h1>"} {:cells html-fixture/cells}
+                   {:browser {:selected-date "2025-06-29" :filters {}}}]]
+    (let [t (html-sample options)]
+      (is (false? (:ready? (publication/diagnose reviewer t))))
+      (is (thrown? Exception (publication/decide! reviewer (html-request t (str "blocked-" (:job-id t))))))))
+  (let [t (html-sample) newer (html-sample {:config {:rerun true}})]
+    (publication/decide! reviewer (html-request t "original-html"))
+    (is (:eligible? (publication/diagnose reviewer t)))
+    (is (false? (:eligible? (publication/diagnose reviewer newer))))
+    (is (thrown? Exception (publication/decide! reviewer (merge (html-request t "copied-html") newer))))
+    (reviews/propose! fixture/app (assoc (review-fixture/proposal t "html-identity") :evidence [{:table 1 :row 2}]))
+    (reviews/decide! reviewer {:id "identity-approved" :proposal-id "html-identity" :base-revision 0 :action :approve :actor "owner" :reason "Explicit identity review"})
+    (is (false? (:eligible? (publication/diagnose reviewer t))))
+    (publication/decide! reviewer (assoc (html-request t "revalidated-html") :base-revision 1))
+    (is (:eligible? (publication/diagnose reviewer t)))
+    (reviews/decide! reviewer {:id "identity-reversed" :event-id "identity-approved" :base-revision 1 :action :reverse :actor "owner" :reason "Undo"})
+    (is (false? (:eligible? (publication/diagnose reviewer t))))))
+(deftest html-persisted-source-tampering-is-rejected
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (let [t (html-sample) original (html-request t "html-original")]
+    (publication/decide! reviewer original)
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+    (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_sha256='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'")
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+    (is (thrown? Exception (publication/decide! reviewer original)))
+    (is (false? (:ready? (publication/diagnose reviewer t))))
+    (is (false? (:eligible? (publication/diagnose reviewer t))))
+    (is (thrown? Exception (publication/decide! reviewer (assoc (html-request t "html-forged") :base-revision 1))))
+    (is (thrown? Exception (reviews/propose! fixture/app (assoc (review-fixture/proposal t "forged-review") :evidence [{:table 1 :row 2}]))))))

@@ -133,7 +133,7 @@
                     (when (and html? (not (nonblank? (:event-name context)))) [:missing-event-heading])
                     (when (and html? (not (nonblank? (:event-date context)))) [:missing-event-date])
                     (when (and html? (pos? (get-in artifact [:reconciliation :unsupported-table-count] 0))) [:unsupported-html-layout])
-                    (when html? (map #(vector :substantive-source-flag %) (:flags payload)))
+                    (when html? (concat (:context-errors context) (map #(vector :substantive-source-flag %) (:flags payload))))
                     (map (fn [x] [:unresolved-extraction-error x])
                          (remove (cond-> allowed-uncertainties
                                    (and html? (= html-policy policy)) (into #{:html-review-not-supported :coverage-not-established})) uncertainties))
@@ -183,6 +183,8 @@
                    (fail! "Publication reviewer database capability required"))
                  (query c "SELECT pg_advisory_xact_lock(781246915)")
                  (query c "SELECT pg_advisory_xact_lock(hashtextextended(?,11))" (str (:job-id r) "/" (:ordinal r)))
+                 (let [s (state c r)]
+                   (when (html-evidence/html? (:artifact s)) (html-context! s)))
                  (if-let [old (first (query c "SELECT * FROM freediving.publication_decisions WHERE id=?" (:id r)))]
                    (do (when-not (= r (:request (body old))) (fail! "Conflicting idempotency key")) (body old))
                    (let [d (diagnosis c r) s (state c r)

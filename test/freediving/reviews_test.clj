@@ -3,6 +3,7 @@
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
             [freediving.aida-html :as html]
+            [freediving.html-evidence :as html-evidence]
             [freediving.aida-html-test :as html-fixture]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
@@ -300,3 +301,22 @@
       (is (= :matched (get-in (reviews/effective reviewer target) [:identity :outcome])))
       (reviews/decide! reviewer {:id "reverse-html" :event-id "approve-html" :action :reverse :base-revision 1 :actor "owner" :reason "Undo"})
       (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target)))))))
+(deftest html-registered-identity-target-rejects-wrong-source-row-and-envelope
+  (let [dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        _ (observations/import! fixture/app root job)
+        inspection (observations/inspect fixture/app job)
+        ref {:job-id job :ordinal 0 :candidate-id (:candidate_id (first (:observations inspection)))
+             :source-sha256 hash :artifact-sha256 (html-evidence/sha256 (:artifact-bytes inspection))
+             :table 1 :row 2}
+        t (sample) p (assoc (proposal t "html-anchor") :identity-target ref :evidence [ref]
+                            :after {:outcome :matched :identity-id (str "local-observation:" job ":0")})]
+    (doseq [bad [(assoc ref :row 1) (assoc ref :table 2) (assoc ref :ordinal 1)
+                 (assoc ref :candidate-id "forged") (assoc ref :source-sha256 "forged")
+                 (assoc ref :artifact-sha256 "forged")]]
+      (is (thrown? Exception (reviews/propose! fixture/app (assoc p :evidence [bad] :identity-target bad)))))
+    (reviews/propose! fixture/app p)
+    (is (thrown? Exception (reviews/decide! fixture/app {:id "forbidden" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Not authorized"})))
+    (reviews/decide! reviewer {:id "approved-html-anchor" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Explicit review"})
+    (is (= (:after p) (:identity (reviews/effective reviewer t))))))

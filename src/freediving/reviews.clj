@@ -171,6 +171,8 @@
   (transaction url
                (fn [c]
                  (audit! p) (lock! c p)
+                 (page-lines (target c p))
+                 (doseq [ref (:evidence p) :when (contains? ref :job-id)] (registered-reference! c ref))
                  (or (existing c "review_proposals" (:id p) p)
                      (let [s (snapshot c p) _ (validate-proposal! c p s) o (target c p)
                            record (assoc p :action :propose :request p
@@ -201,6 +203,7 @@
                        _ (when-not (= (select-keys raw [:id :job-id :ordinal]) (assoc t :id (:id row)))
                            (fail! "Proposal or event envelope mismatch"))]
                    (lock! c t)
+                   (page-lines (target c t))
                    (or (existing c "review_decisions" (:id request) request)
                        (let [s (snapshot c t) subject (body row) ds (decisions c t)
                              _ (when-not (= (:base-revision request) (:revision s)) (fail! "Stale base revision"))
