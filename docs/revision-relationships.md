@@ -47,3 +47,23 @@ A consumer must read the current relationship state and exact source references,
 ## Genuine evidence boundary
 
 The [retained CMAS inspection](cmas-timing-acquisition-20260925.md#batch-8-revision-evidence-inspection) supports filename/version and report-header evidence, but supplies no reviewed predecessor relationship. Inspected CWT PDFs lack stable athlete-ID/bib columns. Separate 2026 initial and continuation units have different scoped identifiers and dates. No genuine record was confirmed, rejected or reversed during this batch. Backend fixtures are synthetic, not reconstructed publisher history.
+
+## Typed retained HTML scope
+
+HTML descriptors accept `[:html-scope field]` with the same exact reference/value binding envelope. The field must equal the descriptor's scope key. These bindings replay the retained HTML and candidate ordinal, verify extraction/acquisition identities, and reject explicit hiding and contradictory selected context.
+
+| Field | Retained evidence |
+| --- | --- |
+| `:event-id` | Numeric ID in a registered `https://www.aidainternational.org/StartList/ID` URL; optional `day_index` or `#start` does not change the event ID |
+| `:federation` | `AIDA`, the namespace established by that official registered route |
+| `:event-name` | Unique visible `h1` or supported championship branding image alt text; never the document title |
+| `:date` | Unique visible active `.days` control, agreeing with parser replay |
+| `:discipline`, `:category` | Own-row `Discipline`/`Gender`, or unique visible selected controls when the row has no such column |
+| `:source-name` | Own-row `Diver` cell |
+| `:source-athlete-id` | One visible, exact official `Profile-UUID` href in that row's `Diver` cell; this is a scoped source identifier, not an identity decision |
+
+All registered acquisition routes must agree before supplying an event ID. Selected controls and row fields must agree; gender spelling aliases are compared only for detecting contradictions and retained values are not rewritten. Start order, rank, day-index, line and official-top values do not supply bib, attempt, round or session. HTML raw-field scope paths remain available only for their corresponding `Diver`, `Discipline` and `Gender` fields. HTML descriptors replay source even when these older raw paths are used, so changing and rehashing stored context does not manufacture evidence.
+
+A read-only batch 11 check replayed the first row of each of the 24 retained AIDA extraction versions. All supplied the eight fields above. This was a selector smoke check, not a completeness assertion for every row. The stale 2021 `h1` in these pages is commented out; visible championship branding supplies the event name. No separately typed venue, round, session or bib was established. A location embedded in an event name does not automatically establish a venue. These partial descriptors still cannot pass complete event-selection scope requirements.
+
+CMAS PDF page-line and own-row raw evidence paths remain available. No CMAS API record was promoted into an extracted row, and no rank was treated as a bib. Missing stable identifiers and ambiguous timing semantics remain source/review gaps tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8), not new authority conferred by these selectors.

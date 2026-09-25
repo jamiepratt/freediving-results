@@ -5,7 +5,10 @@
             [freediving.archive-test :as archive-fixture]
             [freediving.extraction-test :as pdf]
             [freediving.observations-test :as fixture]
-            [freediving.revisions :as revisions]))
+            [freediving.revisions :as revisions]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
+            [freediving.html-evidence :as html-evidence]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
 (use-fixtures :each (fn [f]
                       (when-not fixture/admin (throw (ex-info "Isolated PostgreSQL required" {})))
@@ -203,3 +206,74 @@
       (is (thrown? Exception (revisions/propose! fixture/app (assoc p :id "bad" :revision-evidence [{:kind :version :binding bad}])))))
     (doseq [k [:event-id :bib :source-athlete-id]]
       (is (thrown? Exception (revisions/candidates fixture/app (assoc-in b [:scope k] binding) []))))))
+
+(defn html-sample
+  ([source] (html-sample source "https://example.org/StartList/1"))
+  ([source url]
+   (let [dir (archive-fixture/workspace) root (str dir "/archive") file (str dir "/source.html")
+         hash (html-evidence/sha256 (.getBytes source "UTF-8"))
+         _ (spit file source)
+         _ (archive/register! root file (-> archive-fixture/manifest
+                                            (assoc :sha256 hash :content-type "text/html" :final-url url)
+                                            (dissoc :provenance)))
+         a (html/extract! root hash {:actor "synthetic" :config {}})]
+     (observations/import! fixture/app root (:job-id a))
+     (revisions/reference fixture/app {:job-id (:job-id a) :ordinal 0}))))
+(defn html-descriptor [ref values]
+  {:reference ref :scope (into {} (for [[k v] values] [k {:reference ref :path [:html-scope k] :value v}]))})
+(deftest retained-html-scope-is-replayed-without-inventing-missing-fields
+  (let [ref (html-sample (str "<h1>Synthetic championship</h1>" (html-fixture/document html-fixture/cells)))
+        d (html-descriptor ref {:event-name "Synthetic championship" :date "2025-06-28"
+                                :discipline "DYNB" :category "Female" :source-name "ÉXAMPLE  & Person"})]
+    (is (= [] (revisions/candidates fixture/app d [])))
+    (doseq [field [:venue :round :session :bib :attempt]]
+      (is (thrown? Exception (revisions/candidates fixture/app (html-descriptor ref {field "1"}) []))))))
+
+(deftest html-start-order-is-never-a-bib-or-session
+  (let [ref (html-sample (html-fixture/document html-fixture/cells))
+        binding {:reference ref :path [:candidates 0 :raw :fields "Start"] :value "1"}]
+    (doseq [field [:bib :attempt :session :round :event-id]]
+      (is (thrown? Exception (revisions/candidates fixture/app {:reference ref :scope {field binding}} []))))))
+
+(deftest retained-profile-link-is-scoped-source-id-only
+  (let [profile "https://www.aidainternational.org/Profile-00000000-0000-0000-0000-000000000001"
+        ref (html-sample (html-fixture/document (assoc html-fixture/cells 1 (str "<a href='" profile "'>Synthetic Person</a>"))))]
+    (is (= [] (revisions/candidates fixture/app (html-descriptor ref {:source-athlete-id profile}) [])))))
+
+(deftest registered-aida-route-binds-event-id-without-treating-day-index-as-session
+  (let [ref (html-sample (html-fixture/document html-fixture/cells)
+                         "https://www.aidainternational.org/StartList/1234?day_index=3")]
+    (is (= [] (revisions/candidates fixture/app (html-descriptor ref {:event-id "1234" :federation "AIDA"}) [])))
+    (is (thrown? Exception (revisions/candidates fixture/app (html-descriptor ref {:session "3"}) [])))))
+
+(deftest retained-row-and-selected-discipline-cannot-conflict
+  (let [ref (html-sample (str "<select id='discipline'><option selected>DYN</option></select>"
+                              (html-fixture/document html-fixture/cells)))]
+    (is (thrown? Exception (revisions/candidates fixture/app (html-descriptor ref {:discipline "DYNB"}) [])))))
+
+(deftest hidden-and-ambiguous-context-cannot-supply-scope
+  (doseq [[source values]
+          [[(str "<div hidden><h1>Hidden event</h1></div>" (html-fixture/document html-fixture/cells)) {:event-name "Hidden event"}]
+           [(str "<h1>One</h1><h1>Two</h1>" (html-fixture/document html-fixture/cells)) {:event-name "One"}]
+           [(str "<div hidden>" (html-fixture/document html-fixture/cells) "</div>") {:date "2025-06-28"}]
+           [(html-fixture/document (assoc html-fixture/cells 1 "<span hidden>Hidden athlete</span>")) {:source-name "Hidden athlete"}]
+           [(str "<select id='discipline' hidden><option selected>DYN</option></select>"
+                 (html-fixture/document html-fixture/cells)) {:discipline "DYN"}]]]
+    (let [ref (html-sample source)]
+      (is (thrown? Exception (revisions/candidates fixture/app (html-descriptor ref values) []))))))
+
+(deftest rehashed-html-context-tampering-still-fails-source-replay
+  (let [ref (html-sample (html-fixture/document html-fixture/cells))
+        artifact (:artifact (observations/inspect fixture/app (:job-id ref)))
+        forged (assoc-in artifact [:context :event-date] "2099-01-01")
+        bytes (.getBytes (pr-str forged) "UTF-8")
+        hash (html-evidence/sha256 bytes)
+        forged-ref (assoc ref :artifact-sha256 hash)]
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin)
+                s (.prepareStatement c "UPDATE freediving.extractions SET artifact_bytes=?,artifact_sha256=? WHERE job_id=?")]
+      (.setBytes s 1 bytes) (.setString s 2 hash) (.setString s 3 (:job-id ref)) (.executeUpdate s))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+    (is (thrown-with-msg? Exception #"replay" (revisions/candidates fixture/app (html-descriptor forged-ref {:date "2099-01-01"}) [])))
+    (is (thrown-with-msg? Exception #"replay" (revisions/candidates fixture/app
+                                                                    {:reference forged-ref :scope {:source-name {:reference forged-ref :path [:candidates 0 :raw :fields "Diver"] :value "ÉXAMPLE  & Person"}}} [])))))

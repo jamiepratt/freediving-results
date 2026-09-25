@@ -2,7 +2,8 @@
   "Source-backed revision candidates and append-only authorized relationship reviews."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [freediving.source-scope :as source-scope])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -89,8 +90,9 @@
   ([c binding revision-evidence?]
    (let [{:keys [reference path value]} binding
          target (verified-target c reference)
-         _ (when-not (or (and (= :candidates (first path)) (= (:ordinal reference) (second path))
-                              (= :raw (nth path 2 nil)) (>= (count path) 4))
+         html-scope? (and (= 2 (count path)) (= :html-scope (first path)))
+         _ (when-not (or html-scope? (and (= :candidates (first path)) (= (:ordinal reference) (second path))
+                                          (= :raw (nth path 2 nil)) (>= (count path) 4))
                          (and (= :pages (first path)) (nat-int? (second path))
                               (= :lines (nth path 2 nil)) (nat-int? (nth path 3 nil))
                               (= :text (nth path 4 nil)) (= 5 (count path)))
@@ -98,7 +100,9 @@
                               (= :acquisitions (first path)) (nat-int? (second path))
                               (= [:manifest :final-url] (vec (drop 2 path)))))
              (fail! "Evidence path must address source text or the referenced source row"))
-         absent (Object.) actual (get-in (:artifact target) path absent)]
+         absent (Object.) actual (if html-scope?
+                                   (get (source-scope/html-values! (:artifact target) (:ordinal reference)) (second path) absent)
+                                   (get-in (:artifact target) path absent))]
      (when-not (and (= #{:reference :path :value} (set (keys binding)))
                     (= reference (:reference target)) (vector? path) (seq path)
                     (not (identical? absent actual)) (= value actual))
@@ -106,12 +110,22 @@
      (when-not (and (or (string? value) (number? value)) (not (and (string? value) (str/blank? value))))
        (fail! "Source evidence values must be nonblank scalars")) value)))
 (defn- descriptor [c d]
-  (let [target (verified-target c (:reference d))]
+  (let [target (verified-target c (:reference d))
+        html-values (when (= 4 (:schema-version (:artifact target)))
+                      (source-scope/html-values! (:artifact target) (:ordinal (:reference d))))]
     (when-not (= (:reference d) (:reference target)) (fail! "Descriptor provenance mismatch"))
     (when-not (and (= #{:reference :scope} (set (keys d))) (map? (:scope d))) (fail! "Invalid descriptor"))
     (into {} (for [[k b] (:scope d)]
-               (do (when (and (#{:bib :source-athlete-id :source-name :attempt} k) (not= :candidates (first (:path b))))
+               (do (when (and html-values
+                              (not (or (= [:html-scope k] (:path b))
+                                       (= [:candidates (:ordinal (:reference d)) :raw :fields
+                                           ({:source-name "Diver" :discipline "Discipline" :category "Gender"} k)] (:path b)))))
+                     (fail! "Unsupported typed HTML scope source"))
+                   (when (and (#{:bib :source-athlete-id :source-name :attempt} k) (not (or (= :candidates (first (:path b)))
+                                                                                            (and (= :html-scope (first (:path b))) (= k (second (:path b)))))))
                      (fail! "Participant scope requires own-row source evidence"))
+                   (when (and (= :html-scope (first (:path b))) (not= k (second (:path b))))
+                     (fail! "Typed scope field mismatch"))
                    (when-not (= (:reference d) (:reference b)) (fail! "Scope provenance mismatch"))
                    [k (let [v (binding-value c b)]
                         (when-not (and (or (string? v) (number? v)) (not (and (string? v) (str/blank? v))))
