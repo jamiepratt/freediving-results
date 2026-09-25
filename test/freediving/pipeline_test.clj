@@ -7,6 +7,7 @@
             [freediving.depth-2026 :as depth-2026]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
+            [freediving.athens-geometry :as athens-geometry]
             [freediving.novi-sad :as novi-sad]
             [freediving.extraction-test :as pdf]
             [freediving.archive :as archive]
@@ -234,5 +235,11 @@
 (deftest indoor-time-parser-version-change-requires-new-registration
   (let [{:keys [job config job-id]} (setup)]
     (with-redefs [indoor-time/parser-version "cmas-2026-indoor-time/test-next"]
+      (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
+      (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))
+
+(deftest athens-geometry-version-change-requires-new-registration
+  (let [{:keys [job config job-id]} (setup)]
+    (with-redefs [athens-geometry/parser-version "cmas-athens-pool/test-next"]
       (is (= :stale-job-version (:reason (pipeline/stage! config :archive job-id))))
       (is (not= job-id (:job-id (pipeline/register-job! (:registry-root config) job)))))))

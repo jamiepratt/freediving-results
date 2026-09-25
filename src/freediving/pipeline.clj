@@ -8,6 +8,7 @@
             [freediving.extraction :as extraction]
             [freediving.aida :as aida]
             [freediving.athens :as athens]
+            [freediving.athens-geometry :as athens-geometry]
             [freediving.depth-2025 :as depth-2025]
             [freediving.depth-2026 :as depth-2026]
             [freediving.indoor-2026 :as indoor-2026]
@@ -61,7 +62,7 @@
       (when-not (and (= h (sha bytes)) (= id (:job-id value))) (fail! :invalid-private-reference))
       value)))
 (defn- versions []
-  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version depth/parser-version depth-2025/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version novi-sad/parser-version]
+  {:pipeline pipeline-version :parsers [extraction/parser-version aida/parser-version athens/parser-version athens-geometry/parser-version depth/parser-version depth-2025/parser-version depth-2025/geometry-parser-version depth-2026/parser-version indoor-2026/parser-version indoor-time/parser-version novi-sad/parser-version]
    :candidates {:version candidates/packet-version :config candidates/default-config}
    :tools (mapv (fn [tool]
                   (let [r (shell/sh tool "-v")]

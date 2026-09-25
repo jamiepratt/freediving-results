@@ -269,7 +269,7 @@
       (is (= :created (:run-status receipt)))
       (is (not= (:job-id legacy) (:job-id receipt)))
       (is (= legacy-bytes (slurp (:artifact-path legacy))))
-      (is (= "cmas-athens-pool/6" (:parser-version r)))
+      (is (= "cmas-athens-pool/7" (:parser-version r)))
       (is (= 3 (:schema-version r)))
       (is (= 1 (get-in r [:reconciliation :parsed-count])))
       (is (= :skipped (:run-status (extraction/extract! root digest opts))))

@@ -6,6 +6,9 @@
             [freediving.aida-html-test :as html-fixture]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
+            [freediving.athens :as athens]
+            [freediving.athens-geometry-test :as athens-fixture]
+            [freediving.depth-2026-test :as geometry-fixture]
             [freediving.extraction-test :as extraction-fixture]
             [freediving.archive-test :as fixture]
             [freediving.observations :as observations])
@@ -86,7 +89,7 @@
       (is (thrown-with-msg? Exception error (observations/import! app root (:job-id artifact))))
       (is (= 0 (:observations (observations/counts app)))))))
 (deftest abrupt-process-death-rolls-back
-  (let [{:keys [root artifact] :as fixture} (synthetic 3 "cmas-athens-pool/6") job (:job-id artifact)]
+  (let [{:keys [root artifact] :as fixture} (synthetic 3 "cmas-test/1") job (:job-id artifact)]
     (publish! fixture)
     (let [code (str "(require '[freediving.observations :as o]) (o/import! " (pr-str app) " " (pr-str root) " " (pr-str job)
                     " {:on-progress (fn [_] (.halt (Runtime/getRuntime) 23))})")
@@ -95,6 +98,16 @@
     (is (= 0 (:observations (observations/counts app))))
     (is (= 0 (:versions (observations/counts app))))
     (is (= :created (:status (observations/import! app root job))))))
+
+(deftest athens-current-and-preserved-six-import-as-distinct-versions
+  (let [{:keys [root result receipt]} (geometry-fixture/extract-stream athens-fixture/synthetic-stream)
+        old (-> (merge result (athens/parse-pages (mapv :text (:pages result))))
+                (dissoc :geometry-xml) (update :tool dissoc :geometry-arguments))
+        historical (athens-fixture/install-artifact root old)]
+    (doseq [r [receipt historical]]
+      (is (= :created (:status (observations/import! app root (:job-id r)))))
+      (is (= :skipped (:status (observations/import! app root (:job-id r))))))
+    (is (= 2 (:versions (observations/counts app))))))
 (deftest conflicts-and-tampering-rejected
   (let [{:keys [root artifact] :as fixture} (synthetic 1 "cmas-test/1")
         receipt (publish! fixture) job (:job-id artifact)]
@@ -106,7 +119,7 @@
     (spit (:artifact-path receipt) "corrupt")
     (is (thrown-with-msg? Exception #"integrity" (observations/import! app root job)))))
 (deftest concurrent-versions-and-fragment-provenance
-  (let [{:keys [root artifact]} (synthetic 3 "cmas-athens-pool/6")
+  (let [{:keys [root artifact]} (synthetic 3 "cmas-athens-pool/4")
         lines ["fi" "unknown header"]
         a (-> artifact
               (assoc :raw-text (str/join "\n" lines)
@@ -133,16 +146,25 @@
       (is (thrown-with-msg? Exception #"Conflicting" (observations/import! app root (:job-id artifact))))
       (is (= 1 (:versions (observations/counts app)))))))
 (deftest real-parser-multiline-artifacts-retain-evidence
-  (doseq [[schema text] [[2 (str extraction-fixture/aida-header "     Éva\n1.   Example-   AIN   150 m   1m   75.5   0\n     Test\n")]
-                         [3 (str (str/replace extraction-fixture/dyn-header "# Name & surname Country Realized Final Notes" "# Name & surname Country     Realized     Final        Notes")
-                                 (apply str (repeat 60 " ")) "GOLD MEDAL,\n1 Synthetic NAME GBR          210,5       210,5\n"
-                                 (apply str (repeat 60 " ")) "WORLD RECORD SENIORS\n")]]]
-    (let [parsed (extraction/parse-pages [text])
-          {:keys [root artifact]} (synthetic schema (:parser-version parsed))
-          a (merge artifact parsed {:raw-text text})]
-      (publish! {:root root :artifact a})
-      (is (= :created (:status (observations/import! app root (:job-id a)))))
-      (is (= (:candidates a) (mapv :payload (:observations (observations/inspect app (:job-id a)))))))))
+  (let [text (str extraction-fixture/aida-header "     Éva\n1.   Example-   AIN   150 m   1m   75.5   0\n     Test\n")
+        parsed (extraction/parse-pages [text])
+        {:keys [root artifact]} (synthetic 2 (:parser-version parsed))
+        a (merge artifact parsed {:raw-text text})]
+    (publish! {:root root :artifact a})
+    (is (= :created (:status (observations/import! app root (:job-id a)))))
+    (is (= (:candidates a) (mapv :payload (:observations (observations/inspect app (:job-id a)))))))
+  (let [stream (str (-> athens-fixture/synthetic-stream
+                        (str/replace "DNF FINAL" "DYN FINAL")
+                        (str/replace "(1 Sample NAME GBR 100 100) Tj ET" "ET\n"))
+                    (geometry-fixture/text-at 400 636 "GOLD MEDAL,")
+                    (geometry-fixture/text-at 20 630 "1 Synthetic NAME GBR 210,5 210,5")
+                    (geometry-fixture/text-at 400 624 "WORLD RECORD SENIORS"))
+        {:keys [root result receipt]} (geometry-fixture/extract-stream stream)
+        job (:job-id receipt)]
+    (is (= "GOLD MEDAL, WORLD RECORD SENIORS" (get-in result [:candidates 0 :parsed :notes])))
+    (is (= 3 (count (get-in result [:candidates 0 :source-lines]))))
+    (is (= :created (:status (observations/import! app root job))))
+    (is (= (:candidates result) (mapv :payload (:observations (observations/inspect app job)))))))
 (deftest malformed-processing-provenance-rejected
   (doseq [change [#(dissoc % :processed-at) #(update % :tool dissoc :version)
                   #(assoc % :processed-at "yesterday") #(assoc-in % [:tool :arguments] [1])
