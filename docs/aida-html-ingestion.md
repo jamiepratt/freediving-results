@@ -26,11 +26,13 @@ Date context comes from the selected date in the archived HTML. Ranking discipli
 
 The archive now accepts structured browser acquisition context and verifies separately retained DOM evidence. See the [manifest contract](../README.md#manifest-contract). Official AIDA schedule links can also include an allowed literal `day_index` query; retain it together with the observed selected date. The [25 September inventory](championship-inventory-20260925.md) records the isolated restart corpus. The session audit below covers all exposed result dates for Wakayama 2025, Limassol 2025 and Budapest 2026. These private acquisitions do not replace the earlier corpus or establish complete championship coverage beyond those views.
 
-The `:event-name` field currently retains the document title, which is generic on older event pages. Their specific event heading remains in the archived HTML. Points and penalties retain source text without numeric coercion. These limitations remain visible rather than being filled from inferred context.
+The immutable parser's `:event-name` field retains the document title, which can be generic. The separate HTML review evidence path reads the retained event header and selected date without rewriting that original field or changing parser version 1. A document title alone does not establish an event name. Points and penalties retain source text without numeric coercion.
 
 Duplicate extraction/import calls reuse the same immutable job and observations when source bytes, acquisition evidence, parser, actor and config are unchanged. Changed source bytes or processing identity produce another retained version. This does not deduplicate athletes, rank and attempt listings, or mirrored publications into one sporting result.
 
-HTML observations remain blocked from publication. The current review/publication path requires PDF page/line evidence; this change does not authorize HTML validation, identity merging, corrections or public release.
+Private HTML inspection and review use exact table/row evidence. Optional publication policy `extraction-publication/2` supports HTML citations after explicit reviewer validation; policy 1 continues to block HTML. Installing code and migration 9 does not activate policy 2. Activation and genuine decisions remain separate owner checkpoints. See [publication policy](publication-policy.md) and [private inspection](local-source-inspection.md).
+
+Inspection verifies the retained source and extraction before presenting event/date/filter context and row cells as inert text. It does not execute publisher scripts or fetch publisher assets. Evidence remains bound to the exact source, job, artifact, candidate and observation. A different capture or extraction requires fresh decisions, even if its rows look identical. Automated replay and reconciliation never supply the reviewer's accuracy attestations.
 
 ## Measured acquisition, 24 September 2026
 
@@ -108,4 +110,10 @@ clojure -M data/championship-restart-20260925-b02/aida/recaptures/register_extra
 python3 data/championship-restart-20260925-b02/aida/reconcile.py data/championship-restart-20260925-b02/aida/recaptures
 ```
 
-No database import, owner decisions, HTML publication support, identity merges or public replacement occurred. Rankings, alternative exports and publisher revisions are not silently deduplicated by this session audit. Remaining acceptance and later work stay in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+No database import, owner decisions, HTML publication support, identity merges or public replacement occurred during that acquisition audit. Rankings, alternative exports and publisher revisions are not silently deduplicated by this session audit. Remaining acceptance stays in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
+## HTML review support verification
+
+The subsequent HTML review implementation replayed all 24 retained artifacts, representing 3,483 versioned rows, without modifying their archives. Every artifact retained an unambiguous event-branding header and matching selected date; no acquisition-context conflict was found. This validates compatibility of the evidence path, not capture completeness, sporting-result semantics or owner approval. Original truncated DOM records and later complete captures remain separate.
+
+Synthetic PostgreSQL and HTTP checks exercise explicit HTML validation, PDF coexistence, source/version tampering, unauthorized requests, identity reversal and validation revocation. Public projections expose exact citations and source tokens without private source dumps. Real source rows remain unreviewed. Policy activation, real-corpus import, reviewed event replacement and genuine owner decisions were not performed by this implementation.

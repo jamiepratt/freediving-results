@@ -42,7 +42,7 @@ As with the existing review API, reviewer SQL is a trusted administrative capabi
 
 Read-only diagnostics distinguish possible, rejected, confirmed, reversed and missing-history relationships. None is an extraction validation or an athlete-identity approval. Existing public projections and eligibility remain unchanged, including the substantive blockers on ambiguous indoor timing fields.
 
-A consumer must read the current relationship state and exact source references, check publication eligibility separately, and account for pending or conflicting evidence. A cached confirmed relationship cannot be treated as permanently current after a reversal. No public deduplication, event replacement, rollback of published selection, HTML citation rendering or revision wording is implemented by this backend. Those acceptance gates remain in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+A consumer must read the current relationship state and exact source references, check publication eligibility separately, and account for pending or conflicting evidence. A cached confirmed relationship cannot be treated as permanently current after a reversal. The separate [publication path](publication-policy.md) supports HTML citations under explicitly activated policy 2. This revision backend still supplies no public deduplication, event replacement, rollback of published selection or revision wording. Those acceptance gates remain in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 ## Genuine evidence boundary
 

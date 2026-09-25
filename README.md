@@ -22,7 +22,7 @@ The [shadow evaluation guide](docs/local-shadow-evaluation.md) describes the ver
 
 ## Local import orchestration
 
-For new AIDA sources, prefer supported [official HTML attempt tables](docs/aida-html-ingestion.md). The separate schema-4 API preserves table/row evidence and imports private observations; HTML review/publication remains blocked. CMAS retains its PDF/text path.
+For new AIDA sources, prefer supported [official HTML attempt tables](docs/aida-html-ingestion.md). The separate schema-4 API preserves table/row evidence and imports private observations. Private HTML inspection and explicit review are supported; HTML publication requires separately activated policy 2 and fresh extraction validation. CMAS retains its PDF/text path.
 
 The optional [Agent-o-rama import graph](docs/local-rama-pipeline.md) coordinates private local job registration, archive provenance, versioned PDF extraction, PostgreSQL ingestion and candidate review readiness. Each stage uses the existing evidence APIs. Graph inputs and outputs contain opaque references and fixed statuses; readiness grants no review or publication authority.
 
@@ -295,7 +295,9 @@ The [publication policy](docs/publication-policy.md) defines eligibility indepen
 
 `freediving.public-results` provides read-only `results`, `search-source-name`, `result`, `athlete-history` and `coverage` APIs, each taking a database URL first. Search uses the exact original source name, including when identity is unresolved or an approved name correction exists. Public result and identity IDs are opaque. Missing and private result IDs both return nil; history and coverage count visible results only.
 
-The restricted public reader can select only the sanitized public view. A trusted reviewer explicitly calls `refresh!` to prepare the eligible corpus. Any review or publication decision invalidates that snapshot; affected observations require revalidation, followed by another refresh. Reversals therefore hide stale corrections and identity history immediately. A correction without publicly available evidence withholds its result, including transitive dependencies. Public records contain source citations, allowlisted original/raw/effective values, approved/reversed correction audit, explicit unknown fields and partial-pilot coverage. Archived PDFs, private proposals and processing records remain private.
+The restricted public reader can select only the sanitized public view. A trusted reviewer explicitly calls `refresh!` to prepare the eligible corpus. Any review or publication decision invalidates that snapshot; affected observations require revalidation, followed by another refresh. Reversals therefore hide stale corrections and identity history immediately. A correction without publicly available evidence withholds its result, including transitive dependencies. Public records contain source citations, allowlisted original/raw/effective values, approved/reversed correction audit, explicit unknown fields and partial-pilot coverage. HTML citations identify retained event context, selected date, table and row. Archived documents, raw HTML, private proposals and processing records remain private.
+
+The additive HTML publication migration does not activate policy 2. Existing policy-1 PDF validations remain valid after the code and migration upgrade. Explicit policy activation invalidates old-policy validations; review the [activation checkpoint](docs/deployment.md) before changing it. No real observation is approved by installing this support.
 
 Create `reviews_public` as a restricted login role, then apply migrations 1 through 4 in order as the database owner. Existing review examples show creation of `observations_app` and `reviews_owner`.
 

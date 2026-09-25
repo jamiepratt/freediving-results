@@ -2,7 +2,7 @@
 
 This implementation is a local readiness boundary for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). It does not deploy a site or approve the real pilot corpus. All real observations remain private; synthetic decisions do not count as owner-reviewed pilot cases.
 
-The isolated [2025-2026 championship acquisition](championship-inventory-20260925.md) retains source provenance, browser-state evidence and automated AIDA row reconciliation. Those checks are not reviewer attestations. It does not activate a policy, import historical approvals, replace events or authorize publication. HTML review/publication remains blocked; its acceptance and event cutover are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+The isolated [2025-2026 championship acquisition](championship-inventory-20260925.md) retains source provenance, browser-state evidence and automated AIDA row reconciliation. Those checks are not reviewer attestations. It does not activate a policy, import historical approvals, replace events or authorize publication. HTML inspection/review and optional policy-2 publication are supported. Real review, source gaps and event cutover remain tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 The [2025 CMAS depth extraction](cmas-timing-acquisition-20260925.md#batch-4-geometry-backed-continuations) retains 352 parsed source rows across 20 PDFs, including 20 geometry-backed continuation rows. New `cmas-2025-depth/2` jobs supplement preserved `/1` artifacts; retained `cmas-women-depth/1` jobs remain unchanged. All are unreviewed and publication-blocked. Source replay and automated reconciliation supply no visual-accuracy attestation. These extraction batches added no observations, real reviews or policy activation.
 
@@ -18,7 +18,7 @@ The new `cmas-2026-indoor-time/1` artifacts also carry `source-semantics-unresol
 
 Extraction validation establishes whether a particular source row can be represented faithfully. Identity review establishes whether an observation belongs to an approved local identity. An extraction validation never creates an identity link. A validated row with unknown identity can appear under its exact original source name.
 
-Policy `extraction-publication/1` applies to an exact extraction job, artifact hash, candidate ID, source hash and observation ordinal. Validation and revocation append immutable events. The original extraction's `:publication {:status :blocked}` and all original bytes and candidate values remain unchanged. That parser flag records the extraction-time state, not the later validation decision.
+Policies `extraction-publication/1` and `extraction-publication/2` apply to an exact extraction job, artifact hash, candidate ID, source hash and observation ordinal. Policy 1 retains the PDF contract; policy 2 adds HTML evidence. Only the explicitly active policy can validate or expose rows. Validation and revocation append immutable events. The original extraction's `:publication {:status :blocked}` and all original bytes and candidate values remain unchanged. That parser flag records the extraction-time state, not the later validation decision.
 
 The reviewer must inspect the cited source row and its context. A validation request attests to source visual accuracy and absence of unresolved substantive extraction errors. Parser success, reconciled counts, or an identity approval alone cannot supply those attestations. Actor labels and free-text reasons are audit metadata; database capabilities determine authority.
 
@@ -57,6 +57,12 @@ After genuine source review, a decision file has this shape. Copy provenance and
 
 Use `clojure -M:publication decide REQUEST.edn` with reviewer credentials. `history TARGET.edn` returns the private audit. Revocation uses a new ID, current revisions, `:action :revoke`, an explanation and row evidence; `:attestations {}` is allowed. All request fields remain required; unexpected fields and trailing EDN forms are rejected.
 
+For HTML under policy 2, replace the evidence with the exact `{:table 1 :row 2}` coordinate from the current observation and use its current diagnostic policy. These are 1-based document-table and table-row indices, including header rows. Do not supply invented PDF coordinates. Cross-observation review evidence additionally includes the exact job, ordinal, candidate, source hash and artifact hash. New captures or parser jobs never inherit either kind of approval.
+
+HTML evidence replays the immutable parser against retained source text and verifies its source hash, extraction identity and observation binding. Event context comes from a unique retained heading or event-branding image alternative text, never from the document title alone. Comments, including stale commented-out headings, are ignored. Missing or ambiguous context remains a blocker. Selected dates and retained filters remain separate evidence; a source hash does not establish capture completeness. Historical truncated DOM captures are not repaired by later acquisitions.
+
+Policy 2 permits explicitly partial HTML row coverage, not a claim that a whole event or ranking is complete. Unsupported rows, invalid fields and contradictory card/remark evidence are not cleared by parser success or reconciliation. The reviewer still supplies both accuracy attestations. Identity remains unresolved unless separately reviewed.
+
 ## Public boundary
 
 Private administrative APIs expose evidence needed for review. Public APIs read only a restricted database view over explicitly prepared projections. The projection builder selects public fields; it never copies full candidate records, extraction artifacts, raw PDF bytes, private archive paths, processing configuration, actor credentials, private proposals or rejected decisions.
@@ -69,7 +75,7 @@ The trusted reviewer prepares all eligible projections with `refresh!`. A change
 
 Policy activation is a separate append-only database-owner action. Policy version identifiers cannot be reused, so an old version cannot be reactivated to revive its validations. Rollbacks require a fresh version identifier and new validations. An application that does not implement the active policy cannot validate results. Updating code alone does not activate a database policy; deployment of a new policy must explicitly activate it. Real pilot activation changes and validation decisions require separate evidence-backed review.
 
-The owner-only API is `activate-policy! ADMIN-URL VERSION REASON`, also exposed as `clojure -M:publication activate-policy VERSION REASON`. Version 1 is installed by migration 3. A new policy implementation must also ship an additive migration for the public view's supported version before activation. Activating an unsupported version makes current rows ineligible immediately; refresh cannot restore them. Old migration checksums must not be edited.
+The owner-only API is `activate-policy! ADMIN-URL VERSION REASON`, also exposed as `clojure -M:publication activate-policy VERSION REASON`. Version 1 is installed by migration 3. Migration 9 adds public-view support for version 2 without changing the active policy or old migration checksums. Existing policy-1 PDF rows remain visible after that upgrade. The [guarded activation checkpoint](deployment.md#html-publication-policy-checkpoint) verifies migration 9 and requires an explicit acknowledgement: activation hides policy-1 rows until fresh validations and projection refresh. Activating an unsupported version also makes rows ineligible; refresh cannot restore them.
 
 ## Authority and limits
 
