@@ -9,7 +9,8 @@
            [java.security MessageDigest]
            [java.util HexFormat]))
 
-(def parser-version "cmas-2025-indoor-json/8")
+(def parser-version "cmas-2025-indoor-json/9")
+(def v8-parser-version "cmas-2025-indoor-json/8")
 (def v7-parser-version "cmas-2025-indoor-json/7")
 (def v6-parser-version "cmas-2025-indoor-json/6")
 (def v5-parser-version "cmas-2025-indoor-json/5")
@@ -22,6 +23,8 @@
   {"001" {:name "Static Apnea" :date "23/05/2025" :sport "NU"
           :family "1" :kind "static" :round "007" :heat "001"}
    "002" {:name "Speed Apnea 2x50" :date "22/05/2025" :sport "NU"
+          :family "1" :kind "speed" :round "007" :heat "001"}
+   "003" {:name "Speed Apnea 4x50" :date "23/05/2025" :sport "NU"
           :family "1" :kind "speed" :round "007" :heat "001"}
    "004" {:name "Speed Apnea 8x50" :date "22/05/2025" :sport "NU"
           :family "1" :kind "speed" :round "007" :heat "001"}
@@ -112,7 +115,9 @@
   (let [performance (get row "MemPrest")
         fields (get row "MemFields")
         two-by-fifty? (= "002" competition)
-        finish (get-in row ["MemFields" (if two-by-fifty? 2 8) "V"])
+        four-by-fifty? (= "003" competition)
+        finish-index (case competition "002" 2 "003" 4 8)
+        finish (get-in fields [finish-index "V"])
         clock-pattern (if two-by-fifty?
                         #"(?:[0-9]+:)?[0-9]{1,2}\.[0-9]{2}"
                         #"[0-9]+:[0-9]{2}\.[0-9]{2}")
@@ -123,14 +128,14 @@
          (= "" (get row "MemQual"))
          (vector? fields) (= 9 (count fields))
          (every? #(and (map? %) (string? (get % "V"))) fields)
-         (or (not two-by-fifty?)
+         (or (not (or two-by-fifty? four-by-fifty?))
              (and (= "" (get-in fields [0 "V"]))
-                  (every? #(= "" (get-in fields [% "V"])) (range 3 9))))
+                  (every? #(= "" (get-in fields [% "V"])) (range (inc finish-index) 9))))
          (or (and clock? (= performance finish))
              (and (= "DNS" performance) (= "" finish))
              (and (= "DSQ" performance)
                   (or (= "" finish)
-                      (and two-by-fifty? (string? finish)
+                      (and (or two-by-fifty? four-by-fifty?) (string? finish)
                            (re-matches clock-pattern finish))))))))
 (defn parse-result
   "Parse source-bound CGR1 bytes with separately observed page and response URLs.
@@ -228,8 +233,13 @@
        :publication {:status :blocked :reasons [:owner-review-required :source-semantics-unresolved
                                                 :coverage-not-established]}})))
 (declare parse-prior-result)
-(defn- parse-v7-result [bytes provenance]
+(defn- parse-v8-result [bytes provenance]
   (let [result (parse-result bytes provenance)]
+    (when (= "003" (:competition (codes (:view-url provenance))))
+      (fail! "Version 8 parser cannot replay speed 4x50 source"))
+    (assoc result :parser-version v8-parser-version)))
+(defn- parse-v7-result [bytes provenance]
+  (let [result (parse-v8-result bytes provenance)]
     (when (= "002" (:competition (codes (:view-url provenance))))
       (fail! "Version 7 parser cannot replay speed 2x50 source"))
     (assoc result :parser-version v7-parser-version)))
@@ -301,7 +311,8 @@
   [root artifact]
   (when-not (and (= 5 (:schema-version artifact))
                  (#{legacy-parser-version prior-parser-version previous-parser-version
-                    v4-parser-version v5-parser-version v6-parser-version v7-parser-version parser-version}
+                    v4-parser-version v5-parser-version v6-parser-version v7-parser-version
+                    v8-parser-version parser-version}
                   (:parser-version artifact))
                  (= tool (:tool artifact)))
     (fail! "Unsupported CMAS JSON extraction contract"))
@@ -314,6 +325,7 @@
                     "cmas-2025-indoor-json/5" parse-v5-result
                     "cmas-2025-indoor-json/6" parse-v6-result
                     "cmas-2025-indoor-json/7" parse-v7-result
+                    "cmas-2025-indoor-json/8" parse-v8-result
                     parse-result)
                   bytes {:view-url view-url :json-url json-url})]
     (when-not (and (= (:acquisitions source) (:acquisitions artifact))
