@@ -11,6 +11,7 @@
 
 (def parser-version "cmas-2025-indoor-json/2")
 (def legacy-parser-version "cmas-2025-indoor-json/1")
+(def dnf-categories #{"JUF" "JUM" "MAF" "MAM" "SEF" "SEM"})
 (defn- fail! [message] (throw (ex-info message {})))
 (defn- populated? [x] (and (string? x) (not (str/blank? x))))
 (defn- utf8 [bytes]
@@ -76,11 +77,14 @@
                    (= (:round route) (header-code source "Round"))
                    (= (:heat route) (header-code source "Heat"))
                    (= "TF" (header-code source "Sport"))
+                   (= "011" (:competition route))
+                   (= "Dynamic Apnea Without Fin" (get-in source ["Competition" "Eng"]))
+                   (contains? dnf-categories (:category route))
                    (= (:competition route) (get source "tipologia"))
                    (= (str (header-code source "Sport") (:category route)
                            (:competition route) "CLAS" (subs (:round route) 1) " " (:heat route) ".JSON") filename)
                    (response-url? json-url (:family route) filename)
-                   (populated? (get-in source ["Event" "Date"]))
+                   (= "20/05/2025" (get-in source ["Event" "Date"]))
                    (vector? rows) (seq rows) (every? valid-row? rows))
       (fail! "Unsupported or ambiguous CGR1 result structure"))
     {:parser-version parser-version :raw-json raw-json :view-url view-url

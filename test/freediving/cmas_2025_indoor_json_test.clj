@@ -23,6 +23,35 @@
 (defn source [rows] (.getBytes (json/write-str (assoc headers "data" rows)) "UTF-8"))
 (def provenance {:view-url view-url :json-url json-url})
 
+(deftest athens-dnf-categories-retain-distinct-source-positions
+  (doseq [[category label] [["JUF" "Juniors Women"] ["JUM" "Juniors Men"]
+                            ["MAF" "Masters Women"] ["SEF" "Seniors Women"]
+                            ["SEM" "Seniors Men"]]]
+    (let [filename (str "TF" category "011CLAS07 001.JSON")
+          source-data (-> headers
+                          (assoc "jsonfilename" filename)
+                          (assoc-in ["Category" "Cod"] category)
+                          (assoc-in ["Category" "Eng"] label)
+                          (assoc "data" [(assoc row "PlaCod" "120" "PlaCat" label)
+                                         (assoc row "PlaCod" "120" "PlaCat" label "PlaLane" "2")]))
+          bytes (.getBytes (json/write-str source-data) "UTF-8")
+          page (str/replace view-url "/MAM/" (str "/" category "/"))
+          response (str/replace json-url "TFMAM011" (str "TF" category "011"))
+          result (indoor/parse-result bytes {:view-url page :json-url response})]
+      (is (= label (get-in result [:headers "Category" "Eng"])))
+      (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
+      (is (= ["120" "120"] (mapv #(get-in % [:raw "PlaCod"]) (:candidates result))))
+      (is (every? #(and (= :unreviewed (:review-status %))
+                        (= :blocked (:selection-status %))
+                        (= page (:source-page-url %))) (:candidates result))))))
+
+(deftest result-must-be-the-2025-athens-dnf-event
+  (doseq [source-data [(assoc-in headers ["Event" "Date"] "21/05/2025")
+                       (assoc-in headers ["Competition" "Eng"] "Dynamic Apnea With Fin")]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (indoor/parse-result (.getBytes (json/write-str (assoc source-data "data" [row])) "UTF-8")
+                                      provenance)))))
+
 (deftest final-result-retains-source-and-unreviewed-rows
   (let [finished (assoc row "PlaCod" "125" "PlaName" "James" "PlaSurname" "PRATT"
                         "b" "64" "PlaLane" "2" "MemPrest" "" "MemPoint" "107.50")
