@@ -246,3 +246,6 @@
                              (execute! c "INSERT INTO freediving.revision_decisions(id,proposal_id,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?)"
                                        (:id r) (:proposal-id r) (:revision record) (name action) (:event-id r) (encode record))
                              (existing c "revision_decisions" r)))))))
+
+(defn descriptor-values [connection d] (descriptor connection d))
+(defn snapshot-on [connection] (state connection))

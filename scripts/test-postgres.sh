@@ -33,6 +33,8 @@ export FREEDIVING_TEST_PUBLIC_URL="jdbc:postgresql://127.0.0.1:$test_port/observ
 export FREEDIVING_TEST_SUBMIT_URL="jdbc:postgresql://127.0.0.1:$test_port/observations_test?user=corrections_submit"
 clojure -M:${1:-test-postgres}
 if [[ $# -eq 0 ]]; then
+  clojure -M:test-selection-migration
+  clojure -M:test-event-selections
   clojure -M:test-revisions
   clojure -M:test-reviews
   clojure -M:test-publication

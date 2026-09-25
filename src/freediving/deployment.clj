@@ -3,6 +3,7 @@
   (:require [freediving.observations :as observations]
             [freediving.reviews :as reviews]
             [freediving.revisions :as revisions]
+            [freediving.event-selections :as selections]
             [freediving.publication :as publication]
             [freediving.public-results :as public]
             [freediving.corrections :as corrections]
@@ -18,4 +19,5 @@
     (labels/migrate! url "reviews_owner" :real)
     (revisions/migrate! url "observations_app" "reviews_owner")
     (public/migrate! url "reviews_owner" "reviews_public")
-    (println "Applied migrations 1-9; no records published.")))
+    (selections/migrate! url "reviews_owner")
+    (println "Applied migrations 1-10; no records published.")))

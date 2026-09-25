@@ -1,7 +1,8 @@
 (ns freediving.public-results
   "Read-only public projection. Refresh requires a trusted reviewer database capability."
   (:require [clojure.edn :as edn] [clojure.java.io :as io] [clojure.string :as str]
-            [freediving.html-evidence :as html-evidence])
+            [freediving.html-evidence :as html-evidence]
+            [freediving.event-selections :as selections])
   (:import [java.sql DriverManager Connection] [java.security MessageDigest] [java.util HexFormat]))
 (def public-field-keys
   #{:source-name :representation :federation :event-name :event-date :discipline :category
@@ -81,6 +82,8 @@
                   (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " public-role ",PUBLIC"))
                   (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " public-role))
                   (execute! c (str "GRANT SELECT ON freediving.public_results TO " public-role))
+                  (when (selections/installed? c)
+                    (execute! c (str "GRANT SELECT ON freediving.public_event_coverage TO " public-role)))
                   (execute! c (str "GRANT SELECT,INSERT,UPDATE,DELETE ON freediving.public_projection_cache TO " reviewer-role))
                   {:schema-version (if defer-html-view? 4 9)}))))
 (defn activate-html-policy!
@@ -177,28 +180,39 @@
        :identity (if identity-id {:status :approved :id identity-id} {:status :unresolved})
        :unknown-fields (vec (sort (filter #(nil? (get effective %)) public-field-keys)))
        :coverage {:scope :pilot :completeness :partial}})))
-(defn refresh! [url]
-  (transaction url
-               (fn [c]
+(defn refresh-on! [c]
       ;; One snapshot for all records and dependencies. Changes after this snapshot invalidate the view.
-                 (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.public_projection_cache','INSERT') AND has_table_privilege(current_user,'freediving.publication_decisions','INSERT') AS allowed")))
-                   (fail! "Projection reviewer capability required"))
-                 (query c "SELECT pg_advisory_xact_lock(781246915)")
-                 (let [validations (eligible-rows c)
-                       projected (loop [vs validations]
-                                   (let [eligible (set (map #(str (:job_id %) ":" (:ordinal %)) vs))
-                                         pairs (vec (keep (fn [v] (when-let [p (projection c v eligible)] [v p])) vs))]
-                                     (if (= (count pairs) (count vs)) pairs (recur (mapv first pairs)))))
-                       review-count (:n (first (query c "SELECT count(*) AS n FROM freediving.review_decisions")))
-                       validation-count (:n (first (query c "SELECT count(*) AS n FROM freediving.publication_decisions")))]
-                   (execute! c "DELETE FROM freediving.public_projection_cache")
-                   (doseq [[v p] projected]
-                     (execute! c "INSERT INTO freediving.public_projection_cache(result_id,job_id,ordinal,validation_id,policy_version,review_count,validation_count,source_name,identity_id,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?)"
-                               (:result-id p) (:job_id v) (:ordinal v) (:id v) (:policy_version v) review-count validation-count
-                               (get-in p [:original :source-name]) (get-in p [:identity :id]) (binding [*print-length* nil *print-level* nil] (pr-str p))))
-                   {:refreshed (count projected)}))))
+  (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.public_projection_cache','INSERT') AND has_table_privilege(current_user,'freediving.publication_decisions','INSERT') AS allowed")))
+    (fail! "Projection reviewer capability required"))
+  (query c "SELECT pg_advisory_xact_lock(781246915)")
+  (let [plan (selections/projection-plan c (eligible-rows c))
+        validations (:validations plan)
+        projected (loop [vs validations]
+                    (let [eligible (set (map #(str (:job_id %) ":" (:ordinal %)) vs))
+                          pairs (vec (keep (fn [v] (when-let [p (projection c v eligible)] [v (merge p (dissoc (get (:metadata plan) [(:job_id v) (:ordinal v)]) :validation-id))])) vs))
+                          counts (frequencies (keep #(get-in % [1 :event-selection :id]) pairs))
+                          pairs (filterv (fn [[_ p]] (let [id (get-in p [:event-selection :id])]
+                                                       (or (nil? id) (= (get (:expected plan) id) (get counts id))))) pairs)]
+                      (if (= (count pairs) (count vs)) pairs (recur (mapv first pairs)))))
+        review-count (:n (first (query c "SELECT count(*) AS n FROM freediving.review_decisions")))
+        validation-count (:n (first (query c "SELECT count(*) AS n FROM freediving.publication_decisions")))]
+    (execute! c "DELETE FROM freediving.public_projection_cache")
+    (doseq [[v p] projected]
+      (execute! c "INSERT INTO freediving.public_projection_cache(result_id,job_id,ordinal,validation_id,policy_version,review_count,validation_count,source_name,identity_id,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?)"
+                (:result-id p) (:job_id v) (:ordinal v) (:id v) (:policy_version v) review-count validation-count
+                (get-in p [:original :source-name]) (get-in p [:identity :id]) (binding [*print-length* nil *print-level* nil] (pr-str p))))
+    (when (selections/installed? c)
+      (let [snapshot (selections/snapshot-on c)]
+        (execute! c "UPDATE freediving.public_projection_cache SET selection_count=?,relationship_count=?,proposal_count=?" (:selections snapshot) (:relationships snapshot) (:proposals snapshot))))
+    (selections/refresh-coverage! c)
+    {:refreshed (count projected)}))
+(defn refresh! [url] (transaction url refresh-on!))
 (defn results [url]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results ORDER BY result_id"))))
+(defn listing-snapshot [url]
+  (transaction url (fn [c]
+                     {:results (mapv (comp edn/read-string :body_edn) (query c "SELECT body_edn FROM freediving.public_results ORDER BY result_id"))
+                      :events (or (selections/event-coverage c) [])})))
 (defn search-source-name [url exact-name]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results WHERE source_name=? ORDER BY result_id" exact-name))))
 (defn result [url id]
@@ -206,7 +220,7 @@
 (defn athlete-history [url id]
   (transaction url #(mapv (comp edn/read-string :body_edn) (query % "SELECT body_edn FROM freediving.public_results WHERE identity_id=? ORDER BY result_id" id))))
 (defn coverage [url]
-  (transaction url #(assoc (first (query % "SELECT count(*) AS results,count(DISTINCT identity_id) AS approved_identities FROM freediving.public_results")) :scope :pilot :completeness :partial)))
+  (transaction url #(assoc (first (query % "SELECT count(*) AS results,count(DISTINCT identity_id) AS approved_identities FROM freediving.public_results")) :scope :pilot :completeness :partial :events (or (selections/event-coverage %) []))))
 (defn -main [& [command & args]]
   (try
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
