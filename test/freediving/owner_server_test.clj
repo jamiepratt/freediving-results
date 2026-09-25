@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
             [clojure.data.json :as json]
             [clojure.string :as str]
+            [clojure.java.shell :as shell]
             [freediving.owner-server :as server]
             [freediving.source-pages-test :as pages-fixture]
             [freediving.aida-html-test :as html-fixture]
@@ -357,3 +358,18 @@
         (is (= 200 (:status (request s "GET" (get-in metadata [:body :image-url]) nil h))))
         (is (= 200 (:status (request s "POST" "/api/publication" validation h)))))
       (finally (server/stop! s)))))
+
+(deftest normal-deployment-revision-capabilities-allow-owner-but-not-extra-writes
+  (let [deployment (shell/sh "clojure" "-M" "-m" "freediving.deployment"
+                             :env (assoc (into {} (System/getenv)) "FREEDIVING_MIGRATION_URL" fixture/admin))]
+    (is (zero? (:exit deployment)) (str (:out deployment) (:err deployment)))
+    (let [s (server/start! (config))]
+      (try (is (= 401 (:status (request s "GET" "/api/candidates" nil {}))))
+           (finally (server/stop! s))))
+    (fixture/sql! fixture/admin "GRANT UPDATE (body_edn) ON freediving.revision_proposals TO reviews_owner")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Owner database authority invalid" (server/start! (config))))
+    (fixture/sql! fixture/admin "REVOKE UPDATE (body_edn) ON freediving.revision_proposals FROM reviews_owner")
+    (let [url (inspector!)]
+      (fixture/sql! fixture/admin "GRANT INSERT (body_edn) ON freediving.revision_proposals TO source_inspector")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Inspector database authority invalid"
+                            (server/start! (merge (dissoc (config) :demo?) {:mode :real-inspection :database-url url :archive-root "/missing" :cache-root "/missing"})))))))
