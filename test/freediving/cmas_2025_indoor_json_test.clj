@@ -43,12 +43,87 @@
          "MemPrest" "4:05.00" "MemPoint" "" "MemFields" [{"V" ""} {"V" "4:05.00"}]))
 (defn static-source [rows] (.getBytes (json/write-str (assoc static-headers "data" rows)) "UTF-8"))
 
+(def speed-view-url "https://results.microplustimingservices.com/CMAS/Results/#/1/speed-result-json/JUF/004/007/001")
+(def speed-json-url "https://results.microplustimingservices.com/CMAS/ExportPOST/export/CMAS_1/NUJUF004CLAS07%20001.JSON")
+(def speed-headers
+  (-> static-headers
+      (assoc "jsonfilename" "NUJUF004CLAS07 001.JSON" "tipologia" "004")
+      (assoc-in ["Competition" "Cod"] "004")
+      (assoc-in ["Competition" "Eng"] "Speed Apnea 8x50")
+      (assoc-in ["Heat" "UffDate"] "22/05/2025")
+      (assoc-in ["Event" "Date"] "22/05/2025")))
+(def speed-row
+  (assoc static-row "MemPrest" "5:31.41" "MemQual" ""
+         "MemFields" [{"V" ""} {"V" "24.16" "T" "" "P" "2"}
+                      {"V" "1:06.90" "T" "42.74" "P" "1"}
+                      {"V" "1:47.38" "T" "40.48" "P" "1"}
+                      {"V" "2:30.37" "T" "42.99" "P" "2"}
+                      {"V" "3:11.87" "T" "41.50" "P" "1"}
+                      {"V" "3:57.71" "T" "45.84" "P" "1"}
+                      {"V" "4:18.14" "T" "20.43" "P" "1"}
+                      {"V" "5:31.41" "T" "1:13.27" "P" "1"}]))
+(defn speed-source [rows]
+  (.getBytes (json/write-str (assoc speed-headers "data" rows)) "UTF-8"))
+
+(deftest athens-speed-apnea-preserves-finish-and-split-tokens
+  (let [result (indoor/parse-result (speed-source [speed-row])
+                                    {:view-url speed-view-url :json-url speed-json-url})
+        candidate (first (:candidates result))]
+    (is (= "cmas-2025-indoor-json/7" (:parser-version result)))
+    (is (= 0 (get-in candidate [:coordinates :row-index-zero-based])))
+    (is (= speed-row (:raw candidate)))
+    (is (= "5:31.41" (get-in candidate [:parsed :performance-token])))
+    (is (= "5:31.41" (get-in candidate [:parsed :time-token])))
+    (is (= :unknown (get-in candidate [:parsed :performance-unit])))
+    (is (= 1 (get-in result [:reconciliation :candidate-count])))
+    (is (= :blocked (get-in result [:publication :status])))))
+
+(deftest athens-speed-apnea-keeps-statuses-and-quarantines-ambiguous-finish
+  (let [status-fields (assoc-in (vec (get speed-row "MemFields")) [8 "V"] "")
+        dsq (assoc speed-row "PlaCod" "121" "MemPrest" "DSQ" "MemFields" status-fields)
+        dns (assoc speed-row "PlaCod" "122" "MemPrest" "DNS" "MemFields" status-fields)
+        conflict (assoc speed-row "PlaCod" "123" "MemPrest" "5:32.00")
+        malformed (assoc speed-row "PlaCod" "124" "MemPrest" 42)
+        result (indoor/parse-result (speed-source [speed-row dsq dns conflict malformed])
+                                    {:view-url speed-view-url :json-url speed-json-url})]
+    (is (= [0 1 2] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
+    (is (= [nil "DSQ" "DNS"] (mapv #(get-in % [:parsed :status-token]) (:candidates result))))
+    (is (= ["5:31.41" nil nil] (mapv #(get-in % [:parsed :time-token]) (:candidates result))))
+    (is (= [{:coordinates {:row-index-zero-based 3}
+             :reason :ambiguous-speed-result-row :raw conflict}
+            {:coordinates {:row-index-zero-based 4}
+             :reason :ambiguous-speed-result-row :raw malformed}]
+           (:unparsed-rows result)))
+    (is (= {:source-row-count 5 :candidate-count 3 :unparsed-count 2
+            :unresolved-count 5 :status :unreviewed}
+           (:reconciliation result)))))
+
+(deftest athens-speed-apnea-requires-exact-route-and-headers
+  (let [parse (fn [data page response]
+                (indoor/parse-result (.getBytes (json/write-str (assoc data "data" [speed-row])) "UTF-8")
+                                     {:view-url page :json-url response}))]
+    (doseq [bad-data [(assoc-in speed-headers ["Event" "Date"] "23/05/2025")
+                      (assoc-in speed-headers ["Heat" "UffDate"] "23/05/2025")
+                      (assoc-in speed-headers ["Round" "Eng"] "FINAL")
+                      (assoc-in speed-headers ["Competition" "Eng"] "Static Apnea")
+                      (assoc speed-headers "jsonfilename" "NUJUF001CLAS07 001.JSON")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (parse bad-data speed-view-url speed-json-url))))
+    (doseq [bad-page [(str/replace speed-view-url "/004/" "/001/")
+                      (str/replace speed-view-url "speed-result-json" "static-result-json")
+                      (str/replace speed-view-url "/JUF/" "/JUM/")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (parse speed-headers bad-page speed-json-url))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (parse speed-headers speed-view-url
+                        (str/replace speed-json-url "CMAS_1" "CMAS_2"))))))
+
 (deftest athens-static-cgr1-preserves-time-and-status-tokens
   (let [rows [static-row (assoc static-row "PlaCod" "100002" "PlaLane" "2"
                                 "MemPrest" "DSQ" "MemFields" [{"V" ""} {"V" "DSQ"}])]
         result (indoor/parse-result (static-source rows)
                                     {:view-url static-view-url :json-url static-json-url})]
-    (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
+    (is (= "cmas-2025-indoor-json/7" (:parser-version result)))
     (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
     (is (= ["4:05.00" "DSQ"] (mapv #(get-in % [:parsed :performance-token]) (:candidates result))))
     (is (= ["4:05.00" nil] (mapv #(get-in % [:parsed :time-token]) (:candidates result))))
@@ -97,7 +172,7 @@
           response (str/replace json-url "TFMAM011" (str "TF" category "026"))
           result (indoor/parse-result (.getBytes (json/write-str source-data) "UTF-8")
                                       {:view-url page :json-url response})]
-      (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
+      (is (= "cmas-2025-indoor-json/7" (:parser-version result)))
       (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
       (is (= ["DSQ" "DSQ"] (mapv #(get-in % [:parsed :performance-token]) (:candidates result))))
       (is (every? #(and (= :unreviewed (:review-status %))
@@ -120,7 +195,7 @@
           response (str/replace json-url "TFMAM011" (str "TF" category "016"))
           result (indoor/parse-result (.getBytes (json/write-str source-data) "UTF-8")
                                       {:view-url page :json-url response})]
-      (is (= "cmas-2025-indoor-json/6" (:parser-version result)))
+      (is (= "cmas-2025-indoor-json/7" (:parser-version result)))
       (is (= [0 1] (mapv #(get-in % [:coordinates :row-index-zero-based]) (:candidates result))))
       (is (= ["120" "120"] (mapv #(get-in % [:raw "PlaCod"]) (:candidates result))))
       (is (every? #(and (= :unreviewed (:review-status %))
@@ -286,6 +361,8 @@
       (is (= view-url (:view-url artifact)))
       (is (= json-url (:json-url artifact)))
       (is (= artifact (indoor/validate-artifact! root artifact)))
+      (let [v6 (assoc artifact :parser-version "cmas-2025-indoor-json/6")]
+        (is (= v6 (indoor/validate-artifact! root v6))))
       (let [v5 (assoc artifact :parser-version "cmas-2025-indoor-json/5")]
         (is (= v5 (indoor/validate-artifact! root v5))))
       (let [v4 (assoc artifact :parser-version "cmas-2025-indoor-json/4")]

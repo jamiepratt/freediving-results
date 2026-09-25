@@ -364,6 +364,38 @@
                                                             fragment)})))
           fragment))))
 
+(deftest athens-speed-json-acquisition-retains-exact-result-pages
+  (doseq [category ["JUF" "JUM" "MAF" "MAM" "SEF" "SEM"]]
+    (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+          json-url (str "https://results.microplustimingservices.com/CMAS/ExportPOST/export/CMAS_1/NU"
+                        category "004CLAS07%20001.JSON")
+          page-url (str "https://results.microplustimingservices.com/CMAS/Results/#/1/speed-result-json/"
+                        category "/004/007/001")
+          contextual (assoc manifest :final-url json-url :content-type "application/json"
+                            :provenance {:publisher-url "https://www.cmas.org/"
+                                         :redirect-chain [json-url]
+                                         :source-page-url page-url})]
+      (spit source "abc")
+      (archive/register! root source contextual)
+      (is (= contextual (:manifest (first (:acquisitions
+                                           (archive/inspect root (:sha256 manifest)))))))))
+  (doseq [fragment ["/1/speed-result-json/MAM/001/007/001"
+                    "/1/speed-result-json/MAM/004/006/001"
+                    "/1/speed-result-json/MAM/004/007/002"
+                    "/2/speed-result-json/MAM/004/007/001"
+                    "/1/speed-result-json/XXX/004/007/001"]]
+    (let [dir (workspace) source (str dir "/source")]
+      (spit source "abc")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                            (archive/register! (str dir "/archive") source
+                                               (assoc manifest :provenance
+                                                      {:publisher-url "https://www.cmas.org/"
+                                                       :redirect-chain [(:final-url manifest)]
+                                                       :source-page-url
+                                                       (str "https://results.microplustimingservices.com/CMAS/Results/#"
+                                                            fragment)})))
+          fragment))))
+
 (deftest session-and-result-route-allowlists-reject-unobserved-context
   (doseq [url (concat
                (map #(str "https://www.aidainternational.org/StartList/4350" %)
