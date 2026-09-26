@@ -1,0 +1,16 @@
+                                         Championnat de France Eau Libre 2025
+                                                     Résultats Bipalme Hommes
+                                                             Villefranche-sur-Mer
+
+FFESSM
+                                                       Profondeur Profondeur Pénalités     Défaut         Total
+Classement         Nom       Prénom      Nationalité                                                                Carton
+                                                        annoncée   réalisée  profondeur   plaquette       Points
+    1        ALOUACH         Abdelatif   Française           90 m         90          0               0        90    Blanc
+    1        JAOUEN          Nicolas     Française           90 m         90          0               0        90    Blanc
+    3        ISY-SCHWART     Quentin     Française           80 m         80          0               0        80    Blanc
+    4        MASSE           Yannick     Française           72 m         72          0               0        72    Blanc
+    5        JANKELIOWITCH   Alexandre   Française           60 m         60          0               0        60    Blanc
+    6        ATZORI          Alexis      Française           58 m         58          0               0        58    Blanc
+    7        GOIX            Maxime      Française           55 m         52          3               1        48   Jaune
+

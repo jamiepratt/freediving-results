@@ -1,0 +1,15 @@
+                                    Championnat de France Eau Libre 2025
+                                          Résultats Sans Palmes Femmes
+                                                         Villefranche-sur-Mer
+
+FFESSM
+                                                   Profondeur Profondeur Pénalités     Défaut         Total
+Classement        Nom    Prénom      Nationalité                                                                Carton
+                                                    annoncée   réalisée  profondeur   plaquette       Points
+    1        BANEGAS     Brigitte   Française           50 m          50          0               0        50    Blanc
+    1        BERTRAND    Emilie     Française           50 m          50          0               0        50    Blanc
+    3        AGBOTON     Jade       Française           45 m          45          0               0        45    Blanc
+    4        ALNABWANY   Amal       Syrienne            39 m          39          0               0        39    Blanc
+    5        MARZIN      Chantal    Française           35 m          35          0               0        35    Blanc
+    6        SIMONIS     Marine     Belge               57 m          25         32               1        -8   Jaune
+

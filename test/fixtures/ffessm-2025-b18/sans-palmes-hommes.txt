@@ -1,0 +1,21 @@
+                                        Championnat de France Eau Libre 2025
+                                              Résultats Sans Palmes Hommes
+                                                             Villefranche-sur-Mer
+
+FFESSM
+                                                       Profondeur Profondeur Pénalités     Défaut         Total
+Classement         Nom     Prénom        Nationalité                                                                Carton
+                                                        annoncée   réalisée  profondeur   plaquette       Points
+    1        ALOUACH       Abdelatif    Française            68 m         68          0               0        68    Blanc
+    2        BOURSEAUD     Julien       Française            56 m         56          0               0        56    Blanc
+    2        ISY-SCHWART   Quentin      Française            56 m         56          0               0        56    Blanc
+   4         TERRIN        Frédéric     Française            55 m         55          0               0        55    Blanc
+   5         DAOULAS       Guillaume    Française            54 m         54          0               0        54    Blanc
+   6         GAMBINI       Gilles       Française            52 m         52          0               0        52    Blanc
+   7         MAURANES      Théo         Française            51 m         51          0               0        51    Blanc
+   8         EMILE         Thibault     Française            47 m         47          0               0        47    Blanc
+   9         DROMARD       Christophe   Française            40 m         40          0               0        40    Blanc
+   10        ROMEO         Sébastien    Française            46 m         40          6               1        33   Jaune
+   11        GOIX          Maxime       Française            51 m          7         44               1       -38   Jaune
+   DQ        KANSCHINE     Sylvain      Française            57 m         57          0               0         0   Rouge
+

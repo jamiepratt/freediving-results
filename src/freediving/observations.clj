@@ -159,6 +159,7 @@
                      (extraction/ffessm-2025-day1-artifact? a) (->> (extraction/validate-ffessm-2025-day1-artifact! root))
                      (extraction/ffessm-2025-day2-artifact? a) (->> (extraction/validate-ffessm-2025-day2-artifact! root))
                      (extraction/ffessm-2025-monofin-artifact? a) (->> (extraction/validate-ffessm-2025-monofin-artifact! root))
+                     (extraction/ffessm-2025-b18-artifact? a) (->> (extraction/validate-ffessm-2025-b18-artifact! root))
                      (extraction/ffessm-2026-artifact? a) (->> (extraction/validate-ffessm-2026-artifact! root))
                      (extraction/ffessm-2026-men-artifact? a) (->> (extraction/validate-ffessm-2026-men-artifact! root))
                      (extraction/ffessm-2026-bipalmes-women-artifact? a) (->> (extraction/validate-ffessm-2026-bipalmes-women-artifact! root))
