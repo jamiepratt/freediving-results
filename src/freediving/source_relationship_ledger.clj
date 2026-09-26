@@ -40,16 +40,18 @@
      :parsed parsed}))
 
 (defn- validate-routes! [{:keys [routes source-candidates]}]
-  (doseq [route routes]
-    (when-not (and (= #{:route-id :source-sha256} (set (keys route)))
-                   (string? (:route-id route))
-                   (re-matches #"[a-z0-9][a-z0-9-]*" (:route-id route))
-                   (string? (:source-sha256 route))
-                   (re-matches #"[0-9a-f]{64}" (:source-sha256 route)))
-      (throw (ex-info "Route evidence must contain only route-id and SHA-256" {}))))
-  (doseq [candidate source-candidates]
-    (when-not (= #{:left :right :reason} (set (keys candidate)))
-      (throw (ex-info "Source candidates need only left, right and reason" {})))))
+  (let [candidate-routes (set (mapcat (juxt :left :right) source-candidates))]
+    (doseq [route routes]
+      (let [sha (:source-sha256 route)]
+        (when-not (and (= #{:route-id :source-sha256} (set (keys route)))
+                       (string? (:route-id route))
+                       (re-matches #"[a-z0-9][a-z0-9-]*" (:route-id route))
+                       (or (and (string? sha) (re-matches #"[0-9a-f]{64}" sha))
+                           (and (nil? sha) (contains? candidate-routes (:route-id route)))))
+          (throw (ex-info "Route requires SHA-256 unless it is an unresolved candidate" {})))))
+    (doseq [candidate source-candidates]
+      (when-not (= #{:left :right :reason} (set (keys candidate)))
+        (throw (ex-info "Source candidates need only left, right and reason" {}))))))
 
 (defn build-ledger
   "Build a deterministic ledger from inspected jobs and declarative route evidence."
