@@ -90,6 +90,16 @@
              (and (= "drive.usercontent.google.com" host) (= "/download" path)
                   (re-matches (re-pattern (str "id=" file-id "&export=download")) (or query "")))))))
 
+(defn- vestico-competition-view? [^URI u]
+  (and (= "https" (.getScheme u))
+       (= "diving.vestico.hr" (.getHost u))
+       (= -1 (.getPort u))
+       (nil? (.getRawUserInfo u))
+       (nil? (.getRawFragment u))
+       (= "/index.php" (.getRawPath u))
+       (contains? #{"comp=6" "comp=7" "comp=8" "comp=9" "comp=10"}
+                  (.getRawQuery u))))
+
 (defn- url? [v]
   (try (let [u (URI. v)]
          (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
@@ -97,7 +107,8 @@
               (or (and (nil? (.getRawQuery u))
                        (or (nil? (.getRawFragment u)) (timing-route? u)))
                   (aida-session-route? u)
-                  (google-drive-download? u))))
+                  (google-drive-download? u)
+                  (vestico-competition-view? u))))
        (catch Exception _ false)))
 (defn- browser-state? [state]
   (and (map? state)

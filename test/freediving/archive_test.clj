@@ -48,6 +48,29 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (archive/register! (str dir "/bad") source (assoc routed :final-url bad)))))))
 
+(deftest vestico-competition-views-preserve-exact-public-selector
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        base "https://diving.vestico.hr/index.php"]
+    (spit source "abc")
+    (doseq [url (cons base (map #(str base "?comp=" %) (range 6 11)))]
+      (let [routed (assoc manifest :final-url url)]
+        (archive/register! root source routed)
+        (is (some #{routed} (map :manifest (:acquisitions (archive/inspect root (:sha256 manifest))))))
+        url)))
+  (let [dir (workspace) source (str dir "/source")
+        base "https://diving.vestico.hr/index.php"]
+    (spit source "abc")
+    (doseq [url [(str base "?comp=5") (str base "?comp=11")
+                 (str base "?comp=6&token=secret") (str base "?comp=6&comp=7")
+                 (str base "?%63omp=6") (str base "?comp=%36")
+                 (str base "?comp=6#results")
+                 "http://diving.vestico.hr/index.php?comp=6"
+                 "https://diving.vestico.hr:8443/index.php?comp=6"
+                 "https://diving.vestico.hr.evil.org/index.php?comp=6"]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Malformed manifest"
+                            (archive/register! (str dir "/archive") source (assoc manifest :final-url url)))
+          url))))
+
 (deftest inventory-verifies-real-archive-layout-before-reporting
   (let [dir (workspace) root (str dir "/archive") source (str dir "/source")]
     (spit source "abc")
