@@ -2,6 +2,12 @@
 
 Observed through 25 September 2026. This is a route and evidence guide, not a live availability check or a complete championship inventory. Start at the [CMAS results archive](https://www.cmas.org/freediving/results.html) or the AIDA event page, then retain what the route actually returns. Current source coverage and unresolved work live in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
+## HTTP acquisition core status
+
+`scripts/source_acquisition.py` supplies a bounded HTTP GET primitive for future acquisition commands. One `AcquisitionClient` shared by threads spaces requests per host, including each redirect and retry. The default policy is two concurrent requests per host, at least one second between starts, a 20-second request timeout, three attempts, a 30-second maximum retry delay, five redirects and a 50 MiB response limit. CMAS hosts default to one concurrent request, at least three seconds between starts and two attempts. A caller may configure a stricter per-host policy. Only HTTP 429 and 500, 502, 503 or 504, plus network, timeout or incomplete-body failures, retry. Valid `Retry-After` seconds and HTTP dates delay the retry; a required delay above the configured maximum stops with a terminal error. Returned bytes are complete within the declared length and size limit, but the caller must still verify MIME, signature and source identity before registration. Events and errors include host, attempt, wait, reason and outcome without URL paths, queries or response bodies.
+
+This primitive is currently limited to one process and has not been wired into the documented discovery, PDF, JSON, HTML or browser acquisition routes. It does not inventory archives, capture Playwright traffic, coordinate restarted workers, create run manifests or register coverage gaps. The [pacing prerequisite in issue #22](https://github.com/jamiepratt/freediving-results/issues/22) remains open. Do not start new ingestion under #8 or #16 until those routes and archive checks are connected and verified.
+
 ## Find and acquire a source
 
 | Source and discovery | Result route and representation | Observed access and context | Provenance caution |
