@@ -272,6 +272,7 @@ def main(argv=None):
     parser.add_argument("url")
     parser.add_argument("representation", choices=sorted(_REPRESENTATIONS))
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--lease-path", type=Path, help="Shared private SQLite lease path")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--archive-root", action="append", type=Path, default=[],
                         help="Existing private local or mounted remote acquisition root")
@@ -279,7 +280,9 @@ def main(argv=None):
     parser.add_argument("--refresh", action="store_true", help="Request publisher even when verified bytes exist")
     args = parser.parse_args(argv)
     try:
+        client = AcquisitionClient(lease_path=args.lease_path) if args.lease_path and not args.dry_run else None
         receipt = acquire(args.url, args.representation, args.output_dir, dry_run=args.dry_run,
+                          client=client,
                           archive_roots=args.archive_root, context=json.loads(args.context_json),
                           refresh=args.refresh)
     except SourceRejected as error:

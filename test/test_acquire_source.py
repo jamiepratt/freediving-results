@@ -164,6 +164,19 @@ class AcquireSourceTest(unittest.TestCase):
         self.assertNotIn("private", result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_cli_uses_explicit_shared_lease_path(self):
+        publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"},
+                                                 b"<html><body>Results</body></html>"))
+        lease = Path(self.directory.name) / "state" / "shared.sqlite3"
+        command = [sys.executable, str(ROOT / "scripts" / "acquire_source.py"),
+                   publisher.url, "html", str(self.output), "--lease-path", str(lease)]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("acquired", json.loads(result.stdout)["status"])
+        self.assertTrue(lease.is_file())
+        self.assertEqual(0o600, lease.stat().st_mode & 0o777)
+        self.assertEqual(1, len(publisher.requests))
+
 
 if __name__ == "__main__":
     unittest.main()
