@@ -1,0 +1,93 @@
+                                                                                              Tot        Uscita
+                                                                                Distanza
+                                                                                           Punteggio    incerta     totale punti
+             SQUADRA GIA                     Atleta               M/F   type   raggiunta
+                                                                                           Tecnica +   da -5% a -    individuali
+                                                                                   mt
+                                                                                            Bonus         50%
+
+
+                         GIRO D'ITALIA IN APNEA
+                          TROFEO SAN MAURO
+                     POMIGLIANO D'ARCO 1 MARZO 2026
+                                    Classifica maschile bipinne
+ 1 San Mauro Apnea                 Romanucci Carmine              M      B       178,8         0          0%          214,56
+
+ 2 Water Instinct - N.B.A. Roma    Bruno Michele                  M      B        200          0          20%           192
+
+ 3 Water Instinct - N.B.A. Roma    Chikhani Flavio                M      B       156,2         0          0%          187,44
+ 4 In Apnea A.S.D.                 Cinque Alberto                 M      B        150          0           0%           180
+ 5 One Breath                      Capenti Davide                 M      B        136          0           0%          163,2
+ 6 San Mauro Apnea                 Iazzetta Antonio               M      B       128,5         0           0%          154,2
+ 7 Water Instinct - N.B.A. Roma    Ramelli Andrea                 M      B        142          0          10%         153,36
+ 8 One Breath                      Lenzi Alessandro               M      B        134          0           5%         152,76
+ 9 San Mauro Apnea                 Liguori Joannes                M      B        125          0           0%           150
+10 Apnea Free A.S.D.               Ceriola Luca                   M      B        125          0           0%           150
+11 Apnea Free A.S.D.               Javarone Stefano               M      B        107         19           0%          147,4
+12 San Mauro Apnea                 Iacobelli Gennaro              M      B        112         12           0%          146,4
+13 Apnea Free A.S.D.               Carollo Giuseppe               M      B        135          0          10%          145,8
+14 One Breath                      Malizia Vincenzo               M      B        100         24           0%           144
+15 One Breath                      Guarracino Riccardo            M      B        100         20           0%           140
+16 San Mauro Apnea                 D'Alessandro Antonio           M      B       108,2         9           0%         138,84
+17 Subacquei Partenopei            De Luca Fabio                  M      B        115          0           0%           138
+18 Water Instinct - N.B.A. Roma    Micarelli Andrea               M      B        112          0           0%          134,4
+19 San Mauro Apnea                 Picariello Giovanni            M      B       111,8         0           0%         134,16
+20 Living Apnea A.S.D.             Rotundi Francesco Maria        M      B         90         19           0%           127
+21 One Breath                      Interdonato Marco              M      B        100          7           0%           127
+22 Water Instinct - N.B.A. Roma    Contu Cristian                 M      B       105,2         0           0%         126,24
+23 Subacquei Partenopei            Cannella Fabrizio              M      B        100          6           0%           126
+24 San Mauro Apnea                 Pelliccia Raffaele             M      B        102          0           0%          122,4
+25 Living Apnea A.S.D.             Manenti Luca                   M      B        100          0           0%           120
+26 Subacquei Partenopei            Farina Marco                   M      B        100          0           0%           120
+27 Subacquei Partenopei            Leigheb Pasquale               M      B        100          0           0%           120
+28 Subacquei Partenopei            Mileto Stefano                 M      B        100          0           0%           120
+29 Apnea Free A.S.D.               Adinolfi Alessandro            M      B        100          0           0%           120
+30 Apnea Free A.S.D.               Delre Nicola                   M      B        100          0           0%           120
+31 San Mauro Apnea                 Siciliano Mattia               M      B        100          0           0%           120
+32 Subacquei Partenopei            Rossi Marco                    M      B         86         11           0%          114,2
+33 Subacquei Partenopei            Sacco Dario                    M      B         87          9           0%          113,4
+34 Subacquei Partenopei            Davini Giuseppe                M      B         84         12           0%          112,8
+35 Apnea Free A.S.D.               Molesti Francesco              M      B         75         21           0%           111
+36 San Mauro Apnea                 Pistone Andrea                 M      B         75         18           0%           108
+37 San Mauro Apnea                 Razzini Guido                  M      B         75         18           0%           108
+38 San Mauro Apnea                 Minutolo Dario                 M      B         75         17           0%           107
+39 Subacquei Partenopei            Macchione Simone               M      B         75         17           0%           107
+40 Subacquei Partenopei            Cappiello Mauro                M      B         75         16           0%           106
+41 San Mauro Apnea                 Capasso Francesco              M      B         75         15           0%           105
+42 San Mauro Apnea                 Amoroso Francesco              M      B         75         14           0%           104
+43 One Breath                      Longo Antonio                  M      B         75         13           0%           103
+44 San Mauro Apnea                 Potenza Alessandro             M      B        64,4        24           0%         101,28
+45 San Mauro Apnea                 Montella Mariano               M      B         75         10           0%           100
+46 San Mauro Apnea                 Armini Antonio                 M      B         75          9           0%           99
+47 Subacquei Partenopei            Vitagliano Vincenzo            M      B         75          9           0%           99
+48 Living Apnea A.S.D.             Di Marzio Stefano              M      B         75          8           0%           98
+49 One Breath                      Barsotti Lorenzo               M      B         78          0           0%          93,6
+50 One Breath                      Scurci Marco                   M      B         75          0           0%           90
+51 Apnea Free A.S.D.               Marcucci Riccardo              M      B        62,5        13           0%           88
+52 San Mauro Apnea                 Cotena Raffaele                M      B         61         11           0%          84,2
+
+
+                                  Classifica maschile monopinna
+ 1 Water Instinct - N.B.A. Roma    Stasolla Emanuele              M      M        132          0          0%            132
+ 2 San Mauro Apnea                 Lupo Enrico                    M      M       125,8         0          0%           125,8
+ 3 San Mauro Apnea                 Ricciardi Stefano              M      M       118,4         0          0%           118,4
+ 4 San Mauro Apnea                 Leo Francesco                  M      M        118          0          5%           112,1
+ 5 San Mauro Apnea                 Schuwerk Klaus                 M      M       101,4         0          0%           101,4
+ 6 Subacquei Partenopei            Lepre Salvatore                M      M        100          0          0%            100
+ 7 San Mauro Apnea                 Montella Carmine               M      M         99          0          0%            99
+ 8 Apnea Free A.S.D.               Iannuzzi Lucas Orlando         M      M         75         20          0%            95
+
+
+                                       Classifica maschile rana
+ 1 San Mauro Apnea                 Taddeo Giuseppe                M      R        119          0          0%           154,7
+
+ 2 In Apnea A.S.D.                 Santacroce Manuel              M      R        116          0          0%           150,8
+
+ 3 In Apnea A.S.D.                 De Sanctis Francesco           M      R        100         11          0%            141
+ 4 Subacquei Partenopei            Oliveri Del Castillo Umberto   M      R       107           0           5%         132,145
+ 5 In Apnea A.S.D.                 Spagnol Giorgio                M      R       100           0           0%           130
+ 6 Subacquei Partenopei            Salvati Vittorio               M      R       100           0           0%           130
+ 7 San Mauro Apnea                 Montella Matteo                M      R       88,3          0           0%         114,79
+ 8 One Breath                      Cremisi Elia                   M      R        86           0           0%          111,8
+ 9 San Mauro Apnea                 Riccio Luigi                   M      R        80           0          10%          93,6
+

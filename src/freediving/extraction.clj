@@ -9,6 +9,7 @@
             [freediving.novi-sad :as novi-sad]
             [freediving.croatia-open :as croatia-open]
             [freediving.italy-open :as italy-open]
+            [freediving.san-mauro-2026 :as san-mauro]
             [freediving.world-games-2025 :as world-games]
             [freediving.world-games-series-2025 :as world-games-series]
             [freediving.kaohsiung-2025 :as kaohsiung]
@@ -152,6 +153,7 @@
            (novi-sad/supported? pages) (novi-sad/parse-pages pages)
            (croatia-open/supported? pages) (croatia-open/parse-pages pages)
            (italy-open/supported? pages) (italy-open/parse-pages pages)
+           (san-mauro/supported? pages) (san-mauro/parse-pages sha256 pages)
            (world-games/supported? pages) (world-games/parse-pages pages)
            (world-games-series/supported? pages) (world-games-series/parse-pages pages)
            (kaohsiung/supported? pages) (kaohsiung/parse-pages pages)
@@ -197,6 +199,11 @@
 
 (defn italy-open-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= italy-open/parser-version (:parser-version artifact))))
+
+(defn san-mauro-artifact? [artifact]
+  (and (= 3 (:schema-version artifact))
+       (= san-mauro/parser-version (:parser-version artifact))
+       (contains? san-mauro/source-sha256s (:source-sha256 artifact))))
 
 (defn world-games-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= world-games/parser-version (:parser-version artifact))))
@@ -301,7 +308,7 @@
   ([root artifact]
    (or (requires-geometry-validation? artifact)
        (when (and (not (legacy-novi-artifact? artifact)) (not (legacy-athens-artifact? artifact))
-                  (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact))
+                  (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact)) (not (san-mauro-artifact? artifact))
                   (not (world-games-artifact? artifact))
                   (not (world-games-series-artifact? artifact))
                   (not (kaohsiung-artifact? artifact))
@@ -353,6 +360,7 @@
          novi? (novi-sad/supported? pages)
          croatia? (croatia-open/supported? pages)
          italy? (italy-open/supported? pages)
+         san-mauro? (san-mauro/supported? pages)
          world-games? (world-games/supported? pages)
          world-games-series? (world-games-series/supported? pages)
          kaohsiung? (kaohsiung/supported? pages)
@@ -380,6 +388,8 @@
          ffessm-new (when ffessm-new? (parse-pages sha256 pages))
          _ (when (and italy? (not= sha256 italy-open/source-sha256))
              (throw (ex-info "Italian Open parser is bound to a different source PDF" {})))
+         _ (when (and san-mauro? (not (contains? san-mauro/source-sha256s sha256)))
+             (throw (ex-info "San Mauro parser is bound to different source PDFs" {})))
          _ (when (and world-games? (not= sha256 world-games/source-sha256))
              (throw (ex-info "World Games parser is bound to a different source PDF" {})))
          _ (when (and world-games-series? (not= sha256 world-games-series/source-sha256))
@@ -415,8 +425,8 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
-                   :schema-version (cond ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
+                   :parser-version (cond ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :schema-version (cond ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -429,7 +439,7 @@
                             (throw (ex-info "Extracted page count does not match PDF" {:expected page-count :actual (count pages)})))
                           (merge (if (or athens? indoor? depth-2025? depth-2026?)
                                    ((cond athens? athens-geometry/parse-pages-with-geometry indoor-time? indoor-time/parse-pages-with-geometry indoor? indoor-2026/parse-pages-with-geometry depth-2026? depth-2026/parse-pages-with-geometry :else depth-2025/parse-pages-with-geometry) pages (:out (command! "pdftotext" "-bbox-layout" "-enc" "UTF-8" (:artifact-path source) "-")))
-                                   (or ffessm-new (parse-pages pages))) identity
+                                   (or ffessm-new (parse-pages sha256 pages))) identity
                                  {:job-id job-id :processed-at (str (java.time.Instant/now))
                                   :raw-text raw :tool-stderr (:err result)
                                   :pdf-page-count page-count}))) on-progress))))
@@ -575,6 +585,23 @@
                              ffessm-2026-juniors-artifact?
                              ffessm-juniors/source-sha256
                              "French 2026 juniors"))
+
+(defn validate-san-mauro-artifact!
+  "Replay the immutable source-bound result sheet before import."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (san-mauro/parse-pages (:source-sha256 artifact) pages)]
+    (when-not (and (san-mauro-artifact? artifact)
+                   (= "pdftotext" (get-in artifact [:tool :name]))
+                   (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
+                   (= (str/trim (:err (command! "pdftotext" "-v"))) (get-in artifact [:tool :version]))
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "San Mauro extraction differs from archived source replay" {})))
+    artifact))
 
 (defn validate-italy-open-artifact!
   "Replay source-bound text and reconciliation against the registered PDF before import."
