@@ -89,6 +89,20 @@ class AcquireSourceTest(unittest.TestCase):
                 self.assertEqual(body, Path(receipt["source_path"]).read_bytes())
                 self.assertEqual(mime, json.loads(Path(receipt["provenance_path"]).read_text())["content_type"])
 
+    def test_html_result_page_with_recaptcha_script_is_retained(self):
+        body = (b'<!doctype html><html><head><script src="https://www.google.com/recaptcha/enterprise.js"></script>'
+                b'</head><body><h1>Results 2026</h1><a href="results.pdf">Final results</a></body></html>')
+        publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"}, body))
+        receipt = acquire(publisher.url, "html", self.output, client=self.client)
+        self.assertEqual(body, Path(receipt["source_path"]).read_bytes())
+
+    def test_actual_captcha_challenge_is_rejected(self):
+        publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"},
+                                                 b"<html><body>CAPTCHA required</body></html>"))
+        with self.assertRaises(SourceRejected) as caught:
+            acquire(publisher.url, "html", self.output, client=self.client)
+        self.assertEqual("access_challenge", caught.exception.reason)
+
     def test_redirect_and_retry_have_one_successful_artifact(self):
         target = self.publisher(lambda path: (200, {"Content-Type": "application/pdf"}, b"%PDF-1.4\nresult"))
         calls = []
