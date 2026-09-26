@@ -28,8 +28,9 @@ _CHALLENGE = (b"captcha", b"verify you are human", b"cloudflare challenge",
               b"checking your browser", b"attention required", b"unusual traffic")
 _RETRYABLE = (429, 500, 502, 503, 504)
 _REDIRECT = (301, 302, 303, 307, 308)
-_SENSITIVE_NAME = re.compile(r"token|api[_-]?key|secret|password|session|auth|credential|signature|jwt", re.I)
+_SENSITIVE_NAME = re.compile(r"token|api[_-]?key|secret|password|session|auth|credential|signature|jwt|storage", re.I)
 _SENSITIVE_VALUE = re.compile(r"\b(?:token|api[_-]?key|secret|password|session|auth|credential|signature|jwt)\s*[:=]|\bbearer\s+", re.I)
+_SPORT_SESSION_NAMES = {"session", "session_name"}
 
 
 class BrowserAcquisitionError(Exception):
@@ -65,7 +66,12 @@ def reject_sensitive_metadata(value):
     """Reject credential-shaped user metadata before it enters capture receipts."""
     if isinstance(value, dict):
         for key, item in value.items():
-            if not isinstance(key, str) or _SENSITIVE_NAME.search(key):
+            if not isinstance(key, str):
+                raise ValueError("sensitive metadata key")
+            if key.lower() in _SPORT_SESSION_NAMES:
+                if not isinstance(item, str) or not 1 <= len(item) <= 160 or re.search(r"[\r\n=&?]", item):
+                    raise ValueError("invalid sporting session")
+            elif _SENSITIVE_NAME.search(key):
                 raise ValueError("sensitive metadata key")
             reject_sensitive_metadata(item)
     elif isinstance(value, list):

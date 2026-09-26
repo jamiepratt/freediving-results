@@ -104,7 +104,9 @@ class BrowserCaptureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = str(Path(directory) / "output")
             for url, context in [
-                ("https://publisher.example/results", '{"filters":{"session":"private"}}'),
+                ("https://publisher.example/results", '{"filters":{"session_cookie":"private"}}'),
+                ("https://publisher.example/results", '{"session":"Bearer abc123"}'),
+                ("https://publisher.example/results", '{"session_name":"session=private"}'),
                 ("https://publisher.example/results?token=private", "{}"),
                 ("https://publisher.example/results#session=private", "{}"),
             ]:
@@ -120,13 +122,22 @@ class BrowserCaptureTest(unittest.TestCase):
                         "selected_state": {"selector": ".date", "text": "2025-06-28"},
                         "result_selector": "table.results tr", "min_results": 1,
                         "response_contains": "Athlete"}
-            for update in ({"selected_date": "20250628"}, {"session": "private"},
+            for update in ({"selected_date": "20250628"}, {"storage_state": "private"},
                            {"verified_filters": [{"name": "discipline", "selector": ".filter", "text": "token=private"}]}):
                 spec.write_text(json.dumps({**baseline, **update}))
                 with self.subTest(update=update), redirect_stderr(StringIO()):
                     with self.assertRaises(SystemExit):
                         capture_main(["https://publisher.example/results", str(Path(directory) / "output"),
                                       "--selection-file", str(spec), "--dry-run"])
+
+    def test_capture_cli_accepts_plain_competition_session_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = '{"session":"2025-06-28 DYN","filters":{"session_name":"Morning finals"}}'
+            with redirect_stdout(StringIO()) as output:
+                result = capture_main(["https://publisher.example/results", str(Path(directory) / "output"),
+                                       "--context-json", context, "--dry-run"])
+        self.assertEqual(0, result)
+        self.assertEqual("publisher.example", json.loads(output.getvalue())["host"])
 
     def test_capture_cli_validates_selection_file_before_browser_start(self):
         with tempfile.TemporaryDirectory() as directory:
