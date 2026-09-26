@@ -751,3 +751,27 @@
                  (mapv #(get-in % [:probabilities :match]) (:results report))))
           (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
             (is (= receipt (evaluation/run! dir sample cfg runtime)))))))))
+
+(deftest spelling-answers-share-batches-and-remain-in-private-results
+  (let [cfg (dissoc (config "https://example.com") :identity-protocol :native-batch-size)
+        prepared (first (p/prepare-batches cfg (cases)))
+        body (json/read-str (:body prepared) :key-fn keyword)
+        spelling-answer {:type "choice" :choice "left" :confidence 0.98
+                         :probabilities {:left 0.96 :right 0.01 :equally_plausible 0.01
+                                         :unknown 0.01 :not_applicable 0.01}}
+        identity-answer {:type "choice" :choice "match" :confidence 0.98
+                         :probabilities {:match 0.96 :no_match 0.02 :abstain 0.02}}]
+    (is (= "shadow-adapters/14" (:adapter-version prepared)))
+    (is (= #{:identity_0 :identity_1 :spelling_0 :spelling_1} (set (keys (:questions body)))))
+    (is (.contains (:state body) "mistransliterated"))
+    (http/with-server
+      (fn [ex] (http/reply! ex 200 (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                                    :answers {:identity_0 identity-answer :identity_1 identity-answer
+                                                              :spelling_0 spelling-answer :spelling_1 spelling-answer}})))
+      (fn [url]
+        (let [sample (assoc (dataset) :cases (subvec (:cases (dataset)) 0 2))
+              config (assoc cfg :endpoint url :identity-protocol :freediving-compact-v3)
+              root (runner/root)
+              receipt (evaluation/run! root sample [config] {:providers {"native" {:bearer-token "fixture-secret"}}})
+              results (get-in (evaluation/inspect-run root (:run-id receipt)) [:report :providers "native" :results])]
+          (is (= [:left :left] (mapv #(get-in % [:spelling :outcome]) results))))))))

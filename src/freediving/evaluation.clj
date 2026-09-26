@@ -163,13 +163,16 @@
                             {:case-id id :outcome :error :error :comparator-halted
                              :dispatch-status :not-dispatched :halted-by-case-id halted-by
                              :attempts [] :latency-ms nil :cost {:status :not-incurred}}
-                            (merge {:case-id id :batch-index index :request-hash (:request-hash receipt)
-                                    :trace-hash trace-hash :accounting :request-level-only
-                                    :cost {:status :unknown} :latency-ms nil :attempts []
-                                    :model-version (:model-version response)
-                                    :external-outcome (:external-outcome response)
-                                    :companions (into {} (map (fn [kind] [kind (or (get-in response [:answers (str (name kind) "_" i)])
-                                                                                   {:outcome :error :error (:error response)})]) (:companions request)))}
+                            (merge (cond-> {:case-id id :batch-index index :request-hash (:request-hash receipt)
+                                            :trace-hash trace-hash :accounting :request-level-only
+                                            :cost {:status :unknown} :latency-ms nil :attempts []
+                                            :model-version (:model-version response)
+                                            :external-outcome (:external-outcome response)
+                                            :companions (into {} (map (fn [kind] [kind (or (get-in response [:answers (str (name kind) "_" i)])
+                                                                                           {:outcome :error :error (:error response)})]) (:companions request)))}
+                                     (:spelling-choice? request)
+                                     (assoc :spelling (or (get-in response [:answers (str "spelling_" i)])
+                                                          {:outcome :error :error (:error response)})))
                                    (or (get-in response [:answers (str "identity_" i)])
                                        {:outcome :error :error (:error response)}))))
                         (range) ids)
@@ -199,7 +202,7 @@
 
 (defn- native-batch? [config]
   (or (:native-batch-size config)
-      (= :freediving-compact-v2 (:identity-protocol config))))
+      (#{:freediving-compact-v2 :freediving-compact-v3} (:identity-protocol config))))
 
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside

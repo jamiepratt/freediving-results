@@ -151,6 +151,35 @@
          :instruction (:instruction question-local-descriptor)
          :guidance-version :original-v1))
 
+(def compact-spelling-descriptor
+  (assoc compact-table-descriptor
+         :protocol-id :freediving-compact-v3
+         :guidance-version :international-transliteration-v1
+         :instruction
+         (str (str/replace (:instruction question-local-descriptor)
+                           "All outcomes are advisory; owner review remains required. Confidence is a provider signal, not calibrated accuracy."
+                           "Identity outcomes do not merge people or publish results. Confidence is uncalibrated.")
+              " Freediving events are international; organisers and data-entry staff may not speak athletes' languages, so names may be mistransliterated. "
+              "Representation codes usually reflect nationality and may be a weak language clue, never proof of citizenship or identity.")))
+
+(defn spelling-question [input]
+  (validate-input! input)
+  {:type "choice"
+   :instructions
+   {:left {:name (get-in input [:left :fields :name :value])
+           :representation (get-in input [:left :fields :representation :value])}
+    :right {:name (get-in input [:right :fields :name :value])
+            :representation (get-in input [:right :fields :representation :value])}
+    :question (str "Which printed name is linguistically more plausible for this athlete? "
+                   "Events are international and names may be mistransliterated by organisers or data-entry staff unfamiliar with the athlete's language. "
+                   "Use representation as a weak nationality/language clue, not proof. Choose unknown if evidence is weak. "
+                   "Choose not_applicable if these appear to be different people. Do not invent a third spelling.")}
+   :criteria {:left "Left printed spelling is more plausible"
+              :right "Right printed spelling is more plausible"
+              :equally_plausible "Both printed spellings are equally plausible"
+              :unknown "Insufficient evidence to prefer either spelling"
+              :not_applicable "The names appear to belong to different people"}})
+
 (defn- dependence-groups [sources]
   ;; Connected components also catch duplicate documents assigned different families.
   (reduce (fn [groups source]
