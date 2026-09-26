@@ -28,6 +28,7 @@ def main(argv=None):
     parser.add_argument("url", help="Official HTTP(S) source page")
     parser.add_argument("output", type=Path, help="New private capture directory")
     parser.add_argument("--lease-path", type=Path, help="Shared private SQLite lease path")
+    parser.add_argument("--channel", help="Installed Playwright browser channel, such as chrome")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     from urllib.parse import urlsplit
@@ -47,7 +48,7 @@ def main(argv=None):
     args.output.mkdir(mode=0o700)
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = playwright.chromium.launch(headless=True, channel=args.channel)
             try:
                 context = browser.new_context(accept_downloads=True, service_workers="block")
                 page = context.new_page()
