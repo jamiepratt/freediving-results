@@ -11,11 +11,13 @@ from hashlib import sha256
 import json
 import random
 import time
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, build_opener
 
 from acquire_source import _safe_url
+from source_inventory import find_reusable_source, legacy_archive_gaps
 from source_acquisition import AcquisitionClient, _NoRedirect, _retry_after
 
 
@@ -48,6 +50,7 @@ class BrowserCapture:
     dom: str
     responses: tuple[BrowserResponse, ...]
     redirects: tuple[tuple[str, str, int], ...]
+    reuses: tuple[dict, ...] = ()
 
 
 def _validate(host, status, content_type, body, resource_type):
@@ -77,7 +80,8 @@ def _validate(host, status, content_type, body, resource_type):
     return True
 
 
-def capture_page(page, url, client: AcquisitionClient, *, opener=None):
+def capture_page(page, url, client: AcquisitionClient, *, opener=None,
+                 archive_roots=(), source_context=None, refresh=False):
     """Capture a Page through the shared lease; return exact response bytes and DOM.
 
     Each browser request is replayed through a bounded HTTP reader. Playwright's
@@ -87,6 +91,7 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None):
     failures = []
     responses = []
     redirects = []
+    reuses = []
     redirect_count = 0
     opener = opener or build_opener(_NoRedirect)
 
@@ -109,6 +114,38 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None):
         policy = client.policy_for(host)
         browser_request = route.request
         method = getattr(browser_request, "method", "GET")
+        if method == "GET" and not refresh:
+            for representation in ("html", "json", "pdf"):
+                try:
+                    reusable = find_reusable_source(archive_roots, request_url, representation,
+                                                    source_context or {})
+                except ValueError:
+                    failures.append(BrowserAcquisitionError(host, "archive_inventory_failed"))
+                    route.abort()
+                    return
+                if reusable is None:
+                    continue
+                body = reusable["body"]
+                if len(body) > policy.max_bytes:
+                    failures.append(BrowserAcquisitionError(host, "size_limit"))
+                    route.abort()
+                    return
+                content_type = reusable["record"]["content_type"]
+                try:
+                    if _validate(host, 200, content_type, body,
+                                 getattr(browser_request, "resource_type", "document")):
+                        responses.append(BrowserResponse(request_url, host, 200, content_type,
+                                                         body, sha256(body).hexdigest()))
+                except BrowserAcquisitionError as failure:
+                    failures.append(failure)
+                    route.abort()
+                    return
+                reuses.append({"url": request_url, "sha256": sha256(body).hexdigest(),
+                               "provenance_path": str(reusable["provenance_path"]),
+                               "original_retrieved_at": reusable["record"]["retrieved_at"],
+                               "freshness": "not_checked"})
+                route.fulfill(status=200, headers={"content-type": content_type}, body=body)
+                return
         if method not in ("GET", "POST"):
             failures.append(BrowserAcquisitionError(host, "unsupported_method"))
             route.abort()
@@ -206,6 +243,15 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None):
 
     page.route("**/*", handle)
     try:
+        if archive_roots:
+            # This verifies all objects in configured legacy archives before
+            # navigation; old records lack response facts needed for reuse.
+            try:
+                if any(not Path(root).is_dir() or Path(root).is_symlink() for root in archive_roots):
+                    raise ValueError("archive root unavailable")
+                legacy_archive_gaps(archive_roots, url, "html", source_context or {})
+            except ValueError:
+                raise BrowserAcquisitionError(_safe_url(url), "archive_inventory_failed") from None
         try:
             page.goto(url, wait_until="networkidle")
         except Exception:
@@ -214,6 +260,6 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None):
             raise
         if failures:
             raise failures[0]
-        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects))
+        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects), tuple(reuses))
     finally:
         page.unroute("**/*", handle)

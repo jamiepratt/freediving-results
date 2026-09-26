@@ -8,6 +8,7 @@ from threading import Thread
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from browser_acquisition import BrowserAcquisitionError, capture_page
+from acquire_source import acquire
 from source_acquisition import AcquisitionClient, Policy
 
 
@@ -90,6 +91,56 @@ class Page:
 
 
 class BrowserCaptureTest(unittest.TestCase):
+    def test_unavailable_archive_stops_before_browser_request(self):
+        url = "https://publisher.example/results"
+        page = Page([(url, Response())])
+        with tempfile.TemporaryDirectory() as directory:
+            client = AcquisitionClient(default_policy=Policy(min_interval=0),
+                                       lease_path=Path(directory) / "lease.sqlite3")
+            with self.assertRaises(BrowserAcquisitionError) as caught:
+                capture_page(page, url, client, opener=page,
+                             archive_roots=[Path(directory) / "missing"])
+        self.assertEqual("archive_inventory_failed", caught.exception.reason)
+        self.assertEqual([], page.requests)
+
+    def test_verified_archive_response_is_reused_without_browser_request(self):
+        class Handler(BaseHTTPRequestHandler):
+            calls = 0
+
+            def do_GET(self):
+                Handler.calls += 1
+                body = b"<html>archived results</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/results"
+            page = Page([(url, Response())])
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                client = AcquisitionClient(default_policy=Policy(min_interval=0),
+                                           lease_path=root / "lease.sqlite3")
+                acquire(url, "html", root / "archive", client=client)
+                capture = capture_page(page, url, client, opener=page,
+                                       archive_roots=[root / "archive"])
+            self.assertEqual(1, Handler.calls)
+            self.assertEqual([], page.requests)
+            self.assertEqual(b"<html>archived results</html>", capture.responses[0].body)
+            self.assertEqual(1, len(capture.reuses))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_browser_session_header_reaches_bounded_http_route(self):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):

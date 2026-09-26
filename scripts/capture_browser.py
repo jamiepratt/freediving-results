@@ -29,6 +29,10 @@ def main(argv=None):
     parser.add_argument("output", type=Path, help="New private capture directory")
     parser.add_argument("--lease-path", type=Path, help="Shared private SQLite lease path")
     parser.add_argument("--channel", help="Installed Playwright browser channel, such as chrome")
+    parser.add_argument("--archive-root", action="append", type=Path, default=[],
+                        help="Existing private local or mounted remote acquisition root")
+    parser.add_argument("--context-json", default="{}", help="Exact selected date/filter/version JSON object")
+    parser.add_argument("--refresh", action="store_true", help="Request publisher even when verified bytes exist")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     from urllib.parse import urlsplit
@@ -42,6 +46,12 @@ def main(argv=None):
         return 0
     client = AcquisitionClient(lease_path=args.lease_path)
     try:
+        source_context = json.loads(args.context_json)
+        if not isinstance(source_context, dict):
+            raise ValueError
+    except ValueError:
+        parser.error("context must be a JSON object")
+    try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         parser.error("Playwright is required for browser capture")
@@ -52,7 +62,8 @@ def main(argv=None):
             try:
                 context = browser.new_context(accept_downloads=True, service_workers="block")
                 page = context.new_page()
-                capture = capture_page(page, args.url, client)
+                capture = capture_page(page, args.url, client, archive_roots=args.archive_root,
+                                       source_context=source_context, refresh=args.refresh)
             finally:
                 browser.close()
         dom_bytes = capture.dom.encode("utf-8")
@@ -73,6 +84,7 @@ def main(argv=None):
               "retrieved_at": datetime.now(timezone.utc).isoformat(), "dom_sha256": dom_hash,
               "redirects": [{"from": source, "to": target, "status": status}
                             for source, target, status in capture.redirects],
+              "context": source_context, "reuses": capture.reuses,
               "responses": records})
         print(json.dumps({"status": "captured", "host": host, "responses": len(records),
                           "dom_sha256": dom_hash}, sort_keys=True))
