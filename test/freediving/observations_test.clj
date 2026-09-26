@@ -4,6 +4,7 @@
             [clojure.java.shell :as shell]
             [freediving.aida-html :as html]
             [freediving.aida-html-test :as html-fixture]
+            [freediving.vestico-2025 :as vestico]
             [freediving.cmas-2025-indoor-json :as indoor-json]
             [freediving.cmas-2025-indoor-json-test :as indoor-json-fixture]
             [freediving.archive :as archive]
@@ -206,6 +207,29 @@
       (archive/derive! root (:job-id bad) (constantly bad) nil)
       (is (thrown-with-msg? Exception #"HTML source replay" (observations/import! app root (:job-id bad))))
       (is (= 2 (:observations (observations/counts app)))))))
+
+(deftest vestico-html-import-retains-source-bound-observations
+  (let [dir (fixture/workspace) root (str dir "/archive") file (str dir "/vestico.html")
+        source (slurp "test/resources/fixtures/vestico-2025/results.html" :encoding "UTF-8")
+        hash (html-fixture/register-html root file source)
+        receipt (html/extract! root hash {:actor "vestico-test" :config {}})
+        job (:job-id receipt)]
+    (is (= vestico/source-sha256 hash))
+    (is (= :created (:status (observations/import! app root job))))
+    (is (= :skipped (:status (observations/import! app root job))))
+    (is (= 12 (:observations (observations/counts app))))
+    (is (= 12 (:result-rows (observations/counts app))))
+    (is (= {:table 1 :row 2}
+           (get-in (observations/inspect app job) [:observations 0 :payload :coordinates])))
+    (is (= "277,5"
+           (get-in (observations/inspect app job) [:observations 0 :payload :raw :fields "Result"])))
+    (let [stored (:artifact (observations/inspect app job))
+          altered (-> stored (assoc :actor "tampered")
+                      (assoc-in [:candidates 0 :parsed :performance] 999M))
+          altered (assoc altered :job-id (html/digest (select-keys altered html/identity-keys)))]
+      (archive/derive! root (:job-id altered) (constantly altered) nil)
+      (is (thrown-with-msg? Exception #"HTML source replay"
+                            (observations/import! app root (:job-id altered)))))))
 
 (deftest cmas-json-import-retains-result-page-citation-and-row-evidence
   (let [dir (fixture/workspace) root (str dir "/archive") file (str dir "/result.json")

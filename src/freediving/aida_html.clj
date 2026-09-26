@@ -1,7 +1,8 @@
 (ns freediving.aida-html
   "Bounded AIDA table extraction. Source text, not inferred sporting facts, is authoritative."
   (:require [clojure.string :as str]
-            [freediving.archive :as archive])
+            [freediving.archive :as archive]
+            [freediving.vestico-2025 :as vestico])
   (:import [org.jsoup.parser Parser]
            [org.jsoup.nodes Element]))
 
@@ -122,32 +123,38 @@
       (throw (ex-info "HTML requires text/html acquisition evidence" {})))
     (str (.decode decoder (java.nio.ByteBuffer/wrap bytes)))))
 
+(defn- source-parser [sha256]
+  (if (= vestico/source-sha256 sha256)
+    {:version vestico/parser-version :parse vestico/parse-html}
+    {:version parser-version :parse parse-html}))
+
 (defn validate-artifact!
   "Validate HTML observations by deterministic replay from verified archive bytes."
   [root artifact]
-  (when-not (and (= 4 (:schema-version artifact)) (= parser-version (:parser-version artifact))
-                 (= {:name "jsoup" :version "1.21.2" :arguments ["UTF-8" "track-position"]} (:tool artifact)))
-    (throw (ex-info "Unsupported HTML extraction contract" {})))
-  (let [expected (parse-html (source-text root (:source-sha256 artifact)))]
-    (when-not (= expected (select-keys artifact (keys expected)))
-      (throw (ex-info "HTML source replay mismatch" {}))))
+  (let [{:keys [version parse]} (source-parser (:source-sha256 artifact))]
+    (when-not (and (= 4 (:schema-version artifact)) (= version (:parser-version artifact))
+                   (= {:name "jsoup" :version "1.21.2" :arguments ["UTF-8" "track-position"]} (:tool artifact)))
+      (throw (ex-info "Unsupported HTML extraction contract" {})))
+    (let [expected (parse (source-text root (:source-sha256 artifact)))]
+      (when-not (= expected (select-keys artifact (keys expected)))
+        (throw (ex-info "HTML source replay mismatch" {})))))
   artifact)
 
 (defn extract!
   "Derive immutable schema 4 HTML evidence from a registered UTF-8 representation.
-   Parses explicit metres; time notation retains unknown unit. No HTTP requests,
-   identity decisions or publication."
+   Routes one exact Vestico source; all other sources retain the AIDA parser."
   [root sha256 {:keys [actor config] :as options}]
   (when-not (and (= #{:actor :config} (set (keys options)))
                  (string? actor) (not (str/blank? actor)) (map? config))
     (throw (ex-info "Expected {:actor nonblank-string :config map}" {})))
   (let [source (archive/inspect root sha256)
         text (source-text root sha256)
+        {:keys [version parse]} (source-parser sha256)
         identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                   :evidence-sha256 (archive/extraction-evidence root)
-                  :actor actor :config config :parser-version parser-version :schema-version 4
+                  :actor actor :config config :parser-version version :schema-version 4
                   :tool {:name "jsoup" :version "1.21.2" :arguments ["UTF-8" "track-position"]}}
         job-id (digest identity)]
     (archive/derive! root job-id
-                     #(merge (parse-html text) identity
+                     #(merge (parse text) identity
                              {:job-id job-id :processed-at (str (java.time.Instant/now))}) nil)))

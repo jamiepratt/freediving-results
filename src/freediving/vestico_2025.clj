@@ -7,6 +7,7 @@
            [java.util HexFormat]))
 
 (def parser-version "vestico-2025-dyn-html/1")
+(def source-sha256 "238dd1a1e5792f9c0ce5deb6be24263470271c4f2396f17399db27fc639ab09b")
 (def headers ["Rank" "OT" "Lane" "Competitor" "M/F" "Club" "Result" "Card" "IRM"])
 (def categories {"Rezultati žene / Results female" "Results female"
                  "Rezultati muškarci / Results male" "Results male"})

@@ -4,6 +4,7 @@
             [freediving.archive :as archive]
             [freediving.archive-test :as fixture]
             [clojure.edn :as edn]
+            [freediving.vestico-2025 :as vestico]
             [freediving.aida-html :as html]))
 
 (def headers ["Start" "Diver" "Nationality" "Gender" "Discipline" "OT" "AP" "RP" "Card" "Points" "Remarks"])
@@ -95,6 +96,25 @@
     (is (nil? (get-in time [:parsed :unit])))
     (is (= :invalid (get-in malformed [:fields :performance :status])))
     (is (= "unknown m" (get-in malformed [:raw :fields "RP"])))))
+
+(deftest exact-vestico-source-routes-through-immutable-html-extraction
+  (let [dir (fixture/workspace) root (str dir "/archive") path (str dir "/source.html")
+        source (slurp "test/resources/fixtures/vestico-2025/results.html" :encoding "UTF-8")
+        hash (register-html root path source)
+        options {:actor "source-bound-test" :config {:source "vestico"}}
+        receipt (html/extract! root hash options)
+        artifact (edn/read-string (slurp (:artifact-path receipt)))]
+    (is (= "238dd1a1e5792f9c0ce5deb6be24263470271c4f2396f17399db27fc639ab09b" hash))
+    (is (= vestico/parser-version (:parser-version artifact)))
+    (is (= 4 (:schema-version artifact)))
+    (is (= 12 (count (:candidates artifact))))
+    (is (= 12 (get-in artifact [:reconciliation :printed-count])))
+    (is (= (:candidates (vestico/parse-html source)) (:candidates artifact)))
+    (is (= artifact (html/validate-artifact! root artifact)))
+    (is (= :skipped (:run-status (html/extract! root hash options))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"HTML source replay"
+                          (html/validate-artifact! root
+                                                   (assoc-in artifact [:candidates 0 :parsed :performance] 999M))))))
 
 (deftest structurally-ambiguous-rows-are-retained-for-review
   (doseq [source [(document (assoc cells 1 "<table><tr><td>Nested Person</td></tr></table>"))
