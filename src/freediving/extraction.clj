@@ -23,6 +23,7 @@
             [freediving.vertical-blue-2025 :as vertical-blue]
             [freediving.ffessm-2025-day1 :as ffessm-2025-day1]
             [freediving.ffessm-2025-day2 :as ffessm-2025-day2]
+            [freediving.ffessm-2025-monofin :as ffessm-2025-monofin]
             [freediving.ffessm-2026 :as ffessm-2026]
             [freediving.ffessm-2026-men :as ffessm-2026-men]
             [freediving.ffessm-2026-bipalmes-women :as ffessm-bipalmes-women]
@@ -114,7 +115,8 @@
          final-sha (some #(when (ffessm-final/supported? % pages) %)
                          [ffessm-final/cnf-men-sha256 ffessm-final/fim-women-sha256
                           ffessm-final/fim-men-sha256])
-         juniors? (ffessm-juniors/supported? pages)]
+         juniors? (ffessm-juniors/supported? pages)
+         monofin-sha (ffessm-2025-monofin/matching-sha pages)]
      (when (and bipalmes-women? (not= sha256 ffessm-bipalmes-women/source-sha256))
        (throw (ex-info "French 2026 bifins women parser is bound to a different source PDF" {})))
      (when (and regular-men? (not= sha256 ffessm-regular/men-sha256))
@@ -125,7 +127,10 @@
        (throw (ex-info "French 2026 final category parser is bound to a different source PDF" {})))
      (when (and juniors? (not= sha256 ffessm-juniors/source-sha256))
        (throw (ex-info "French 2026 juniors parser is bound to a different source PDF" {})))
-     (cond bipalmes-women? (ffessm-bipalmes-women/parse-pages pages)
+     (when (and monofin-sha (not= sha256 monofin-sha))
+       (throw (ex-info "French 2025 monofin parser is bound to a different source PDF" {})))
+     (cond monofin-sha (ffessm-2025-monofin/parse-pages sha256 pages)
+           bipalmes-women? (ffessm-bipalmes-women/parse-pages pages)
            (or regular-men? regular-women?) (ffessm-regular/parse-pages sha256 pages)
            final-sha (ffessm-final/parse-pages sha256 pages)
            juniors? (ffessm-juniors/parse-pages pages)
@@ -221,6 +226,12 @@
 (defn ffessm-2025-day2-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= ffessm-2025-day2/parser-version (:parser-version artifact))))
 
+(defn ffessm-2025-monofin-artifact? [artifact]
+  (and (= 3 (:schema-version artifact))
+       (some? (ffessm-2025-monofin/parser-version (:source-sha256 artifact)))
+       (= (ffessm-2025-monofin/parser-version (:source-sha256 artifact))
+          (:parser-version artifact))))
+
 (defn ffessm-2026-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= ffessm-2026/parser-version (:parser-version artifact))))
 
@@ -285,6 +296,7 @@
                   (not (vertical-blue-artifact? artifact))
                   (not (ffessm-2025-day1-artifact? artifact))
                   (not (ffessm-2025-day2-artifact? artifact))
+                  (not (ffessm-2025-monofin-artifact? artifact))
                   (not (ffessm-2026-artifact? artifact))
                   (not (ffessm-2026-men-artifact? artifact))
                   (not (ffessm-2026-bipalmes-women-artifact? artifact))
@@ -335,7 +347,8 @@
          vertical-blue? (vertical-blue/supported? pages)
          ffessm-2025-day1? (ffessm-2025-day1/supported? pages)
          ffessm-2026? (ffessm-2026/supported? pages)
-         ffessm-new? (or (ffessm-bipalmes-women/supported? pages)
+         ffessm-new? (or (some? (ffessm-2025-monofin/matching-sha pages))
+                         (ffessm-bipalmes-women/supported? pages)
                          (ffessm-regular/supported? ffessm-regular/men-sha256 pages)
                          (ffessm-regular/supported? ffessm-regular/women-sha256 pages)
                          (some #(ffessm-final/supported? % pages)
@@ -489,6 +502,13 @@
   (validate-ffessm-artifact! root artifact ffessm-2025-day2/parse-pages
                              ffessm-2025-day2-artifact? ffessm-2025-day2/source-sha256
                              "French 2025 day-two"))
+
+(defn validate-ffessm-2025-monofin-artifact! [root artifact]
+  (validate-ffessm-artifact! root artifact
+                             (partial ffessm-2025-monofin/parse-pages (:source-sha256 artifact))
+                             ffessm-2025-monofin-artifact?
+                             (:source-sha256 artifact)
+                             "French 2025 monofin"))
 
 (defn validate-ffessm-2026-artifact! [root artifact]
   (validate-ffessm-artifact! root artifact ffessm-2026/parse-pages

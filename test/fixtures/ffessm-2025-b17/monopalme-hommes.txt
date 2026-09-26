@@ -1,0 +1,18 @@
+                                       Championnat de France Eau Libre 2025
+                                              Résultats Monopalme Hommes
+                                                              Villefranche-sur-Mer
+
+FFESSM
+                                                     Profondeur Profondeur Pénalités     Défaut         Total
+Classement        Nom         Prénom   Nationalité                                                                Carton
+                                                      annoncée   réalisée  profondeur   plaquette       Points
+
+    1        LAFFIN      Eddy          Française         105 m         105          0               0       105   Blanc
+    2        JAOUEN      Nicolas       Française         101 m         101          0               0       101   Blanc
+    3        EMILE       Thibault      Française          75 m          75          0               0        75   Blanc
+    4        DROMARD     Christophe    Française          72 m          72          0               0        72   Blanc
+    5        BOURSEAUD   Julien        Française          65 m          65          0               0        65   Blanc
+   DQ        GAMBINI     Gilles        Française          83 m          83          0               0         0   Rouge
+   DQ        MARAIO      Mathieu       Française         105 m         105          0               0         0   Rouge
+   DQ        TOURREAU    Stéphane      Française         105 m         105          0               0         0   Rouge
+
