@@ -23,6 +23,10 @@ class DiscoveryTest(unittest.TestCase):
         def respond(path):
             if path == "/html":
                 return 200, {"Content-Type": "text/html"}, (FIXTURES / "discovery-index.html").read_bytes()
+            if path == "/sensitive":
+                return 200, {"Content-Type": "text/html"}, (
+                    b'<html><a href="/events/2025.pdf?filter=Bearer%20private-value" '
+                    b'data-date="2025-06-12">Result</a></html>')
             if path == "/json":
                 return 200, {"Content-Type": "application/json"}, (FIXTURES / "discovery-index.json").read_bytes()
             if path.endswith(".pdf"):
@@ -86,6 +90,35 @@ class DiscoveryTest(unittest.TestCase):
         requests = list(self.publisher.requests)
         self.assertEqual(first, self.run_discovery())
         self.assertEqual(requests, self.publisher.requests)
+
+    def test_sensitive_context_is_rejected_before_acquisition_or_private_output(self):
+        for context in ({"session_cookie": "private-value"},
+                        {"filter": "Bearer private-value"}):
+            with self.subTest(context=context):
+                config = json.loads(self.config.read_text())
+                config["sources"][0]["context"] = context
+                self.config.write_text(json.dumps(config))
+                result = subprocess.run([sys.executable, str(ROOT / "scripts" / "discover_results.py"),
+                                         str(self.config), str(self.private / "output")],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn("private-value", result.stderr)
+                self.assertFalse((self.private / "output").exists())
+                self.assertEqual([], self.publisher.requests)
+
+    def test_sensitive_candidate_url_is_rejected_before_inventory_record(self):
+        config = json.loads(self.config.read_text())
+        config["sources"] = [{**config["sources"][0],
+                              "index_url": self.publisher.url.removesuffix("/source") + "/sensitive"}]
+        self.config.write_text(json.dumps(config))
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / "discover_results.py"),
+                                 str(self.config), str(self.private / "output")],
+                                capture_output=True, text=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("private-value", result.stderr)
+        inventory = self.private / "output" / "inventory.json"
+        self.assertTrue(not inventory.exists() or "private-value" not in inventory.read_text())
+        self.assertEqual(["/sensitive"], self.publisher.requests)
 
 
 if __name__ == "__main__":

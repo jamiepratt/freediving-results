@@ -10,11 +10,33 @@ from hashlib import sha256
 from html.parser import HTMLParser
 import json
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+import re
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from acquire_source import SourceRejected, _atomic_write, _private_dir, acquire
 from source_acquisition import AcquisitionClient
 from source_inventory import _safe_url
+
+
+_CREDENTIAL = re.compile(r"bearer|cookie|session|token|password|secret|credential|authorization|api[_-]?key", re.I)
+
+
+def _public_url(url):
+    if not _safe_url(url):
+        return False
+    return not any(_CREDENTIAL.search(value) for _, value in
+                   parse_qsl(urlsplit(url).query, keep_blank_values=True))
+
+
+def _public_context(value):
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and not _CREDENTIAL.search(key) and _public_context(item)
+                   for key, item in value.items())
+    if isinstance(value, list):
+        return all(_public_context(item) for item in value)
+    if isinstance(value, str):
+        return not _CREDENTIAL.search(value)
+    return value is None or isinstance(value, (bool, int, float))
 
 
 class _DatedLinks(HTMLParser):
@@ -50,7 +72,9 @@ def _source_config(source):
         raise ValueError("source is missing required fields")
     if source["index_representation"] not in ("html", "json") or source["candidate_representation"] not in ("pdf", "html", "json"):
         raise ValueError("unsupported representation")
-    if not _safe_url(source["index_url"]):
+    if not _public_context(source["context"]):
+        raise ValueError("source context may contain credentials")
+    if not _public_url(source["index_url"]):
         raise ValueError("unsafe index URL")
     if urlsplit(source["index_url"]).hostname.lower() != source["allowed_host"].lower():
         raise ValueError("index host differs from allowed host")
@@ -127,7 +151,7 @@ def discover(config_path, output_dir, *, client=None, retry_gaps=False):
             if not cutoff <= selected <= as_of:
                 continue
             url = urljoin(index_record["final_url"], link["url"])
-            if not _safe_url(url) or urlsplit(url).hostname.lower() != source["allowed_host"].lower():
+            if not _public_url(url) or urlsplit(url).hostname.lower() != source["allowed_host"].lower():
                 raise ValueError("candidate URL is unsafe or outside publisher host")
             representation = source["candidate_representation"]
             context = {**source["context"], "selected_date": selected.isoformat(),
