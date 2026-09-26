@@ -6,6 +6,10 @@
             [freediving.owner-server :as server]
             [freediving.candidates :as candidates]
             [freediving.jev-candidates :as jev-candidates]
+            [freediving.evaluation :as evaluation]
+            [freediving.evaluation-data-test :as evaluation-fixture]
+            [freediving.evaluation-providers :as providers]
+            [freediving.evaluation-protocol :as protocol]
             [freediving.source-pages-test :as pages-fixture]
             [freediving.aida-html-test :as html-fixture]
             [freediving.publication-test :as publication-fixture]
@@ -63,18 +67,54 @@
                                                             (select-keys a [:source-sha256 :acquisitions :evidence-sha256
                                                                             :actor :config :parser-version :schema-version
                                                                             :pdfinfo-version :tool]))))))
-        root (str (Files/createTempDirectory "owner-jev-scores-" (make-array java.nio.file.attribute.FileAttribute 0)))
+        root (.getCanonicalPath (.toFile (Files/createTempDirectory "owner-jev-scores-" (make-array java.nio.file.attribute.FileAttribute 0))))
         s (server/start! (assoc (config) :jev-run-root root :jev-provider-id "jev"))]
     (try
       (let [h (login s)
-            row (first (candidates/load-corpus publication-fixture/reviewer {}))]
+            row (first (candidates/load-corpus publication-fixture/reviewer {}))
+            source {:evidence-id "row" :source-sha256 (:source-sha256 row)
+                    :artifact-sha256 (:artifact-sha256 row) :observation-id (:candidate-id row)
+                    :source-family-id (:source-sha256 row)
+                    :page (:page (first (:source-lines row)))
+                    :lines [(:line (first (:source-lines row))) (:line (first (:source-lines row)))]
+                    :exact-lines [(:text (first (:source-lines row)))]}
+            record {:record-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
+                    :fields (assoc (zipmap protocol/field-keys (repeat {:value nil :evidence-ids []}))
+                                   :name {:value (get-in row [:payload :parsed :source-name])
+                                          :evidence-ids ["row"]})
+                    :sources [source] :uncertainties [] :publisher-identity nil}
+            case (assoc (evaluation-fixture/sample-case "b" :held-out)
+                        :case-id "exact-pair" :label nil
+                        :input {:schema-version "freediving-source/1" :left record :right record})]
         (with-redefs [candidates/packet (fn [_ _ _] {:candidates [{:observations [row]}]})
-                      jev-candidates/candidate-case (fn [& _] {:case-id "exact-pair" :input {:left {:record-id "left"}
-                                                                                             :right {:record-id "right"}}})]
+                      jev-candidates/candidate-case (fn [& _] case)]
           (let [detail (request s "GET" (str "/api/detail?job-id=" (:job-id t) "&ordinal=0") nil h)]
-            (is (= 200 (:status detail)))
-            (is (= :missing (get-in detail [:body :jev-scores 0 :score-status])))
-            (is (= "exact-pair" (get-in detail [:body :jev-scores 0 :case-id]))))))
+            (is (= 200 (:status detail)) (pr-str detail))
+            (is (= "missing" (get-in detail [:body :jev-scores 0 :score-status])))
+            (is (= "exact-pair" (get-in detail [:body :jev-scores 0 :case-id]))))
+          (let [answer {:outcome :match :confidence 0.91
+                        :probabilities {:match 0.91 :no-match 0.07 :abstain 0.02}}
+                config {:id "jev" :provider :jev :identity-protocol :freediving-compact-v3
+                        :model "jev-1.13.0" :endpoint "https://example.com"}
+                _ (with-redefs [providers/execute! (fn [_ _]
+                                                     {:outcome :complete :http-status 200
+                                                      :model-version "jev-1.13.0" :answers {"identity_0" answer
+                                                                                            "spelling_0" {:outcome :unknown :confidence 0.8
+                                                                                                          :probabilities {:left 0.1 :right 0.1
+                                                                                                                          :equally-plausible 0.1 :unknown 0.6
+                                                                                                                          :not-applicable 0.1}}}
+                                                      :raw-response "private-provider-response"
+                                                      :cost {:status :unknown}})]
+                    (evaluation/run! root (evaluation-fixture/dataset [case]) [config]
+                                     {:providers {"jev" {:bearer-token "fixture-secret"}}}))
+                detail (request s "GET" (str "/api/detail?job-id=" (:job-id t) "&ordinal=0") nil h)
+                score (first (get-in detail [:body :jev-scores]))]
+            (is (= 200 (:status detail)) (pr-str detail))
+            (is (= "complete" (:score-status score)))
+            (is (= 0.91 (get-in score [:identity :probabilities :match])))
+            (is (re-matches #"[0-9a-f]{64}" (:request-hash score)))
+            (is (re-matches #"[0-9a-f]{64}" (:result-hash score)))
+            (is (not (str/includes? (pr-str detail) "private-provider-response"))))))
       (finally (server/stop! s)))))
 (deftest complete-review-and-validation-flow-preserves-source
   (let [t (publication-fixture/sample (fn [a] (let [a (assoc-in a [:config :synthetic] true)] (assoc a :job-id (fixture/hash-value (select-keys a [:source-sha256 :acquisitions :evidence-sha256 :actor :config :parser-version :schema-version :pdfinfo-version :tool]))))))
