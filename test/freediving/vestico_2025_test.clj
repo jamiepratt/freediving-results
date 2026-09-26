@@ -6,6 +6,49 @@
 (def source (slurp "test/resources/fixtures/vestico-2025/results.html" :encoding "UTF-8"))
 (def source-sha256 "238dd1a1e5792f9c0ce5deb6be24263470271c4f2396f17399db27fc639ab09b")
 
+(defn synthetic-view [comp result]
+  (-> source
+      (str/replace "class=\"nav-link active\" href=\"index.php?comp=6\"" "class=\"nav-link \" href=\"index.php?comp=6\"")
+      (str/replace (str "class=\"nav-link \" href=\"index.php?comp=" comp "\"")
+                   (str "class=\"nav-link active\" href=\"index.php?comp=" comp "\""))
+      (str/replace-first "277,5" result)))
+
+(deftest four-official-disciplines-preserve-printed-results
+  (doseq [[comp result discipline] [[8 "153,0" "DBF"]
+                                    [7 "187,5" "DNF"]
+                                    [9 "06:36" "STA"]
+                                    [10 "2:00.20" "S&E"]]]
+    (let [artifact (vestico/parse-html (synthetic-view comp result))
+          row (first (:candidates artifact))]
+      (is (= :needs-review (:status artifact)) (str comp))
+      (is (= 12 (get-in artifact [:reconciliation :candidate-count])) (str comp))
+      (is (= :parsed (:parse-status row)) (str comp))
+      (is (= discipline (get-in row [:parsed :discipline])) (str comp))
+      (is (= result (get-in row [:parsed :realised-performance])) (str comp))
+      (when (#{9 10} comp)
+        (is (nil? (get-in row [:parsed :performance])) (str comp))
+        (is (= (if (= comp 9) [6 36] [2 0])
+               (get-in row [:parsed :realized-time :components])) (str comp)))
+      (is (nil? (get-in row [:parsed :unit])) (str comp)))))
+
+(deftest unranked-disqualification-and-dns-are-cited
+  (let [dq-source (-> (synthetic-view 8 "153,0")
+                      (str/replace-first "<td class=\"text-nowrap text-center\">1</td>" "<td class=\"text-nowrap text-center\">-</td>")
+                      (str/replace-first "<td>W</td><td></td>" "<td>R</td><td>DQ UBO</td>"))
+        dns-source (-> dq-source
+                       (str/replace-first "<td class=\"text-right\">153,0</td>" "<td class=\"text-right\"></td>")
+                       (str/replace-first "<td>R</td><td>DQ UBO</td>" "<td></td><td>DNS</td>"))
+        dq (first (:candidates (vestico/parse-html dq-source)))
+        dns (first (:candidates (vestico/parse-html dns-source)))]
+    (is (= :parsed (:parse-status dq)))
+    (is (= "-" (get-in dq [:parsed :rank])))
+    (is (= "153,0" (get-in dq [:parsed :realised-performance])))
+    (is (= "DQ UBO" (get-in dq [:parsed :irm])))
+    (is (= :parsed (:parse-status dns)))
+    (is (nil? (get-in dns [:parsed :realised-performance])))
+    (is (= "DNS" (get-in dns [:parsed :irm])))
+    (is (every? #(= 9 (count (get-in % [:raw :cell-html]))) [dq dns]))))
+
 (deftest official-dyn-result-reconciles-every-live-position
   (let [artifact (vestico/parse-html source)
         rows (:candidates artifact)

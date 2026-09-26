@@ -124,8 +124,8 @@
     (str (.decode decoder (java.nio.ByteBuffer/wrap bytes)))))
 
 (defn- source-parser [sha256]
-  (if (= vestico/source-sha256 sha256)
-    {:version vestico/parser-version :parse vestico/parse-html}
+  (if-let [view (get vestico/source-views sha256)]
+    {:version (:version view) :parse vestico/parse-html}
     {:version parser-version :parse parse-html}))
 
 (defn validate-artifact!
@@ -142,7 +142,7 @@
 
 (defn extract!
   "Derive immutable schema 4 HTML evidence from a registered UTF-8 representation.
-   Routes one exact Vestico source; all other sources retain the AIDA parser."
+   Routes exact Vestico sources; all other sources retain the AIDA parser."
   [root sha256 {:keys [actor config] :as options}]
   (when-not (and (= #{:actor :config} (set (keys options)))
                  (string? actor) (not (str/blank? actor)) (map? config))
