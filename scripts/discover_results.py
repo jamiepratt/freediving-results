@@ -19,7 +19,8 @@ from source_inventory import _safe_url
 
 
 _CREDENTIAL_KEY = re.compile(
-    r"bearer|cookie|token|password|secret|credential|authorization|api[_-]?key|session[_-]?(?:id|key)", re.I)
+    r"bearer|cookie|token|password|secret|credential|authorization|api[_-]?key|"
+    r"session[_-]?(?:id|key|state)|storage[_-]?state", re.I)
 _CREDENTIAL_VALUE = re.compile(
     r"bearer|cookie|token|password|secret|credential|authorization|api[_-]?key|session\s*[:=]", re.I)
 

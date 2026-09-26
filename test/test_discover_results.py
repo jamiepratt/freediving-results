@@ -92,21 +92,24 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(requests, self.publisher.requests)
 
     def test_sensitive_context_is_rejected_before_acquisition_or_private_output(self):
-        for context in ({"session_cookie": "private-value"},
+        for ordinal, context in enumerate(({"session_cookie": "private-value"},
                         {"session_token": "private-value"},
+                        {"session_state": "private-value"},
+                        {"storage_state": "private-value"},
                         {"filter": "Bearer private-value"},
-                        {"filter": "session=private-value"}):
+                        {"filter": "session=private-value"})):
             with self.subTest(context=context):
+                output = self.private / f"output-{ordinal}"
                 config = json.loads(self.config.read_text())
                 config["sources"][0]["context"] = context
                 self.config.write_text(json.dumps(config))
                 result = subprocess.run([sys.executable, str(ROOT / "scripts" / "discover_results.py"),
-                                         str(self.config), str(self.private / "output")],
+                                         str(self.config), str(output)],
                                         capture_output=True, text=True)
                 self.assertNotEqual(0, result.returncode)
                 self.assertNotIn("private-value", result.stderr)
-                self.assertFalse((self.private / "output").exists())
-                self.assertEqual([], self.publisher.requests)
+                self.assertFalse(output.exists())
+        self.assertEqual([], self.publisher.requests)
 
     def test_sporting_session_context_is_preserved_in_receipts(self):
         config = json.loads(self.config.read_text())
