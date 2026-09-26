@@ -963,3 +963,77 @@ passed repair, lint, 99 shadow tests / 1,747 assertions and four full launcher
 tests, including terminal stopping, interrupted launches, tampering and replay.
 Original B7 and C8 packets and identities reproduced unchanged. Actual billed
 cost and raw HTTP response bytes remain unavailable.
+
+### Explicit Italian table facts, 2026-09-26
+
+[Issue #13](https://github.com/jamiepratt/freediving-results/issues/13) tested
+making existing raw facts explicit, with original guidance and five-pair grouping
+unchanged. `:identity-extraction :italian-table-v1` requires compact protocol and
+`:identity-guidance :original-v1`; omitted options preserve earlier requests.
+The projection version is `freediving-compact-table/1`, with unchanged /13 parsing.
+
+The extraction only adds `birth-year`, literal `societa`, and `discipline` fields.
+It requires cited name-row evidence and preceding headers from the same document,
+artifact and page. Birth-year/Società extraction additionally requires a recognized
+column header, numeric rank agreeing with the structured rank, surname/given-name
+agreement, a four-digit 19xx/20xx year and the expected following time column.
+Split birth-year headers are supported. Unsupported layouts remain raw and are
+flagged in local `:table-extractions` metadata. Existing fields, uncertainties,
+exact excerpts, source order and dependence labels are preserved. A Società value
+is not asserted to be a verified club, and a year is not expanded to a birth date.
+
+Label-blind extraction added 87 birth years, 87 Società values and 86 disciplines
+across the 90 Italian records. Three rank-less rows retained their birth-year and
+Società values only in raw text. Four discipline headings came from preceding
+pages and were not promoted. The independent audit checked every added value and
+citation, as well as preservation of all 162 original records. All 36 Croatian
+questions were unchanged; the first seven complete requests were byte-identical
+to G5. Both positive and negative Italian cases received eligible extractions.
+
+The frozen T5 run completed 17 requests / 81 questions, one attempt each, with
+46 matches, 35 no-matches, no abstentions, errors or undispatched cases. Every
+decision agreed with both G5 and full L5. No false merge or missed match occurred
+against these labels. The earlier short-guidance abstention remains separate;
+its Croatian question received no additional evidence in this run.
+
+| Measure | Full evidence L5 | Compact/original G5 | Explicit facts T5 |
+| --- | ---: | ---: | ---: |
+| Mean P(match), all 46 positive labels | 95.80% | 90.76% | 94.98% |
+| Mean P(match), 23 Italian positive labels | 97.43% | 87.65% | 95.48% |
+| Mean P(match), 23 unchanged Croatian positives | 94.17% | 93.87% | 94.48% |
+| Reported input tokens | 342,897 | 105,593 | 116,312 |
+| Reported output tokens | 3,326 | 3,326 | 3,326 |
+| Request-loop wall seconds | 10.308 | 8.559 | 8.724 |
+| Summed HTTP seconds | 9.766 | 7.864 | 8.007 |
+| Request median / p95, ms | 574/726 | 457/694 | 475/662 |
+| Aggregate wire bytes | 660,719 | 309,576 | 326,022 |
+| Largest request bytes | 47,548 | 23,037 | 24,802 |
+
+G5-T5 distributions changed on 51 cases, maximum component difference 0.20 and
+mean absolute difference 0.018107. L5-T5 distributions changed on 47 cases,
+maximum 0.08 and mean 0.008313. Neither comparison changed a decision. Exact and
+1e-9-threshold counts agreed. T5 used 10.15% more input tokens than G5 while
+retaining 66.08% savings against full L5.
+
+The larger increase on Italian pairs is consistent with explicit table fields
+making existing evidence easier to use. The unchanged Croatian questions also
+moved slightly, demonstrating run-to-run variation. There were no contemporaneous
+randomized or repeated controls; this experiment cannot assign the full change
+to extraction, establish probability calibration, or demonstrate improved accuracy
+on fresh cases. Original label and source-dependence limitations remain. Defaults,
+labels and identity authority were not changed.
+
+Private evidence: `data/jev-table-81-20260926/` in worktree `2cde`, including
+per-record extraction review, source-citation audit, unchanged-request checks and
+all paired results. Run identity:
+`01d7b04236f2ba08595677f6cc0e3a175dc83406474bafc7b77df5987dda8ca1`.
+Report SHA-256: `263d90a2f550075f39426189320faf8e24414731ee5c776d4624fdd847b1034c`;
+summary: `bcb9e477252c28243693df57ea4ccf33aa449bb643129a62da228b9e058c9123`;
+paired outcomes: `1fc9d94072984cd195b86b0fb8d77b42fc915d8415791c069133f6d34df86a88`.
+Replay made zero calls and preserved all 90 store files. All 1,468 prior evidence
+files retained bytes, modes and modification times; credential scanning passed.
+RED covered absent extraction, incorrectly accepted later headers, unsupported
+configuration and missing launcher. GREEN passed repair, lint, 103 shadow tests /
+1,786 assertions and all four launcher tests. B7 and G5/C5 frozen packets and
+identities still reproduce. Actual billed cost and raw HTTP response bytes remain
+unavailable.

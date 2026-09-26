@@ -213,3 +213,81 @@
     (doseq [bad [(assoc cfg :identity-guidance :unknown)
                  (assoc cfg :identity-guidance :original-v1 :identity-protocol :freediving-question-local-v1)]]
       (is (thrown? Exception (providers/prepare-batches bad cases))))))
+
+(defn italian-table-input []
+  (let [lines ["Classifica OPEN F - CWT OPEN International"
+               "Posizione  Cognome  Nome  Società  Anno di nascita  Tempo dichiarato"
+               "1  Example  Ada  Ada Example  1985  1:20.00"]
+        sources (mapv (fn [i line] (assoc reference :evidence-id (str "table-" i)
+                                          :lines [(inc i) (inc i)] :exact-lines [line])) (range) lines)
+        r (-> (record "table-record" "Ada Example")
+              (assoc :sources sources)
+              (assoc-in [:fields :name :evidence-ids] ["table-2"])
+              (assoc-in [:fields :rank] {:value "1" :evidence-ids ["table-2"]}))]
+    {:schema-version "freediving-source/1" :left r :right r}))
+
+(deftest raw-table-facts-become-explicit-without-changing-original-evidence
+  (let [in (italian-table-input)
+        p ((requiring-resolve 'freediving.evaluation-protocol/compact-table-projection) in)
+        old (protocol/compact-projection in)
+        fields (get-in p [:input :left :fields])]
+    (is (= "1985" (get-in fields [:birth-year :value])))
+    (is (= "Ada Example" (get-in fields [:societa :value])))
+    (is (= "CWT" (get-in fields [:discipline :value])))
+    (is (not (contains? fields :club)))
+    (is (not (contains? fields :birth-date)))
+    (is (= ["s3" "s2"] (get-in fields [:birth-year :sources])))
+    (is (= (:sources (:input old)) (:sources (:input p))))
+    (is (= in (get-in p [:mapping :complete-input])))
+    (is (= "freediving-compact-table/1" (:projection-version p)))))
+
+(deftest table-extraction-refuses-ambiguous-or-unassociated-cells
+  (let [base (italian-table-input)]
+    (doseq [change [(fn [r] (assoc-in r [:sources 1 :page] 2))
+                    (fn [r] (assoc-in r [:sources 1 :lines] [4 4]))
+                    (fn [r] (assoc-in r [:sources 2 :exact-lines] ["Example  Ada  Ada Example  1985  1:20.00"]))
+                    (fn [r] (assoc-in r [:sources 2 :exact-lines] ["1  Other  Ada  Ada Example  1985  1:20.00"]))
+                    (fn [r] (assoc-in r [:sources 2 :exact-lines] ["1  Example  Ada  Ada Example  unknown  1:20.00"]))
+                    (fn [r] (assoc-in r [:fields :rank :value] "2"))]]
+      (let [in (-> base (update :left change) (update :right change))
+            p (protocol/compact-table-projection in)]
+        (is (not (contains? (get-in p [:input :left :fields]) :birth-year)))
+        (is (not (contains? (get-in p [:input :left :fields]) :societa)))
+        (is (= in (get-in p [:mapping :complete-input])))))))
+
+(deftest table-facts-are-an-opt-in-addition-with-original-guidance
+  (let [cfg (assoc config :identity-protocol :freediving-compact-v1 :native-batch-size 5
+                   :native-diagnostics-version 2 :probability-sum-tolerance 0.02 :identity-guidance :original-v1)
+        cases [{:case-id "table" :input (italian-table-input)}]
+        base (first (providers/prepare-batches cfg cases))
+        request (first (providers/prepare-batches (assoc cfg :identity-extraction :italian-table-v1) cases))
+        before (json/read-str (:body base) :key-fn keyword)
+        after (json/read-str (:body request) :key-fn keyword)]
+    (is (= (:state before) (:state after)))
+    (is (= (get-in before [:questions :identity_0 :criteria]) (get-in after [:questions :identity_0 :criteria])))
+    (is (= "1985" (get-in after [:questions :identity_0 :instructions :left :fields :birth-year :value])))
+    (is (= (get-in before [:questions :identity_0 :instructions :sources]) (get-in after [:questions :identity_0 :instructions :sources])))
+    (is (= "freediving-compact-table/1" (get-in request [:protocol :projection-version])))
+    (doseq [bad [(assoc cfg :identity-extraction :unknown)
+                 (-> cfg (dissoc :identity-guidance) (assoc :identity-extraction :italian-table-v1))]]
+      (is (thrown? Exception (providers/prepare-batches bad cases))))))
+
+(deftest split-table-headers-retain-citations-and-existing-uncertainty
+  (let [in (italian-table-input)
+        r (:left in)
+        src (:sources r)
+        r (assoc r :sources [(first src)
+                             (assoc (second src) :exact-lines ["Posizione  Cognome  Nome  Società"])
+                             (assoc reference :evidence-id "year-top" :lines [3 3] :exact-lines ["Anno di"])
+                             (assoc reference :evidence-id "year-bottom" :lines [4 4] :exact-lines ["nascita"])
+                             (assoc (nth src 2) :lines [5 5])]
+                 :uncertainties [{:value "Detached penalty ownership uncertain" :evidence-ids ["table-2"]}])
+        in (assoc in :left r :right r)
+        p (protocol/compact-table-projection in)
+        old (protocol/compact-projection in)]
+    (is (= "1985" (get-in p [:input :left :fields :birth-year :value])))
+    (is (= ["s5" "s2" "s3" "s4"] (get-in p [:input :left :fields :birth-year :sources])))
+    (is (= (get-in old [:input :left :uncertainties]) (get-in p [:input :left :uncertainties])))
+    (is (= (:sources (:input old)) (:sources (:input p))))
+    (let [conflict (assoc-in in [:left :fields :discipline] {:value "FIM" :evidence-ids ["table-2"]})]
+      (is (= "FIM" (get-in (protocol/compact-table-projection conflict) [:input :left :fields :discipline :value]))))))

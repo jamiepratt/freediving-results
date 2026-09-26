@@ -92,7 +92,7 @@
         (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
-(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version :probability-sum-tolerance :identity-guidance])
+(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version :probability-sum-tolerance :identity-guidance :identity-extraction])
 (def ^:private companion-instructions
   {:name-variation "Assess whether plausible name ordering, transliteration, omitted components or transcription variation explains the names."
    :contradiction "Assess whether reliable source evidence substantively contradicts these being the same person."
@@ -106,11 +106,14 @@
   [config cases]
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
         compact? (= :freediving-compact-v1 (:identity-protocol config))
+        table? (= :italian-table-v1 (:identity-extraction config))
+        project (if table? protocol/compact-table-projection protocol/compact-projection)
         local? (or compact? (= :freediving-question-local-v1 (:identity-protocol config)))
         descriptor (cond compact? (cond-> protocol/compact-descriptor
                                     (= :original-v1 (:identity-guidance config))
                                     (assoc :instruction (:instruction protocol/question-local-descriptor)
-                                           :guidance-version :original-v1))
+                                           :guidance-version :original-v1)
+                                    table? (assoc :projection-version "freediving-compact-table/1"))
                          local? protocol/question-local-descriptor
                          :else protocol/descriptor)
         rounded? (contains? config :probability-sum-tolerance)
@@ -119,6 +122,8 @@
     (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1} (:identity-protocol config))
                    (or (not (contains? config :identity-guidance))
                        (and compact? (= :original-v1 (:identity-guidance config))))
+                   (or (not (contains? config :identity-extraction))
+                       (and compact? table? (= :original-v1 (:identity-guidance config))))
                    (or (not local?) (and (= "jev-1.13.0" (:model config))
                                          (= 2 (:native-diagnostics-version config))
                                          (or (#{1 2} size) rounded?) (empty? companions)))
@@ -144,7 +149,8 @@
                              (mapcat (fn [i request]
                                        (let [left (str "/records/" (names (get-in request [:input :left])))
                                              right (str "/records/" (names (get-in request [:input :right])))
-                                             q (cond compact? (protocol/compact-question (:input request))
+                                             q (cond table? (protocol/compact-table-question (:input request))
+                                                     compact? (protocol/compact-question (:input request))
                                                      local? (protocol/question-local (:input request))
                                                      :else (protocol/question left right))]
                                          (cons [(str "identity_" i) q]
@@ -169,7 +175,7 @@
                   :evidence (mapv #(select-keys % [:case-id :evidence]) members)
                   :question-ids (vec (keys questions))
                   :companions companions :context-policy (if local? :question-local-evidence :exact-record-dedup-shared-batch)}
-           compact? (assoc :projections (mapv #(protocol/compact-projection (:input %)) members)))))
+           compact? (assoc :projections (mapv #(project (:input %)) members)))))
      (partition-all size cases))))
 
 (defn- base-result [outcome model]

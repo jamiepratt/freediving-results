@@ -191,3 +191,61 @@
    :instructions (assoc (:input (compact-projection input))
                         :question (:question question-local-descriptor))
    :criteria (:criteria (question "/left" "/right"))})
+
+(defn- table-facts [record]
+  (let [name-ids (get-in record [:fields :name :evidence-ids])
+        row (when (= 1 (count name-ids))
+              (first (filter #(= (first name-ids) (:evidence-id %)) (:sources record))))
+        same-page? #(= (select-keys row [:source-sha256 :artifact-sha256 :page])
+                       (select-keys % [:source-sha256 :artifact-sha256 :page]))
+        lines (for [s (:sources record)
+                    :when (and row (same-page? s) (< (second (:lines s)) (first (:lines row))))
+                    line (:exact-lines s)]
+                {:text line :id (:evidence-id s)})
+        headers (filter #(re-find #"Posizione\s+Cognome\s+Nome\s+Società" (:text %)) lines)
+        birth-headers (filter #(re-find #"Anno di|nascita" (:text %)) lines)
+        birth-text (str/join " " (map :text birth-headers))
+        columns (when (= 1 (count (:exact-lines row)))
+                  (str/split (str/trim (first (:exact-lines row))) #"\s{2,}"))
+        aligned? (and (= 1 (count headers)) (>= (count columns) 6)
+                      (re-find #"Anno di" birth-text) (re-find #"nascita" birth-text)
+                      (re-matches #"[0-9]+" (nth columns 0))
+                      (= (nth columns 0) (get-in record [:fields :rank :value]))
+                      (= (str (nth columns 2) " " (nth columns 1)) (get-in record [:fields :name :value]))
+                      (re-matches #"(?:19|20)[0-9]{2}" (nth columns 4))
+                      (re-matches #"[0-9]+:[0-9]{2}(?:[.,][0-9]+)?" (nth columns 5)))
+        citations (vec (distinct (concat [(:evidence-id row)] (map :id headers) (map :id birth-headers))))
+        disciplines (keep (fn [line]
+                            (when-let [m (re-find #"Classi(?:fi|ﬁ)ca\b.*?-\s+(CWTB|CWT|CNF|FIM)\b" (:text line))]
+                              {:value (second m) :evidence-ids [(:evidence-id row) (:id line)]})) lines)
+        discipline (when (and row (= 1 (count (set (map :value disciplines))))) (first disciplines))]
+    {:status (cond aligned? :aligned-row (seq headers) :unsupported-row-layout :else :unsupported-table)
+     :fields (cond-> {}
+               aligned? (assoc :birth-year {:value (nth columns 4) :evidence-ids citations}
+                               :societa {:value (nth columns 3) :evidence-ids citations})
+               (and discipline (nil? (get-in record [:fields :discipline :value])))
+               (assoc :discipline discipline))}))
+
+(defn compact-table-projection
+  "Expose only unambiguous, source-cited Italian table cells. Società remains a
+  literal column value, not a verified club. Unsupported layouts remain raw.
+  Complete input, raw excerpts, existing fields and uncertainties are unchanged."
+  [input]
+  (let [base (compact-projection input)
+        labels (into {} (for [[label refs] (get-in base [:mapping :sources]) ref refs]
+                          [(:evidence-id ref) label]))
+        extractions (into {} (for [side [:left :right]] [side (table-facts (get input side))]))]
+    (-> (reduce (fn [p side]
+                  (update-in p [:input side :fields] merge
+                             (into {} (for [[field fact] (get-in extractions [side :fields])]
+                                        [field {:value (:value fact)
+                                                :sources (vec (distinct (map labels (:evidence-ids fact))))}]))))
+                base [:left :right])
+        (assoc :projection-version "freediving-compact-table/1")
+        (assoc-in [:mapping :table-extractions] extractions))))
+
+(defn compact-table-question [input]
+  {:type "choice"
+   :instructions (assoc (:input (compact-table-projection input))
+                        :question (:question question-local-descriptor))
+   :criteria (:criteria (question "/left" "/right"))})
