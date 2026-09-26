@@ -88,6 +88,12 @@ class _LeaseStore:
         with closing(self._connect()) as db:
             db.execute("CREATE TABLE IF NOT EXISTS hosts (host TEXT PRIMARY KEY, next_start REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS leases (token TEXT PRIMARY KEY, host TEXT NOT NULL, pid INTEGER NOT NULL, expires REAL NOT NULL)")
+            # Version 1 stored wall-clock deadlines. They cannot safely be
+            # compared with monotonic time, so discard only pacing state.
+            if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+                db.execute("DELETE FROM hosts")
+                db.execute("DELETE FROM leases")
+                db.execute("PRAGMA user_version = 2")
 
     def _connect(self):
         return sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -109,7 +115,7 @@ class _LeaseStore:
         while True:
             with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
-                now = time.time()
+                now = time.monotonic()
                 db.execute("DELETE FROM leases WHERE expires <= ?", (now,))
                 for stale_token, pid in db.execute("SELECT token, pid FROM leases WHERE host = ?", (host,)):
                     if not self._alive(pid):
@@ -128,7 +134,7 @@ class _LeaseStore:
 
     def renew(self, token, lifetime):
         with closing(self._connect()) as db:
-            db.execute("UPDATE leases SET expires = ? WHERE token = ?", (time.time() + lifetime, token))
+            db.execute("UPDATE leases SET expires = ? WHERE token = ?", (time.monotonic() + lifetime, token))
 
     def leave(self, token):
         with closing(self._connect()) as db:

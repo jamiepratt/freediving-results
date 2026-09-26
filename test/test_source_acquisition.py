@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -81,6 +82,17 @@ class AcquisitionTest(unittest.TestCase):
             with AcquisitionClient(default_policy=policy, state_path=state).lease(url) as second_wait:
                 self.assertGreaterEqual(second_wait, 0.14)
             self.assertNotIn("secret", Path(state).read_bytes().decode("utf-8", errors="ignore"))
+
+    def test_forward_wall_clock_change_does_not_skip_persisted_spacing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            policy = Policy(concurrency=1, min_interval=0.18)
+            url = "https://publisher.example/result"
+            with AcquisitionClient(default_policy=policy, state_path=state).lease(url):
+                pass
+            with patch("source_acquisition.time.time", return_value=time.time() + 3600):
+                with AcquisitionClient(default_policy=policy, state_path=state).lease(url) as waited:
+                    self.assertGreaterEqual(waited, 0.14)
 
     def test_redirect_target_shares_budget_with_new_client(self):
         arrived = []
