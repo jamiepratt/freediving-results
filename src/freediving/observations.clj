@@ -156,6 +156,8 @@
                      (extraction/belgrade-2026-artifact? a) (->> (extraction/validate-belgrade-2026-artifact! root))
                      (extraction/deep-dominica-2026-artifact? a) (->> (extraction/validate-deep-dominica-2026-artifact! root))
                      (extraction/vertical-blue-artifact? a) (->> (extraction/validate-vertical-blue-artifact! root))
+                     (extraction/ffessm-2025-day1-artifact? a) (->> (extraction/validate-ffessm-2025-day1-artifact! root))
+                     (extraction/ffessm-2026-artifact? a) (->> (extraction/validate-ffessm-2026-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
