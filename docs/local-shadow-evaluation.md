@@ -645,3 +645,64 @@ wire body, prompt, model or source evidence. Existing stored results and errors
 remain unchanged and replay without HTTP. Synthetic loopback tests cover both
 inclusive endpoints, nearby rejected sums, unchanged probabilities, other
 validation failures, distinct run identities and replay of both versions.
+
+### Full same-sample /11 evaluation, 2026-09-26
+
+The owner [authorized the frozen full /11 run](https://github.com/jamiepratt/freediving-results/issues/6#issuecomment-5842781379)
+on the same 81 cases, S1 then B1, with explicit probability-sum tolerance 0.02.
+All 122 prepared objects and wire hashes reproduced the B6 packet. Wire bodies,
+case order, labels, source evidence, model and execution limits remained unchanged.
+The separate B7 store contains 122 completed requests / 162 question attempts,
+with one request at a time, one attempt, no retries or companion requests.
+
+| Measure | S1 | B1 |
+| --- | ---: | ---: |
+| Requests completed / planned | 81/81 | 41/41 |
+| Questions dispatched | 81 | 81 |
+| Match / no-match / abstain | 46/35/0 | 46/35/0 |
+| Errors / undispatched cases | 0/0 | 0/0 |
+| Valid and decisive coverage | 81/81 (100%) | 81/81 (100%) |
+| False merges / all negative labels | 0/35 | 0/35 |
+| Missed matches / all positive labels | 0/46 | 0/46 |
+| Request-loop wall time, seconds | 34.580 | 20.396 |
+| Summed HTTP latency, seconds | 32.278 | 19.149 |
+| Request latency median / p95, ms | 391/469 | 452/582 |
+| Reported input / output tokens | 379,377 / 3,518 | 356,577 / 3,398 |
+| Actual billed cost | Unknown | Unknown |
+
+All 81 paired choices agreed. Probability distributions differed on 35 cases;
+maximum absolute component difference was 0.03, mean absolute component difference
+0.004115 across 243 components. Private paired outcomes retain every choice and
+probability distribution. Token counters are provider-reported usage, not billing.
+
+These are descriptive results against owner-approved, assistant-authored judgments
+and reasons. The seven earlier owner adjudications remain excluded. Of the 81
+cases, 38 had already been exposed in partial /10 execution, and the /11 validator
+choice followed those results. The run is not untouched fresh held-out evidence.
+The 116 apparent people, two event/documents and one publisher limit independence;
+owner-attested development disjointness does not rule out hidden aliases or copies.
+No repeat controls establish a causal batching benefit, calibration, unbiased
+generalization or production safety. No /10 result filled a /11 gap. B3/B4 remain
+separate and unchanged. [Issue #6](https://github.com/jamiepratt/freediving-results/issues/6)
+remains open for an explicit acceptance decision under these limitations; the /10
+conditional closure rule was not transferred to /11.
+
+Private artifacts: `data/heldout-evaluation-81-20260926-b7/` in the saved project.
+Run identity: `b437d63afdbfde706dbea25a7e0e3721dfdb9b02ef8adb71836fab36669608aa`.
+Live report SHA-256: `751185331e36003c576bf11979d2320d4715b81994ce147fcdc08df8ed778cd2`;
+summary: `4cdaee1d6be963438920c352342789234c1aae5256158ff05a41bc5ccee58db1`;
+paired outcomes: `598301a4c7e70ba6fa5dd531d1d14022d705a39a451862126bb38d86a082c9a8`;
+launch manifest: `fbf35d1eea9445052c80f5331623600449a47964355320d68cfc1e9522d592a4`.
+The frozen adapter retains sanitized diagnostics, not raw HTTP response bytes.
+
+The batch-specific `scripts/jev_frozen_run.py` launcher verifies hash-bound inputs
+and executables before credentials, records an exclusive fsynced launch marker,
+and refuses every later live launch. Its Clojure entrypoint verifies prepared
+objects and run identity before execution; replay requires complete evidence and
+forbids dispatch. Offline tests cover interrupted launches, tamper rejection,
+the complete CLI, synthetic full execution and terminal-arm stopping. Four wrapper
+tests and the shadow suite (87 tests / 1,651 assertions) passed; Clojure repair and
+lint were clean. Live replay made zero calls and reproduced result/report with all
+615 store files unchanged in bytes, permissions and modification times. All 462
+inventoried prior files retained their hashes. An in-memory exact credential and
+service-token scan found no retained secrets. No deployment or authority mutation.
