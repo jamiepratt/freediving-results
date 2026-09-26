@@ -31,6 +31,7 @@ class BrowserAcquisitionError(Exception):
 
 @dataclass(frozen=True)
 class BrowserResponse:
+    url: str
     host: str
     status: int
     content_type: str | None
@@ -40,8 +41,10 @@ class BrowserResponse:
 
 @dataclass(frozen=True)
 class BrowserCapture:
+    entry_url: str
     dom: str
     responses: tuple[BrowserResponse, ...]
+    redirects: tuple[tuple[str, str, int], ...]
 
 
 def _validate(host, status, content_type, body, resource_type):
@@ -80,6 +83,7 @@ def capture_page(page, url, client: AcquisitionClient):
     """
     failures = []
     responses = []
+    redirects = []
     redirect_count = 0
 
     def handle(route):
@@ -122,6 +126,7 @@ def capture_page(page, url, client: AcquisitionClient):
                                 _safe_url(target)
                             except ValueError:
                                 raise BrowserAcquisitionError(host, "unsafe_redirect", status) from None
+                            redirects.append((request_url, target, status))
                         declared_length = response.headers.get("content-length")
                         if declared_length is not None:
                             try:
@@ -135,7 +140,7 @@ def capture_page(page, url, client: AcquisitionClient):
                         is_source = _validate(host, status, response.headers.get("content-type"), body,
                                               getattr(route.request, "resource_type", "document"))
                         if status == 200 and is_source:
-                            responses.append(BrowserResponse(host, status, response.headers.get("content-type"),
+                            responses.append(BrowserResponse(request_url, host, status, response.headers.get("content-type"),
                                                              body, sha256(body).hexdigest()))
                         route.fulfill(response=response)
                         return
@@ -166,6 +171,6 @@ def capture_page(page, url, client: AcquisitionClient):
             raise
         if failures:
             raise failures[0]
-        return BrowserCapture(page.content(), tuple(responses))
+        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects))
     finally:
         page.unroute("**/*", handle)

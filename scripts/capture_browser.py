@@ -65,10 +65,14 @@ def main(argv=None):
             if not target.exists():
                 _write_private(target, response.body)
             records.append({"host": response.host, "status": response.status,
+                            "url": response.url,
                             "content_type": response.content_type, "sha256": response.sha256,
                             "bytes": len(response.body), "file": name})
         _json(args.output / "capture.json", {"schema": "browser-capture/v1", "host": host,
+              "entry_url": capture.entry_url,
               "retrieved_at": datetime.now(timezone.utc).isoformat(), "dom_sha256": dom_hash,
+              "redirects": [{"from": source, "to": target, "status": status}
+                            for source, target, status in capture.redirects],
               "responses": records})
         print(json.dumps({"status": "captured", "host": host, "responses": len(records),
                           "dom_sha256": dom_hash}, sort_keys=True))

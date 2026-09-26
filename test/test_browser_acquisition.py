@@ -78,6 +78,7 @@ class BrowserCaptureTest(unittest.TestCase):
             client = AcquisitionClient(default_policy=Policy(min_interval=0.08), lease_path=Path(directory) / "lease.sqlite3")
             result = capture_page(page, host + "/event", client)
         self.assertEqual("<html>rendered results</html>", result.dom)
+        self.assertEqual(host + "/event", result.responses[0].url)
         self.assertEqual(3, len(page.requests))
         self.assertTrue(all(b[1] - a[1] >= 0.065 for a, b in zip(page.requests, page.requests[1:])))
         self.assertTrue(all(route.fulfilled for route in page.routes))
@@ -113,6 +114,17 @@ class BrowserCaptureTest(unittest.TestCase):
                 capture_page(page, "https://publisher.example/start", client)
         self.assertEqual("unsafe_redirect", caught.exception.reason)
         self.assertEqual(1, len(page.requests))
+
+    def test_browser_redirect_records_observed_chain(self):
+        source = "https://publisher.example/start"
+        target = "https://other.example/results"
+        page = Page([(source, Response(status=302, headers={"location": target})),
+                     (target, Response())])
+        with tempfile.TemporaryDirectory() as directory:
+            client = AcquisitionClient(default_policy=Policy(min_interval=0), lease_path=Path(directory) / "lease.sqlite3")
+            capture = capture_page(page, source, client)
+        self.assertEqual(((source, target, 302),), capture.redirects)
+        self.assertEqual(target, capture.responses[0].url)
 
     def test_browser_network_retry_enters_budget_again(self):
         host = "https://publisher.example"
