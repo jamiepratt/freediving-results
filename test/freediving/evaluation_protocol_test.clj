@@ -196,3 +196,20 @@
                  (assoc cfg :max-request-bytes 100)
                  (assoc cfg :companion-assessments [:contradiction])]]
       (is (thrown? Exception (providers/prepare-batches bad cases))))))
+
+(deftest original-guidance-is-an-isolated-opt-in-on-compact-evidence
+  (let [cfg (assoc config :identity-protocol :freediving-compact-v1 :native-batch-size 5
+                   :native-diagnostics-version 2 :probability-sum-tolerance 0.02)
+        cases (mapv #(hash-map :case-id (str "case-" %) :input (input)) (range 6))
+        compact (providers/prepare-batches cfg cases)
+        original (providers/prepare-batches (assoc cfg :identity-guidance :original-v1) cases)]
+    (doseq [[short full] (map vector compact original)]
+      (let [a (json/read-str (:body short)) b (json/read-str (:body full))]
+        (is (= (dissoc a "state") (dissoc b "state")))
+        (is (= (:instruction protocol/question-local-descriptor) (get b "state")))
+        (is (= (:instruction protocol/compact-descriptor) (get a "state")))
+        (is (= (:projections short) (:projections full)))
+        (is (not= short full))))
+    (doseq [bad [(assoc cfg :identity-guidance :unknown)
+                 (assoc cfg :identity-guidance :original-v1 :identity-protocol :freediving-question-local-v1)]]
+      (is (thrown? Exception (providers/prepare-batches bad cases))))))

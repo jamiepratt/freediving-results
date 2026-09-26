@@ -92,7 +92,7 @@
         (:identity-protocol config) (assoc :protocol protocol/descriptor)
         body (assoc :body body)))))
 
-(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version :probability-sum-tolerance])
+(def ^:private batch-option-keys [:native-batch-size :companion-assessments :native-diagnostics-version :probability-sum-tolerance :identity-guidance])
 (def ^:private companion-instructions
   {:name-variation "Assess whether plausible name ordering, transliteration, omitted components or transcription variation explains the names."
    :contradiction "Assess whether reliable source evidence substantively contradicts these being the same person."
@@ -107,10 +107,18 @@
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
         compact? (= :freediving-compact-v1 (:identity-protocol config))
         local? (or compact? (= :freediving-question-local-v1 (:identity-protocol config)))
+        descriptor (cond compact? (cond-> protocol/compact-descriptor
+                                    (= :original-v1 (:identity-guidance config))
+                                    (assoc :instruction (:instruction protocol/question-local-descriptor)
+                                           :guidance-version :original-v1))
+                         local? protocol/question-local-descriptor
+                         :else protocol/descriptor)
         rounded? (contains? config :probability-sum-tolerance)
         base-config (cond-> (apply dissoc config batch-option-keys)
                       local? (assoc :identity-protocol :freediving-source-v1))]
     (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1} (:identity-protocol config))
+                   (or (not (contains? config :identity-guidance))
+                       (and compact? (= :original-v1 (:identity-guidance config))))
                    (or (not local?) (and (= "jev-1.13.0" (:model config))
                                          (= 2 (:native-diagnostics-version config))
                                          (or (#{1 2} size) rounded?) (empty? companions)))
@@ -129,7 +137,7 @@
        (let [singles (mapv #(prepare-request base-config %) members)
              records (vec (distinct (mapcat #(map (:input %) [:left :right]) singles)))
              names (zipmap records (map #(str "record_" %) (range)))
-             state (if local? (:instruction (if compact? protocol/compact-descriptor protocol/question-local-descriptor))
+             state (if local? (:instruction descriptor)
                        (json/write-str {:schema-version "freediving-source/1"
                                         :records (into (sorted-map) (map (fn [r] [(names r) r]) records))}))
              questions (into (sorted-map)
@@ -156,7 +164,7 @@
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
          (cond-> {:adapter-version (if compact? "shadow-adapters/13" (if local? (if rounded? (if (> size 2) "shadow-adapters/12" "shadow-adapters/11") "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7"))) :provider :jev :config normalized
-                  :protocol (cond compact? protocol/compact-descriptor local? protocol/question-local-descriptor :else protocol/descriptor) :body body
+                  :protocol descriptor :body body
                   :case-ids (mapv :case-id members)
                   :evidence (mapv #(select-keys % [:case-id :evidence]) members)
                   :question-ids (vec (keys questions))

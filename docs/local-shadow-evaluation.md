@@ -891,3 +891,75 @@ passed, followed by 98 shadow tests / 1,735 assertions and all four compact
 launcher tests. The combined launcher discovery also passed two older launch
 guards; six older private-fixture checks were skipped in that invocation.
 Original B7 prepared objects and run identity reproduced during compact preflight.
+
+### Controlled guidance comparison, 2026-09-26
+
+[Issue #12](https://github.com/jamiepratt/freediving-results/issues/12) held compact
+evidence and grouping fixed at five pairs, comparing original guidance (G5) with
+shortened guidance (C5). Both arms were frozen before dispatch, G5 then C5, each
+with sixteen five-pair groups and one singleton. They used the same 81 cases,
+order, model, outcome criteria, parser, timeout and one-attempt policy. Preflight
+verified that paired HTTP bodies differed only in shared `state`; questions and
+local evidence mappings were identical. Original guidance was byte-identical to
+the earlier question-local protocol. No missing context was added to the evidence.
+
+For this opt-in variant, `:identity-guidance :original-v1` on a compact native
+configuration records the guidance choice in immutable configuration and protocol
+metadata. Omitting it preserves compact /13 exactly. Other values and use on
+noncompact protocols are rejected. The compact projection and parser remain /13;
+the option changes request/run identities. `jev_guidance_runner.clj` and
+`jev_guidance_run.py` freeze, check and execute this specific two-arm comparison,
+bounded to 34 requests / 162 questions with separate terminal stopping per arm.
+
+| Measure | Prior full L5 | Compact/original G5 | Compact/short C5 | Prior compact C8 |
+| --- | ---: | ---: | ---: | ---: |
+| Pairs per full group | 5 | 5 | 5 | 8 |
+| Match / no-match / abstain | 46/35/0 | 46/35/0 | 45/35/1 | 45/35/1 |
+| Errors / undispatched | 0/0 | 0/0 | 0/0 | 0/0 |
+| Mean match probability, 46 positive labels | 95.80% | 90.76% | 71.04% | 70.30% |
+| Mean abstain probability, 46 positive labels | 3.89% | 8.33% | 25.00% | 25.93% |
+| Reported input tokens | 342,897 | 105,593 | 103,944 | 101,106 |
+| Reported output tokens | 3,326 | 3,326 | 3,328 | 3,310 |
+| Request-loop wall seconds | 10.308 | 8.559 | 8.726 | 7.895 |
+| Summed HTTP seconds | 9.766 | 7.864 | 8.032 | 7.386 |
+| Request median / p95, ms | 574/726 | 457/694 | 439/1,000 | 623/1,003 |
+
+G5 and C5 completed all 34 requests without retries. Both had zero false merges
+and zero predicted no-matches against positive labels; C5's abstention is reported
+separately and is not counted as correct. Original guidance recovered the sole
+changed decision, `B28-d50bc3a9bb55ac89`, to match. Its match/no-match/abstain
+probabilities were 0.81/0.03/0.16 in G5 and 0.41/0.10/0.49 in C5. Inspection
+confirmed its identical compact questions, populated facts, uncertainty statements
+and raw excerpts in both arms. All other decisions agreed with L5 and each other.
+
+G5-C5 distributions differed on 68 cases, maximum component difference 0.40 and
+mean absolute difference 0.076790 across 243 components. L5-G5 differed on 62
+distributions with no changed decisions, maximum 0.22 and mean 0.024609. C8-C5
+differed on 44 distributions with no changed decisions, maximum 0.13 and mean
+0.013374. Exact comparison and a 1e-9 threshold agreed on these counts.
+
+Restoring guidance recovered 19.72 percentage points of mean positive-case match
+probability while costing only 1,649 extra input tokens relative to C5. G5 still
+used 69.21% fewer input tokens than full L5. The result strongly implicates the
+guidance rewrite in the earlier loss of match support; reducing the group size
+alone left the same abstention and nearly the same mean match probability.
+It does not identify which sentence caused the effect. The residual 5.04-point
+gap from L5 is consistent with a representation effect but remains confounded
+with execution time and model variability. Fixed order and no repeated controls
+prevent a definitive causal or calibration claim. These remain exposed cases
+with the earlier label/source limitations, not fresh held-out validation.
+No default protocol, labels or identity decisions were changed after observing
+the results; the original-guidance variant remains explicitly selectable.
+
+Private evidence: `data/jev-guidance-81-20260926/` in worktree `2cde`.
+Run identity: `e8b5420e069f528dd4fbf8430b4bae9ec16b95650461e73a2695527e961a4bfd`.
+Report SHA-256: `f6c391510c39a58304fbb43ee2d7cfa7a654dabbac1e64ead6b861375497796b`;
+summary: `8fa45ca41940ee4cb1002cd4664bc01768ad2271a062160d1f82353ed50d4687`;
+paired outcomes: `26912dbc1acffe681b38ca4d0cb5cf7a153616ec3b52172d51a538236115ee6a`.
+Replay made zero calls and preserved all 175 store files; 1,268 prior files
+retained bytes, modes and modification times. Credential scanning passed.
+Expected RED failures established the missing opt-in and launcher; GREEN checks
+passed repair, lint, 99 shadow tests / 1,747 assertions and four full launcher
+tests, including terminal stopping, interrupted launches, tampering and replay.
+Original B7 and C8 packets and identities reproduced unchanged. Actual billed
+cost and raw HTTP response bytes remain unavailable.
