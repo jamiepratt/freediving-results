@@ -194,6 +194,8 @@ Both commands use `scripts/source_acquisition.py`. Its SQLite lease under `~/.lo
 
 The historical manual and ad hoc acquisition paths are not automatically guarded by these commands. Future #8/#16 acquisition must use these entry points or the shared client and verify the resulting evidence before archive registration. Check the [pacing prerequisite #22](https://github.com/jamiepratt/freediving-results/issues/22) and current source inventory before starting another ingestion batch.
 
+The [2026-09-26 organizer inventory](2025-onward-source-inventory-20260926.md#remaining-tuttinapnea-2025-pdfs-and-february-comparison-review-b24) records the remaining January 2025 TuttinApnea PDFs. Import the individual dynamic sheet with parser `tuttinapnea-january-2025-dynamic/1`; retain the summary and combined sheets as supporting aggregates. Its one points-only zero row stays unparsed. The January combined point ledger links only exact unique source rows, and the February 2026 ledger records four name-order matches against original PDFs. These links do not approve athlete identity, unique attempt totals or publication.
+
 ## Find and acquire a source
 
 | Source and discovery | Result route and representation | Observed access and context | Provenance caution |
