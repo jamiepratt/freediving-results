@@ -1,5 +1,5 @@
 (ns freediving.unu-tampa-2025
-  "Source-bound results in the December 2025 UNU Tampa Bay CMAS PDF."
+  "Source-bound results in the 2025 UNU Tampa Bay CMAS PDF."
   (:require [clojure.string :as str]))
 
 (def source-sha256 "61831ff0715a2130e2c2d35aa6caac30d92fc9f795a7cee3c290782710949781")
