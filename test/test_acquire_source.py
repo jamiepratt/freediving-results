@@ -139,6 +139,15 @@ class AcquireSourceTest(unittest.TestCase):
         self.assertNotIn("secret", gap_text)
         self.assertNotIn(publisher.url, gap_text)
 
+    def test_sensitive_redirect_is_rejected_before_target_request(self):
+        target = self.publisher(lambda path: (200, {"Content-Type": "application/pdf"}, b"%PDF-1.4\n"))
+        source = self.publisher(lambda path: (302, {"Location": target.url + "?token=private"}, b""))
+        with self.assertRaises(SourceRejected) as caught:
+            acquire(source.url, "pdf", self.output, client=self.client)
+        self.assertEqual("unsafe_redirect", caught.exception.reason)
+        self.assertEqual([], target.requests)
+        self.assertNotIn("private", Path(caught.exception.gap_path).read_text())
+
     def test_dry_run_shows_effective_policy_without_network_or_files(self):
         receipt = acquire("https://www.cmas.org/results", "pdf", self.output, dry_run=True)
         self.assertTrue(receipt["dry_run"])

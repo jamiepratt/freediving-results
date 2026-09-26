@@ -196,7 +196,7 @@ class AcquisitionClient:
             thread.join()
             self._leases.leave(token)
 
-    def fetch(self, url):
+    def fetch(self, url, *, url_validator=None):
         origin = _host(url)
         events = []
 
@@ -213,6 +213,8 @@ class AcquisitionClient:
             while True:
                 status = None
                 host = _host(current)
+                if url_validator is not None:
+                    url_validator(current)
                 policy = self.policy_for(host)
                 try:
                     with self.lease(current) as waited:

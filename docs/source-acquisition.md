@@ -2,11 +2,25 @@
 
 Observed through 25 September 2026. This is a route and evidence guide, not a live availability check or a complete championship inventory. Start at the [CMAS results archive](https://www.cmas.org/freediving/results.html) or the AIDA event page, then retain what the route actually returns. Current source coverage and unresolved work live in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
-## HTTP acquisition core status
+## Paced acquisition entry points
 
-`scripts/source_acquisition.py` supplies a bounded HTTP GET primitive for future acquisition commands. One `AcquisitionClient` shared by threads spaces requests per host, including each redirect and retry. The default policy is two concurrent requests per host, at least one second between starts, a 20-second request timeout, three attempts, a 30-second maximum retry delay, five redirects and a 50 MiB response limit. CMAS hosts default to one concurrent request, at least three seconds between starts and two attempts. A caller may configure a stricter per-host policy. Only HTTP 429 and 500, 502, 503 or 504, plus network, timeout or incomplete-body failures, retry. Valid `Retry-After` seconds and HTTP dates delay the retry; a required delay above the configured maximum stops with a terminal error. Returned bytes are complete within the declared length and size limit, but the caller must still verify MIME, signature and source identity before registration. Events and errors include host, attempt, wait, reason and outcome without URL paths, queries or response bodies.
+Use `scripts/acquire_source.py` for official discovery pages, PDFs, JSON and HTML. Supply the expected representation explicitly. Its private output retains exact successful bytes, hash, MIME, status, timing, redirect chain and host-only pacing events. A restriction, challenge page, wrong MIME or invalid signature produces a host-only coverage gap and no source object. This command does not register or ingest a source.
 
-This primitive is currently limited to one process and has not been wired into the documented discovery, PDF, JSON, HTML or browser acquisition routes. It does not inventory archives, capture Playwright traffic, coordinate restarted workers, create run manifests or register coverage gaps. The [pacing prerequisite in issue #22](https://github.com/jamiepratt/freediving-results/issues/22) remains open. Do not start new ingestion under #8 or #16 until those routes and archive checks are connected and verified.
+```sh
+python3 scripts/acquire_source.py https://www.cmas.org/ html data/private-acquisition --dry-run
+python3 scripts/acquire_source.py OFFICIAL_URL pdf data/private-acquisition
+```
+
+Use `scripts/capture_browser.py` for a page that needs browser rendering. It requires Playwright and a Chromium installation. The command routes navigation, API calls, direct downloads and page assets through the same per-host lease. It retains result-bearing response bytes and the complete rendered DOM under a new private output directory, or a safe coverage gap on a terminal failure. Blocked service workers prevent requests from bypassing the route. Browser capture does not infer selected dates, filters, source identity or publisher authority; record and verify those before archive registration. Browser response byte limits are checked after Playwright receives the response, so use the HTTP command for large or unknown-size downloads.
+
+```sh
+python3 scripts/capture_browser.py https://www.aidainternational.org/StartList/4349 data/private-browser --dry-run
+python3 scripts/capture_browser.py OFFICIAL_PAGE_URL data/private-browser
+```
+
+Both commands use `scripts/source_acquisition.py`. Its SQLite lease under `~/.local/state/freediving-results/acquisition.sqlite3` coordinates workers and restarted processes on the same machine. Configure a single shared `lease_path` in Python callers, or `--lease-path` for browser capture, when using another private state location. Every HTTP retry and redirect host gets a fresh lease. The default policy is two concurrent requests per host, at least one second between starts, a 20-second timeout, three attempts, 30-second maximum retry delay, five redirects and 50 MiB response limit. CMAS hosts default to one concurrent request, three seconds between starts and two attempts. A caller can set stricter host policies. `Retry-After` is honored up to the configured maximum. Events and terminal errors omit URL paths, queries, response bodies and headers. Do not put credentials or session-bearing URLs in command arguments or private provenance.
+
+The historical manual and ad hoc acquisition paths are not automatically guarded by these commands. Future #8/#16 acquisition must use these entry points or the shared client and verify the resulting evidence before archive registration. The [parent pacing prerequisite #22](https://github.com/jamiepratt/freediving-results/issues/22) remains open through archive inventory and full validation. Do not start new #8/#16 ingestion before it closes.
 
 ## Find and acquire a source
 

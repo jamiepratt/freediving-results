@@ -106,7 +106,7 @@ def acquire(url, representation, output_dir, *, client=None, dry_run=False):
     started_at = datetime.now(timezone.utc).isoformat()
     started_clock = time.monotonic()
     try:
-        result = client.fetch(url)
+        result = client.fetch(url, url_validator=_safe_url)
         # Redirects are checked before retaining them or source bytes.
         for target in result.redirects:
             _safe_url(target)
