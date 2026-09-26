@@ -28,6 +28,7 @@
             [freediving.ffessm-2026-bipalmes-women :as ffessm-bipalmes-women]
             [freediving.ffessm-2026-regular-categories :as ffessm-regular]
             [freediving.ffessm-2026-final-categories :as ffessm-final]
+            [freediving.ffessm-2026-juniors :as ffessm-juniors]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -112,7 +113,8 @@
          regular-women? (ffessm-regular/supported? ffessm-regular/women-sha256 pages)
          final-sha (some #(when (ffessm-final/supported? % pages) %)
                          [ffessm-final/cnf-men-sha256 ffessm-final/fim-women-sha256
-                          ffessm-final/fim-men-sha256])]
+                          ffessm-final/fim-men-sha256])
+         juniors? (ffessm-juniors/supported? pages)]
      (when (and bipalmes-women? (not= sha256 ffessm-bipalmes-women/source-sha256))
        (throw (ex-info "French 2026 bifins women parser is bound to a different source PDF" {})))
      (when (and regular-men? (not= sha256 ffessm-regular/men-sha256))
@@ -121,9 +123,12 @@
        (throw (ex-info "French 2026 no fins women parser is bound to a different source PDF" {})))
      (when (and final-sha (not= sha256 final-sha))
        (throw (ex-info "French 2026 final category parser is bound to a different source PDF" {})))
+     (when (and juniors? (not= sha256 ffessm-juniors/source-sha256))
+       (throw (ex-info "French 2026 juniors parser is bound to a different source PDF" {})))
      (cond bipalmes-women? (ffessm-bipalmes-women/parse-pages pages)
            (or regular-men? regular-women?) (ffessm-regular/parse-pages sha256 pages)
            final-sha (ffessm-final/parse-pages sha256 pages)
+           juniors? (ffessm-juniors/parse-pages pages)
            (depth/supported? pages) (depth/parse-pages pages)
            (depth-2025/supported? pages) (depth-2025/parse-pages pages)
            (aida/supported? pages) (aida/parse-pages pages)
@@ -238,6 +243,11 @@
        (= (ffessm-final/parser-version (:source-sha256 artifact))
           (:parser-version artifact))))
 
+(defn ffessm-2026-juniors-artifact? [artifact]
+  (and (= 3 (:schema-version artifact))
+       (= ffessm-juniors/source-sha256 (:source-sha256 artifact))
+       (= ffessm-juniors/parser-version (:parser-version artifact))))
+
 (defn- athens-selected? [pages]
   (and (athens/supported? pages)
        (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported?])))
@@ -278,7 +288,9 @@
                   (not (ffessm-2026-artifact? artifact))
                   (not (ffessm-2026-men-artifact? artifact))
                   (not (ffessm-2026-bipalmes-women-artifact? artifact))
-                  (not (ffessm-2026-regular-artifact? artifact)))
+                  (not (ffessm-2026-regular-artifact? artifact))
+                  (not (ffessm-2026-final-artifact? artifact))
+                  (not (ffessm-2026-juniors-artifact? artifact)))
          (let [source (archive/inspect root (:source-sha256 artifact))
                raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
                pages (str/split raw #"\f" -1)]
@@ -328,7 +340,8 @@
                          (ffessm-regular/supported? ffessm-regular/women-sha256 pages)
                          (some #(ffessm-final/supported? % pages)
                                [ffessm-final/cnf-men-sha256 ffessm-final/fim-women-sha256
-                                ffessm-final/fim-men-sha256]))
+                                ffessm-final/fim-men-sha256])
+                         (ffessm-juniors/supported? pages))
          ffessm-new (when ffessm-new? (parse-pages sha256 pages))
          _ (when (and italy? (not= sha256 italy-open/source-sha256))
              (throw (ex-info "Italian Open parser is bound to a different source PDF" {})))
@@ -506,6 +519,12 @@
                              ffessm-2026-final-artifact?
                              (:source-sha256 artifact)
                              "French 2026 final category"))
+
+(defn validate-ffessm-2026-juniors-artifact! [root artifact]
+  (validate-ffessm-artifact! root artifact ffessm-juniors/parse-pages
+                             ffessm-2026-juniors-artifact?
+                             ffessm-juniors/source-sha256
+                             "French 2026 juniors"))
 
 (defn validate-italy-open-artifact!
   "Replay source-bound text and reconciliation against the registered PDF before import."
