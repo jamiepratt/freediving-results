@@ -497,19 +497,26 @@
                 call (.sendAsync client req (limited-handler (:max-response-bytes config)))
                 _ (reset! pending call)
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
-                status (.statusCode response)]
-            (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request))
-                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
-                       (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
-                         (parse-diagnostic-response (:provider request) (.body response) token
-                                                    (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
-                                                    (= "shadow-adapters/5" (:adapter-version request))
-                                                    (= "shadow-adapters/6" (:adapter-version request)))
-                         (parse-response (:provider request) (.body response))))
-                     (failure (cond (= 429 status) :rate-limited (>= status 500) :provider-unavailable
-                                    (<= 300 status 399) :redirect-refused :else :http-error)
-                              (or (= 429 status) (>= status 500)) :known))
+                status (.statusCode response)
+                raw (.body response)]
+            (assoc (if (and (= :freediving-compact-v3 (:identity-protocol config))
+                            (str/includes? raw token))
+                     (failure :credential-echo false :known)
+                     (if (<= 200 status 299)
+                       (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request))
+                         (let [parsed ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request raw token)]
+                           (cond-> parsed
+                             (and (= :freediving-compact-v3 (:identity-protocol config))
+                                  (= :complete (:outcome parsed))) (assoc :raw-response raw)))
+                         (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
+                           (parse-diagnostic-response (:provider request) (.body response) token
+                                                      (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))
+                                                      (= "shadow-adapters/5" (:adapter-version request))
+                                                      (= "shadow-adapters/6" (:adapter-version request)))
+                           (parse-response (:provider request) (.body response))))
+                       (failure (cond (= 429 status) :rate-limited (>= status 500) :provider-unavailable
+                                      (<= 300 status 399) :redirect-refused :else :http-error)
+                                (or (= 429 status) (>= status 500)) :known)))
                    :http-status status))
           (catch TimeoutException _
             (when @pending (.cancel ^CompletableFuture @pending true))

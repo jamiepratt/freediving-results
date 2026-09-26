@@ -3,6 +3,7 @@
   (:refer-clojure :exclude [run!])
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.walk :as walk]
             [freediving.evaluation-data :as data]
             [freediving.evaluation-protocol :as protocol]
@@ -59,7 +60,7 @@
   (when-not (or (:harness-version x) (:adapter-version x))
     (walk/postwalk (fn [v]
                      (when (map? v)
-                       (doseq [k [:input-hash :report-hash :request-hash :start-hash :trace-hash]
+                       (doseq [k [:input-hash :report-hash :request-hash :start-hash :trace-hash :result-hash]
                                :when (contains? v k)]
                          (verify-graph! root (object! root (get v k)))))
                      v) x))
@@ -156,6 +157,7 @@
               batch (cond-> {:batch-index index :case-ids ids :question-ids (:question-ids request)
                              :dispatch-status (if halted-by :not-dispatched :dispatched)
                              :request-hash (put! root request) :attempt receipt}
+                      response (assoc :result-hash (put! root response))
                       trace-hash (assoc :trace-hash trace-hash))
               outcomes (mapv
                         (fn [i id]
@@ -204,6 +206,18 @@
   (or (:native-batch-size config)
       (#{:freediving-compact-v2 :freediving-compact-v3} (:identity-protocol config))))
 
+(defn require-jev-credential!
+  "Reject a missing v3 Jev credential before creating a durable attempt marker."
+  [configs runtime]
+  (doseq [config configs
+          :when (and (= :jev (:provider config))
+                     (= :freediving-compact-v3 (:identity-protocol config)))]
+    (let [token (get-in runtime [:providers (:id config) :bearer-token])]
+      (when-not (and (string? token) (not (str/blank? token))
+                     (not (re-find #"[\r\n]" token)))
+        (fail! "Jev credential required"))))
+  true)
+
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
    content identities. Provider runtime is scoped as :providers {config-id options};
@@ -237,9 +251,10 @@
            run-id (digest identity-text)]
        (with-store root
          (fn [root]
-           (put! root identity)
            (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root))
-               (let [reports (into {} (map (fn [c requests]
+               (let [_ (require-jev-credential! configs runtime)
+                     _ (put! root identity)
+                     reports (into {} (map (fn [c requests]
                                              [(:id c) ((if (native-batch? c) native-comparator! comparator!) root run-id c cases requests runtime)]) configs prepared))
                      report {:schema-version 1 :run-id run-id :dataset-id (:dataset-id dataset) :providers reports}
                      report-hash (put! root report)
@@ -262,6 +277,18 @@
                            (into {} (map (fn [[id r]] [id (assoc r :metrics (data/metrics cases (:results r)))]) reports))))]
         (assoc manifest :input input :report view :stored-report-hash (:report-hash manifest)
                :report-view :recomputed-unverified-assertions)))))
+
+(defn list-runs
+  "Discover at most 10,000 private completed runs. Every returned run is verified."
+  [root]
+  (with-store root
+    (fn [root]
+      (let [names (->> (.listFiles (io/file root "records"))
+                       (map #(.getName %))
+                       (filter #(re-matches #"[0-9a-f]{64}-manifest" %))
+                       sort vec)]
+        (when (> (count names) 10000) (fail! "Too many evaluation runs"))
+        (mapv #(subs % 0 64) names)))))
 
 (defn- validate-enrichment! [original enriched]
   (data/validate-dataset! enriched)

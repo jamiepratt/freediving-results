@@ -10,6 +10,30 @@
 (defn root [] (.getCanonicalPath (.toFile (Files/createTempDirectory "shadow-eval-" (make-array FileAttribute 0)))))
 (def dataset (fixtures/dataset [(fixtures/sample-case "a" :development) (fixtures/sample-case "b" :held-out)]))
 (def configs [{:id "rules" :provider :rules}])
+(deftest v3-requires-credential-before-storage
+  (let [dir (root) cfg [{:id "jev" :provider :jev :identity-protocol :freediving-compact-v3}]
+        calls (atom 0)]
+    (with-redefs [providers/prepare-batches (fn [_ _]
+                                              [{:adapter-version "shadow-adapters/14" :provider :jev
+                                                :case-ids ["b"] :question-ids ["identity_0"]
+                                                :config {:max-response-bytes 10000
+                                                         :identity-protocol :freediving-compact-v3}}])
+                  providers/execute! (fn [& _]
+                                       (swap! calls inc)
+                                       {:outcome :complete :model-version "jev-1.13.0"
+                                        :http-status 200 :answers {"identity_0" {:outcome :match}}
+                                        :cost {:status :unknown}})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"credential"
+                            (evaluation/run! dir dataset cfg {:providers {"jev" {:bearer-token "  "}}})))
+      (is (empty? (.listFiles (io/file dir "records"))))
+      (let [first-run (evaluation/run! dir dataset cfg {:providers {"jev" {:bearer-token "secret"}}})]
+        (is (= 1 @calls))
+        (is (= [(:run-id first-run)] (evaluation/list-runs dir)))
+        (is (re-matches #"[0-9a-f]{64}"
+                        (get-in (evaluation/inspect-run dir (:run-id first-run))
+                                [:report :providers "jev" :batches 0 :result-hash])))
+        (is (= first-run (evaluation/run! dir dataset cfg)))
+        (is (= 1 @calls))))))
 (deftest strict-output-contract-is-durable-and-halts-without-masking-errors
   (let [dir (root) calls (atom 0)
         ds (fixtures/dataset (mapv #(fixtures/sample-case % :held-out) ["a" "b" "c"]))

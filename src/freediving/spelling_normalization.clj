@@ -50,6 +50,9 @@
         cited (filter #(some #{(:evidence-id %)} (:evidence-ids name)) (:sources record))]
     (when (and row (= "result-row" (:kind row))
                (= (:value name) (get-in row [:payload :parsed :source-name]))
+               (or (nil? (:source-version record))
+                   (= (:source-version record)
+                      (select-keys row [:parser-version :schema-version :source-format])))
                (some #(and (= (:source-sha256 %) (:source-sha256 row))
                            (= (:artifact-sha256 %) (:artifact-sha256 row))
                            (= (:observation-id %) (:candidate-id row))) cited))
@@ -80,40 +83,85 @@
          (= (:model-version result) (:model-version response)))))
 
 (defn score-view
-  "Return only current source-bound Jev scores involving one observation."
-  [root run-id provider-id target rows]
-  (let [run (evaluation/inspect-run root run-id)
-        report (get-in run [:report :providers provider-id])
-        results (into {} (map (juxt :case-id identity) (:results report)))
-        requests (get-in run [:input :requests])
-        index (first (keep-indexed (fn [i config] (when (= provider-id (:id config)) i))
-                                   (get-in run [:input :configurations])))]
-    (when-not (and index report
-                   (every? #(and (= :jev (:provider %)) (= "shadow-adapters/14" (:adapter-version %))
-                                 (= :freediving-compact-v3 (get-in % [:config :identity-protocol])))
-                           (get requests index)))
-      (throw (ex-info "Stored v3 Jev score required" {})))
-    (mapv (fn [case]
-            (let [input (:input case)
-                  result (results (:case-id case))]
-              {:case-id (:case-id case)
-               :run-id run-id
-               :score-status (if (provider-receipt? report result) :complete :unavailable)
-               :model-version (:model-version result)
-               :protocol-version :freediving-compact-v3
-               :request-hash (:request-hash result)
-               :left-name (get-in input [:left :fields :name :value])
-               :right-name (get-in input [:right :fields :name :value])
-               :identity (select-keys result [:outcome :confidence :probabilities])
-               :spelling (:spelling result)
-               :automatic-recommendation (when (provider-receipt? report result)
-                                           (recommendation input result))}))
-          (filter (fn [case]
-                    (let [left (bound-row rows (get-in case [:input :left]))
-                          right (bound-row rows (get-in case [:input :right]))]
-                      (and left right
-                           (some #(= target (select-keys % [:job-id :ordinal])) [left right]))))
-                  (filter #(= :held-out (:split %)) (get-in run [:input :dataset :cases]))))))
+  "Return private review metadata for source-bound or stale Jev scores involving one observation."
+  ([root run-id provider-id target rows] (score-view root run-id provider-id target rows nil))
+  ([root run-id provider-id target rows current-case-ids]
+   (let [run (evaluation/inspect-run root run-id)
+         report (get-in run [:report :providers provider-id])
+         results (into {} (map (juxt :case-id identity) (:results report)))
+         requests (get-in run [:input :requests])
+         index (first (keep-indexed (fn [i config] (when (= provider-id (:id config)) i))
+                                    (get-in run [:input :configurations])))]
+     (when-not (and index report
+                    (every? #(and (= :jev (:provider %)) (= "shadow-adapters/14" (:adapter-version %))
+                                  (= :freediving-compact-v3 (get-in % [:config :identity-protocol])))
+                            (get requests index)))
+       (throw (ex-info "Stored v3 Jev score required" {})))
+     (mapv (fn [case]
+             (let [input (:input case)
+                   result (results (:case-id case))
+                   batch (get (:batches report) (:batch-index result))
+                   left (bound-row rows (:left input))
+                   right (bound-row rows (:right input))
+                   current? (and left right
+                                 (or (nil? current-case-ids)
+                                     (contains? current-case-ids (:case-id case))))
+                   complete? (provider-receipt? report result)
+                   status (cond (not current?) :stale
+                                (not-every? #(#{:pdf :html :json} (:source-format %)) [left right]) :unsupported
+                                (nil? result) :missing
+                                complete? :complete
+                                :else :failed)]
+               {:case-id (:case-id case)
+                :run-id run-id
+                :score-status status
+                :model-version (:model-version result)
+                :protocol-version :freediving-compact-v3
+                :adapter-version "shadow-adapters/14"
+                :provider-configuration (get-in run [:input :requests index 0 :config])
+                :pair-references (mapv #(select-keys % [:record-id :sources])
+                                       [(:left input) (:right input)])
+                :extraction-versions (mapv :source-version
+                                           [(:left input) (:right input)])
+                :request-hash (:request-hash result)
+                :result-hash (:result-hash batch)
+                :completed-at (get-in batch [:attempt :completed-at])
+                :source-references (mapv :sources [(:left input) (:right input)])
+                :left-name (get-in input [:left :fields :name :value])
+                :right-name (get-in input [:right :fields :name :value])
+                :identity (when complete? (select-keys result [:outcome :confidence :probabilities]))
+                :spelling (when complete? (:spelling result))
+                :automatic-recommendation (when (and current? complete?)
+                                            (recommendation input result))}))
+           (filter (fn [case]
+                     (some #(= target (record-target %))
+                           (map (get case :input) [:left :right])))
+                   (filter #(= :held-out (:split %)) (get-in run [:input :dataset :cases])))))))
+
+(defn score-views
+  "Inspect bounded historical v3 runs; never silently substitute an old run for a current pair."
+  ([root provider-id target rows] (score-views root provider-id target rows nil))
+  ([root provider-id target rows current-cases]
+   (let [current-ids (when (some? current-cases)
+                       (set (map :case-id (remove :score-status current-cases))))
+         historical (->> (evaluation/list-runs root)
+                         (mapcat (fn [run-id]
+                                   (let [run (evaluation/inspect-run root run-id)
+                                         index (first (keep-indexed (fn [i config]
+                                                                      (when (= provider-id (:id config)) i))
+                                                                    (get-in run [:input :configurations])))
+                                         request (get-in run [:input :requests index 0])]
+                                     (when (and (= :jev (:provider request))
+                                                (= :freediving-compact-v3 (get-in request [:config :identity-protocol])))
+                                       (score-view root run-id provider-id target rows current-ids))))) vec)
+         indexed (set (map :case-id historical))
+         missing (for [case current-cases :when (not (contains? indexed (:case-id case)))]
+                   (merge {:case-id (:case-id case) :run-id nil
+                           :score-status (or (:score-status case) :missing)
+                           :pair-references (mapv #(select-keys % [:record-id :sources])
+                                                  [(get-in case [:input :left]) (get-in case [:input :right])])}
+                          (select-keys case [:target-reference :candidate-reference])))]
+     (->> (concat historical missing) (sort-by (juxt :case-id :run-id)) vec))))
 
 (defn apply-run!
   "Apply clear spelling choices from one stored v3 Jev run through reversible

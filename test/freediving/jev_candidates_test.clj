@@ -49,6 +49,10 @@
                                               {:job-id "json" :ordinal 0})))
         pair (build rows)]
     (is (= pair (build rows)))
+    (is (= (select-keys (first rows) [:parser-version :schema-version :source-format])
+           (get-in pair [:input :left :source-version])))
+    (is (= (select-keys (second rows) [:parser-version :schema-version :source-format])
+           (get-in pair [:input :right :source-version])))
     (is (= {:table 1 :row 2} (get-in pair [:input :left :sources 0 :locator])))
     (is (= :html (get-in pair [:input :left :sources 0 :source-format])))
     (is (= (get-in html-artifact [:candidates 0 :raw :html])

@@ -160,13 +160,32 @@
         (when-not row (fail! 404 "Unknown observation"))
         (if (= path "/api/evidence")
           (respond (assoc (select-keys row [:job-id :ordinal :source-format :source-lines :acquisitions :source-sha256 :artifact-sha256]) :coordinates (get-in row [:payload :coordinates])))
-          (respond (merge mode-info {:packet (assoc (candidates/packet corpus t {}) :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
-                                     :jev-scores (when score-config
-                                                   (spelling/score-view (:jev-run-root score-config)
-                                                                        (:jev-run-id score-config)
-                                                                        (:jev-provider-id score-config) t corpus))
-                                     :history (reviews/history database-url t) :publication (publication/diagnose database-url t)
-                                     :publication-history (publication/history database-url t) :rubric packets/rubric}))))
+          (let [packet (candidates/packet corpus t {})
+                candidate-rows (mapcat :observations (:candidates packet))
+                _ (when (> (count candidate-rows) 1000) (fail! 400 "Too many candidate pairs"))
+                current-cases (when score-config
+                                (mapv (fn [candidate]
+                                        (let [reference (select-keys candidate [:job-id :ordinal])]
+                                          (try
+                                            (assoc ((requiring-resolve 'freediving.jev-candidates/candidate-case)
+                                                    database-url corpus t reference)
+                                                   :target-reference t :candidate-reference reference)
+                                            (catch Exception _
+                                              {:case-id (str "unsupported:" (:job-id candidate) ":" (:ordinal candidate))
+                                               :score-status :unsupported
+                                               :target-reference (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])
+                                               :candidate-reference (select-keys candidate [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])}))))
+                                      candidate-rows))]
+            (respond (merge mode-info {:packet (assoc packet :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
+                                       :jev-scores (when score-config
+                                                     (if-let [run-id (:jev-run-id score-config)]
+                                                       (spelling/score-view (:jev-run-root score-config)
+                                                                            run-id (:jev-provider-id score-config) t corpus
+                                                                            (set (map :case-id (remove :score-status current-cases))))
+                                                       (spelling/score-views (:jev-run-root score-config)
+                                                                             (:jev-provider-id score-config) t corpus current-cases)))
+                                       :history (reviews/history database-url t) :publication (publication/diagnose database-url t)
+                                       :publication-history (publication/history database-url t) :rubric packets/rubric})))))
       :else (fail! 404 "Unknown endpoint"))))
 (defn stop! [{:keys [^HttpServer server executor capability-file]}]
   (when server (.stop server 0)) (when executor (.shutdownNow ^java.util.concurrent.ExecutorService executor))
@@ -186,8 +205,10 @@
                    (or (not (contains? config :review-enabled?)) (boolean? (:review-enabled? config)))
                    (= (contains? config :archive-root) (contains? config :cache-root))
                    (or (not-any? #(contains? config %) [:jev-run-root :jev-run-id :jev-provider-id])
-                       (every? #(and (string? (get config %)) (not (str/blank? (get config %))))
-                               [:jev-run-root :jev-run-id :jev-provider-id]))
+                       (and (every? #(and (string? (get config %)) (not (str/blank? (get config %))))
+                                    [:jev-run-root :jev-provider-id])
+                            (or (not (contains? config :jev-run-id))
+                                (and (string? (:jev-run-id config)) (not (str/blank? (:jev-run-id config)))))))
                    (or (not real?) (and (string? (:archive-root config)) (string? (:cache-root config)))))
       (fail! 400 "Explicit owner mode and source configuration required"))
     (authority! database-url review-enabled?)

@@ -71,7 +71,14 @@
          (and (text? (:value fact)) (seq (:evidence-ids fact))
               (every? ids (:evidence-ids fact))))))
 (defn- source-record? [r]
-  (and (map? r) (= #{:record-id :fields :sources :uncertainties :publisher-identity} (set (keys r)))
+  (and (map? r) (contains? #{#{:record-id :fields :sources :uncertainties :publisher-identity}
+                             #{:record-id :fields :sources :uncertainties :publisher-identity :source-version}}
+                           (set (keys r)))
+       (or (not (contains? r :source-version))
+           (and (= #{:parser-version :schema-version :source-format} (set (keys (:source-version r))))
+                (text? (get-in r [:source-version :parser-version]))
+                (integer? (get-in r [:source-version :schema-version]))
+                (#{:pdf :html :json} (get-in r [:source-version :source-format]))))
        (text? (:record-id r)) (vector? (:sources r)) (<= 1 (count (:sources r)) 32)
        (every? evidence? (:sources r))
        (let [ids (set (map :evidence-id (:sources r))) identity (:publisher-identity r)]

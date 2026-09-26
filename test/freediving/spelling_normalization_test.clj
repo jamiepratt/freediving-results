@@ -33,11 +33,13 @@
 (defn- bound-case []
   (let [record (fn [side job name]
                  {:record-id (str "local-observation:" job ":0")
+                  :source-version {:parser-version "parser/1" :schema-version 3 :source-format :pdf}
                   :fields {:name {:value name :evidence-ids [(str side "-source")]}}
                   :sources [{:evidence-id (str side "-source") :source-sha256 (str job "-source")
                              :artifact-sha256 (str job "-artifact") :observation-id (str job "-candidate")}]})
         row (fn [job name]
               {:job-id job :ordinal 0 :kind "result-row" :source-format :pdf
+               :parser-version "parser/1" :schema-version 3
                :candidate-id (str job "-candidate") :source-sha256 (str job "-source")
                :artifact-sha256 (str job "-artifact") :payload {:parsed {:source-name name}}
                :source-lines [{:page 1 :line 1}]})]
@@ -100,3 +102,44 @@
       (is (= :no-clear-choice
              (:status (first (spelling/apply-run! "root" "run" "jev" "reviewer")))))
       (is (empty? @calls)))))
+
+(deftest score-view-reports-exact-lineage-and-stale-versions
+  (let [{:keys [case rows]} (bound-case)
+        result (assoc match :case-id "pair" :batch-index 0 :request-hash "request"
+                      :trace-hash "trace" :model-version "jev-1.13.0")
+        run {:input {:configurations [{:id "jev"}]
+                     :requests [[{:provider :jev :adapter-version "shadow-adapters/14"
+                                  :config {:identity-protocol :freediving-compact-v3}}]]
+                     :dataset {:cases [case]}}
+             :report {:providers {"jev" {:results [result]
+                                         :batches [{:dispatch-status :dispatched :trace-hash "trace"
+                                                    :result-hash "result"
+                                                    :attempt {:request-hash "request" :completed-at "2026-09-26T00:00:00Z"
+                                                              :result {:outcome :complete :http-status 200
+                                                                       :model-version "jev-1.13.0"
+                                                                       :raw-response "private-response"}}}]}}}}]
+    (with-redefs [evaluation/inspect-run (fn [& _] run)]
+      (let [score (first (spelling/score-view "root" "run" "jev" {:job-id "left" :ordinal 0} rows))]
+        (is (= :complete (:score-status score)))
+        (is (= "result" (:result-hash score)))
+        (is (= (vec (repeat 2 {:parser-version "parser/1" :schema-version 3 :source-format :pdf}))
+               (:extraction-versions score)))
+        (is (= "2026-09-26T00:00:00Z" (:completed-at score)))
+        (is (= (:probabilities match) (get-in score [:identity :probabilities])))
+        (is (not (.contains (pr-str score) "private-response"))))
+      (is (= :stale (:score-status (first (spelling/score-view "root" "run" "jev"
+                                                               {:job-id "left" :ordinal 0}
+                                                               (assoc-in rows [0 :artifact-sha256] "changed"))))))
+      (is (= :stale (:score-status (first (spelling/score-view "root" "run" "jev"
+                                                               {:job-id "left" :ordinal 0}
+                                                               (assoc-in rows [0 :parser-version] "parser/2"))))))
+      (is (= :stale (:score-status (first (spelling/score-view "root" "run" "jev"
+                                                               {:job-id "left" :ordinal 0} rows #{}))))))))
+
+(deftest current-pair-without-stored-run-is-explicitly-missing
+  (let [{:keys [case rows]} (bound-case)]
+    (with-redefs [evaluation/list-runs (fn [_] [])]
+      (is (= [{:case-id "pair" :run-id nil :score-status :missing
+               :pair-references (mapv #(select-keys % [:record-id :sources])
+                                      [(get-in case [:input :left]) (get-in case [:input :right])])}]
+             (spelling/score-views "root" "jev" {:job-id "left" :ordinal 0} rows [case]))))))

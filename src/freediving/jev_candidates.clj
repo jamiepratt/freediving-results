@@ -124,9 +124,11 @@
                                 {:value (str value) :evidence-ids [(:evidence-id reference)]})
                               (concat (get-in row [:payload :uncertainties] [])
                                       (get-in row [:payload :flags] [])))]
-      {:record-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
-       :fields fields :sources [source] :uncertainties uncertainties
-       :publisher-identity nil})))
+      (cond-> {:record-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
+               :fields fields :sources [source] :uncertainties uncertainties
+               :publisher-identity nil}
+        (and (string? (:parser-version row)) (integer? (:schema-version row)))
+        (assoc :source-version (select-keys row [:parser-version :schema-version :source-format]))))))
 
 (defn candidate-case
   "Build one exact candidate pair. A source or parser change produces a new ID."
