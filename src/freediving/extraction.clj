@@ -12,6 +12,7 @@
             [freediving.world-games-2025 :as world-games]
             [freediving.world-games-series-2025 :as world-games-series]
             [freediving.kaohsiung-2025 :as kaohsiung]
+            [freediving.lodz-2025 :as lodz]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -99,6 +100,7 @@
         (world-games/supported? pages) (world-games/parse-pages pages)
         (world-games-series/supported? pages) (world-games-series/parse-pages pages)
         (kaohsiung/supported? pages) (kaohsiung/parse-pages pages)
+        (lodz/supported? pages) (lodz/parse-pages pages)
         (depth-2026/supported? pages) (depth-2026/parse-pages-with-geometry pages "")
         :else (parse-cmas-pages pages)))
 
@@ -139,6 +141,9 @@
 (defn kaohsiung-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= kaohsiung/parser-version (:parser-version artifact))))
 
+(defn lodz-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= lodz/parser-version (:parser-version artifact))))
+
 (defn- athens-selected? [pages]
   (and (athens/supported? pages)
        (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported?])))
@@ -165,7 +170,8 @@
                   (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact))
                   (not (world-games-artifact? artifact))
                   (not (world-games-series-artifact? artifact))
-                  (not (kaohsiung-artifact? artifact)))
+                  (not (kaohsiung-artifact? artifact))
+                  (not (lodz-artifact? artifact)))
          (let [source (archive/inspect root (:source-sha256 artifact))
                raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
                pages (str/split raw #"\f" -1)]
@@ -200,6 +206,7 @@
          world-games? (world-games/supported? pages)
          world-games-series? (world-games-series/supported? pages)
          kaohsiung? (kaohsiung/supported? pages)
+         lodz? (lodz/supported? pages)
          _ (when (and italy? (not= sha256 italy-open/source-sha256))
              (throw (ex-info "Italian Open parser is bound to a different source PDF" {})))
          _ (when (and world-games? (not= sha256 world-games/source-sha256))
@@ -208,11 +215,13 @@
              (throw (ex-info "World Games Series parser is bound to a different source PDF" {})))
          _ (when (and kaohsiung? (not= sha256 kaohsiung/source-sha256))
              (throw (ex-info "Kaohsiung parser is bound to a different source PDF" {})))
+         _ (when (and lodz? (not= sha256 lodz/source-sha256))
+             (throw (ex-info "Łódź parser is bound to a different source PDF" {})))
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version :else parser-version)
-                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 :else 1)
+                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version :else parser-version)
+                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -365,6 +374,24 @@
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
       (throw (ex-info "Kaohsiung extraction differs from archived source replay" {})))
+    artifact))
+
+(defn validate-lodz-artifact!
+  "Replay the source-bound Łódź attempt rows before import."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (lodz/parse-pages pages)]
+    (when-not (and (lodz-artifact? artifact)
+                   (= lodz/source-sha256 (:source-sha256 artifact))
+                   (= "pdftotext" (get-in artifact [:tool :name]))
+                   (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
+                   (= (str/trim (:err (command! "pdftotext" "-v"))) (get-in artifact [:tool :version]))
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "Łódź extraction differs from archived source replay" {})))
     artifact))
 
 (defn -main [& args]

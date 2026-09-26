@@ -144,6 +144,7 @@
                      (extraction/world-games-artifact? a) (->> (extraction/validate-world-games-artifact! root))
                      (extraction/world-games-series-artifact? a) (->> (extraction/validate-world-games-series-artifact! root))
                      (extraction/kaohsiung-artifact? a) (->> (extraction/validate-kaohsiung-artifact! root))
+                     (extraction/lodz-artifact? a) (->> (extraction/validate-lodz-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
