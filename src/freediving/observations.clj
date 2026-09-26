@@ -150,6 +150,8 @@
                      (extraction/unu-tampa-artifact? a) (->> (extraction/validate-unu-tampa-artifact! root))
                      (extraction/noxy-artifact? a) (->> (extraction/validate-noxy-artifact! root))
                      (extraction/deep-dominica-artifact? a) (->> (extraction/validate-deep-dominica-artifact! root))
+                     (extraction/belgrade-2026-artifact? a) (->> (extraction/validate-belgrade-2026-artifact! root))
+                     (extraction/deep-dominica-2026-artifact? a) (->> (extraction/validate-deep-dominica-2026-artifact! root))
                      (extraction/vertical-blue-artifact? a) (->> (extraction/validate-vertical-blue-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]

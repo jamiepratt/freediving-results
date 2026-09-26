@@ -6,10 +6,52 @@
             [freediving.athens :as athens]
             [freediving.archive :as archive]
             [freediving.archive-test :as fixture]
+            [freediving.belgrade-2026 :as belgrade-2026]
+            [freediving.deep-dominica-2026 :as deep-dominica-2026]
+            [freediving.deep-dominica-2026-test :as dominica-2026-fixture]
+            [clojure.java.shell :as shell]
             [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (def header "2025 CMAS World Championship Freediving Outdoor\n09/09/2025\nCWT MEN SENIORS\nRANK SURNAME & NAME NAT CATEGORY DEPTH PEN. STATUS NOTES\n")
+
+(deftest belgrade-2026-results-route-through-public-extraction
+  (let [pages [(str "2026 Belgrade Freediving Open\n"
+                    "Serbia, Futog, 25.04.2026\n"
+                    " DNF          Athlete               Pol              Klub         Ostvareno\n"
+                    "  1        Tijana Nikolić     Žensko / Female   RK Sebastijan       106\n")]
+        result (extraction/parse-pages pages)]
+    (is (= "belgrade-freediving-open-2026/1" (:parser-version result)))
+    (is (= 1 (get-in result [:reconciliation :candidate-count])))
+    (is (= :blocked (get-in result [:publication :status])))))
+
+(deftest deep-dominica-2026-results-route-through-public-extraction
+  (let [result (extraction/parse-pages dominica-2026-fixture/pages)]
+    (is (= "cmas-deep-dominica-2026/1" (:parser-version result)))
+    (is (= 30 (get-in result [:reconciliation :candidate-count])))
+    (is (= :blocked (get-in result [:publication :status])))))
+
+(deftest source-bound-2026-replay-rejects-edited-results
+  (doseq [[source-hash parse-pages pages artifact? validate!]
+          [[belgrade-2026/source-sha256 belgrade-2026/parse-pages
+            [(str "2026 Belgrade Freediving Open\nSerbia, Futog, 25.04.2026\n"
+                  " DNF          Athlete               Pol              Klub         Ostvareno\n"
+                  "  1        Tijana Nikolić     Žensko / Female   RK Sebastijan       106\n")]
+            extraction/belgrade-2026-artifact? extraction/validate-belgrade-2026-artifact!]
+           [deep-dominica-2026/source-sha256 deep-dominica-2026/parse-pages dominica-2026-fixture/pages
+            extraction/deep-dominica-2026-artifact? extraction/validate-deep-dominica-2026-artifact!]]]
+    (let [raw (str (str/join "\f" pages) "\f")
+          artifact (merge (parse-pages pages)
+                          {:source-sha256 source-hash :raw-text raw
+                           :tool {:name "pdftotext" :version "test-version"
+                                  :arguments ["-layout" "-enc" "UTF-8"]}})]
+      (is (artifact? artifact))
+      (with-redefs [archive/inspect (fn [& _] {:artifact-path "archived.pdf"})
+                    shell/sh (fn [& args] {:exit 0 :out (if (= "-v" (second args)) "" raw)
+                                           :err (if (= "-v" (second args)) "test-version" "")})]
+        (is (= artifact (validate! "archive" artifact)))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (validate! "archive" (assoc-in artifact [:candidates 0 :parsed :source-name] "edited"))))))))
 (deftest cwt-candidates-preserve-source-and-unknowns
   (let [line " 1  ÉXAMPLE Zso a  CMAS1 Men Senior  101  1  100  PEN  NO MARKER"
         result (extraction/parse-pages [(str header line "\n") "OTHER Person  AIN  Men Senior  103  DSQ  PULL\n"])]
