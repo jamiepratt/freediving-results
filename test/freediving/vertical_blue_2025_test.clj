@@ -17,6 +17,7 @@
         [penalty dns claire] (:candidates result)]
     (is (= 3 (get-in result [:reconciliation :candidate-count])))
     (is (= "Alfredo Miguel ROËN MARTÍN" (get-in penalty [:parsed :source-name])))
+    (is (= (mapv :text (:source-lines penalty)) (get-in penalty [:raw :lines])))
     (is (= [1 5] ((juxt #(get-in % [:coordinates :page]) #(get-in % [:coordinates :line])) penalty)))
     (is (= "95" (get-in penalty [:raw :fields :depth-declared])))
     (is (= 76M (get-in penalty [:parsed :final-performance])))

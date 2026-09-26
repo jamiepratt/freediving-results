@@ -3,7 +3,7 @@
   (:require [clojure.string :as str]))
 
 (def source-sha256 "7b8b9b51b3adb1dcd87559e0366758f4d477275b96cdf7ab484bf57c2dff88f6")
-(def parser-version "cmas-vertical-blue-2025/1")
+(def parser-version "cmas-vertical-blue-2025/2")
 (def ^:private expected-counts [7 7 15 6 10 9 12 4 9])
 (def ^:private expected-days [1 2 3 4 5 6 7 8 9])
 
@@ -114,7 +114,7 @@
         lines (vec (concat before [line] after))]
     {:coordinates {:page page :line (or (:line (first before)) (:line line))
                    :column-start 1 :column-end (inc (count (:text line)))}
-     :source-lines lines :raw {:line (:text line) :fields raw}
+     :source-lines lines :raw {:line (:text line) :lines (mapv :text lines) :fields raw}
      :parse-status (if parsed :parsed :unparsed) :parsed parsed
      :fields (into {} (map (fn [[k v]]
                              [k {:status (if (nil? v) :unknown :parsed) :value v}]) parsed))
