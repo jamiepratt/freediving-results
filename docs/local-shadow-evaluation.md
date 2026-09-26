@@ -809,3 +809,85 @@ launch after durable start, and verifies completed replay without dispatch.
 These cases were previously exposed. Any comparison is a regression experiment;
 changed batch grouping prevents attributing differences solely to compaction.
 Smaller payloads do not by themselves establish better accuracy.
+
+### Compact 81-case regression, 2026-09-26
+
+[Issue #11](https://github.com/jamiepratt/freediving-results/issues/11) used the
+same 81 cases, order, labels, `jev-1.13.0` model and rounded probability criteria.
+The independently checked projection preserved all 767 populated fields, 185
+uncertainty statements and 980 source-excerpt instances across 162 records.
+It omitted 691 nil fields and represented 75 duplicate excerpt instances through
+shared labels, leaving 905 excerpts. Raw-only birth years and clubs, exact spacing,
+table headers, ambiguous continuations and source associations remained intact.
+No raw lines were heuristically removed.
+
+Evidence JSON fell from 600,978 to 246,595 aggregate bytes (58.97%); the largest
+pair fell from 10,835 to 4,863 bytes. Actual preparation tested every supported
+group size, 1-8. Eight pairs passed, with a largest request of 35,601 bytes;
+the unchanged eight-pair limit prohibits all 81 together. C8 used ten groups
+of eight followed by one singleton, one attempt each, without retries.
+
+| Measure | S1 | B1 | L5 | Compact C8 |
+| --- | ---: | ---: | ---: | ---: |
+| Requests | 81 | 41 | 17 | 11 |
+| Aggregate wire bytes | 778,287 | 704,807 | 660,719 | 292,020 |
+| Largest request bytes | 13,024 | 21,895 | 47,548 | 35,601 |
+| Valid results / all cases | 81/81 | 81/81 | 81/81 | 81/81 |
+| Match / no-match / abstain | 46/35/0 | 46/35/0 | 46/35/0 | 45/35/1 |
+| Errors / undispatched | 0/0 | 0/0 | 0/0 | 0/0 |
+| Decisive coverage | 100% | 100% | 100% | 98.77% |
+| False merges / 35 negative labels | 0 | 0 | 0 | 0 |
+| Missed matches / 46 positive labels | 0 | 0 | 0 | 0 |
+| Request-loop wall time, seconds | 34.580 | 20.396 | 10.308 | 7.895 |
+| Summed HTTP latency, seconds | 32.278 | 19.149 | 9.766 | 7.386 |
+| Request latency median / p95, ms | 391/469 | 452/582 | 574/726 | 623/1,003 |
+| Reported input tokens | 379,377 | 356,577 | 342,897 | 101,106 |
+| Reported output tokens | 3,518 | 3,398 | 3,326 | 3,310 |
+
+The sole changed decision was `B28-d50bc3a9bb55ac89`: match in S1/B1/L5,
+abstain in C8. Its match/no-match/abstain probabilities were respectively
+0.94/0.01/0.05, 0.91/0.01/0.08, 0.92/0.01/0.07 and 0.44/0.09/0.47.
+Inspection found all 14 populated fields, two uncertainty statements and both
+distinct raw rows retained. Ten source instances became seven excerpts by
+deduplicating three identical event headers. No decision-relevant evidence loss
+was identified. The cause of the changed decision is unestablished; no model
+rationale was requested. The abstention remains an abstention, not a correct
+match or a false negative. No label, prompt or result was altered afterward.
+
+| Probability comparison | S1-C8 | B1-C8 | L5-C8 |
+| --- | ---: | ---: | ---: |
+| Jointly valid cases | 81 | 81 | 81 |
+| Changed decisions | 1 | 1 | 1 |
+| Changed distributions | 52 | 50 | 50 |
+| Maximum absolute component difference | 0.50 | 0.48 | 0.48 |
+| Mean absolute difference, 243 components | 0.097325 | 0.097654 | 0.096914 |
+
+Exact comparisons and a 1e-9 roundoff threshold gave the same changed-distribution
+counts. Relative to L5, wire bytes fell 55.80% and reported input tokens 70.51%.
+These are observations from a regression on exposed cases. Guidance, representation,
+batch grouping and execution time changed together, without randomized order or
+repeat controls. Neither faster execution nor smaller packets establishes improved
+accuracy or a causal compaction benefit. The one abstention reduced decisive
+coverage. Prior label provenance and source-dependence limitations still apply;
+actual billed cost remains unknown. This does not satisfy issue #6's fresh
+held-out gate or authorize identity changes.
+
+Private evidence is retained under `data/jev-compact-81-20260926/` in worktree
+`2cde`, including the complete mapping, exact requests, independent projection
+audit, paired outcomes and the changed-decision inspection. Run identity:
+`7c6aae253827721b24daf432f24be6e5812a0dd21933be75f3d4fb6f4cd9adc9`.
+Live report SHA-256:
+`e18d7ddaf25fa96aec3e334b947d82358f047aa567bcbed5e1ac69b5769df179`;
+comparison summary:
+`9bcfbe7f7f1df9375463fa640af6442ee7b8b8ac4faaccd8d0c3f79508f0bc16`;
+paired outcomes:
+`0297a6f01183336716ba681ae7c244acaa79dfc65596ecbcbdf290ade256a579`.
+
+Offline replay made zero calls and preserved all 60 store files in bytes, modes
+and modification times. All 1,180 inventoried prior evidence files were unchanged.
+The credential/service-token scan passed. As before, sanitized diagnostics are
+retained; raw HTTP response bytes are unavailable. Delimiter repair and lint
+passed, followed by 98 shadow tests / 1,735 assertions and all four compact
+launcher tests. The combined launcher discovery also passed two older launch
+guards; six older private-fixture checks were skipped in that invocation.
+Original B7 prepared objects and run identity reproduced during compact preflight.
