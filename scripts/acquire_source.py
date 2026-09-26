@@ -14,7 +14,7 @@ import re
 import subprocess
 import tempfile
 import time
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from uuid import uuid4
 
 from source_acquisition import AcquisitionClient, AcquisitionError
@@ -45,6 +45,12 @@ def _safe_url(url):
     if _SENSITIVE.search(parts.fragment):
         raise ValueError("source URL has a sensitive fragment")
     return parts.hostname.lower()
+
+
+def _receipt_url(url):
+    """Keep the destination while omitting query and fragment values from gaps."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _private_dir(path):
@@ -191,6 +197,7 @@ def acquire(url, representation, output_dir, *, client=None, dry_run=False,
                     "legacy_archive_incomplete": legacy_gaps}
     started_at = datetime.now(timezone.utc).isoformat()
     started_clock = time.monotonic()
+    result = None
     try:
         result = client.fetch(url, url_validator=_safe_url)
         # Redirects are checked before retaining them or source bytes.
@@ -203,14 +210,23 @@ def acquire(url, representation, output_dir, *, client=None, dry_run=False,
     except (AcquisitionError, SourceRejected, ValueError) as error:
         retrieved_at = datetime.now(timezone.utc).isoformat()
         reason = error.reason if isinstance(error, (AcquisitionError, SourceRejected)) else "unsafe_redirect"
-        status = error.status if isinstance(error, AcquisitionError) else (result.status if "result" in locals() else None)
-        events = [vars(event) for event in error.events] if isinstance(error, AcquisitionError) else []
+        rejected_response = isinstance(error, SourceRejected) and result is not None
+        status = error.status if isinstance(error, AcquisitionError) else (result.status if rejected_response else None)
+        events = ([vars(event) for event in error.events] if isinstance(error, AcquisitionError)
+                  else [vars(event) for event in result.events] if rejected_response else [])
         gap = directory / f"gap-{uuid4().hex}.json"
-        _json_write(gap, {"host": host, "representation": representation,
-                          "source_identity": context_key, "started_at": started_at,
-                          "retrieved_at": retrieved_at, "elapsed_seconds": time.monotonic() - started_clock,
-                          "status": status, "reason": reason, "events": events,
-                          "legacy_archive_incomplete": legacy_gaps})
+        receipt = {"host": host, "representation": representation,
+                   "source_identity": context_key, "started_at": started_at,
+                   "retrieved_at": retrieved_at, "elapsed_seconds": time.monotonic() - started_clock,
+                   "status": status, "reason": reason, "events": events,
+                   "legacy_archive_incomplete": legacy_gaps}
+        if rejected_response:
+            receipt.update(final_url=_receipt_url(result.final_url),
+                           redirect_chain=[_receipt_url(item) for item in (url, *result.redirects)],
+                           content_type=result.content_type, byte_length=len(result.body),
+                           sha256=hashlib.sha256(result.body).hexdigest(),
+                           attempts=result.attempts, body_retention="sha256_only")
+        _json_write(gap, receipt)
         raise SourceRejected(reason, gap) from None
 
     retrieved_at = datetime.now(timezone.utc).isoformat()

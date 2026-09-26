@@ -129,6 +129,36 @@ class AcquireSourceTest(unittest.TestCase):
                 self.assertEqual(1, len(publisher.requests))
         self.assertEqual([], list(self.output.glob("*.pdf")))
 
+    def test_invalid_pdf_gap_retains_http_receipt_without_archiving_body(self):
+        body = b"not a pdf: private response content"
+        target = self.publisher(lambda path: (200, {"Content-Type": "text/html"}, body))
+        source = self.publisher(lambda path: (302, {"Location": target.url}, b""))
+        with self.assertRaises(SourceRejected) as caught:
+            acquire(source.url, "pdf", self.output, client=self.client)
+        gap = json.loads(Path(caught.exception.gap_path).read_text())
+        self.assertEqual("invalid_pdf_signature", gap["reason"])
+        self.assertEqual(200, gap["status"])
+        self.assertEqual(target.url, gap["final_url"])
+        self.assertEqual([source.url, target.url], gap["redirect_chain"])
+        self.assertEqual("text/html", gap["content_type"])
+        self.assertEqual(len(body), gap["byte_length"])
+        self.assertEqual(hashlib.sha256(body).hexdigest(), gap["sha256"])
+        self.assertEqual(1, gap["attempts"])
+        self.assertEqual("sha256_only", gap["body_retention"])
+        self.assertNotIn(body.decode(), Path(caught.exception.gap_path).read_text())
+        self.assertEqual([], list(self.output.glob("*.pdf")))
+
+    def test_rejected_response_gap_omits_query_values(self):
+        publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"}, b"not a pdf"))
+        with self.assertRaises(SourceRejected) as caught:
+            acquire(publisher.url + "?download=private-value", "pdf", self.output,
+                    client=self.client)
+        gap_text = Path(caught.exception.gap_path).read_text()
+        gap = json.loads(gap_text)
+        self.assertEqual(publisher.url, gap["final_url"])
+        self.assertEqual([publisher.url], gap["redirect_chain"])
+        self.assertNotIn("private-value", gap_text)
+
     def test_403_records_safe_terminal_gap_without_retry(self):
         publisher = self.publisher(lambda path: (403, {"Content-Type": "text/html"}, b"secret blocked body"))
         with self.assertRaises(SourceRejected) as caught:
