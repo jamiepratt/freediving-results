@@ -51,6 +51,9 @@
         (is (string? (get-in login [:body :csrf])))
         (is (= 200 (:status (request s "GET" "/api/candidates" nil headers))))
         (is (= 403 (:status (request s "POST" "/api/proposals" {} (merge headers {"Content-Type" "application/json" "Origin" (:url s)})))))
+        (is (= 400 (:status (request s "POST" "/api/proposals" {:jev-score {:run-id "missing"}}
+                                     (merge headers {"Content-Type" "application/json" "Origin" (:url s)
+                                                     "X-CSRF-Token" (get-in login [:body :csrf])})))))
         (is (= 405 (:status (request s "GET" "/api/proposals" nil headers)))))
       (finally (server/stop! s)))))
 (defn -main [& _] (let [r (run-tests 'freediving.owner-server-test)] (shutdown-agents) (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))

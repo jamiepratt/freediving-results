@@ -105,7 +105,11 @@
         (let [r (request-values (body! e))]
           (case path
             "/api/corrections/triage" (respond (corrections/triage! database-url (assoc r :proposal-id (:proposal-id r))))
-            "/api/proposals" (respond (reviews/propose! database-url r))
+            "/api/proposals" (respond (if (:jev-score r)
+                                        (do (when-not score-config (fail! 400 "Jev score inspection is not configured"))
+                                            ((requiring-resolve 'freediving.reviews/propose-scored-identity!)
+                                             (:jev-run-root score-config) database-url r))
+                                        (reviews/propose! database-url r)))
             "/api/decisions" (respond (reviews/decide! database-url r))
             "/api/publication" (do
                                  (when (and source-config (= :validate (:action r)))

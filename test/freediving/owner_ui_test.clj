@@ -24,6 +24,26 @@
                     assert.equal(link['proposal-id'],'p1');assert.equal(link.evidence,undefined);assert.equal(link.after,undefined);
                     console.log('owner request contract passed');")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest scored-identity-proposal-binds-exact-pair
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    const target={'job-id':'left',ordinal:0,'candidate-id':'a','source-sha256':'s1','artifact-sha256':'a1',page:2,line:3};
+                    const candidate={'job-id':'right',ordinal:4,'candidate-id':'b','source-sha256':'s2','artifact-sha256':'a2',page:5,line:6};
+                    const score={'score-status':'complete','run-id':'run','provider-id':'jev','case-id':'case','result-hash':'hash','target-reference':target,'candidate-reference':candidate,identity:{probabilities:{match:0.91,'no-match':0.07,abstain:0.02}}};
+                    const d={packet:{target:{'job-id':'left',ordinal:0}},effective:{revision:2,fields:{},identity:{outcome:'unknown'}},'jev-scores':[score]};
+                    const f={field:'identity',outcome:'matched',score,inspection:{'both-versions-reviewed':true,'contrary-evidence-reviewed':true,'source-dependence-reviewed':true},actor:'owner',reason:'Both registered originals inspected',page:2,line:3};
+                    assert.throws(()=>ui.proposal(d,{...f,inspection:{...f.inspection,'both-versions-reviewed':false}},'p'));
+                    assert.throws(()=>ui.proposal(d,{...f,score:{...score,'score-status':'stale'}},'p'));
+                    assert.throws(()=>ui.proposal(d,{...f,score:{...score,'result-hash':'other'}},'p'));
+                    const match=ui.proposal(d,f,'p');
+                    assert.deepEqual(match['jev-score'],{'run-id':'run','provider-id':'jev','case-id':'case','result-hash':'hash'});
+                    assert.deepEqual(match.inspection,{'both-versions-reviewed':true,'contrary-evidence-reviewed':true,'source-dependence-reviewed':true});
+                    assert.deepEqual(match.evidence,[target,candidate]);
+                    assert.deepEqual(match['identity-target'],candidate);
+                    assert.deepEqual(match.after,{outcome:'matched','identity-id':'local-observation:right:4'});
+                    for(const outcome of ['no-match','unknown']){const p=ui.proposal(d,{...f,outcome},outcome);assert.deepEqual(p.after,{outcome});assert.deepEqual(p.evidence,[target,candidate]);assert.equal(p['identity-target'],undefined);}
+                    console.log('scored identity contract passed');")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (deftest source-page-navigation-contract
   (let [r (shell/sh "node" "-e"
                     "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');

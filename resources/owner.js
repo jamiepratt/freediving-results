@@ -26,11 +26,19 @@
       field:f.field,category:identity?'identity-matching':f.category,
       before:identity?d.effective.identity:d.effective.fields[f.field],
       after:identity?{outcome:f.outcome}:scalar(f.type,f.value),evidence:evidence(f)};
-    if (identity && f.outcome === 'matched') {
-      if (!f.anchor) throw Error('Choose a registered candidate anchor.');
-      p.after = {outcome:'matched','identity-id':f.anchor['identity-id']};
-      p['identity-target'] = f.anchor.reference;
-      p.evidence.push(f.anchor.reference);
+    if (identity) {
+      const score=f.score, required=['both-versions-reviewed','contrary-evidence-reviewed','source-dependence-reviewed'];
+      if (!['matched','no-match','unknown'].includes(f.outcome)) throw Error('Choose an identity outcome.');
+      if (!score || score['score-status']!=='complete' || !d['jev-scores']?.some(s=>s['score-status']==='complete' && s['run-id']===score['run-id'] && s['provider-id']===score['provider-id'] && s['case-id']===score['case-id'] && s['result-hash']===score['result-hash'])) throw Error('Choose a current complete Jev score and reload changed scores.');
+      if (!score['target-reference'] || !score['candidate-reference'] || score['target-reference']['job-id']!==t['job-id'] || score['target-reference'].ordinal!==t.ordinal) throw Error('Score pair has no exact registered target and candidate references.');
+      if (!required.every(k=>f.inspection?.[k]===true)) throw Error('Inspect both originals, contrary evidence and source dependence.');
+      p['jev-score']={'run-id':score['run-id'],'provider-id':score['provider-id'],'case-id':score['case-id'],'result-hash':score['result-hash']};
+      p.inspection=Object.fromEntries(required.map(k=>[k,true]));
+      p.evidence=[score['target-reference'],score['candidate-reference']];
+      if (f.outcome === 'matched') {
+        p.after = {outcome:'matched','identity-id':'local-observation:'+score['candidate-reference']['job-id']+':'+score['candidate-reference'].ordinal};
+        p['identity-target'] = score['candidate-reference'];
+      }
     }
     return p;
   }
@@ -179,19 +187,39 @@
     if(hasViewer)pageView.load(t,sourcePage);
     $('uncertainties').replaceChildren(structure(d.packet.uncertainties),structure({'parse-status':t.payload['parse-status'],'unresolved-reasons':t.payload['unresolved-reasons']||[],errors:t.payload.errors||[]}));
     $('jev-scores').replaceChildren();
-    for(const score of d['jev-scores']||[]){const card=node('section',undefined,'candidate');const identity=score.identity||{},spelling=score.spelling||{},suggestion=score['automatic-recommendation'];card.append(node('h4',score['left-name']+' / '+score['right-name']),node('p','Jev identity: '+readable(identity.outcome)+' · P(match) '+readable(identity.probabilities?.match)),node('p','Jev spelling choice: '+readable(spelling.outcome)+' · choice probability '+readable(spelling.probabilities?.[spelling.outcome])),node('p',suggestion?'Automatic normalization eligible: '+suggestion.spelling:'No automatic normalization. Owner may choose a spelling below.'),node('p','Model probabilities are uncalibrated. Case '+score['case-id']));$('jev-scores').append(card);}
+    $('identity-score').replaceChildren(new Option('Select a complete current score',''));
+    for(const [i,score] of (d['jev-scores']||[]).entries()){
+      const card=node('section',undefined,'candidate'),identity=score.identity||{},spelling=score.spelling||{};
+      card.append(node('h4',(score['left-name']||'Unknown')+' / '+(score['right-name']||'Unknown')),
+        node('p','Status: '+readable(score['score-status'])+' · Jev identity: '+readable(identity.outcome)),
+        node('p','Full identity probabilities: '+readable(identity.probabilities)),
+        node('p','Spelling: '+readable(spelling.outcome)+' · probabilities: '+readable(spelling.probabilities)),
+        node('p','Model probabilities are uncalibrated. Same names, high P(match), and mirrored sources do not prove identity.'),
+        expandable('Both original observation versions, source excerpts and uncertainties',score['pair-records']||score['pair-references']||[]),
+        expandable('Contrary evidence and source dependence',{'source-dependence':score['source-dependence'],'pair-uncertainties':Object.fromEntries(Object.entries(score['pair-records']||{}).map(([side,record])=>[side,record.uncertainties||[]])),'source-references':score['source-references']}),
+        expandable('Exact score identity, extraction versions and registered citations',score));
+      for(const [side,ref] of [['target',score['target-reference']],['candidate',score['candidate-reference']]]){
+        if(!ref)continue;
+        const button=node('button','Inspect '+side+' registered source');button.type='button';
+        button.onclick=async()=>{try{const evidence=await api('/api/evidence?'+targetQuery(ref));card.append(expandable(side+' exact original source',evidence));}catch(error){status(error.message,true);}};
+        card.append(button);
+      }
+      $('jev-scores').append(card);
+      if(score['score-status']==='complete' && score['run-id'] && score['provider-id'] && score['case-id'] && score['result-hash'] && score['target-reference'] && score['candidate-reference'])
+        $('identity-score').append(new Option((score['left-name']||'Left')+' / '+(score['right-name']||'Right')+' · '+score['case-id']+' · '+score['result-hash'].slice(0,12),String(i)));
+    }
     if(!d['jev-scores']?.length)$('jev-scores').append(node('p','No current source-bound Jev score for this observation.'));
-    $('candidates').replaceChildren();$('anchor').replaceChildren(new Option('Select an inspected candidate',''));
+    $('candidates').replaceChildren();
     (d.packet.candidates||[]).forEach((c,i)=>{
       const card=node('section',undefined,'candidate');card.append(node('h4',c.observations.map(o=>o.payload.parsed?.['source-name']||'Unknown name').join(' / ')),node('p','Retrieval signals: '+readable(c.signals)));
       c.observations.forEach(o=>{card.append(expandable('Source comparison and exact provenance',o));const b=node('button','Inspect candidate source lines');b.type='button';b.onclick=async()=>{try{const data=await api('/api/evidence?'+targetQuery(o));card.append(sourceEvidence(data));}catch(err){status(err.message,true);}};card.append(b);if(hasViewer){const pageButton=node('button','Open candidate page and comparison');pageButton.type='button';pageButton.onclick=()=>openCase(o);card.append(pageButton);}});$('candidates').append(card);
-      $('anchor').append(new Option(c.observations[0].payload.parsed?.['source-name']+' · '+c['source-sha256'].slice(0,12),String(i)));
     });
     if(!d.packet.candidates?.length)$('candidates').append(node('p','No supported candidate retrieved. Unknown and no-match do not establish distinct identities.'));
     $('field').replaceChildren(...Object.keys(fields).filter(k=>fields[k]===null||typeof fields[k]!=='object').map(k=>new Option(human(k),k)),new Option('Identity outcome','identity'));
     document.querySelector('label[for=page]').textContent=e['source-format']==='html'?'Inspected source table':'Inspected source page';document.querySelector('label[for=line]').textContent=e['source-format']==='html'?'Inspected source row':'Inspected source line';
     $('page').value=e['source-format']==='html'?e.coordinates?.table:(e.coordinates?.page||e['source-lines']?.[0]?.page||'');$('line').value=e['source-format']==='html'?e.coordinates?.row:(e.coordinates?.line||e['source-lines']?.[0]?.line||'');
     $('visual').checked=false;$('substantive').checked=false;$('publication-reason').value='';
+    ['inspected-versions','inspected-contrary','inspected-dependence'].forEach(id=>$(id).checked=false);
     $('publication-state').textContent='Automated prerequisites: '+(d.publication['ready?']?'ready':'blocked')+'. Currently eligible: '+(d.publication['eligible?']?'yes':'no')+'. '+readable(d.publication.reasons);
     $('audit').replaceChildren();
     (d.history||[]).forEach(h=>{
@@ -241,7 +269,7 @@
   $('logout').onclick=async()=>{if(busy)return;lock(true);try{await api('/api/logout',{});clearSession();status('Signed out. Owner session revoked.');$('capability').focus();}catch(e){if(e.status===401){clearSession();status('Session expired. Log in again.');}else status('Sign out failed: '+e.message,true);}finally{lock(false);}};
   $('login').onsubmit=async event=>{event.preventDefault();try{const capability=$('capability').value;$('capability').value='';const s=await api('/api/login',{capability});csrf=s.csrf;await start();status('Owner session established.');}catch(e){status(e.message,true);}};
   $('filter').oninput=renderList;$('outcome-filter').onchange=renderList;$('field').onchange=fieldChanged;
-  $('proposal').onsubmit=event=>{event.preventDefault();try{const f=common(formData('proposal'));f.anchor=detail.packet.candidates[Number(f.anchor)]?.['local-identity-anchor'];if($('anchor').value==='')f.anchor=null;mutate('/api/proposals',proposal(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
+  $('proposal').onsubmit=event=>{event.preventDefault();try{const f=common(formData('proposal'));f.score=$('identity-score').value===''?null:detail['jev-scores'][Number($('identity-score').value)];f.inspection={'both-versions-reviewed':$('inspected-versions').checked,'contrary-evidence-reviewed':$('inspected-contrary').checked,'source-dependence-reviewed':$('inspected-dependence').checked};mutate('/api/proposals',proposal(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
   $('publication-form').onsubmit=event=>{event.preventDefault();try{const f=common(formData('publication-form'));f.visual=$('visual').checked;f.substantive=$('substantive').checked;mutate('/api/publication',publication(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
   $('retry').onclick=()=>{if(pending)mutate(pending.path,pending.request);};$('reload').onclick=()=>{if(selected)openCase(selected);};
   start().catch(e=>status(e.message,true));
