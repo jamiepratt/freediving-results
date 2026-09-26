@@ -170,11 +170,13 @@
                                             (assoc ((requiring-resolve 'freediving.jev-candidates/candidate-case)
                                                     database-url corpus t reference)
                                                    :target-reference t :candidate-reference reference)
-                                            (catch Exception _
-                                              {:case-id (str "unsupported:" (:job-id candidate) ":" (:ordinal candidate))
-                                               :score-status :unsupported
-                                               :target-reference (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])
-                                               :candidate-reference (select-keys candidate [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])}))))
+                                            (catch clojure.lang.ExceptionInfo error
+                                              (if (re-find #"Unsupported|ambiguous|Only parsed|Missing PDF source line" (or (.getMessage error) ""))
+                                                {:case-id (str "unsupported:" (:job-id candidate) ":" (:ordinal candidate))
+                                                 :score-status :unsupported
+                                                 :target-reference (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])
+                                                 :candidate-reference (select-keys candidate [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])}
+                                                (throw error))))))
                                       candidate-rows))]
             (respond (merge mode-info {:packet (assoc packet :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
                                        :jev-scores (when score-config
