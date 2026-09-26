@@ -4,6 +4,8 @@
             [clojure.string :as str]
             [clojure.java.shell :as shell]
             [freediving.owner-server :as server]
+            [freediving.candidates :as candidates]
+            [freediving.jev-candidates :as jev-candidates]
             [freediving.source-pages-test :as pages-fixture]
             [freediving.aida-html-test :as html-fixture]
             [freediving.publication-test :as publication-fixture]
@@ -53,6 +55,27 @@
   (let [r (request s "POST" "/api/login" {:capability (slurp (:capability-file s))} {"Origin" (:url s) "Content-Type" "application/json"})]
     {"Origin" (:url s) "Content-Type" "application/json"
      "Cookie" (first (str/split (:cookie r) #";")) "X-CSRF-Token" (get-in r [:body :csrf])}))
+
+(deftest private-detail-shows-missing-current-jev-pair
+  (let [t (publication-fixture/sample (fn [a]
+                                        (let [a (assoc-in a [:config :synthetic] true)]
+                                          (assoc a :job-id (fixture/hash-value
+                                                            (select-keys a [:source-sha256 :acquisitions :evidence-sha256
+                                                                            :actor :config :parser-version :schema-version
+                                                                            :pdfinfo-version :tool]))))))
+        root (str (Files/createTempDirectory "owner-jev-scores-" (make-array java.nio.file.attribute.FileAttribute 0)))
+        s (server/start! (assoc (config) :jev-run-root root :jev-provider-id "jev"))]
+    (try
+      (let [h (login s)
+            row (first (candidates/load-corpus publication-fixture/reviewer {}))]
+        (with-redefs [candidates/packet (fn [_ _ _] {:candidates [{:observations [row]}]})
+                      jev-candidates/candidate-case (fn [& _] {:case-id "exact-pair" :input {:left {:record-id "left"}
+                                                                                             :right {:record-id "right"}}})]
+          (let [detail (request s "GET" (str "/api/detail?job-id=" (:job-id t) "&ordinal=0") nil h)]
+            (is (= 200 (:status detail)))
+            (is (= :missing (get-in detail [:body :jev-scores 0 :score-status])))
+            (is (= "exact-pair" (get-in detail [:body :jev-scores 0 :case-id]))))))
+      (finally (server/stop! s)))))
 (deftest complete-review-and-validation-flow-preserves-source
   (let [t (publication-fixture/sample (fn [a] (let [a (assoc-in a [:config :synthetic] true)] (assoc a :job-id (fixture/hash-value (select-keys a [:source-sha256 :acquisitions :evidence-sha256 :actor :config :parser-version :schema-version :pdfinfo-version :tool]))))))
         original (observations/inspect fixture/app (:job-id t)) s (server/start! (config))]

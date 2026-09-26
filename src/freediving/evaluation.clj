@@ -249,6 +249,8 @@
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))
            run-id (digest identity-text)]
+       (when-not (and (exists? root) (read-record root (str run-id "-manifest")))
+         (require-jev-credential! configs runtime))
        (with-store root
          (fn [root]
            (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root))
@@ -279,7 +281,7 @@
                :report-view :recomputed-unverified-assertions)))))
 
 (defn list-runs
-  "Discover at most 10,000 private completed runs. Every returned run is verified."
+  "Discover at most 10,000 private completed run IDs. Inspect each to verify content."
   [root]
   (with-store root
     (fn [root]

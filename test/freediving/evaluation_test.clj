@@ -11,7 +11,7 @@
 (def dataset (fixtures/dataset [(fixtures/sample-case "a" :development) (fixtures/sample-case "b" :held-out)]))
 (def configs [{:id "rules" :provider :rules}])
 (deftest v3-requires-credential-before-storage
-  (let [dir (root) cfg [{:id "jev" :provider :jev :identity-protocol :freediving-compact-v3}]
+  (let [dir (str (root) "/fresh") cfg [{:id "jev" :provider :jev :identity-protocol :freediving-compact-v3}]
         calls (atom 0)]
     (with-redefs [providers/prepare-batches (fn [_ _]
                                               [{:adapter-version "shadow-adapters/14" :provider :jev
@@ -25,7 +25,7 @@
                                         :cost {:status :unknown}})]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"credential"
                             (evaluation/run! dir dataset cfg {:providers {"jev" {:bearer-token "  "}}})))
-      (is (empty? (.listFiles (io/file dir "records"))))
+      (is (not (.exists (io/file dir))))
       (let [first-run (evaluation/run! dir dataset cfg {:providers {"jev" {:bearer-token "secret"}}})]
         (is (= 1 @calls))
         (is (= [(:run-id first-run)] (evaluation/list-runs dir)))
