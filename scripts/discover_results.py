@@ -18,24 +18,27 @@ from source_acquisition import AcquisitionClient
 from source_inventory import _safe_url
 
 
-_CREDENTIAL = re.compile(r"bearer|cookie|session|token|password|secret|credential|authorization|api[_-]?key", re.I)
+_CREDENTIAL_KEY = re.compile(
+    r"bearer|cookie|token|password|secret|credential|authorization|api[_-]?key|session[_-]?(?:id|key)", re.I)
+_CREDENTIAL_VALUE = re.compile(
+    r"bearer|cookie|token|password|secret|credential|authorization|api[_-]?key|session\s*[:=]", re.I)
 
 
 def _public_url(url):
     if not _safe_url(url):
         return False
-    return not any(_CREDENTIAL.search(value) for _, value in
+    return not any(_CREDENTIAL_VALUE.search(value) for _, value in
                    parse_qsl(urlsplit(url).query, keep_blank_values=True))
 
 
 def _public_context(value):
     if isinstance(value, dict):
-        return all(isinstance(key, str) and not _CREDENTIAL.search(key) and _public_context(item)
+        return all(isinstance(key, str) and not _CREDENTIAL_KEY.search(key) and _public_context(item)
                    for key, item in value.items())
     if isinstance(value, list):
         return all(_public_context(item) for item in value)
     if isinstance(value, str):
-        return not _CREDENTIAL.search(value)
+        return not _CREDENTIAL_VALUE.search(value)
     return value is None or isinstance(value, (bool, int, float))
 
 

@@ -93,7 +93,9 @@ class DiscoveryTest(unittest.TestCase):
 
     def test_sensitive_context_is_rejected_before_acquisition_or_private_output(self):
         for context in ({"session_cookie": "private-value"},
-                        {"filter": "Bearer private-value"}):
+                        {"session_token": "private-value"},
+                        {"filter": "Bearer private-value"},
+                        {"filter": "session=private-value"}):
             with self.subTest(context=context):
                 config = json.loads(self.config.read_text())
                 config["sources"][0]["context"] = context
@@ -105,6 +107,17 @@ class DiscoveryTest(unittest.TestCase):
                 self.assertNotIn("private-value", result.stderr)
                 self.assertFalse((self.private / "output").exists())
                 self.assertEqual([], self.publisher.requests)
+
+    def test_sporting_session_context_is_preserved_in_receipts(self):
+        config = json.loads(self.config.read_text())
+        config["sources"] = [{**config["sources"][0],
+                              "context": {"session": "women final session"}}]
+        self.config.write_text(json.dumps(config))
+        inventory = self.run_discovery()
+        self.assertEqual(2, len(inventory["candidates"]))
+        for item in inventory["candidates"]:
+            provenance = json.loads((self.private / "output" / "archive" / item["provenance"]).read_text())
+            self.assertEqual("women final session", provenance["context"]["session"])
 
     def test_sensitive_candidate_url_is_rejected_before_inventory_record(self):
         config = json.loads(self.config.read_text())
