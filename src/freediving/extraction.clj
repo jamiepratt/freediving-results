@@ -22,7 +22,9 @@
             [freediving.camotes-challenge-2026 :as camotes-challenge-2026]
             [freediving.vertical-blue-2025 :as vertical-blue]
             [freediving.ffessm-2025-day1 :as ffessm-2025-day1]
+            [freediving.ffessm-2025-day2 :as ffessm-2025-day2]
             [freediving.ffessm-2026 :as ffessm-2026]
+            [freediving.ffessm-2026-men :as ffessm-2026-men]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -119,7 +121,9 @@
         (deep-dominica-2026/supported? pages) (deep-dominica-2026/parse-pages pages)
         (vertical-blue/supported? pages) (vertical-blue/parse-pages pages)
         (ffessm-2025-day1/supported? pages) (ffessm-2025-day1/parse-pages pages)
+        (ffessm-2025-day2/supported? pages) (ffessm-2025-day2/parse-pages pages)
         (ffessm-2026/supported? pages) (ffessm-2026/parse-pages pages)
+        (ffessm-2026-men/supported? pages) (ffessm-2026-men/parse-pages pages)
         (depth-2026/supported? pages) (depth-2026/parse-pages-with-geometry pages "")
         :else (parse-cmas-pages pages)))
 
@@ -187,8 +191,14 @@
 (defn ffessm-2025-day1-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= ffessm-2025-day1/parser-version (:parser-version artifact))))
 
+(defn ffessm-2025-day2-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= ffessm-2025-day2/parser-version (:parser-version artifact))))
+
 (defn ffessm-2026-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= ffessm-2026/parser-version (:parser-version artifact))))
+
+(defn ffessm-2026-men-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= ffessm-2026-men/parser-version (:parser-version artifact))))
 
 (defn- athens-selected? [pages]
   (and (athens/supported? pages)
@@ -226,7 +236,9 @@
                   (not (deep-dominica-2026-artifact? artifact))
                   (not (vertical-blue-artifact? artifact))
                   (not (ffessm-2025-day1-artifact? artifact))
-                  (not (ffessm-2026-artifact? artifact)))
+                  (not (ffessm-2025-day2-artifact? artifact))
+                  (not (ffessm-2026-artifact? artifact))
+                  (not (ffessm-2026-men-artifact? artifact)))
          (let [source (archive/inspect root (:source-sha256 artifact))
                raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
                pages (str/split raw #"\f" -1)]
@@ -297,13 +309,19 @@
              (throw (ex-info "Vertical Blue parser is bound to a different source PDF" {})))
          _ (when (and ffessm-2025-day1? (not= sha256 ffessm-2025-day1/source-sha256))
              (throw (ex-info "French 2025 day-one parser is bound to a different source PDF" {})))
+         ffessm-2025-day2? (ffessm-2025-day2/supported? pages)
+         _ (when (and ffessm-2025-day2? (not= sha256 ffessm-2025-day2/source-sha256))
+             (throw (ex-info "French 2025 day-two parser is bound to a different source PDF" {})))
          _ (when (and ffessm-2026? (not= sha256 ffessm-2026/source-sha256))
              (throw (ex-info "French 2026 parser is bound to a different source PDF" {})))
+         ffessm-2026-men? (ffessm-2026-men/supported? pages)
+         _ (when (and ffessm-2026-men? (not= sha256 ffessm-2026-men/source-sha256))
+             (throw (ex-info "French 2026 men parser is bound to a different source PDF" {})))
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
-                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
+                   :parser-version (cond ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :schema-version (cond ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -407,10 +425,20 @@
                              ffessm-2025-day1-artifact? ffessm-2025-day1/source-sha256
                              "French 2025 day-one"))
 
+(defn validate-ffessm-2025-day2-artifact! [root artifact]
+  (validate-ffessm-artifact! root artifact ffessm-2025-day2/parse-pages
+                             ffessm-2025-day2-artifact? ffessm-2025-day2/source-sha256
+                             "French 2025 day-two"))
+
 (defn validate-ffessm-2026-artifact! [root artifact]
   (validate-ffessm-artifact! root artifact ffessm-2026/parse-pages
                              ffessm-2026-artifact? ffessm-2026/source-sha256
                              "French 2026"))
+
+(defn validate-ffessm-2026-men-artifact! [root artifact]
+  (validate-ffessm-artifact! root artifact ffessm-2026-men/parse-pages
+                             ffessm-2026-men-artifact? ffessm-2026-men/source-sha256
+                             "French 2026 men"))
 
 (defn validate-italy-open-artifact!
   "Replay source-bound text and reconciliation against the registered PDF before import."
