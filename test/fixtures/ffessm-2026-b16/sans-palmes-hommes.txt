@@ -1,0 +1,35 @@
+                              Championnat de France Eau Libre 2026
+                                     Résultats Sans Palmes Hommes
+                                                 Villefranche-sur-mer
+
+EPREUVE
+                                                                             Profondeur                Profondeur                           Defaut Tag Total
+Classement Compétiteurs                   Sexe      Nationalité Fédération                Discipline                Pénalités prof 1pts/m                       Carton   COMMENTAIRES
+                                                                             Annoncée                  Réalisée                             1pt        Points
+1            Buchou         Geoffrey      Homme     Française   FFESSM       70 m         CNF          70 m         0m                                 70       Blanc
+1            Provenzani     Kevin         Homme     Française   FFESSM       70 m         CNF          70 m         0m                                 70       Blanc
+3            Mauranes       Théo          Homme     Française   FFESSM       63 m         CNF          63 m         0m                                 63       Blanc
+4            Daoulas        Guillaume     Homme     Française   FFESSM       62 m         CNF          62 m         0m                                 62       Blanc
+5            Motta          Florian       Homme     Française   FFESSM       53 m         CNF          53 m         0m                                 53       Blanc
+6            Emile          Thibault      Homme     Française   FFESSM       50 m         CNF          50 m         0m                                 50       Blanc
+7            Blond          Jean-Michel   Homme     Française   FFESSM       44 m         CNF          44 m         0m                                 44       Blanc
+8            Goix           Maxime        Homme     Française   FFESSM       45 m         CNF          37 m         8m                      1          28       Jaune    Annonce non atteinte
+             Cianfoni       Alessandro    Homme     italienne   FFESSM       44 m         CNF          44 m         0m                                 0        Rouge    DQ syncope syrface
+             Vogler         Christian     Homme     Française   FFESSM       63 m         CNF          63 m         0m                                 0        Rouge    DQ syncope syrface
+             Bourseaud      Julien        Homme     Française   FFESSM       66 m         CNF          66 m         0m                                 0        Rouge    DQ syncope syrface
+
+CHAMPIONNAT DE FRANCE
+                                                                             Profondeur                Profondeur                           Defaut Tag Total
+Classement   Compétiteurs                 Sexe      Nationalité Fédération                Discipline                Pénalités prof 1pts/m                       Carton   COMMENTAIRES
+                                                                             Annoncée                  Réalisée                             1pt        Points
+1            Buchou         Geoffrey      Homme     Française   FFESSM       70 m         CNF          70 m         0m                                 70       Blanc
+1            Provenzani     Kevin         Homme     Française   FFESSM       70 m         CNF          70 m         0m                                 70       Blanc
+3            Mauranes       Théo          Homme     Française   FFESSM       63 m         CNF          63 m         0m                                 63       Blanc
+4            Daoulas        Guillaume     Homme     Française   FFESSM       62 m         CNF          62 m         0m                                 62       Blanc
+5            Motta          Florian       Homme     Française   FFESSM       53 m         CNF          53 m         0m                                 53       Blanc
+6            Emile          Thibault      Homme     Française   FFESSM       50 m         CNF          50 m         0m                                 50       Blanc
+7            Blond          Jean-Michel   Homme     Française   FFESSM       44 m         CNF          44 m         0m                                 44       Blanc
+8            Goix           Maxime        Homme     Française   FFESSM       45 m         CNF          37 m         8m                      1          28       Jaune    Annonce non atteinte
+             Vogler         Christian     Homme     Française   FFESSM       63 m         CNF          63 m         0m                                 0        Rouge    DQ syncope syrface
+             Bourseaud      Julien        Homme     Française   FFESSM       66 m         CNF          66 m         0m                                 0        Rouge    DQ syncope syrface
+
