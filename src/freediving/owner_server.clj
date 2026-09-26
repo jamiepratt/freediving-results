@@ -77,6 +77,35 @@
   (let [cookies (str/split (or (header e "Cookie") "") #";\s*") id (some #(second (re-matches #"owner-session=([A-Za-z0-9_-]+)" %)) cookies)
         s (get @sessions id)]
     (when (and s (< (System/currentTimeMillis) (:expires s))) s)))
+(defn- current-jev-cases [database-url corpus packet]
+  (let [target (:target packet)
+        target-ref (select-keys target [:job-id :ordinal])
+        candidates (mapcat :observations (:candidates packet))]
+    (when (> (count candidates) 1000) (fail! 400 "Too many candidate pairs"))
+    (mapv (fn [candidate]
+            (let [reference (select-keys candidate [:job-id :ordinal])]
+              (try
+                (assoc ((requiring-resolve 'freediving.jev-candidates/candidate-case)
+                        database-url corpus target-ref reference)
+                       :target-reference target-ref :candidate-reference reference)
+                (catch clojure.lang.ExceptionInfo error
+                  (if (re-find #"Unsupported|ambiguous|Only parsed|Missing PDF source line" (or (.getMessage error) ""))
+                    {:case-id (str "unsupported:" (:job-id candidate) ":" (:ordinal candidate))
+                     :score-status :unsupported
+                     :target-reference (select-keys target [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])
+                     :candidate-reference (select-keys candidate [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])}
+                    (throw error))))))
+          candidates)))
+(defn- jev-scores [database-url corpus packet score-config]
+  (when score-config
+    (let [target (select-keys (:target packet) [:job-id :ordinal])
+          current (current-jev-cases database-url corpus packet)]
+      (if-let [run-id (:jev-run-id score-config)]
+        (spelling/score-view (:jev-run-root score-config) run-id
+                             (:jev-provider-id score-config) target corpus
+                             (set (map :case-id (remove :score-status current))))
+        (spelling/score-views (:jev-run-root score-config)
+                              (:jev-provider-id score-config) target corpus current)))))
 (defn- routes! [e {:keys [url database-url secret sessions mode-info source-config score-config]}]
   (let [method (.getRequestMethod e) path (.getPath (.getRequestURI e)) host (header e "Host") origin (header e "Origin")
         auth (session sessions e) get? (= method "GET") post? (= method "POST")
@@ -158,38 +187,29 @@
       (let [p (params e) offset (try (Long/parseLong (get p :offset "0")) (catch Exception _ -1))]
         (when-not (<= 0 offset 10000) (fail! 400 "Correction offset must be between 0 and 10000"))
         (respond (corrections/list-requests database-url {:limit 100 :offset offset})))
-      (= path "/api/candidates") (respond (merge mode-info (assoc (candidates/packets (candidates/load-corpus database-url {}) {:limit 1000}) :rubric packets/rubric)))
+      (= path "/api/candidates")
+      (let [corpus (candidates/load-corpus database-url {})
+            result (candidates/packets corpus {:limit 1000})
+            scores (when score-config
+                     (spelling/score-views-for-targets
+                      (:jev-run-root score-config) (:jev-provider-id score-config) corpus
+                      (into {} (map (fn [packet]
+                                      [(select-keys (:target packet) [:job-id :ordinal])
+                                       (current-jev-cases database-url corpus packet)])
+                                    (:packets result)))
+                      (:jev-run-id score-config)))]
+        (respond (merge mode-info
+                        (assoc result :packets (mapv #(assoc % :jev-scores (get scores (select-keys (:target %) [:job-id :ordinal])))
+                                                     (:packets result))
+                               :rubric packets/rubric))))
       (contains? #{"/api/detail" "/api/evidence"} path)
       (let [t (target! e) corpus (candidates/load-corpus database-url {}) row (some #(when (= t (select-keys % [:job-id :ordinal])) %) corpus)]
         (when-not row (fail! 404 "Unknown observation"))
         (if (= path "/api/evidence")
           (respond (assoc (select-keys row [:job-id :ordinal :source-format :source-lines :acquisitions :source-sha256 :artifact-sha256]) :coordinates (get-in row [:payload :coordinates])))
-          (let [packet (candidates/packet corpus t {})
-                candidate-rows (mapcat :observations (:candidates packet))
-                _ (when (> (count candidate-rows) 1000) (fail! 400 "Too many candidate pairs"))
-                current-cases (when score-config
-                                (mapv (fn [candidate]
-                                        (let [reference (select-keys candidate [:job-id :ordinal])]
-                                          (try
-                                            (assoc ((requiring-resolve 'freediving.jev-candidates/candidate-case)
-                                                    database-url corpus t reference)
-                                                   :target-reference t :candidate-reference reference)
-                                            (catch clojure.lang.ExceptionInfo error
-                                              (if (re-find #"Unsupported|ambiguous|Only parsed|Missing PDF source line" (or (.getMessage error) ""))
-                                                {:case-id (str "unsupported:" (:job-id candidate) ":" (:ordinal candidate))
-                                                 :score-status :unsupported
-                                                 :target-reference (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])
-                                                 :candidate-reference (select-keys candidate [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version :schema-version])}
-                                                (throw error))))))
-                                      candidate-rows))]
+          (let [packet (assoc (candidates/packet corpus t {}) :target row)]
             (respond (merge mode-info {:packet (assoc packet :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
-                                       :jev-scores (when score-config
-                                                     (if-let [run-id (:jev-run-id score-config)]
-                                                       (spelling/score-view (:jev-run-root score-config)
-                                                                            run-id (:jev-provider-id score-config) t corpus
-                                                                            (set (map :case-id (remove :score-status current-cases))))
-                                                       (spelling/score-views (:jev-run-root score-config)
-                                                                             (:jev-provider-id score-config) t corpus current-cases)))
+                                       :jev-scores (jev-scores database-url corpus packet score-config)
                                        :history (reviews/history database-url t) :publication (publication/diagnose database-url t)
                                        :publication-history (publication/history database-url t) :rubric packets/rubric})))))
       :else (fail! 404 "Unknown endpoint"))))

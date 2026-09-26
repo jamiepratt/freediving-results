@@ -7,3 +7,7 @@
 .case{overflow-wrap:anywhere}
 
 #evidence th:first-child,#evidence td:first-child,#evidence th:nth-child(2),#evidence td:nth-child(2){min-width:4rem;white-space:nowrap;overflow-wrap:normal;padding:.65rem .5rem}#evidence th:last-child,#evidence td:last-child{min-width:18rem}
+
+.score-legend{display:flex;justify-content:space-between;flex-wrap:wrap;gap:.25rem;margin-top:1rem;padding-top:.7rem;border-top:10px solid transparent;border-image:linear-gradient(90deg,#8b1e2d,#a75a00,#17643d) 1;font-size:.76rem;font-weight:650;color:#173235}.score-swatch{display:block;width:100%;height:.55rem;border-radius:.2rem;margin:.5rem 0;border:1px solid #61746c}.score-status{display:block;font-weight:750;margin-top:.5rem}.case .score-status{color:#173235}.case[aria-current=true]{outline:3px solid #a75a00;outline-offset:1px}.case small{overflow-wrap:anywhere}.case:hover .score-status{color:#fff}.score-card{border-left:4px solid #a4aca8;padding-left:.8rem}.score-card .score-swatch{max-width:26rem}
+.case-pair{display:block;padding:.4rem 0;border-top:1px solid #b8ccc3}.case-pair:first-of-type{margin-top:.5rem}.case:hover .case-pair{border-color:#9cc5b5}
+.case[aria-current=true]{background:#21655b;color:#fff}.case[aria-current=true] small,.case[aria-current=true] .score-status{color:#fff}

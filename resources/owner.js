@@ -69,6 +69,70 @@
     const context='Source '+String(target['job-id']).slice(0,12)+(target['source-format']==='html'?' · table '+coords.table+' · row '+coords.row:' · page '+(coords.page??'?')+' · line '+(coords.line??'?'))+' · observation '+target.ordinal;
     return {label,context,search:JSON.stringify([payload.parsed,raw,payload['source-lines'],target['job-id'],context,packet.outcome]).toLowerCase()};
   }
+  function scoreSummary(packet,sort='match-desc') {
+    const scores=packet['jev-scores']||[];
+    const complete=scores.filter(s=>s['score-status']==='complete' &&
+      ['match','no-match','abstain'].every(k=>Number.isFinite(s.identity?.probabilities?.[k]) && s.identity.probabilities[k]>=0 && s.identity.probabilities[k]<=1));
+    const key=sort.startsWith('no-match')?'no-match':'match',direction=sort.endsWith('asc')?1:-1;
+    const score=complete.sort((a,b)=>direction*(a.identity.probabilities[key]-b.identity.probabilities[key]) ||
+      String(a['case-id']||'').localeCompare(String(b['case-id']||'')) || String(a['run-id']||'').localeCompare(String(b['run-id']||'')))[0];
+    return score?{status:'complete',score,probabilities:score.identity.probabilities}:
+      {status:scores[0]?.['score-status']||'missing',score:scores[0]||null,probabilities:null};
+  }
+  function queueCases(packets,{sort='match-desc',filter='',outcome=''}={}) {
+    const key=sort.startsWith('no-match')?'no-match':'match',direction=sort.endsWith('asc')?1:-1;
+    return packets.map((packet,index)=>({packet,index,summary:scoreSummary(packet,sort)}))
+      .filter(({packet})=>casePresentation(packet).search.includes(filter.toLowerCase()) && (!outcome||packet.outcome===outcome))
+      .sort((a,b)=>{
+        const av=a.summary.probabilities?.[key],bv=b.summary.probabilities?.[key];
+        if(av===undefined || bv===undefined)return av===undefined?(bv===undefined?a.index-b.index:1):-1;
+        const diff=direction*(av-bv);
+        if(diff)return diff;
+        const at=a.packet.target,bt=b.packet.target;
+        return String(at['job-id']).localeCompare(String(bt['job-id'])) || at.ordinal-bt.ordinal || a.index-b.index;
+      }).map(({packet})=>packet);
+  }
+  function scoreRows(packet,sort='match-desc') {
+    const selected=scoreSummary(packet,sort).score;
+    return (packet['jev-scores']?.length?packet['jev-scores']:[null])
+      .map(score=>({score,sortingPair:score===selected && scorePresentation(score).color!==null}));
+  }
+  function probabilityColor(value) {
+    if(!Number.isFinite(value)||value<0||value>1)return null;
+    const stops=[[139,30,45],[167,90,0],[23,100,61]],position=value<0.5?value*2:(value-0.5)*2;
+    const a=value<0.5?stops[0]:stops[1],b=value<0.5?stops[1]:stops[2];
+    return '#'+a.map((part,i)=>Math.round(part+(b[i]-part)*position).toString(16).padStart(2,'0')).join('');
+  }
+  function sourceCitation(reference) {
+    const parts=[];
+    const add=(label,value)=>{if(value!==undefined && value!==null)parts.push(label+' '+String(value));};
+    add('evidence',reference['evidence-id']);add('source SHA-256',reference['source-sha256']);
+    add('artifact SHA-256',reference['artifact-sha256']);add('observation',reference['observation-id']);
+    add('format',reference['source-format']);
+    add('page',reference.page);
+    if(Array.isArray(reference.lines))add('lines',reference.lines.join('-'));
+    add('table',reference.locator?.table);add('row',reference.locator?.row);
+    add('row index zero based',reference.locator?.['row-index-zero-based']);
+    add('source page URL',reference.locator?.['source-page-url']);
+    return parts.join(' · ');
+  }
+  function scorePresentation(score,now=Date.now()) {
+    const status=score?.['score-status']||'missing',p=score?.identity?.probabilities;
+    const valid=status==='complete' && ['match','no-match','abstain'].every(k=>Number.isFinite(p?.[k])&&p[k]>=0&&p[k]<=1);
+    const completed=Date.parse(score?.['completed-at']||'');
+    const elapsed=Number.isFinite(completed)?Math.max(0,now-completed):null;
+    const duration=(number,unit)=>number+' '+unit+(number===1?'':'s')+' ago';
+    const age=elapsed===null?'Score age unavailable':(elapsed<3600000?duration(Math.floor(elapsed/60000),'minute'):elapsed<86400000?duration(Math.floor(elapsed/3600000),'hour'):duration(Math.floor(elapsed/86400000),'day'));
+    const references=(score?.['source-references']||[]).flat();
+    return {status:valid?'Complete current score':'Score '+status+' - no current probability',
+      probabilities:valid?'P(match) '+String(p.match)+' · P(no match) '+String(p['no-match'])+' · P(abstain) '+String(p.abstain):'Probabilities unavailable',
+      outcome:valid?'Jev outcome: '+String(score.identity.outcome||'unknown'):'Jev outcome unavailable',
+      model:'Model/version: '+String(score?.['model-version']||score?.['provider-configuration']?.model||'unavailable'),
+      age:'Scored: '+String(score?.['completed-at']||'unavailable')+' · '+age,
+      identity:'Run '+String(score?.['run-id']||'unavailable')+' · case '+String(score?.['case-id']||'unavailable')+' · request '+String(score?.['request-hash']||'unavailable')+' · result '+String(score?.['result-hash']||'unavailable'),
+      evidence:references.length+' source records: '+references.map(sourceCitation).join('; '),
+      color:valid?probabilityColor(p.match):null};
+  }
   function viewerControls({state,page,count,observationPage,busy}) {
     const loaded=state==='loaded';
     return {previous:busy||!loaded||page<=1,next:busy||!loaded||page>=count,
@@ -94,7 +158,7 @@
       }
     };
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls}; return; }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls,scoreSummary,queueCases,scoreRows,scorePresentation,probabilityColor}; return; }
   const $=id=>document.getElementById(id);
   let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0, canReview=false, hasViewer=false;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
@@ -151,10 +215,24 @@
     });
   }
   function renderList(){
-    const filter=$('filter').value.toLowerCase(),outcome=$('outcome-filter').value;
-    const visible=packets.filter(p=>casePresentation(p).search.includes(filter)&&(!outcome||p.outcome===outcome));
+    const visible=queueCases(packets,{filter:$('filter').value,outcome:$('outcome-filter').value,sort:$('score-sort').value});
     $('cases').replaceChildren();$('case-count').textContent=visible.length+' of '+packets.length+' comparison cases';
-    visible.forEach(p=>{const presentation=casePresentation(p),b=node('button',presentation.label,'case');b.append(node('small',human(p.outcome)),node('small',presentation.context));b.onclick=()=>openCase(p.target);$('cases').append(b);});
+    visible.forEach(p=>{
+      const presentation=casePresentation(p),b=node('button',presentation.label,'case');
+      b.type='button';b.setAttribute('aria-current',selected?.['job-id']===p.target['job-id'] && selected?.ordinal===p.target.ordinal?'true':'false');
+      b.append(node('small','Retrieval: '+human(p.outcome)),node('small',presentation.context));
+      const rows=scoreRows(p,$('score-sort').value);
+      rows.forEach(({score:candidate,sortingPair},index)=>{
+        const score=scorePresentation(candidate),pair=node('span',undefined,'case-pair');
+        pair.append(node('span','Pair '+(index+1)+' of '+rows.length+(sortingPair?' · sorting pair':''),'score-status'));
+        pair.append(node('small',(candidate?.['left-name']||'Unknown')+' / '+(candidate?.['right-name']||'Unknown')));
+        pair.append(node('small',score.status));
+        if(score.color){const strip=node('span',undefined,'score-swatch');strip.style.backgroundColor=score.color;strip.setAttribute('aria-hidden','true');pair.append(strip);}
+        [score.probabilities,score.outcome,score.model,score.age,score.evidence,score.identity].forEach(line=>pair.append(node('small',line)));
+        b.append(pair);
+      });
+      b.onclick=()=>openCase(p.target);$('cases').append(b);
+    });
     if(!visible.length)$('cases').append(node('p','No cases match these filters.'));
   }
   function expandable(title,value){const d=node('details');d.append(node('summary',title),structure(value));return d;}
@@ -189,10 +267,11 @@
     $('jev-scores').replaceChildren();
     $('identity-score').replaceChildren(new Option('Select a complete current score',''));
     for(const [i,score] of (d['jev-scores']||[]).entries()){
-      const card=node('section',undefined,'candidate'),identity=score.identity||{},spelling=score.spelling||{};
+      const card=node('section',undefined,'candidate score-card'),identity=score.identity||{},spelling=score.spelling||{},view=scorePresentation(score);
+      card.append(node('p',view.status,'score-status'));
+      if(view.color){const strip=node('span',undefined,'score-swatch');strip.style.backgroundColor=view.color;strip.setAttribute('aria-hidden','true');card.append(strip);}
       card.append(node('h4',(score['left-name']||'Unknown')+' / '+(score['right-name']||'Unknown')),
-        node('p','Status: '+readable(score['score-status'])+' · Jev identity: '+readable(identity.outcome)),
-        node('p','Full identity probabilities: '+readable(identity.probabilities)),
+        node('p',view.probabilities),node('p',view.outcome),node('p',view.model),node('p',view.age),node('p',view.evidence),node('p',view.identity),
         node('p','Spelling: '+readable(spelling.outcome)+' · probabilities: '+readable(spelling.probabilities)),
         node('p','Model probabilities are uncalibrated. Same names, high P(match), and mirrored sources do not prove identity.'),
         expandable('Both original observation versions, source excerpts and uncertainties',score['pair-records']||score['pair-references']||[]),
@@ -231,10 +310,10 @@
     $('publication-history').replaceChildren(...(d['publication-history']||[]).map(h=>auditEntry(h,[])));if(!d['publication-history']?.length)$('publication-history').append(node('p','No extraction decisions.'));fieldChanged();$('detail').hidden=false;
   }
   async function loadDetail(t){const ticket=++generation,q=targetQuery(t);try{const [d,e]=await Promise.all([api('/api/detail?'+q),api('/api/evidence?'+q)]);if(ticket!==generation)return false;detail=d;renderDetail(d,e);return true;}catch(error){if(ticket!==generation)return false;throw error;}}
-  async function openCase(t){if(busy)return;pageView.clear();selected=t;detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status(canReview?'Inspect original evidence before proposing a change.':'Read-only: inspect the registered page and compare extracted values.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
+  async function openCase(t){if(busy)return;pageView.clear();selected=t;renderList();detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status(canReview?'Inspect original evidence before proposing a change.':'Read-only: inspect the registered page and compare extracted values.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
   function fieldChanged(){const f=$('field').value,identity=f==='identity';$('scalar-fields').hidden=identity;$('identity-fields').hidden=!identity;if(!identity){const v=detail.effective.fields[f];$('value-type').value=v===null?'unknown':typeof v==='number'?'number':typeof v==='boolean'?'boolean':'text';$('value').value=v??'';}}
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
-  function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','jev-scores','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';}
+  function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','jev-scores','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';$('score-sort').value='match-desc';}
   async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;canReview=reviewEnabled(s);hasViewer=s['source-viewer?']===true;document.querySelectorAll('[data-review-only]').forEach(e=>e.hidden=!canReview);$('inspection-mode').textContent=canReview?'Owner review enabled. Confident Jev spelling changes may be applied automatically and can be reversed in the audit.':'Read-only inspection. Proposals, decisions, triage and extraction validation are disabled.';$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
   let sourceTarget=null, sourcePage=1, sourceCount=1, observationPage=1, sourceState='empty';
   function syncPageControls(){const controls=viewerControls({state:sourceState,page:sourcePage,count:sourceCount,observationPage,busy});['previous','next','go'].forEach(key=>$('source-'+key).disabled=controls[key]);if(hasViewer)$('visual').disabled=controls.visual;}
@@ -268,7 +347,7 @@
   $('corrections-next').onclick=()=>{if(busy)return;correctionOffset+=100;loadCorrections().catch(e=>status(e.message,true));};
   $('logout').onclick=async()=>{if(busy)return;lock(true);try{await api('/api/logout',{});clearSession();status('Signed out. Owner session revoked.');$('capability').focus();}catch(e){if(e.status===401){clearSession();status('Session expired. Log in again.');}else status('Sign out failed: '+e.message,true);}finally{lock(false);}};
   $('login').onsubmit=async event=>{event.preventDefault();try{const capability=$('capability').value;$('capability').value='';const s=await api('/api/login',{capability});csrf=s.csrf;await start();status('Owner session established.');}catch(e){status(e.message,true);}};
-  $('filter').oninput=renderList;$('outcome-filter').onchange=renderList;$('field').onchange=fieldChanged;
+  $('filter').oninput=renderList;$('outcome-filter').onchange=renderList;$('score-sort').onchange=renderList;$('field').onchange=fieldChanged;
   $('proposal').onsubmit=event=>{event.preventDefault();try{const f=common(formData('proposal'));f.score=$('identity-score').value===''?null:detail['jev-scores'][Number($('identity-score').value)];f.inspection={'both-versions-reviewed':$('inspected-versions').checked,'contrary-evidence-reviewed':$('inspected-contrary').checked,'source-dependence-reviewed':$('inspected-dependence').checked};mutate('/api/proposals',proposal(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
   $('publication-form').onsubmit=event=>{event.preventDefault();try{const f=common(formData('publication-form'));f.visual=$('visual').checked;f.substantive=$('substantive').checked;mutate('/api/publication',publication(detail,f,crypto.randomUUID()));}catch(e){status(e.message,true);}};
   $('retry').onclick=()=>{if(pending)mutate(pending.path,pending.request);};$('reload').onclick=()=>{if(selected)openCase(selected);};

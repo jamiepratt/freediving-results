@@ -44,6 +44,61 @@
                     for(const outcome of ['no-match','unknown']){const p=ui.proposal(d,{...f,outcome},outcome);assert.deepEqual(p.after,{outcome});assert.deepEqual(p.evidence,[target,candidate]);assert.equal(p['identity-target'],undefined);}
                     console.log('scored identity contract passed');")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest owner-queue-sorts-current-jev-probabilities
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    const packet=(id,score,outcome='candidate')=>({target:{'job-id':id,ordinal:0,payload:{parsed:{'source-name':id}}},outcome,'jev-scores':score?[score]:[]});
+                    const score=(status,match,noMatch)=>({'score-status':status,identity:{outcome:'match',probabilities:{match,'no-match':noMatch,abstain:0.1}}});
+                    const rows=[packet('missing'),packet('high',score('complete',0.8,0.1)),packet('tie-b',score('complete',0.5,0.4)),packet('stale',score('stale',0.99,0.01)),packet('low',score('complete',0.1,0.8)),packet('tie-a',score('complete',0.5,0.4)),packet('failed',score('failed',0.98,0.01))];
+                    const ids=(mode,filter='',outcome='')=>ui.queueCases(rows,{sort:mode,filter,outcome}).map(p=>p.target['job-id']);
+                    assert.deepEqual(ids('match-desc'),['high','tie-a','tie-b','low','missing','stale','failed']);
+                    assert.deepEqual(ids('match-asc'),['low','tie-a','tie-b','high','missing','stale','failed']);
+                    assert.deepEqual(ids('no-match-desc'),['low','tie-a','tie-b','high','missing','stale','failed']);
+                    assert.deepEqual(ids('no-match-asc'),['high','tie-a','tie-b','low','missing','stale','failed']);
+                    assert.deepEqual(ids('match-desc','tie'),['tie-a','tie-b']);
+                    assert.deepEqual(ids('match-desc','','unknown'),[]);
+                    assert.equal(ui.scoreSummary(rows[3]).status,'stale');
+                    assert.equal(ui.scoreSummary(rows[0]).status,'missing');
+                    assert.equal(ui.scoreSummary(rows[1]).probabilities.match,0.8);
+                    const multi=packet('multi',score('complete',0.9,0.03));multi['jev-scores'].push(score('complete',0.4,0.55));
+                    assert.equal(ui.scoreSummary(multi,'match-desc').probabilities.match,0.9);
+                    assert.equal(ui.scoreSummary(multi,'match-asc').probabilities.match,0.4);
+                    assert.equal(ui.scoreSummary(multi,'no-match-desc').probabilities['no-match'],0.55);
+                    assert.equal(ui.scoreSummary(multi,'no-match-asc').probabilities['no-match'],0.03);
+                    assert.deepEqual(ui.scoreRows(multi,'no-match-desc').map(x=>[x.sortingPair,x.score.identity.probabilities.match]),[[false,0.9],[true,0.4]]);
+                    assert.deepEqual(ui.queueCases([multi,packet('middle',score('complete',0.6,0.2))],{sort:'no-match-desc'}).map(p=>p.target['job-id']),['multi','middle']);
+                    const invalid=packet('invalid',score('complete',1.2,-0.3));
+                    assert.equal(ui.scoreSummary(invalid).probabilities,null);
+                    assert.deepEqual(ui.queueCases([invalid,packet('valid',score('complete',0.2,0.7))],{sort:'match-desc'}).map(p=>p.target['job-id']),['valid','invalid']);
+                    console.log('owner queue ordering passed');")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest owner-score-presentation-keeps-exact-values-and-neutral-status
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    const s=p=>({'score-status':'complete',identity:{outcome:'match',probabilities:{match:p,'no-match':1-p,abstain:0}},'model-version':'jev-v1','completed-at':'2026-09-25T12:00:00Z','run-id':'run-1','case-id':'case-1','request-hash':'request-1','result-hash':'result-1','source-references':[[{page:2,lines:[3]}],[{page:7,lines:[8]}]]});
+                    assert.equal(ui.probabilityColor(0),'#8b1e2d');
+                    assert.equal(ui.probabilityColor(0.5),'#a75a00');
+                    assert.equal(ui.probabilityColor(1),'#17643d');
+                    assert.notEqual(ui.probabilityColor(0.25),ui.probabilityColor(0.75));
+                    const view=ui.scorePresentation(s(0.321),Date.parse('2026-09-26T12:00:00Z'));
+                    assert.match(view.probabilities,/P\\(match\\) 0\\.321.*P\\(no match\\) 0\\.679.*P\\(abstain\\) 0/s);
+                    assert.match(view.identity,/run-1.*case-1.*request-1.*result-1/s);
+                    assert.match(view.model,/jev-v1/);assert.match(view.age,/1 day ago/);
+                    assert.match(view.evidence,/2 source records/);
+                    assert.match(view.outcome,/match/);
+                    assert.equal(ui.scorePresentation({'score-status':'stale',identity:{probabilities:{match:0.99}}}).color,null);
+                    assert.match(ui.scorePresentation({'score-status':'failed'}).status,/failed/i);
+                    console.log('owner score presentation passed');")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest owner-score-citations-cover-every-source-format
+  (let [r (shell/sh "node" "-e"
+                    "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');
+                    const score={'score-status':'complete',identity:{outcome:'match',probabilities:{match:0.5,'no-match':0.4,abstain:0.1}},'source-references':[[{'evidence-id':'pdf-id','source-sha256':'pdf-source','artifact-sha256':'pdf-artifact','observation-id':'pdf-row','source-format':'pdf',page:7,lines:[12,14]}],[{'evidence-id':'html-id','source-sha256':'html-source','artifact-sha256':'html-artifact','observation-id':'html-row','source-format':'html',locator:{table:3,row:9}},{'evidence-id':'json-id','source-sha256':'json-source','artifact-sha256':'json-artifact','observation-id':'json-row','source-format':'json',locator:{'row-index-zero-based':0,'source-page-url':'https://source.example/view?a=<script>'}}]]};
+                    const evidence=ui.scorePresentation(score).evidence;
+                    for(const value of ['pdf-id','pdf-source','pdf-artifact','pdf-row','page 7','lines 12-14','html-id','html-source','html-artifact','html-row','table 3','row 9','json-id','json-source','json-artifact','json-row','row index zero based 0','https://source.example/view?a=<script>']) assert.ok(evidence.includes(value),value+' absent from '+evidence);
+                    assert.match(evidence,/3 source records/);
+                    console.log('owner source citations passed');")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (deftest source-page-navigation-contract
   (let [r (shell/sh "node" "-e"
                     "const assert=require('node:assert/strict');const ui=require('./resources/owner.js');

@@ -90,11 +90,14 @@
                         :case-id "exact-pair" :label nil
                         :input {:schema-version "freediving-source/1" :left record :right record})]
         (with-redefs [candidates/packet (fn [_ _ _] {:candidates [{:observations [row]}]})
+                      candidates/packets (fn [_ _] {:packets [{:target row :candidates [{:observations [row]}]}]})
                       jev-candidates/candidate-case (fn [& _] case)]
           (let [detail (request s "GET" (str "/api/detail?job-id=" (:job-id t) "&ordinal=0") nil h)]
             (is (= 200 (:status detail)) (pr-str detail))
             (is (= "missing" (get-in detail [:body :jev-scores 0 :score-status])))
-            (is (= "exact-pair" (get-in detail [:body :jev-scores 0 :case-id]))))
+            (is (= "exact-pair" (get-in detail [:body :jev-scores 0 :case-id])))
+            (is (= (get-in detail [:body :jev-scores])
+                   (get-in (request s "GET" "/api/candidates" nil h) [:body :packets 0 :jev-scores]))))
           (let [answer {:outcome :match :confidence 0.91
                         :probabilities {:match 0.91 :no-match 0.07 :abstain 0.02}}
                 config {:id "jev" :provider :jev :identity-protocol :freediving-compact-v3
@@ -117,6 +120,16 @@
             (is (= 0.91 (get-in score [:identity :probabilities :match])))
             (is (re-matches #"[0-9a-f]{64}" (:request-hash score)))
             (is (re-matches #"[0-9a-f]{64}" (:result-hash score)))
+            (is (= score (first (get-in (request s "GET" "/api/candidates" nil h)
+                                        [:body :packets 0 :jev-scores]))))
+            (let [inspections (atom 0)
+                  inspect evaluation/inspect-run]
+              (with-redefs [candidates/packets (fn [_ _] {:packets (vec (repeat 2 {:target row :candidates [{:observations [row]}]}))})
+                            evaluation/inspect-run (fn [& args] (swap! inspections inc) (apply inspect args))]
+                (let [queue (request s "GET" "/api/candidates" nil h)]
+                  (is (= 200 (:status queue)))
+                  (is (= [score score] (mapv (comp first :jev-scores) (get-in queue [:body :packets]))))
+                  (is (= 1 @inspections)))))
             (is (not (str/includes? (pr-str detail) "private-provider-response"))))))
       (finally (server/stop! s)))))
 (deftest complete-review-and-validation-flow-preserves-source
