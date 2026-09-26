@@ -149,6 +149,7 @@
                      (extraction/san-mauro-static-claim? a) (->> (extraction/validate-san-mauro-static-artifact! root))
                      (extraction/tuttinapnea-claim? a) (->> (extraction/validate-tuttinapnea-artifact! root))
                      (extraction/tuttinapnea-2025-static-claim? a) (->> (extraction/validate-tuttinapnea-2025-static-artifact! root))
+                     (extraction/tuttinapnea-2025-dynamic-claim? a) (->> (extraction/validate-tuttinapnea-2025-dynamic-artifact! root))
                      (extraction/world-games-artifact? a) (->> (extraction/validate-world-games-artifact! root))
                      (extraction/world-games-series-artifact? a) (->> (extraction/validate-world-games-series-artifact! root))
                      (extraction/kaohsiung-artifact? a) (->> (extraction/validate-kaohsiung-artifact! root))

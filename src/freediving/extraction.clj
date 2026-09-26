@@ -13,6 +13,7 @@
             [freediving.san-mauro-static-2026 :as san-mauro-static]
             [freediving.tuttinapnea-2026 :as tuttinapnea]
             [freediving.tuttinapnea-2025-static :as tuttinapnea-2025-static]
+            [freediving.tuttinapnea-2025-dynamic :as tuttinapnea-2025-dynamic]
             [freediving.world-games-2025 :as world-games]
             [freediving.world-games-series-2025 :as world-games-series]
             [freediving.kaohsiung-2025 :as kaohsiung]
@@ -129,7 +130,8 @@
                                    ffessm-2025-immersion-libre/matching-sha])
          san-mauro-static? (san-mauro-static/supported? pages)
          tuttinapnea? (tuttinapnea/supported? pages)
-         tuttinapnea-2025-static? (tuttinapnea-2025-static/supported? pages)]
+         tuttinapnea-2025-static? (tuttinapnea-2025-static/supported? pages)
+         tuttinapnea-2025-dynamic? (tuttinapnea-2025-dynamic/supported? pages)]
      (when (and san-mauro-static? (not= sha256 san-mauro-static/source-sha256))
        (throw (ex-info "San Mauro static parser is bound to a different source PDF" {})))
      (when (and tuttinapnea? (not (contains? tuttinapnea/source-sha256s sha256)))
@@ -137,6 +139,9 @@
      (when (and tuttinapnea-2025-static?
                 (not= sha256 tuttinapnea-2025-static/source-sha256))
        (throw (ex-info "TuttinApnea January static parser is bound to a different source PDF" {})))
+     (when (and tuttinapnea-2025-dynamic?
+                (not= sha256 tuttinapnea-2025-dynamic/source-sha256))
+       (throw (ex-info "TuttinApnea January dynamic parser is bound to a different source PDF" {})))
      (when (and bipalmes-women? (not= sha256 ffessm-bipalmes-women/source-sha256))
        (throw (ex-info "French 2026 bifins women parser is bound to a different source PDF" {})))
      (when (and regular-men? (not= sha256 ffessm-regular/men-sha256))
@@ -169,6 +174,7 @@
            san-mauro-static? (san-mauro-static/parse-pages sha256 pages)
            tuttinapnea? (tuttinapnea/parse-pages sha256 pages)
            tuttinapnea-2025-static? (tuttinapnea-2025-static/parse-pages sha256 pages)
+           tuttinapnea-2025-dynamic? (tuttinapnea-2025-dynamic/parse-pages sha256 pages)
            (san-mauro/supported? pages) (san-mauro/parse-pages sha256 pages)
            (world-games/supported? pages) (world-games/parse-pages pages)
            (world-games-series/supported? pages) (world-games-series/parse-pages pages)
@@ -247,6 +253,15 @@
 (defn tuttinapnea-2025-static-claim? [artifact]
   (or (= tuttinapnea-2025-static/parser-version (:parser-version artifact))
       (= tuttinapnea-2025-static/source-sha256 (:source-sha256 artifact))))
+
+(defn tuttinapnea-2025-dynamic-artifact? [artifact]
+  (and (= 3 (:schema-version artifact))
+       (= tuttinapnea-2025-dynamic/parser-version (:parser-version artifact))
+       (= tuttinapnea-2025-dynamic/source-sha256 (:source-sha256 artifact))))
+
+(defn tuttinapnea-2025-dynamic-claim? [artifact]
+  (or (= tuttinapnea-2025-dynamic/parser-version (:parser-version artifact))
+      (= tuttinapnea-2025-dynamic/source-sha256 (:source-sha256 artifact))))
 
 (defn world-games-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= world-games/parser-version (:parser-version artifact))))
@@ -354,6 +369,7 @@
                   (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact)) (not (san-mauro-artifact? artifact))
                   (not (san-mauro-static-claim? artifact)) (not (tuttinapnea-claim? artifact))
                   (not (tuttinapnea-2025-static-claim? artifact))
+                  (not (tuttinapnea-2025-dynamic-claim? artifact))
                   (not (world-games-artifact? artifact))
                   (not (world-games-series-artifact? artifact))
                   (not (kaohsiung-artifact? artifact))
@@ -409,6 +425,7 @@
          san-mauro-static? (san-mauro-static/supported? pages)
          tuttinapnea? (tuttinapnea/supported? pages)
          tuttinapnea-2025-static? (tuttinapnea-2025-static/supported? pages)
+         tuttinapnea-2025-dynamic? (tuttinapnea-2025-dynamic/supported? pages)
          world-games? (world-games/supported? pages)
          world-games-series? (world-games-series/supported? pages)
          kaohsiung? (kaohsiung/supported? pages)
@@ -446,6 +463,9 @@
          _ (when (and tuttinapnea-2025-static?
                       (not= sha256 tuttinapnea-2025-static/source-sha256))
              (throw (ex-info "TuttinApnea January static parser is bound to a different source PDF" {})))
+         _ (when (and tuttinapnea-2025-dynamic?
+                      (not= sha256 tuttinapnea-2025-dynamic/source-sha256))
+             (throw (ex-info "TuttinApnea January dynamic parser is bound to a different source PDF" {})))
          _ (when (and world-games? (not= sha256 world-games/source-sha256))
              (throw (ex-info "World Games parser is bound to a different source PDF" {})))
          _ (when (and world-games-series? (not= sha256 world-games-series/source-sha256))
@@ -481,8 +501,8 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
-                   :schema-version (cond ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro-static? 3 tuttinapnea? 3 tuttinapnea-2025-static? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
+                   :parser-version (cond ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :schema-version (cond ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro-static? 3 tuttinapnea? 3 tuttinapnea-2025-static? 3 tuttinapnea-2025-dynamic? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -687,6 +707,11 @@
   (validate-source-bound-apnea-artifact!
    root artifact tuttinapnea-2025-static-artifact?
    tuttinapnea-2025-static/parse-pages "TuttinApnea January static"))
+
+(defn validate-tuttinapnea-2025-dynamic-artifact! [root artifact]
+  (validate-source-bound-apnea-artifact!
+   root artifact tuttinapnea-2025-dynamic-artifact?
+   tuttinapnea-2025-dynamic/parse-pages "TuttinApnea January dynamic"))
 
 (defn validate-italy-open-artifact!
   "Replay source-bound text and reconciliation against the registered PDF before import."
