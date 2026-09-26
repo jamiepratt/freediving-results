@@ -775,3 +775,34 @@
               receipt (evaluation/run! root sample [config] {:providers {"native" {:bearer-token "fixture-secret"}}})
               results (get-in (evaluation/inspect-run root (:run-id receipt)) [:report :providers "native" :results])]
           (is (= [:left :left] (mapv #(get-in % [:spelling :outcome]) results))))))))
+
+(deftest partial-v3-response-retains-private-raw-body-and-replays-without-dispatch
+  (let [calls (atom 0) root (runner/root)
+        raw "{\"model\":\"jev-1.13.0\",\"answers\":{\"identity_0\":{\"type\":\"choice\",\"choice\":\"match\",\"confidence\":0.91,\"probabilities\":{\"match\":0.91,\"no_match\":0.07,\"abstain\":0.02}}}}"]
+    (http/with-server
+      (fn [ex] (swap! calls inc) (http/reply! ex 200 raw))
+      (fn [url]
+        (let [sample (assoc (dataset) :cases (subvec (:cases (dataset)) 0 2))
+              config [(assoc (config url) :identity-protocol :freediving-compact-v3)]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! root sample config runtime)
+              result (get-in (evaluation/inspect-run root (:run-id receipt))
+                             [:report :providers "native" :batches 0 :attempt :result])]
+          (is (= :error (:outcome result)))
+          (is (= :invalid-response (:error result)))
+          (is (= raw (:raw-response result)))
+          (is (= receipt (evaluation/run! root sample config)))
+          (is (= 1 @calls)))))))
+
+(deftest v3-credential-echo-never-enters-private-raw-receipt
+  (http/with-server
+    (fn [ex] (http/reply! ex 200 "{\"debug\":\"fixture-secret\"}"))
+    (fn [url]
+      (let [root (runner/root)
+            sample (assoc (dataset) :cases (subvec (:cases (dataset)) 0 2))
+            config [(assoc (config url) :identity-protocol :freediving-compact-v3)]
+            receipt (evaluation/run! root sample config {:providers {"native" {:bearer-token "fixture-secret"}}})
+            result (get-in (evaluation/inspect-run root (:run-id receipt))
+                           [:report :providers "native" :batches 0 :attempt :result])]
+        (is (= :credential-echo (:error result)))
+        (is (nil? (:raw-response result)))))))
