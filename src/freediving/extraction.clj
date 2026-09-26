@@ -13,6 +13,7 @@
             [freediving.world-games-series-2025 :as world-games-series]
             [freediving.kaohsiung-2025 :as kaohsiung]
             [freediving.lodz-2025 :as lodz]
+            [freediving.lodz-2026 :as lodz-2026]
             [freediving.unu-tampa-2025 :as unu-tampa]
             [freediving.noxy-2025 :as noxy]
             [freediving.deep-dominica-2025 :as deep-dominica]
@@ -107,6 +108,7 @@
         (world-games-series/supported? pages) (world-games-series/parse-pages pages)
         (kaohsiung/supported? pages) (kaohsiung/parse-pages pages)
         (lodz/supported? pages) (lodz/parse-pages pages)
+        (lodz-2026/supported? pages) (lodz-2026/parse-pages pages)
         (unu-tampa/supported? pages) (unu-tampa/parse-pages pages)
         (noxy/supported? pages) (noxy/parse-pages pages)
         (deep-dominica/supported? pages) (deep-dominica/parse-pages pages)
@@ -156,6 +158,9 @@
 (defn lodz-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= lodz/parser-version (:parser-version artifact))))
 
+(defn lodz-2026-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= lodz-2026/parser-version (:parser-version artifact))))
+
 (defn unu-tampa-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= unu-tampa/parser-version (:parser-version artifact))))
 
@@ -202,6 +207,7 @@
                   (not (world-games-series-artifact? artifact))
                   (not (kaohsiung-artifact? artifact))
                   (not (lodz-artifact? artifact))
+                  (not (lodz-2026-artifact? artifact))
                   (not (unu-tampa-artifact? artifact))
                   (not (noxy-artifact? artifact))
                   (not (deep-dominica-artifact? artifact))
@@ -243,6 +249,7 @@
          world-games-series? (world-games-series/supported? pages)
          kaohsiung? (kaohsiung/supported? pages)
          lodz? (lodz/supported? pages)
+         lodz-2026? (lodz-2026/supported? pages)
          unu-tampa? (unu-tampa/supported? pages)
          noxy? (noxy/supported? pages)
          deep-dominica? (deep-dominica/supported? pages)
@@ -259,6 +266,8 @@
              (throw (ex-info "Kaohsiung parser is bound to a different source PDF" {})))
          _ (when (and lodz? (not= sha256 lodz/source-sha256))
              (throw (ex-info "Łódź parser is bound to a different source PDF" {})))
+         _ (when (and lodz-2026? (not= sha256 lodz-2026/source-sha256))
+             (throw (ex-info "Łódź 2026 parser is bound to a different source PDF" {})))
          _ (when (and unu-tampa? (not= sha256 unu-tampa/source-sha256))
              (throw (ex-info "UNU Tampa parser is bound to a different source PDF" {})))
          _ (when (and noxy? (not= sha256 noxy/source-sha256))
@@ -274,8 +283,8 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version :else parser-version)
-                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 :else 1)
+                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version :else parser-version)
+                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -446,6 +455,24 @@
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
       (throw (ex-info "Łódź extraction differs from archived source replay" {})))
+    artifact))
+
+(defn validate-lodz-2026-artifact!
+  "Replay source-bound 2026 Łódź positions before import."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (lodz-2026/parse-pages pages)]
+    (when-not (and (lodz-2026-artifact? artifact)
+                   (= lodz-2026/source-sha256 (:source-sha256 artifact))
+                   (= "pdftotext" (get-in artifact [:tool :name]))
+                   (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
+                   (= (str/trim (:err (command! "pdftotext" "-v"))) (get-in artifact [:tool :version]))
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "Łódź 2026 extraction differs from archived source replay" {})))
     artifact))
 
 (defn validate-unu-tampa-artifact!
