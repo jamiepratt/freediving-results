@@ -65,6 +65,16 @@
            [(select-keys line [:page :line])])
     nil))
 
+(defn- registered-reference [row]
+  (when row
+    (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
+           (case (:source-format row)
+             :pdf (select-keys (first (:source-lines row)) [:page :line])
+             :html (select-keys (get-in row [:payload :coordinates]) [:table :row])
+             :json (merge (select-keys row [:parser-version :source-page-url])
+                          (select-keys (get-in row [:payload :coordinates]) [:row-index-zero-based]))
+             {}))))
+
 (defn- id [parts]
   (.formatHex (HexFormat/of)
               (.digest (MessageDigest/getInstance "SHA-256")
@@ -114,7 +124,24 @@
                                 :else :failed)]
                {:case-id (:case-id case)
                 :run-id run-id
+                :provider-id provider-id
                 :score-status status
+                :target-reference (registered-reference left)
+                :candidate-reference (registered-reference right)
+                :pair-records (select-keys input [:left :right])
+                :source-dependence
+                (let [a (:sources (:left input)) b (:sources (:right input))]
+                  {:left-source-families (vec (distinct (map :source-family-id a)))
+                   :right-source-families (vec (distinct (map :source-family-id b)))
+                   :shared-family? (boolean (some (set (map :source-family-id a)) (map :source-family-id b)))
+                   :shared-source-sha256? (boolean (some (set (map :source-sha256 a)) (map :source-sha256 b)))
+                   :shared-artifact-sha256? (boolean (some (set (map :artifact-sha256 a)) (map :artifact-sha256 b)))
+                   :left-acquisitions (mapv #(select-keys (:manifest %) [:publisher :relationship :mirror-of
+                                                                         :discovery-url :final-url :provenance])
+                                            (:acquisitions left))
+                   :right-acquisitions (mapv #(select-keys (:manifest %) [:publisher :relationship :mirror-of
+                                                                          :discovery-url :final-url :provenance])
+                                             (:acquisitions right))})
                 :model-version (:model-version result)
                 :protocol-version :freediving-compact-v3
                 :adapter-version "shadow-adapters/14"

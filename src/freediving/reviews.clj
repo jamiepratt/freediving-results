@@ -5,7 +5,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [freediving.aida-html :as html]
-            [freediving.html-evidence :as html-evidence])
+            [freediving.html-evidence :as html-evidence]
+            [freediving.candidates :as candidates])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -167,20 +168,23 @@
         #{(:coordinates context)})
       (set (for [page (:pages a) line (:lines page)] {:page (:page page) :line (:line line)})))))
 (defn- registered-reference! [c ref]
-  (when-not (and (map? ref) (or (= reference-keys (set (keys ref)))
-                                (= (into (disj reference-keys :page :line) [:table :row]) (set (keys ref))))
-                 (every? nonblank? ((juxt :job-id :candidate-id :source-sha256 :artifact-sha256) ref))
-                 (nat-int? (:ordinal ref)) (every? pos-int? (if (contains? ref :table) ((juxt :table :row) ref) ((juxt :page :line) ref))))
-    (fail! "Invalid registered evidence reference"))
-  (let [o (target c ref) payload (edn/read-string (:payload_edn o))
-        pages (set (conj (mapv :page (:source-lines payload)) (get-in payload [:coordinates :page])))]
-    (when-not (and (= (:candidate-id ref) (:candidate_id o))
-                   (= (:source-sha256 ref) (:source_sha256 o))
-                   (= (:artifact-sha256 ref) (:artifact_sha256 o))
-                   (or (contains? ref :table) (contains? pages (:page ref)))
-                   (contains? (page-lines o) (select-keys ref (if (contains? ref :table) [:table :row] [:page :line]))))
-      (fail! "Registered evidence provenance or coordinates mismatch"))
-    o))
+  (if (= json-reference-keys (set (keys ref)))
+    (json-reference! c ref)
+    (do
+      (when-not (and (map? ref) (or (= reference-keys (set (keys ref)))
+                                    (= (into (disj reference-keys :page :line) [:table :row]) (set (keys ref))))
+                     (every? nonblank? ((juxt :job-id :candidate-id :source-sha256 :artifact-sha256) ref))
+                     (nat-int? (:ordinal ref)) (every? pos-int? (if (contains? ref :table) ((juxt :table :row) ref) ((juxt :page :line) ref))))
+        (fail! "Invalid registered evidence reference"))
+      (let [o (target c ref) payload (edn/read-string (:payload_edn o))
+            pages (set (conj (mapv :page (:source-lines payload)) (get-in payload [:coordinates :page])))]
+        (when-not (and (= (:candidate-id ref) (:candidate_id o))
+                       (= (:source-sha256 ref) (:source_sha256 o))
+                       (= (:artifact-sha256 ref) (:artifact_sha256 o))
+                       (or (contains? ref :table) (contains? pages (:page ref)))
+                       (contains? (page-lines o) (select-keys ref (if (contains? ref :table) [:table :row] [:page :line]))))
+          (fail! "Registered evidence provenance or coordinates mismatch"))
+        o))))
 (defn- validate-proposal! [c p s]
   (audit! p)
   (let [o (target c p) refs (page-lines o)
@@ -207,7 +211,11 @@
           (fail! "Invalid identity target anchor"))))
     (when-not (= (:base-revision p) (:revision s)) (fail! "Stale base revision"))
     (when-not (and (contains? p :before) (= (:before p) (current-value s f))) (fail! "Before value differs from effective state"))
-    (when-not (and (contains? p :after) (not= (:before p) (:after p))) (fail! "Changed after value required"))
+    (when-not (and (contains? p :after)
+                   (or (not= (:before p) (:after p))
+                       (and (= f :identity) (:jev-score p)
+                            (= {:outcome :unknown} (:before p) (:after p)))))
+      (fail! "Changed after value required"))
     (when-not (if (= f :identity)
                 (and (= :identity-matching (:category p)) (identity-value? (:after p)))
                 (and (keyword? f) (contains? (:fields s) f)
@@ -221,9 +229,87 @@
     (when-not (= request (:request (edn/read-string (:body_edn r)))) (fail! "Conflicting idempotency key")) (body r)))
 (defn- keys! [request allowed]
   (when-not (and (map? request) (every? allowed (keys request))) (fail! "Unexpected request fields")))
-(def proposal-keys #{:id :job-id :ordinal :base-revision :category :field :before :after :evidence :reason :actor :identity-target})
+(def proposal-keys #{:id :job-id :ordinal :base-revision :category :field :before :after :evidence :reason :actor :identity-target :jev-score :inspection})
+(def ^:dynamic *scored-root* nil)
+(def ^:private score-selector-keys #{:run-id :provider-id :case-id :result-hash})
+(def ^:private inspection-acknowledgement
+  {:both-versions-reviewed true :contrary-evidence-reviewed true :source-dependence-reviewed true})
+(declare propose!)
+(defn- current-source-version? [c ref]
+  (= (:job-id ref)
+     (:job_id (first (query c
+                            "SELECT job_id FROM freediving.extractions WHERE source_sha256=? ORDER BY imported_at DESC, job_id DESC LIMIT 1"
+                            (:source-sha256 ref))))))
+(defn- inbound-approved-link? [c t]
+  (let [anchor (str "local-observation:" (:job-id t) ":" (:ordinal t))]
+    (boolean
+     (some (fn [row]
+             (let [source {:job-id (:job_id row) :ordinal (:ordinal row)}]
+               (and (not= source t)
+                    (= anchor (get-in (snapshot c source) [:identity :identity-id])))))
+           (query c "SELECT DISTINCT job_id,ordinal FROM freediving.review_proposals")))))
+(defn- score-binding! [c root url p]
+  (let [selector (:jev-score p)
+        _ (when-not (and (nonblank? root) (map? selector)
+                         (= score-selector-keys (set (keys selector)))
+                         (every? nonblank? (vals selector))
+                         (= inspection-acknowledgement (:inspection p))
+                         (= :identity (:field p)) (= :identity-matching (:category p)))
+            (fail! "Exact Jev score and owner inspection acknowledgement required"))
+        refs (:evidence p)
+        _ (when-not (and (vector? refs) (= 2 (count refs))
+                         (every? map? refs) (every? :job-id refs)
+                         (= 2 (count (set (map #(select-keys % [:job-id :ordinal]) refs)))))
+            (fail! "Both registered observation references required"))
+        target-ref (some #(when (= (select-keys p [:job-id :ordinal])
+                                   (select-keys % [:job-id :ordinal])) %) refs)
+        other-ref (first (remove #(= target-ref %) refs))
+        _ (when-not (and target-ref other-ref) (fail! "Score target and candidate references required"))
+        _ (doseq [ref refs] (registered-reference! c ref))
+        _ (when-not (every? #(current-source-version? c %) refs)
+            (fail! "Newer observation version requires score reinspection"))
+        _ (when-not (or (and (= :matched (get-in p [:after :outcome]))
+                             (= other-ref (:identity-target p)))
+                        (and (#{:no-match :unknown} (get-in p [:after :outcome]))
+                             (not (contains? p :identity-target))))
+            (fail! "Identity target must be the scored candidate anchor"))
+        rows (candidates/load-corpus url {})
+        score-view (requiring-resolve 'freediving.spelling-normalization/score-view)
+        case-builder (requiring-resolve 'freediving.jev-candidates/candidate-case)
+        scores (score-view root (:run-id selector) (:provider-id selector)
+                           (select-keys p [:job-id :ordinal]) rows)
+        score (first (filter #(= (:case-id selector) (:case-id %)) scores))
+        left (:target-reference score) right (:candidate-reference score)
+        _ (when-not (and score (= :complete (:score-status score))
+                         (number? (get-in score [:identity :confidence]))
+                         (= #{:match :no_match :abstain}
+                            (set (keys (get-in score [:identity :probabilities]))))
+                         (every? number? (vals (get-in score [:identity :probabilities])))
+                         (= (:result-hash selector) (:result-hash score))
+                         (= #{target-ref other-ref} #{left right})
+                         (= (:case-id selector)
+                            (:case-id (case-builder url rows
+                                                    (select-keys left [:job-id :ordinal])
+                                                    (select-keys right [:job-id :ordinal])))))
+            (fail! "Stale or mismatched stored Jev score"))
+        candidate (snapshot c (select-keys other-ref [:job-id :ordinal]))
+        _ (when (inbound-approved-link? c (select-keys p [:job-id :ordinal]))
+            (fail! "Conflicting identity merge: target is an approved anchor"))
+        _ (when (and (= :matched (get-in p [:after :outcome]))
+                     (= :matched (get-in candidate [:identity :outcome]))
+                     (not= (get-in candidate [:identity :identity-id])
+                           (get-in p [:after :identity-id])))
+            (fail! "Conflicting identity merge"))]
+    {:root root :selector selector :score-status :complete :score score
+     :target-reference target-ref :candidate-reference other-ref
+     :candidate-revision (:revision candidate) :candidate-identity (:identity candidate)}))
+(defn propose-scored-identity! [root url p]
+  (when-not (nonblank? root) (fail! "Configured Jev run root required"))
+  (binding [*scored-root* root] (propose! url p)))
 (defn propose! [url p]
   (keys! p proposal-keys)
+  (when (and (:jev-score p) (not *scored-root*)) (fail! "Configured Jev score verifier required"))
+  (when (and (not (:jev-score p)) (contains? p :inspection)) (fail! "Unexpected inspection acknowledgement"))
   (transaction url
                (fn [c]
                  (audit! p) (lock! c p)
@@ -231,11 +317,13 @@
                  (doseq [ref (:evidence p) :when (contains? ref :job-id)] (registered-reference! c ref))
                  (or (existing c "review_proposals" (:id p) p)
                      (let [s (snapshot c p) _ (validate-proposal! c p s) o (target c p)
+                           binding (when (:jev-score p) (score-binding! c *scored-root* url p))
                            record (assoc p :action :propose :request p
                                          :observation {:job-id (:job-id p) :ordinal (:ordinal p)
                                                        :candidate-id (:candidate_id o)
                                                        :source-sha256 (:source_sha256 o)
-                                                       :artifact-sha256 (:artifact_sha256 o)})]
+                                                       :artifact-sha256 (:artifact_sha256 o)})
+                           record (cond-> record binding (assoc :score-binding binding))]
                        (execute! c "INSERT INTO freediving.review_proposals(id,job_id,ordinal,body_edn) VALUES(?,?,?,?)"
                                  (:id p) (:job-id p) (:ordinal p) (encode record))
                        (existing c "review_proposals" (:id p) p))))))
@@ -259,6 +347,8 @@
                        _ (when-not (= (select-keys raw [:id :job-id :ordinal]) (assoc t :id (:id row)))
                            (fail! "Proposal or event envelope mismatch"))]
                    (lock! c t)
+                   ;; Serialize identity changes that may touch different observation rows.
+                   (query c "SELECT pg_advisory_xact_lock(781246918)")
                    (page-lines (target c t))
                    (or (existing c "review_decisions" (:id request) request)
                        (let [s (snapshot c t) subject (body row) ds (decisions c t)
@@ -266,6 +356,13 @@
                              p (if (= action :reverse)
                                  (first (filter #(= (:proposal-id subject) (:id %)) (proposals c t))) subject)
                              field (:field p)]
+                         (when (and (= action :approve) (:jev-score p) (not (:score-binding p)))
+                           (fail! "Scored proposal binding missing"))
+                         (when (and (= action :approve) (:score-binding p))
+                           (let [binding (:score-binding p)
+                                 current (score-binding! c (:root binding) url p)]
+                             (when-not (= (dissoc current :root) (dissoc binding :root))
+                               (fail! "Stale scored proposal; inspect both observation versions again"))))
                          (if (= action :reverse)
                            (when-not (and (= :approve (:action subject)) (= (:id subject) (get-in s [:active field]))
                                           (not-any? #(= (:id subject) (:event-id %)) ds))
@@ -280,7 +377,14 @@
                                                  :artifact-sha256 (:artifact_sha256 o)}]
                                  (when-not (= provenance (:observation p)) (fail! "Proposal provenance mismatch")))
                                (validate-proposal! c p s))))
-                         (let [record (merge request t {:revision (inc (:revision s)) :request request}
+                         (let [record (merge request t {:revision (inc (:revision s)) :request request
+                                                        :field field
+                                                        :before (if (= action :reverse) (:after p) (current-value s field))
+                                                        :after (case action
+                                                                 :approve (:after p)
+                                                                 :reverse (:before p)
+                                                                 :reject (current-value s field))
+                                                        :evidence (:evidence p)}
                                              (when (= action :approve) {:prior-event (get-in s [:active field])}))]
                            (execute! c "INSERT INTO freediving.review_decisions(id,job_id,ordinal,revision,action,proposal_id,event_id,body_edn) VALUES(?,?,?,?,?,?,?,?)"
                                      (:id request) (:job-id t) (:ordinal t) (:revision record) (name action)

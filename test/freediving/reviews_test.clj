@@ -14,7 +14,11 @@
             [freediving.reviews :as reviews]
             [freediving.candidates :as candidates]
             [freediving.evaluation :as evaluation]
-            [freediving.spelling-normalization :as spelling]))
+            [freediving.spelling-normalization :as spelling]
+            [freediving.jev-candidates :as jev-candidates]
+            [freediving.evaluation-test :as evaluation-fixture]
+            [freediving.evaluation-providers-test :as http-fixture]
+            [clojure.data.json :as json]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
 (use-fixtures :each (fn [f]
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
@@ -28,6 +32,200 @@
   (merge target {:id id :base-revision 0 :category :identity-matching :field :identity
                  :before {:outcome :unknown} :after {:outcome :matched :identity-id "synthetic-person-1"}
                  :evidence [{:page 1 :line 1}] :reason "Synthetic evidence" :actor "test-proposer"}))
+
+(defn- scored-fixture []
+  (let [target (sample)
+        candidate (assoc target :ordinal 1)
+        rows (candidates/load-corpus fixture/app {})
+        record (fn [row]
+                 (let [ref (str "local-observation:" (:job-id row) ":" (:ordinal row))
+                       source {:evidence-id ref :source-sha256 (:source-sha256 row)
+                               :artifact-sha256 (:artifact-sha256 row)
+                               :observation-id (:candidate-id row)
+                               :source-family-id (:source-sha256 row)
+                               :exact-lines [(get-in row [:payload :raw :line])]}]
+                   {:record-id ref :source-version (select-keys row [:parser-version :schema-version :source-format])
+                    :fields {:name {:value (get-in row [:payload :parsed :source-name])
+                                    :evidence-ids [ref]}}
+                    :sources [source] :uncertainties []}))
+        left (record (first rows)) right (record (second rows))
+        case {:case-id "synthetic-pair" :split :held-out :input {:left left :right right}}
+        result {:case-id "synthetic-pair" :batch-index 0 :request-hash "request"
+                :trace-hash "trace" :model-version "jev-test" :outcome :match
+                :confidence 0.96 :probabilities {:match 0.96 :no_match 0.02 :abstain 0.02}}
+        run {:input {:configurations [{:id "jev"}]
+                     :requests [[{:provider :jev :adapter-version "shadow-adapters/14"
+                                  :config {:identity-protocol :freediving-compact-v3}}]]
+                     :dataset {:cases [case]}}
+             :report {:providers {"jev" {:results [result]
+                                         :batches [{:dispatch-status :dispatched :trace-hash "trace"
+                                                    :result-hash "result"
+                                                    :attempt {:request-hash "request"
+                                                              :completed-at "2026-09-26T00:00:00Z"
+                                                              :result {:outcome :complete :http-status 200
+                                                                       :model-version "jev-test"}}}]}}}}
+        reference (fn [row] (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
+                                   (select-keys (first (:source-lines row)) [:page :line])))
+        refs (mapv reference rows)
+        selector {:run-id "run" :provider-id "jev" :case-id "synthetic-pair" :result-hash "result"}
+        request (-> (proposal target "scored-p")
+                    (assoc :after {:outcome :matched :identity-id (str "local-observation:" (:job-id candidate) ":1")}
+                           :evidence refs :identity-target (second refs) :jev-score selector
+                           :inspection {:both-versions-reviewed true :contrary-evidence-reviewed true
+                                        :source-dependence-reviewed true}))]
+    {:target target :candidate candidate :rows rows :run run :refs refs :request request}))
+
+(deftest scored-identity-is-owner-approved-source-bound-and-reversible
+  (let [{:keys [target candidate rows run refs request]} (scored-fixture)
+        decision {:id "scored-a" :proposal-id "scored-p" :action :approve :base-revision 0
+                  :actor "owner" :reason "Inspected both original source rows and uncertainty"}
+        overrides {#'evaluation/inspect-run (fn [& _] run)
+                   #'candidates/load-corpus (fn [& _] rows)
+                   (requiring-resolve 'freediving.jev-candidates/candidate-case)
+                   (fn [& _] {:case-id "synthetic-pair"})}]
+    (with-redefs-fn overrides
+      #(do
+         (is (thrown? Exception (reviews/propose! fixture/app request)))
+         (is (thrown? Exception (reviews/propose-scored-identity! "root" fixture/app
+                                                                  (assoc request :evidence [(first refs)]))))
+         (let [p (reviews/propose-scored-identity! "root" fixture/app request)]
+           (is (= :complete (get-in p [:score-binding :score-status])))
+           (is (= (:jev-score request) (get-in p [:score-binding :selector])))
+           (is (= p (reviews/propose-scored-identity! "root" fixture/app request)))
+           (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app target))))
+           (is (thrown-with-msg? Exception #"capability" (reviews/decide! fixture/app decision)))
+           (let [approved (reviews/decide! reviewer decision)]
+             (is (= approved (reviews/decide! reviewer decision)))
+             (is (= (:after request) (:identity (reviews/effective fixture/app target))))
+             (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app candidate))))
+             (is (thrown-with-msg? Exception #"Conflicting identity merge"
+                                   (reviews/propose-scored-identity!
+                                    "root" fixture/app
+                                    (-> request
+                                        (assoc :id "conflicting-anchor" :job-id (:job-id candidate)
+                                               :ordinal (:ordinal candidate)
+                                               :after {:outcome :no-match})
+                                        (dissoc :identity-target)))))
+             (is (= 1 (:revision approved)))
+             (is (= "reviews_owner" (:db-role approved)))
+             (is (= {:outcome :unknown} (:before approved)))
+             (is (= (:after request) (:after approved)))
+             (is (= refs (:evidence approved)))
+             (is (string? (:recorded-at approved)))
+             (is (thrown-with-msg? Exception #"Stale" (reviews/decide! reviewer (assoc decision :id "late"))))
+             (let [reversed (reviews/decide! reviewer {:id "scored-r" :event-id "scored-a" :action :reverse
+                                                       :base-revision 1 :actor "owner" :reason "Reconsidered evidence"})]
+               (is (= (:after request) (:before reversed)))
+               (is (= {:outcome :unknown} (:after reversed)))
+               (is (= refs (:evidence reversed))))
+             (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app target))))
+             (is (= 3 (count (reviews/history fixture/app target))))
+             (is (thrown? java.sql.SQLException
+                          (fixture/sql! reviewer "UPDATE freediving.review_decisions SET id=id")))))))))
+
+(deftest scored-no-match-unknown-rejection-and-stale-score-stay-distinct
+  (let [{:keys [target rows run request]} (scored-fixture)
+        stored (atom run)
+        overrides {#'evaluation/inspect-run (fn [& _] @stored)
+                   #'candidates/load-corpus (fn [& _] rows)
+                   (requiring-resolve 'freediving.jev-candidates/candidate-case)
+                   (fn [& _] {:case-id "synthetic-pair"})}
+        decide (fn [id proposal base action]
+                 (reviews/decide! reviewer {:id id :proposal-id proposal :base-revision base
+                                            :action action :actor "owner" :reason "Inspected exact source pair"}))]
+    (with-redefs-fn overrides
+      #(do
+         (is (thrown? Exception
+                      (reviews/propose-scored-identity! "root" fixture/app
+                                                        (assoc request :inspection {:both-versions-reviewed true}))))
+         (is (thrown? Exception
+                      (reviews/propose-scored-identity! "root" fixture/app
+                                                        (assoc-in request [:jev-score :result-hash] "forged"))))
+         (let [unknown (-> request (assoc :id "unknown" :after {:outcome :unknown})
+                           (dissoc :identity-target))]
+           (reviews/propose-scored-identity! "root" fixture/app unknown)
+           (is (= :approve (:action (decide "unknown-a" "unknown" 0 :approve))))
+           (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app target))))
+           (is (= 1 (:revision (reviews/effective fixture/app target)))))
+         (let [no-match (-> request (assoc :id "no-match" :base-revision 1
+                                           :after {:outcome :no-match})
+                            (dissoc :identity-target))]
+           (reviews/propose-scored-identity! "root" fixture/app no-match)
+           (swap! stored assoc-in [:report :providers "jev" :batches 0 :result-hash] "changed")
+           (is (thrown-with-msg? Exception #"Stale|mismatched"
+                                 (decide "stale-score" "no-match" 1 :approve)))
+           (reset! stored run)
+           (is (= :reject (:action (decide "reject-no-match" "no-match" 1 :reject))))
+           (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app target)))))
+         (let [no-match (-> request (assoc :id "no-match-2" :base-revision 2
+                                           :after {:outcome :no-match})
+                            (dissoc :identity-target))]
+           (reviews/propose-scored-identity! "root" fixture/app no-match)
+           (decide "no-match-a" "no-match-2" 2 :approve)
+           (is (= {:outcome :no-match} (:identity (reviews/effective fixture/app target))))
+           (is (= 3 (:revision (reviews/effective fixture/app target))))
+           (is (thrown-with-msg? Exception #"Stale"
+                                 (decide "late" "no-match-2" 2 :approve))))))))
+
+(deftest archived-jev-score-requires-explicit-owner-decision
+  (let [{:keys [root artifact] :as first-source} (fixture/synthetic 1 "review-synthetic/1")
+        bytes (.getBytes (extraction-fixture/synthetic-pdf
+                          "BT /F1 12 Tf 40 750 Td (Second synthetic result page) Tj ET") "UTF-8")
+        sha (html-evidence/sha256 bytes)
+        path (str root "/second-source.pdf")]
+    (java.nio.file.Files/write (java.nio.file.Paths/get path (make-array String 0)) bytes
+                               (make-array java.nio.file.OpenOption 0))
+    (archive/register! root path (assoc archive-fixture/manifest :sha256 sha))
+    (let [second-identity (assoc artifact :source-sha256 sha
+                                 :acquisitions (:acquisitions (archive/inspect root sha)))
+          second-source (assoc second-identity :job-id
+                               (fixture/hash-value (select-keys second-identity observations/identity-keys)))
+          target {:job-id (:job-id artifact) :ordinal 0}
+          candidate {:job-id (:job-id second-source) :ordinal 0}]
+      (fixture/publish! first-source)
+      (fixture/publish! {:root root :artifact second-source})
+      (observations/import! fixture/app root (:job-id artifact))
+      (observations/import! fixture/app root (:job-id second-source))
+      (let [corpus (candidates/load-corpus reviewer {})
+            pair (jev-candidates/candidate-case reviewer corpus target candidate)]
+        (is (= :held-out (:split pair)))
+        (http-fixture/with-server
+          (fn [exchange]
+            (http-fixture/reply! exchange 200
+                                 (json/write-str
+                                  {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                   :answers {:identity_0 {:type "choice" :choice "match" :confidence 0.96
+                                                          :probabilities {:match 0.96 :no_match 0.02 :abstain 0.02}}
+                                             :spelling_0 {:type "choice" :choice "unknown" :confidence 0.96
+                                                          :probabilities {:left 0.01 :right 0.01
+                                                                          :equally_plausible 0.01 :unknown 0.96
+                                                                          :not_applicable 0.01}}}})))
+          (fn [url]
+            (let [run-root (evaluation-fixture/root)
+                  receipt (jev-candidates/score-and-normalize!
+                           run-root reviewer target candidate
+                           {:id "jev" :provider :jev :model "jev-1.13.0" :endpoint url
+                            :identity-protocol :freediving-compact-v3 :max-attempts 1}
+                           {:jev-dispatch-gate :credential-checks-passed-v1
+                            :providers {"jev" {:bearer-token "fixture-secret"}}})
+                  score (first (spelling/score-view run-root (:run-id receipt) "jev" target
+                                                    (candidates/load-corpus reviewer {})))
+                  refs [(:target-reference score) (:candidate-reference score)]
+                  p (-> (proposal target "real-score")
+                        (assoc :after {:outcome :matched
+                                       :identity-id (str "local-observation:" (:job-id candidate) ":0")}
+                               :identity-target (second refs) :evidence refs
+                               :jev-score {:run-id (:run-id receipt) :provider-id "jev"
+                                           :case-id (:case-id pair) :result-hash (:result-hash score)}
+                               :inspection {:both-versions-reviewed true :contrary-evidence-reviewed true
+                                            :source-dependence-reviewed true}))]
+              (is (= :complete (:score-status score)))
+              (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+              (reviews/propose-scored-identity! run-root fixture/app p)
+              (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+              (reviews/decide! reviewer {:id "real-owner-a" :proposal-id "real-score" :action :approve
+                                         :base-revision 0 :actor "owner" :reason "Inspected original source versions"})
+              (is (= (:after p) (:identity (reviews/effective reviewer target)))))))))))
 
 (defn json-observation []
   (let [dir (archive-fixture/workspace) root (str dir "/archive") path (str dir "/source.json")
@@ -49,6 +247,40 @@
          :source-sha256 hash :artifact-sha256 (html-evidence/sha256 (:artifact-bytes inspection))
          :parser-version (:parser-version (:artifact inspection))
          :source-page-url indoor-fixture/view-url :row-index-zero-based 0}))))
+
+(deftest scored-identity-accepts-registered-json-citation-and-rejects-forged-row
+  (let [{:keys [target run request]} (scored-fixture)
+        json-ref (json-observation)
+        rows (candidates/load-corpus fixture/app {})
+        json-row (some #(when (= (:job-id json-ref) (:job-id %)) %) rows)
+        source {:evidence-id "json-source" :source-sha256 (:source-sha256 json-row)
+                :artifact-sha256 (:artifact-sha256 json-row)
+                :observation-id (:candidate-id json-row)
+                :source-family-id (:source-sha256 json-row)}
+        record {:record-id (str "local-observation:" (:job-id json-ref) ":0")
+                :source-version (select-keys json-row [:parser-version :schema-version :source-format])
+                :fields {:name {:value (get-in json-row [:payload :parsed :source-name])
+                                :evidence-ids ["json-source"]}}
+                :sources [source] :uncertainties []}
+        run (assoc-in run [:input :dataset :cases 0 :input :right] record)
+        request (assoc request :evidence [(first (:evidence request)) json-ref]
+                       :identity-target json-ref
+                       :after {:outcome :matched
+                               :identity-id (str "local-observation:" (:job-id json-ref) ":0")})
+        overrides {#'evaluation/inspect-run (fn [& _] run)
+                   #'candidates/load-corpus (fn [& _] rows)
+                   (requiring-resolve 'freediving.jev-candidates/candidate-case)
+                   (fn [& _] {:case-id "synthetic-pair"})}]
+    (with-redefs-fn overrides
+      #(do
+         (is (thrown? Exception
+                      (reviews/propose-scored-identity! "root" fixture/app
+                                                        (assoc request :evidence [(first (:evidence request))
+                                                                                  (assoc json-ref :row-index-zero-based 1)]))))
+         (reviews/propose-scored-identity! "root" fixture/app request)
+         (reviews/decide! reviewer {:id "json-a" :proposal-id "scored-p" :action :approve
+                                    :base-revision 0 :actor "owner" :reason "Inspected JSON row and PDF line"})
+         (is (= (:after request) (:identity (reviews/effective fixture/app target))))))))
 
 (defn extraction-request [ref id]
   {:id id :job-id (:job-id ref) :ordinal (:ordinal ref) :base-revision 0
