@@ -1,5 +1,9 @@
 (ns freediving.noxy-2025-test
   (:require [clojure.test :refer [deftest is]]
+            [clojure.string :as str]
+            [clojure.java.shell :as shell]
+            [freediving.archive :as archive]
+            [freediving.extraction :as extraction]
             [freediving.noxy-2025 :as noxy]))
 
 (defn distance-page [discipline day women men]
@@ -70,3 +74,23 @@
     (is (= 1 (get-in result [:reconciliation :unparsed-count])))
     (is (= "Malformed    XYZ    ambiguous" (get-in (last (:candidates result)) [:raw :line])))
     (is (= 1 (count (filter #(= :unparsed (:parse-status %)) (:candidates result)))))))
+
+(deftest source-layout-dispatches-through-extraction-api
+  (let [result (extraction/parse-pages fixture-pages)]
+    (is (= noxy/parser-version (:parser-version result)))
+    (is (= 15 (get-in result [:reconciliation :candidate-count])))))
+
+(deftest archived-replay-rejects-edited-result
+  (let [raw (str (str/join "\f" fixture-pages) "\f")
+        artifact (merge (noxy/parse-pages fixture-pages)
+                        {:source-sha256 noxy/source-sha256 :raw-text raw
+                         :tool {:name "pdftotext" :version "test-version"
+                                :arguments ["-layout" "-enc" "UTF-8"]}})
+        fake-sh (fn [& args] {:exit 0 :out (if (= "-v" (second args)) "" raw)
+                              :err (if (= "-v" (second args)) "test-version" "")})]
+    (with-redefs [archive/inspect (fn [& _] {:artifact-path "archived.pdf"})
+                  shell/sh fake-sh]
+      (is (= artifact (extraction/validate-noxy-artifact! "archive" artifact)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay"
+                            (extraction/validate-noxy-artifact!
+                             "archive" (assoc-in artifact [:candidates 0 :parsed :final-distance] 999M)))))))
