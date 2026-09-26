@@ -9,11 +9,14 @@ private archive; this module does not register observations.
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import random
 import time
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
+from urllib.request import Request, build_opener
 
 from acquire_source import _safe_url
-from source_acquisition import AcquisitionClient, _retry_after
+from source_acquisition import AcquisitionClient, _NoRedirect, _retry_after
 
 
 _CHALLENGE = (b"captcha", b"verify you are human", b"cloudflare challenge",
@@ -74,17 +77,18 @@ def _validate(host, status, content_type, body, resource_type):
     return True
 
 
-def capture_page(page, url, client: AcquisitionClient):
+def capture_page(page, url, client: AcquisitionClient, *, opener=None):
     """Capture a Page through the shared lease; return exact response bytes and DOM.
 
-    Playwright route.fetch uses max_redirects=0 so each redirect destination
-    enters a fresh route and lease. Exceptions are saved because Playwright may
-    swallow route-handler exceptions and surface only a failed navigation.
+    Each browser request is replayed through a bounded HTTP reader. Playwright's
+    route.fetch buffers the response before its body can be checked. Redirects
+    are fulfilled to the browser so each destination enters a new host lease.
     """
     failures = []
     responses = []
     redirects = []
     redirect_count = 0
+    opener = opener or build_opener(_NoRedirect)
 
     def handle(route):
         nonlocal redirect_count
@@ -103,16 +107,37 @@ def capture_page(page, url, client: AcquisitionClient):
             route.abort()
             return
         policy = client.policy_for(host)
-        for attempt in range(1, policy.max_attempts + 1):
+        browser_request = route.request
+        method = getattr(browser_request, "method", "GET")
+        if method not in ("GET", "POST"):
+            failures.append(BrowserAcquisitionError(host, "unsupported_method"))
+            route.abort()
+            return
+        headers = browser_request.all_headers() if hasattr(browser_request, "all_headers") else {}
+        headers = {key: value for key, value in headers.items()
+                   if key.lower() not in ("host", "content-length", "transfer-encoding",
+                                          "accept-encoding", "connection", "proxy-authorization")}
+        data = (getattr(browser_request, "post_data_buffer", None) or b"") if method == "POST" else None
+        # Replaying a POST after an uncertain response can duplicate a publisher action.
+        attempt_limit = 1 if method == "POST" else policy.max_attempts
+        for attempt in range(1, attempt_limit + 1):
             try:
                 with client.lease(request_url):
-                    response = route.fetch(timeout=int(policy.timeout * 1000), max_redirects=0)
-                    status = response.status
-                    if status in _RETRYABLE:
-                        retry_after = _retry_after(response.headers.get("retry-after"))
-                    else:
+                    request = Request(request_url, data=data, headers=headers, method=method)
+                    try:
+                        response = opener.open(request, timeout=policy.timeout)
+                    except HTTPError as error:
+                        response = error
+                    with response:
+                        status = response.status
+                        response_headers = response.headers
+                        if status in _RETRYABLE:
+                            retry_after = _retry_after(response_headers.get("retry-after"))
+                            continue_retry = True
+                        else:
+                            continue_retry = False
                         if status in _REDIRECT:
-                            location = response.headers.get("location")
+                            location = response_headers.get("location")
                             target = urljoin(request_url, location or "")
                             target_parts = urlsplit(target)
                             redirect_count += 1
@@ -127,26 +152,44 @@ def capture_page(page, url, client: AcquisitionClient):
                             except ValueError:
                                 raise BrowserAcquisitionError(host, "unsafe_redirect", status) from None
                             redirects.append((request_url, target, status))
-                        declared_length = response.headers.get("content-length")
-                        if declared_length is not None:
-                            try:
-                                if int(declared_length) > policy.max_bytes:
-                                    raise BrowserAcquisitionError(host, "size_limit", status)
-                            except ValueError:
-                                raise BrowserAcquisitionError(host, "invalid_content_length", status) from None
-                        body = response.body()
-                        if len(body) > policy.max_bytes:
-                            raise BrowserAcquisitionError(host, "size_limit", status)
-                        is_source = _validate(host, status, response.headers.get("content-type"), body,
-                                              getattr(route.request, "resource_type", "document"))
-                        if status == 200 and is_source:
-                            responses.append(BrowserResponse(request_url, host, status, response.headers.get("content-type"),
-                                                             body, sha256(body).hexdigest()))
-                        route.fulfill(response=response)
-                        return
-                if attempt == policy.max_attempts:
+                            body = b""
+                        elif continue_retry:
+                            body = b""
+                        else:
+                            if status != 200:
+                                _validate(host, status, response_headers.get("content-type"), b"",
+                                          getattr(browser_request, "resource_type", "document"))
+                            encoding = response_headers.get("content-encoding", "identity").lower()
+                            if encoding != "identity":
+                                raise BrowserAcquisitionError(host, "unsupported_content_encoding", status)
+                            declared_length = response_headers.get("content-length")
+                            if declared_length is not None:
+                                try:
+                                    expected_length = int(declared_length)
+                                    if expected_length < 0:
+                                        raise ValueError
+                                    if expected_length > policy.max_bytes:
+                                        raise BrowserAcquisitionError(host, "size_limit", status)
+                                except ValueError:
+                                    raise BrowserAcquisitionError(host, "invalid_content_length", status) from None
+                            body = response.read(policy.max_bytes + 1)
+                            if len(body) > policy.max_bytes:
+                                raise BrowserAcquisitionError(host, "size_limit", status)
+                            if declared_length is not None and len(body) != expected_length:
+                                raise BrowserAcquisitionError(host, "incomplete_response", status)
+                            is_source = _validate(host, status, response_headers.get("content-type"), body,
+                                                  getattr(browser_request, "resource_type", "document"))
+                            if status == 200 and is_source:
+                                responses.append(BrowserResponse(request_url, host, status, response_headers.get("content-type"),
+                                                                 body, sha256(body).hexdigest()))
+                        if not continue_retry:
+                            safe_headers = {key: value for key, value in response_headers.items()
+                                            if key.lower() not in ("content-length", "transfer-encoding", "content-encoding")}
+                            route.fulfill(status=status, headers=safe_headers, body=body)
+                            return
+                if attempt == attempt_limit:
                     raise BrowserAcquisitionError(host, "attempts_exhausted", status)
-                delay = retry_after if retry_after is not None else min(policy.max_delay, 2 ** (attempt - 1))
+                delay = retry_after if retry_after is not None else min(policy.max_delay, 2 ** (attempt - 1) + random.random())
                 if delay > policy.max_delay:
                     raise BrowserAcquisitionError(host, "retry_after_exceeds_max_delay", status)
                 time.sleep(delay)
@@ -155,11 +198,11 @@ def capture_page(page, url, client: AcquisitionClient):
                 route.abort()
                 return
             except Exception:
-                if attempt == policy.max_attempts:
+                if attempt == attempt_limit:
                     failures.append(BrowserAcquisitionError(host, "network_error"))
                     route.abort()
                     return
-                time.sleep(min(policy.max_delay, 2 ** (attempt - 1)))
+                time.sleep(min(policy.max_delay, 2 ** (attempt - 1) + random.random()))
 
     page.route("**/*", handle)
     try:
