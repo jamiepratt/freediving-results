@@ -78,13 +78,26 @@
                              fragment)))))
     (catch Exception _ false)))
 
+(defn- google-drive-download? [^URI u]
+  (and (= "https" (.getScheme u))
+       (= -1 (.getPort u))
+       (nil? (.getRawUserInfo u))
+       (nil? (.getRawFragment u))
+       (let [host (.getHost u) path (.getRawPath u) query (.getRawQuery u)
+             file-id "[A-Za-z0-9_-]{20,80}"]
+         (or (and (= "drive.google.com" host) (= "/uc" path)
+                  (re-matches (re-pattern (str "export=download&id=" file-id)) (or query "")))
+             (and (= "drive.usercontent.google.com" host) (= "/download" path)
+                  (re-matches (re-pattern (str "id=" file-id "&export=download")) (or query "")))))))
+
 (defn- url? [v]
   (try (let [u (URI. v)]
          (and (#{"http" "https"} (.getScheme u)) (text? (.getHost u))
               (nil? (.getUserInfo u))
               (or (and (nil? (.getRawQuery u))
                        (or (nil? (.getRawFragment u)) (timing-route? u)))
-                  (aida-session-route? u))))
+                  (aida-session-route? u)
+                  (google-drive-download? u))))
        (catch Exception _ false)))
 (defn- browser-state? [state]
   (and (map? state)

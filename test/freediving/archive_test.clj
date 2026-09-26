@@ -30,6 +30,24 @@
       (is (= "abc" (when-let [path (:artifact-path result)] (slurp path))))
       (is (= [manifest] (mapv :manifest (:acquisitions result)))))))
 
+(deftest public-google-drive-download-preserves-final-url
+  (let [file-id "1xPXmh6mvthipz_sU5tYroYiJPbmFk0Ub"
+        requested (str "https://drive.google.com/uc?export=download&id=" file-id)
+        final (str "https://drive.usercontent.google.com/download?id=" file-id "&export=download")
+        routed (assoc manifest :discovery-url "https://apnee.ffessm.fr/resultats-2025"
+                      :final-url final
+                      :provenance {:publisher-url "https://apnee.ffessm.fr/resultats-2025"
+                                   :redirect-chain [requested final]})
+        dir (workspace) root (str dir "/archive") source (str dir "/source")]
+    (spit source "abc")
+    (archive/register! root source routed)
+    (is (= [routed] (mapv :manifest (:acquisitions (archive/inspect root (:sha256 manifest))))))
+    (doseq [bad [(str final "&token=private")
+                 (str "https://drive.usercontent.google.com.evil.org/download?id=" file-id "&export=download")
+                 (str "https://drive.usercontent.google.com/download?id=" file-id "&export=preview")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (archive/register! (str dir "/bad") source (assoc routed :final-url bad)))))))
+
 (deftest inventory-verifies-real-archive-layout-before-reporting
   (let [dir (workspace) root (str dir "/archive") source (str dir "/source")]
     (spit source "abc")
