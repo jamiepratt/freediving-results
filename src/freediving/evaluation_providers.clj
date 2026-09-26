@@ -104,12 +104,20 @@
   attempt and one request at a time. Exact equal records alone are deduplicated.
   Conservative UTF-8 byte caps leave headroom below provider 32k/64k token limits."
   [config cases]
-  (let [size (:native-batch-size config) companions (get config :companion-assessments [])
-        compact? (= :freediving-compact-v1 (:identity-protocol config))
-        table? (= :italian-table-v1 (:identity-extraction config))
+  (let [config (cond-> config
+                 (nil? (:identity-protocol config)) (assoc :identity-protocol :freediving-compact-v2))
+        default? (= :freediving-compact-v2 (:identity-protocol config))
+        config (cond-> config
+                 default? (update :native-batch-size #(or % 8))
+                 default? (update :native-diagnostics-version #(or % 2))
+                 default? (update :probability-sum-tolerance #(or % 0.02)))
+        size (:native-batch-size config) companions (get config :companion-assessments [])
+        compact? (#{:freediving-compact-v1 :freediving-compact-v2} (:identity-protocol config))
+        table? (or default? (= :italian-table-v1 (:identity-extraction config)))
         project (if table? protocol/compact-table-projection protocol/compact-projection)
         local? (or compact? (= :freediving-question-local-v1 (:identity-protocol config)))
-        descriptor (cond compact? (cond-> protocol/compact-descriptor
+        descriptor (cond default? protocol/compact-table-descriptor
+                         compact? (cond-> protocol/compact-descriptor
                                     (= :original-v1 (:identity-guidance config))
                                     (assoc :instruction (:instruction protocol/question-local-descriptor)
                                            :guidance-version :original-v1)
@@ -119,11 +127,12 @@
         rounded? (contains? config :probability-sum-tolerance)
         base-config (cond-> (apply dissoc config batch-option-keys)
                       local? (assoc :identity-protocol :freediving-source-v1))]
-    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1} (:identity-protocol config))
+    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1 :freediving-compact-v2} (:identity-protocol config))
                    (or (not (contains? config :identity-guidance))
                        (and compact? (= :original-v1 (:identity-guidance config))))
                    (or (not (contains? config :identity-extraction))
-                       (and compact? table? (= :original-v1 (:identity-guidance config))))
+                       (and compact? (= :italian-table-v1 (:identity-extraction config))
+                            (or default? (= :original-v1 (:identity-guidance config)))))
                    (or (not local?) (and (= "jev-1.13.0" (:model config))
                                          (= 2 (:native-diagnostics-version config))
                                          (or (#{1 2} size) rounded?) (empty? companions)))

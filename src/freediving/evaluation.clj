@@ -197,6 +197,10 @@
                              :request-errors (frequencies (keep #(get-in % [:result :error]) attempts))
                              :cost (total-cost attempts) :accounting :request-level-only}})))))
 
+(defn- native-batch? [config]
+  (or (:native-batch-size config)
+      (= :freediving-compact-v2 (:identity-protocol config))))
+
 (defn run!
   "Evaluate only held-out cases with each configuration. Runtime secrets stay outside
    content identities. Provider runtime is scoped as :providers {config-id options};
@@ -214,16 +218,16 @@
      (when (empty? cases) (fail! "At least one held-out case required"))
      (doseq [c configs]
        (when-not (and (string? (:id c)) (seq (:id c)) (integer? (:max-attempts c)) (<= 1 (:max-attempts c) 3) (integer? (:retry-delay-ms c)) (<= 0 (:retry-delay-ms c) 2000)) (fail! "Invalid provider ID or attempt bound")))
-     (let [samples (mapv #(if (:native-batch-size %) (first (providers/prepare-batches % [(first cases)])) (providers/prepare-request % (first cases))) configs)
+     (let [samples (mapv #(if (native-batch? %) (first (providers/prepare-batches % [(first cases)])) (providers/prepare-request % (first cases))) configs)
            response-budget (* (count cases)
                               (reduce + (map (fn [request config]
                                                (* (:max-attempts config)
                                                   (+ 4096 (get-in request [:config :max-response-bytes]))))
                                              samples configs)))]
        (when (> response-budget (* 32 1024 1024)) (fail! "Planned response budget exceeds 32 MiB")))
-     (let [prepared (mapv (fn [c] (if (:native-batch-size c) (providers/prepare-batches c cases) (mapv #(providers/prepare-request c %) cases))) configs)
+     (let [prepared (mapv (fn [c] (if (native-batch? c) (providers/prepare-batches c cases) (mapv #(providers/prepare-request c %) cases))) configs)
            ;; Persist only validated provider requests/configuration. Never runtime credentials.
-           identity {:schema-version 1 :harness-version (if (some :native-batch-size configs) "shadow-runner/6" (if (some :stop-on-terminal-error? configs) "shadow-runner/5" "shadow-runner/4")) :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id :stop-on-terminal-error?]) configs)}
+           identity {:schema-version 1 :harness-version (if (some native-batch? configs) "shadow-runner/6" (if (some :stop-on-terminal-error? configs) "shadow-runner/5" "shadow-runner/4")) :dataset dataset :requests prepared :configurations (mapv #(select-keys % [:id :max-attempts :retry-delay-ms :scope-id :stop-on-terminal-error?]) configs)}
            identity-text (canonical identity)
            _ (when (> (alength (.getBytes ^String identity-text "UTF-8")) (* 32 1024 1024))
                (fail! "Input and request budget exceeds 32 MiB"))
@@ -233,7 +237,7 @@
            (put! root identity)
            (or (some->> (read-record root (str run-id "-manifest")) (verify-graph! root))
                (let [reports (into {} (map (fn [c requests]
-                                             [(:id c) ((if (:native-batch-size c) native-comparator! comparator!) root run-id c cases requests runtime)]) configs prepared))
+                                             [(:id c) ((if (native-batch? c) native-comparator! comparator!) root run-id c cases requests runtime)]) configs prepared))
                      report {:schema-version 1 :run-id run-id :dataset-id (:dataset-id dataset) :providers reports}
                      report-hash (put! root report)
                      manifest {:run-id run-id :input-hash run-id :report-hash report-hash}]

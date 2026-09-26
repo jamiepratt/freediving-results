@@ -1037,3 +1037,22 @@ configuration and missing launcher. GREEN passed repair, lint, 103 shadow tests 
 1,786 assertions and all four launcher tests. B7 and G5/C5 frozen packets and
 identities still reproduce. Actual billed cost and raw HTTP response bytes remain
 unavailable.
+
+### Default compact Jev batches
+
+New Jev native batches without an `:identity-protocol` use
+`:freediving-compact-v2`. This version uses the original guidance and cited
+Italian table facts by default, with the existing rounded-probability tolerance
+of `0.02` and native diagnostics version 2. Set `:native-batch-size 8` to use
+the largest supported group. Explicit `:freediving-compact-v2` also defaults to
+eight questions when batch size is omitted. The request keeps the 49,152-byte
+wire cap and 24,576-byte state-plus-question cap; an oversized group is rejected
+before dispatch. Existing explicit v1 configurations and frozen requests retain
+their prior semantics and identities.
+
+The full `:probabilities` map and `:confidence` from every valid Jev answer are
+stored with its case result and available in `inspect-run` reports for later
+owner review. No probabilities are normalized or converted into automatic owner
+decisions. Offline preparation of the 81-case packet at size eight produced
+11 requests with a maximum wire body of 39,006 bytes; this does not establish
+that every future group will fit the byte caps.

@@ -719,3 +719,35 @@
             (do (is (= [:invalid-probability-sum] (:validation-reasons prediction)))
                 (is (= 0.02 (get-in prediction [:probability-diagnostics :tolerance])))
                 (is (= :less-than-or-equal (get-in prediction [:probability-diagnostics :comparison]))))))))))
+
+(deftest default-eight-question-run-preserves-each-probability-distribution
+  (let [sample (assoc (dataset) :cases
+                      (mapv #(assoc (first (:cases (dataset))) :case-id (str "default-" %)) (range 9)))
+        calls (atom 0) dir (runner/root)]
+    (http/with-server
+      (fn [ex]
+        (swap! calls inc)
+        (let [body (json/read-str (slurp (.getRequestBody ex)))
+              ids (keys (get body "questions"))]
+          (http/reply! ex 200
+                       (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                        :answers (into {} (map-indexed
+                                                           (fn [i id]
+                                                             [id (assoc (answer "match")
+                                                                        :probabilities {"match" (- 0.9 (* i 0.01))
+                                                                                        "no_match" (+ 0.05 (* i 0.01))
+                                                                                        "abstain" 0.05})]) ids))}))))
+      (fn [url]
+        (let [cfg [(-> (config url)
+                       (dissoc :native-batch-size :identity-protocol)
+                       (assoc :identity-protocol :freediving-compact-v2))]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! dir sample cfg runtime)
+              report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])]
+          (is (= [8 1] (get-in report [:request-metrics :batch-sizes])))
+          (is (= 2 @calls))
+          (is (= (vec (repeat 9 :match)) (mapv :outcome (:results report))))
+          (is (= (mapv #(- 0.9 (* (mod % 8) 0.01)) (range 9))
+                 (mapv #(get-in % [:probabilities :match]) (:results report))))
+          (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
+            (is (= receipt (evaluation/run! dir sample cfg runtime)))))))))
