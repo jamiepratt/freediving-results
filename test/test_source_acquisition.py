@@ -1,4 +1,6 @@
 import sys
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -41,6 +43,81 @@ class LocalPublisher:
 
 
 class AcquisitionTest(unittest.TestCase):
+    def test_separate_processes_share_spacing_and_concurrency(self):
+        arrivals = []
+        lock = threading.Lock()
+
+        def respond(path):
+            with lock:
+                arrivals.append(time.monotonic())
+            time.sleep(0.18)
+            return 200, {}, b"ok"
+
+        publisher = LocalPublisher(respond)
+        self.addCleanup(publisher.close)
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            script = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from source_acquisition import AcquisitionClient, Policy; "
+                "AcquisitionClient(default_policy=Policy(concurrency=1, min_interval=0.05), "
+                "lease_path=sys.argv[2]).fetch(sys.argv[3])"
+            )
+            scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+            workers = [subprocess.Popen([sys.executable, "-c", script, scripts, state, publisher.url])
+                       for _ in range(3)]
+            for worker in workers:
+                self.assertEqual(0, worker.wait(timeout=5))
+        self.assertEqual(3, len(arrivals))
+        self.assertTrue(all(b - a >= 0.16 for a, b in zip(arrivals, arrivals[1:])))
+
+    def test_new_client_and_public_lease_preserve_host_spacing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            policy = Policy(concurrency=1, min_interval=0.18)
+            url = "https://publisher.example/private?token=secret"
+            with AcquisitionClient(default_policy=policy, state_path=state).lease(url) as first_wait:
+                self.assertGreaterEqual(first_wait, 0)
+            with AcquisitionClient(default_policy=policy, state_path=state).lease(url) as second_wait:
+                self.assertGreaterEqual(second_wait, 0.14)
+            self.assertNotIn("secret", Path(state).read_bytes().decode("utf-8", errors="ignore"))
+
+    def test_redirect_target_shares_budget_with_new_client(self):
+        arrived = []
+        target = LocalPublisher(lambda path: (arrived.append(time.monotonic()) or 200, {}, b"target"))
+        self.addCleanup(target.close)
+        source = LocalPublisher(lambda path: (302, {"Location": target.url}, b""))
+        self.addCleanup(source.close)
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            policy = Policy(concurrency=1, min_interval=0.18)
+            AcquisitionClient(default_policy=policy, state_path=state).fetch(target.url)
+            AcquisitionClient(default_policy=policy, state_path=state).fetch(source.url)
+        self.assertGreaterEqual(arrived[1] - arrived[0], 0.14)
+
+    def test_crashed_worker_does_not_hold_concurrency_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+            script = (
+                "import sys, time; sys.path.insert(0, sys.argv[1]); "
+                "from source_acquisition import AcquisitionClient, Policy; "
+                "client = AcquisitionClient(default_policy=Policy(concurrency=1, min_interval=0), state_path=sys.argv[2]); "
+                "lease = client.lease('https://publisher.example/a'); lease.__enter__(); "
+                "print('ready', flush=True); time.sleep(60)"
+            )
+            worker = subprocess.Popen([sys.executable, "-u", "-c", script, scripts, state],
+                                      stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual("ready\n", worker.stdout.readline())
+            finally:
+                worker.kill()
+                worker.wait(timeout=5)
+                worker.stdout.close()
+            client = AcquisitionClient(default_policy=Policy(concurrency=1, min_interval=0), state_path=state)
+            with client.lease("https://publisher.example/b") as waited:
+                self.assertLess(waited, 0.5)
+
     def test_retries_429_after_server_delay(self):
         calls = []
 

@@ -5,14 +5,19 @@ after fetch returns and record failures separately as coverage gaps.
 """
 
 from dataclasses import dataclass
+from contextlib import contextmanager, closing
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import IncompleteRead
 import random
 import re
+import os
+from pathlib import Path
 import socket
+import sqlite3
 import threading
 import time
+from uuid import uuid4
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -71,28 +76,63 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-class _HostGate:
-    def __init__(self):
-        self.condition = threading.Condition()
-        self.active = 0
-        self.next_start = 0.0
+class _LeaseStore:
+    """SQLite transactions serialize starts across clients and worker processes."""
 
-    def enter(self, policy):
-        with self.condition:
-            start = time.monotonic()
-            while True:
-                now = time.monotonic()
-                delay = max(0.0, self.next_start - now)
-                if self.active < policy.concurrency and delay == 0:
-                    self.active += 1
-                    self.next_start = now + policy.min_interval
-                    return now - start
-                self.condition.wait(timeout=delay if delay else None)
+    def __init__(self, path):
+        self.path = Path(path).expanduser()
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Create privately before SQLite can open the file with process umask.
+        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(descriptor)
+        with closing(self._connect()) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS hosts (host TEXT PRIMARY KEY, next_start REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS leases (token TEXT PRIMARY KEY, host TEXT NOT NULL, pid INTEGER NOT NULL, expires REAL NOT NULL)")
 
-    def leave(self):
-        with self.condition:
-            self.active -= 1
-            self.condition.notify_all()
+    def _connect(self):
+        return sqlite3.connect(self.path, timeout=10, isolation_level=None)
+
+    @staticmethod
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def enter(self, host, policy):
+        start = time.monotonic()
+        token = uuid4().hex
+        lifetime = max(60.0, policy.timeout * 3)
+        while True:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                db.execute("DELETE FROM leases WHERE expires <= ?", (now,))
+                for stale_token, pid in db.execute("SELECT token, pid FROM leases WHERE host = ?", (host,)):
+                    if not self._alive(pid):
+                        db.execute("DELETE FROM leases WHERE token = ?", (stale_token,))
+                count = db.execute("SELECT COUNT(*) FROM leases WHERE host = ?", (host,)).fetchone()[0]
+                row = db.execute("SELECT next_start FROM hosts WHERE host = ?", (host,)).fetchone()
+                delay = max(0.0, (row[0] if row else 0.0) - now)
+                if count < policy.concurrency and delay == 0:
+                    db.execute("INSERT INTO leases VALUES (?, ?, ?, ?)", (token, host, os.getpid(), now + lifetime))
+                    db.execute("INSERT INTO hosts VALUES (?, ?) ON CONFLICT(host) DO UPDATE SET next_start = excluded.next_start",
+                               (host, now + policy.min_interval))
+                    db.commit()
+                    return token, time.monotonic() - start, lifetime
+                db.commit()
+            time.sleep(min(0.1, delay) if delay else 0.05)
+
+    def renew(self, token, lifetime):
+        with closing(self._connect()) as db:
+            db.execute("UPDATE leases SET expires = ? WHERE token = ?", (time.time() + lifetime, token))
+
+    def leave(self, token):
+        with closing(self._connect()) as db:
+            db.execute("DELETE FROM leases WHERE token = ?", (token,))
 
 
 def _host(url):
@@ -118,12 +158,15 @@ def _retry_after(value):
 
 
 class AcquisitionClient:
-    def __init__(self, default_policy=None, host_policies=None, event_sink=None):
+    def __init__(self, default_policy=None, host_policies=None, event_sink=None,
+                 lease_path=None, state_path=None):
         self.default_policy = default_policy or Policy()
         self.host_policies = {host.lower(): policy for host, policy in (host_policies or {}).items()}
         self.event_sink = event_sink
-        self._gates = {}
-        self._lock = threading.Lock()
+        if lease_path is not None and state_path is not None and Path(lease_path) != Path(state_path):
+            raise ValueError("lease_path and state_path disagree")
+        default_state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "freediving-results" / "acquisition.sqlite3"
+        self._leases = _LeaseStore(lease_path or state_path or default_state)
         self._opener = build_opener(_NoRedirect)
 
     def policy_for(self, host):
@@ -133,9 +176,25 @@ class AcquisitionClient:
             return CMAS_POLICY
         return self.default_policy
 
-    def _gate(self, host):
-        with self._lock:
-            return self._gates.setdefault(host, _HostGate())
+    @contextmanager
+    def lease(self, url):
+        """Reserve a publisher host before one HTTP or browser request starts."""
+        host = _host(url)
+        token, waited, lifetime = self._leases.enter(host, self.policy_for(host))
+        stop = threading.Event()
+
+        def heartbeat():
+            while not stop.wait(min(10.0, lifetime / 3)):
+                self._leases.renew(token, lifetime)
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            yield waited
+        finally:
+            stop.set()
+            thread.join()
+            self._leases.leave(token)
 
     def fetch(self, url):
         origin = _host(url)
@@ -155,55 +214,52 @@ class AcquisitionClient:
                 status = None
                 host = _host(current)
                 policy = self.policy_for(host)
-                gate = self._gate(host)
-                waited = gate.enter(policy)
                 try:
-                    if waited:
-                        record(host, attempt, waited, "host_pacing", "waited")
-                    try:
-                        response = self._opener.open(Request(current, method="GET"), timeout=policy.timeout)
-                    except HTTPError as error:
-                        response = error
-                    with response:
-                        status = response.status
-                        headers = response.headers
-                        if status in (301, 302, 303, 307, 308):
-                            location = headers.get("Location")
-                            if not location or len(redirects) >= policy.max_redirects:
-                                raise AcquisitionError(host, attempt, "redirect_limit", status, events)
-                            target = urljoin(current, location)
-                            _host(target)
-                            if urlsplit(current).scheme == "https" and urlsplit(target).scheme != "https":
-                                raise AcquisitionError(host, attempt, "insecure_redirect", status, events)
-                            redirects.append(target)
-                            record(host, attempt, 0, "redirect", "follow")
-                        elif status == 200:
-                            body = response.read(policy.max_bytes + 1)
-                            if len(body) > policy.max_bytes:
-                                raise AcquisitionError(host, attempt, "size_limit", status, events)
-                            length = headers.get("Content-Length")
-                            if length is not None:
-                                try:
-                                    expected = int(length)
-                                except ValueError:
-                                    raise AcquisitionError(host, attempt, "invalid_content_length", status, events) from None
-                                if len(body) != expected:
-                                    raise IncompleteRead(body, expected)
-                            record(host, attempt, 0, "success", "complete")
-                            return Result(body, status, current, tuple(redirects),
-                                          headers.get("Content-Type"), attempt, tuple(events))
-                        else:
-                            retryable = status in (429, 500, 502, 503, 504)
-                            reason = "transient_status" if retryable else "permanent_status"
-                            record(host, attempt, 0, reason, str(status))
-                            if not retryable:
-                                raise AcquisitionError(host, attempt, reason, status, events)
-                            retry_delay = _retry_after(headers.get("Retry-After"))
+                    with self.lease(current) as waited:
+                        if waited:
+                            record(host, attempt, waited, "host_pacing", "waited")
+                        try:
+                            response = self._opener.open(Request(current, method="GET"), timeout=policy.timeout)
+                        except HTTPError as error:
+                            response = error
+                        with response:
+                            status = response.status
+                            headers = response.headers
+                            if status in (301, 302, 303, 307, 308):
+                                location = headers.get("Location")
+                                if not location or len(redirects) >= policy.max_redirects:
+                                    raise AcquisitionError(host, attempt, "redirect_limit", status, events)
+                                target = urljoin(current, location)
+                                _host(target)
+                                if urlsplit(current).scheme == "https" and urlsplit(target).scheme != "https":
+                                    raise AcquisitionError(host, attempt, "insecure_redirect", status, events)
+                                redirects.append(target)
+                                record(host, attempt, 0, "redirect", "follow")
+                            elif status == 200:
+                                body = response.read(policy.max_bytes + 1)
+                                if len(body) > policy.max_bytes:
+                                    raise AcquisitionError(host, attempt, "size_limit", status, events)
+                                length = headers.get("Content-Length")
+                                if length is not None:
+                                    try:
+                                        expected = int(length)
+                                    except ValueError:
+                                        raise AcquisitionError(host, attempt, "invalid_content_length", status, events) from None
+                                    if len(body) != expected:
+                                        raise IncompleteRead(body, expected)
+                                record(host, attempt, 0, "success", "complete")
+                                return Result(body, status, current, tuple(redirects),
+                                              headers.get("Content-Type"), attempt, tuple(events))
+                            else:
+                                retryable = status in (429, 500, 502, 503, 504)
+                                reason = "transient_status" if retryable else "permanent_status"
+                                record(host, attempt, 0, reason, str(status))
+                                if not retryable:
+                                    raise AcquisitionError(host, attempt, reason, status, events)
+                                retry_delay = _retry_after(headers.get("Retry-After"))
                 except (URLError, TimeoutError, socket.timeout, ConnectionError, IncompleteRead, OSError) as error:
                     record(host, attempt, 0, "network_error", type(error).__name__)
                     retry_delay = None
-                finally:
-                    gate.leave()
                 if status in (301, 302, 303, 307, 308):
                     current = redirects[-1]
                     continue
