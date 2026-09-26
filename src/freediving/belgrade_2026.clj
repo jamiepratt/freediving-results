@@ -2,7 +2,7 @@
   "Source-bound, review-only extraction for the 2026 Belgrade Freediving Open PDF."
   (:require [clojure.string :as str]))
 
-(def parser-version "belgrade-freediving-open-2026/1")
+(def parser-version "belgrade-freediving-open-2026/2")
 (def source-sha256 "336a72bb0938dfab7085b0bd3fde2f768cc5028f7897391989b1012bd2f9e146")
 (def title "2026 Belgrade Freediving Open")
 (def place-date "Serbia, Futog, 25.04.2026")
@@ -101,9 +101,7 @@
                                                   #(and (= :unresolved-source-line (:classification %))
                                                         (= 1 (abs (- line (:line %)))))
                                                   (:noncandidate-lines processed)))]
-                               (-> c
-                                   (assoc-in [:raw :adjacent-source-evidence] adjacent)
-                                   (assoc :source-lines (vec (sort-by :line (conj adjacent (first (:source-lines c))))))))
+                               (assoc-in c [:raw :adjacent-source-evidence] adjacent))
                              c))
                          (:candidates processed))
         parsed (count (filter #(= :parsed (:parse-status %)) candidates))]

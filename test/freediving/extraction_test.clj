@@ -21,7 +21,7 @@
                     " DNF          Athlete               Pol              Klub         Ostvareno\n"
                     "  1        Tijana Nikolić     Žensko / Female   RK Sebastijan       106\n")]
         result (extraction/parse-pages pages)]
-    (is (= "belgrade-freediving-open-2026/1" (:parser-version result)))
+    (is (= belgrade-2026/parser-version (:parser-version result)))
     (is (= 1 (get-in result [:reconciliation :candidate-count])))
     (is (= :blocked (get-in result [:publication :status])))))
 

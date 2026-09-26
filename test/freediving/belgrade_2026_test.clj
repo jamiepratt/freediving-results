@@ -1,6 +1,11 @@
 (ns freediving.belgrade-2026-test
   (:require [clojure.test :refer [deftest is run-tests]]
-            [freediving.belgrade-2026 :as belgrade]))
+            [freediving.archive :as archive]
+            [freediving.belgrade-2026 :as belgrade]
+            [freediving.extraction-test :as extraction-fixture]
+            [freediving.observations :as observations])
+  (:import [java.security MessageDigest]
+           [java.util HexFormat]))
 
 (def sample-page
   (str "2026 Belgrade Freediving Open\n"
@@ -16,6 +21,7 @@
   (let [r (belgrade/parse-pages [sample-page])
         cs (:candidates r)]
     (is (= belgrade/parser-version (:parser-version r)))
+    (is (= "belgrade-freediving-open-2026/2" (:parser-version r)))
     (is (= 3 (:schema-version r)))
     (is (= :needs-review (:status r)))
     (is (= 4 (get-in r [:reconciliation :candidate-count])))
@@ -61,6 +67,36 @@
     (is (= [1] (get-in r [:reconciliation :unsupported-pages])))
     (is (= :partial-unsupported-needs-parser (:status r)))))
 
+(defn- canonical [v]
+  (cond (map? v) (into (sorted-map) (map (fn [[k x]] [k (canonical x)]) v))
+        (sequential? v) (mapv canonical v)
+        :else v))
+
+(deftest split-club-row-passes-public-import-evidence-validation
+  (let [page (str "2026 Belgrade Freediving Open\nSerbia, Futog, 25.04.2026\n"
+                  "DYNBF          Athlete              Pol              Klub         Ostvareno\n"
+                  "                                                 RK Danubius\n"
+                  "           Dejan Gligorić      Muško / Male                       78 DSQ SP\n"
+                  "                                                   Spasilac\n")
+        [root source-sha] (extraction-fixture/registered-pdf)
+        identity {:source-sha256 source-sha
+                  :acquisitions (:acquisitions (archive/inspect root source-sha))
+                  :evidence-sha256 [] :actor "synthetic-test" :config {}
+                  :parser-version "belgrade-import-evidence-contract/1"
+                  :schema-version 3 :pdfinfo-version "test"
+                  :tool {:name "pdftotext" :version "test" :arguments ["-layout"]}}
+        job-id (.formatHex (HexFormat/of)
+                           (.digest (MessageDigest/getInstance "SHA-256")
+                                    (.getBytes (pr-str (canonical identity)) "UTF-8")))
+        artifact (merge identity (belgrade/parse-pages [page])
+                        {:job-id job-id :parser-version (:parser-version identity)
+                         :processed-at "2026-09-26T12:00:00Z"
+                         :pdf-page-count 1 :raw-text page})]
+    (archive/derive! root job-id (constantly artifact) nil)
+    ;; import! validates all page evidence before attempting a database connection.
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Database URL required"
+                          (observations/import! nil root job-id)))))
+
 (defn -main []
   (let [result (run-tests 'freediving.belgrade-2026-test)]
-    (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
+    (System/exit (if (pos? (+ (:fail result) (:error result))) 1 0))))
