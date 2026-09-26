@@ -1,4 +1,5 @@
 import sys
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -93,6 +94,15 @@ class AcquisitionTest(unittest.TestCase):
             with patch("source_acquisition.time.time", return_value=time.time() + 3600):
                 with AcquisitionClient(default_policy=policy, state_path=state).lease(url) as waited:
                     self.assertGreaterEqual(waited, 0.14)
+
+    def test_legacy_writer_deadline_does_not_block_new_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = str(Path(directory) / "leases.sqlite3")
+            client = AcquisitionClient(default_policy=Policy(min_interval=0), state_path=state)
+            with sqlite3.connect(state) as db:
+                db.execute("INSERT INTO hosts VALUES (?, ?)", ("publisher.example", time.time() + 100))
+            with client.lease("https://publisher.example/result") as waited:
+                self.assertLess(waited, 0.5)
 
     def test_redirect_target_shares_budget_with_new_client(self):
         arrived = []

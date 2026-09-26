@@ -122,6 +122,12 @@ class _LeaseStore:
                         db.execute("DELETE FROM leases WHERE token = ?", (stale_token,))
                 count = db.execute("SELECT COUNT(*) FROM leases WHERE host = ?", (host,)).fetchone()[0]
                 row = db.execute("SELECT next_start FROM hosts WHERE host = ?", (host,)).fetchone()
+                # An older client can still write a wall-clock deadline after
+                # this database migrates. Ignore only unmistakable Unix-time
+                # values; keep normal monotonic deadlines across processes.
+                if row and row[0] > 1_000_000_000 and now < 1_000_000_000:
+                    db.execute("DELETE FROM hosts WHERE host = ?", (host,))
+                    row = None
                 delay = max(0.0, (row[0] if row else 0.0) - now)
                 if count < policy.concurrency and delay == 0:
                     db.execute("INSERT INTO leases VALUES (?, ?, ?, ?)", (token, host, os.getpid(), now + lifetime))
