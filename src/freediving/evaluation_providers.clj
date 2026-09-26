@@ -105,18 +105,21 @@
   Conservative UTF-8 byte caps leave headroom below provider 32k/64k token limits."
   [config cases]
   (let [config (cond-> config
-                 (nil? (:identity-protocol config)) (assoc :identity-protocol :freediving-compact-v2))
-        default? (= :freediving-compact-v2 (:identity-protocol config))
+                 (nil? (:identity-protocol config)) (assoc :identity-protocol :freediving-compact-v3))
+        spelling? (= :freediving-compact-v3 (:identity-protocol config))
+        default? (#{:freediving-compact-v2 :freediving-compact-v3} (:identity-protocol config))
         config (cond-> config
                  default? (update :native-batch-size #(or % 8))
+                 spelling? (update :diagnostics-version #(or % 2))
                  default? (update :native-diagnostics-version #(or % 2))
                  default? (update :probability-sum-tolerance #(or % 0.02)))
         size (:native-batch-size config) companions (get config :companion-assessments [])
-        compact? (#{:freediving-compact-v1 :freediving-compact-v2} (:identity-protocol config))
+        compact? (#{:freediving-compact-v1 :freediving-compact-v2 :freediving-compact-v3} (:identity-protocol config))
         table? (or default? (= :italian-table-v1 (:identity-extraction config)))
         project (if table? protocol/compact-table-projection protocol/compact-projection)
         local? (or compact? (= :freediving-question-local-v1 (:identity-protocol config)))
-        descriptor (cond default? protocol/compact-table-descriptor
+        descriptor (cond spelling? protocol/compact-spelling-descriptor
+                         default? protocol/compact-table-descriptor
                          compact? (cond-> protocol/compact-descriptor
                                     (= :original-v1 (:identity-guidance config))
                                     (assoc :instruction (:instruction protocol/question-local-descriptor)
@@ -127,9 +130,9 @@
         rounded? (contains? config :probability-sum-tolerance)
         base-config (cond-> (apply dissoc config batch-option-keys)
                       local? (assoc :identity-protocol :freediving-source-v1))]
-    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1 :freediving-compact-v2} (:identity-protocol config))
+    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1 :freediving-compact-v2 :freediving-compact-v3} (:identity-protocol config))
                    (or (not (contains? config :identity-guidance))
-                       (and compact? (= :original-v1 (:identity-guidance config))))
+                       (and compact? (= :original-v1 (:identity-guidance config)) (not spelling?)))
                    (or (not (contains? config :identity-extraction))
                        (and compact? (= :italian-table-v1 (:identity-extraction config))
                             (or default? (= :original-v1 (:identity-guidance config)))))
@@ -162,14 +165,15 @@
                                                      compact? (protocol/compact-question (:input request))
                                                      local? (protocol/question-local (:input request))
                                                      :else (protocol/question left right))]
-                                         (cons [(str "identity_" i) q]
-                                               (map (fn [kind]
-                                                      [(str (name kind) "_" i)
-                                                       {:type "choice"
-                                                        :instructions (str (str/replace (:instructions q) #"Choose match when combined evidence supports the same person, no_match when it supports different people, abstain when material ambiguity remains\. " "") " Independent companion assessment; not sequential reasoning or calibrated confidence. " (companion-instructions kind))
-                                                        :criteria {:yes "Source evidence supports this assessment"
-                                                                   :no "Source evidence does not support this assessment"
-                                                                   :unknown "Insufficient evidence"}}]) companions))))
+                                         (concat [[(str "identity_" i) q]]
+                                                 (when spelling? [[(str "spelling_" i) (protocol/spelling-question (:input request))]])
+                                                 (map (fn [kind]
+                                                        [(str (name kind) "_" i)
+                                                         {:type "choice"
+                                                          :instructions (str (str/replace (:instructions q) #"Choose match when combined evidence supports the same person, no_match when it supports different people, abstain when material ambiguity remains\. " "") " Independent companion assessment; not sequential reasoning or calibrated confidence. " (companion-instructions kind))
+                                                          :criteria {:yes "Source evidence supports this assessment"
+                                                                     :no "Source evidence does not support this assessment"
+                                                                     :unknown "Insufficient evidence"}}]) companions))))
                                      (range) singles))
              body (json/write-str {:model (:model config) :state state :questions questions})
              normalized (merge (:config (first singles)) (select-keys config batch-option-keys)
@@ -178,12 +182,13 @@
          (when (or (> (count questions) 32)
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
-         (cond-> {:adapter-version (if compact? "shadow-adapters/13" (if local? (if rounded? (if (> size 2) "shadow-adapters/12" "shadow-adapters/11") "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7"))) :provider :jev :config normalized
+         (cond-> {:adapter-version (if spelling? "shadow-adapters/14" (if compact? "shadow-adapters/13" (if local? (if rounded? (if (> size 2) "shadow-adapters/12" "shadow-adapters/11") "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7")))) :provider :jev :config normalized
                   :protocol descriptor :body body
                   :case-ids (mapv :case-id members)
                   :evidence (mapv #(select-keys % [:case-id :evidence]) members)
                   :question-ids (vec (keys questions))
                   :companions companions :context-policy (if local? :question-local-evidence :exact-record-dedup-shared-batch)}
+           spelling? (assoc :spelling-choice? true)
            compact? (assoc :projections (mapv #(project (:input %)) members)))))
      (partition-all size cases))))
 
@@ -460,12 +465,12 @@
                                               {:outcome :error :error :invalid-response-metadata
                                                :validation-reasons (:validation-reasons metadata)}
                                               (native-choice-diagnostics (get answers id)
-                                                                         (if (str/starts-with? id "identity")
-                                                                           #{"match" "no_match" "abstain"}
-                                                                           #{"yes" "no" "unknown"})
+                                                                         (cond (str/starts-with? id "identity_") #{"match" "no_match" "abstain"}
+                                                                               (str/starts-with? id "spelling_") #{"left" "right" "equally_plausible" "unknown" "not_applicable"}
+                                                                               :else #{"yes" "no" "unknown"})
                                                                          (and (map? answers) (contains? answers id))
-                                                                         (#{"shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))
-                                                                         (#{"shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))))]) ids))
+                                                                         (#{"shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request))
+                                                                         (#{"shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request))))]) ids))
             reasons (cond-> (:validation-reasons metadata)
                       (not (contains? data "answers")) (conj :missing-answers)
                       (and (contains? data "answers") (not (map? answers))) (conj :invalid-answers-type)
@@ -494,8 +499,8 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))
-                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request))
+                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13" "shadow-adapters/14"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
                        (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
                          (parse-diagnostic-response (:provider request) (.body response) token
                                                     (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))

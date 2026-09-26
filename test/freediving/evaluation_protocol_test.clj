@@ -272,7 +272,7 @@
                  (-> cfg (dissoc :identity-guidance) (assoc :identity-extraction :italian-table-v1))]]
       (is (thrown? Exception (providers/prepare-batches bad cases))))))
 
-(deftest new-jev-batches-default-to-table-facts-original-guidance-and-eight-questions
+(deftest new-jev-batches-default-to-table-facts-and-spelling-questions
   (let [cases (mapv #(hash-map :case-id (str "table-" %) :input (italian-table-input)) (range 17))
         cfg (-> config
                 (dissoc :identity-protocol)
@@ -281,15 +281,19 @@
         historical (providers/prepare-batches
                     (assoc cfg :identity-protocol :freediving-compact-v1 :native-batch-size 8
                            :identity-guidance :original-v1 :identity-extraction :italian-table-v1) cases)
+        v2 (providers/prepare-batches (assoc cfg :identity-protocol :freediving-compact-v2) cases)
         first-body (json/read-str (:body (first default)) :key-fn keyword)]
     (is (= [8 8 1] (mapv #(count (:case-ids %)) default)))
-    (is (= :freediving-compact-v2 (get-in (first default) [:protocol :protocol-id])))
-    (is (= :original-v1 (get-in (first default) [:protocol :guidance-version])))
+    (is (= :freediving-compact-v3 (get-in (first default) [:protocol :protocol-id])))
+    (is (= :international-transliteration-v1 (get-in (first default) [:protocol :guidance-version])))
     (is (= "1985" (get-in first-body [:questions :identity_0 :instructions :left :fields :birth-year :value])))
-    (is (= (mapv :body historical) (mapv :body default)))
+    (is (= (mapv :body historical) (mapv :body v2)))
+    (is (= 16 (count (:questions first-body))))
+    (is (= #{:left :right :equally_plausible :unknown :not_applicable}
+           (set (keys (get-in first-body [:questions :spelling_0 :criteria])))))
     (is (not= (:protocol (first historical)) (:protocol (first default))))
     (is (every? #(<= (count (.getBytes ^String (:body %) "UTF-8")) 49152) default))
-    (is (= :freediving-compact-v2 (get-in (first default) [:config :identity-protocol])))
+    (is (= :freediving-compact-v3 (get-in (first default) [:config :identity-protocol])))
     (is (thrown? Exception (providers/prepare-batches
                             (assoc cfg :identity-extraction :unknown) cases)))))
 

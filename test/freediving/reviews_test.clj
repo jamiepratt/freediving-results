@@ -12,7 +12,9 @@
             [freediving.extraction-test :as extraction-fixture]
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
-            [freediving.candidates :as candidates]))
+            [freediving.candidates :as candidates]
+            [freediving.evaluation :as evaluation]
+            [freediving.spelling-normalization :as spelling]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
 (use-fixtures :each (fn [f]
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
@@ -124,6 +126,50 @@
     (is (= {:outcome :unknown} (:identity (reviews/effective fixture/app target))))
     (is (= 3 (count (reviews/history fixture/app target))))
     (is (= (:observations before) (:observations (observations/inspect fixture/app (:job-id target)))))))
+
+(deftest jev-spelling-normalization-uses-reversible-review-audit
+  (let [t (sample)
+        target (first (filter #(= t (select-keys % [:job-id :ordinal]))
+                              (candidates/load-corpus reviewer {})))
+        left {:job-id "other" :ordinal 0 :kind "result-row" :candidate-id "other-candidate"
+              :source-sha256 "other-source" :artifact-sha256 "other-artifact"
+              :payload {:parsed {:source-name "Example"}}}
+        record (fn [row]
+                 {:record-id (str "local-observation:" (:job-id row) ":" (:ordinal row))
+                  :fields {:name {:value (get-in row [:payload :parsed :source-name])
+                                  :evidence-ids ["name-source"]}}
+                  :sources [{:evidence-id "name-source" :source-sha256 (:source-sha256 row)
+                             :artifact-sha256 (:artifact-sha256 row)
+                             :observation-id (:candidate-id row)}]})
+        case {:case-id "pair" :split :held-out
+              :input {:left (record left) :right (record target)}}
+        result {:case-id "pair" :batch-index 0 :request-hash "request" :trace-hash "trace"
+                :model-version "jev-1.13.0" :outcome :match :confidence 0.98
+                :probabilities {:match 0.96 :no_match 0.02 :abstain 0.02}
+                :spelling {:outcome :left :confidence 0.98
+                           :probabilities {:left 0.96 :right 0.01 :equally_plausible 0.01
+                                           :unknown 0.01 :not_applicable 0.01}}}
+        run {:input {:configurations [{:id "jev"}]
+                     :requests [[{:provider :jev :adapter-version "shadow-adapters/14"
+                                  :config {:identity-protocol :freediving-compact-v3}}]]
+                     :dataset {:cases [case]}}
+             :report {:providers {"jev" {:results [result]
+                                         :batches [{:dispatch-status :dispatched :trace-hash "trace"
+                                                    :attempt {:request-hash "request"
+                                                              :result {:outcome :complete :http-status 200
+                                                                       :model-version "jev-1.13.0"}}}]}}}}
+        applied (with-redefs [evaluation/inspect-run (fn [& _] run)
+                              candidates/load-corpus (fn [& _] [left target])]
+                  (first (spelling/apply-run! "private-root" "run" "jev" reviewer)))
+        state (reviews/effective reviewer t)]
+    (is (= :applied (:status applied)))
+    (is (= "Example" (get-in state [:fields :source-name])))
+    (is (= 2 (count (reviews/history reviewer t))))
+    (is (= "Éxample" (get-in target [:payload :parsed :source-name])))
+    (reviews/decide! reviewer {:id "reverse-jev" :event-id (:approval-id applied)
+                               :action :reverse :base-revision (:revision state)
+                               :actor "owner" :reason "Restore original spelling"})
+    (is (= "Éxample" (get-in (reviews/effective reviewer t) [:fields :source-name])))))
 (defn -main [& _]
   (let [r (clojure.test/run-tests 'freediving.reviews-test)]
     (shutdown-agents) (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))

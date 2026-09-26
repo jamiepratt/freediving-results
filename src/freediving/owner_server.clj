@@ -3,7 +3,8 @@
   (:require [clojure.edn :as edn] [clojure.data.json :as json] [clojure.java.io :as io] [clojure.string :as str]
             [freediving.candidates :as candidates] [freediving.packets :as packets]
             [freediving.corrections :as corrections]
-            [freediving.reviews :as reviews] [freediving.publication :as publication])
+            [freediving.reviews :as reviews] [freediving.publication :as publication]
+            [freediving.spelling-normalization :as spelling])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
            [java.sql DriverManager]
@@ -76,7 +77,7 @@
   (let [cookies (str/split (or (header e "Cookie") "") #";\s*") id (some #(second (re-matches #"owner-session=([A-Za-z0-9_-]+)" %)) cookies)
         s (get @sessions id)]
     (when (and s (< (System/currentTimeMillis) (:expires s))) s)))
-(defn- routes! [e {:keys [url database-url secret sessions mode-info source-config]}]
+(defn- routes! [e {:keys [url database-url secret sessions mode-info source-config score-config]}]
   (let [method (.getRequestMethod e) path (.getPath (.getRequestURI e)) host (header e "Host") origin (header e "Origin")
         auth (session sessions e) get? (= method "GET") post? (= method "POST")
         respond #(respond! e 200 % "application/json")]
@@ -160,6 +161,10 @@
         (if (= path "/api/evidence")
           (respond (assoc (select-keys row [:job-id :ordinal :source-format :source-lines :acquisitions :source-sha256 :artifact-sha256]) :coordinates (get-in row [:payload :coordinates])))
           (respond (merge mode-info {:packet (assoc (candidates/packet corpus t {}) :target row :local-identity-anchor {:identity-id (str "local-observation:" (:job-id t) ":" (:ordinal t)) :reference (merge (select-keys row [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256]) (if (= :html (:source-format row)) (select-keys (get-in row [:payload :coordinates]) [:table :row]) (select-keys (first (:source-lines row)) [:page :line])))}) :effective (reviews/effective database-url t)
+                                     :jev-scores (when score-config
+                                                   (spelling/score-view (:jev-run-root score-config)
+                                                                        (:jev-run-id score-config)
+                                                                        (:jev-provider-id score-config) t corpus))
                                      :history (reviews/history database-url t) :publication (publication/diagnose database-url t)
                                      :publication-history (publication/history database-url t) :rubric packets/rubric}))))
       :else (fail! 404 "Unknown endpoint"))))
@@ -174,12 +179,15 @@
   (System/setProperty "sun.net.httpserver.maxRspTime" "45")
   (let [real? (= :real-inspection (:mode config))
         review-enabled? (if real? (true? (:review-enabled? config)) (true? demo?))
-        allowed (if real? #{:database-url :port :capability-file :mode :archive-root :cache-root :review-enabled?}
-                    #{:database-url :port :capability-file :demo? :archive-root :cache-root})]
+        allowed (if real? #{:database-url :port :capability-file :mode :archive-root :cache-root :review-enabled? :jev-run-root :jev-run-id :jev-provider-id}
+                    #{:database-url :port :capability-file :demo? :archive-root :cache-root :jev-run-root :jev-run-id :jev-provider-id})]
     (when-not (and (integer? port) (<= 0 port 65535) (every? allowed (keys config))
                    (or real? (true? demo?))
                    (or (not (contains? config :review-enabled?)) (boolean? (:review-enabled? config)))
                    (= (contains? config :archive-root) (contains? config :cache-root))
+                   (or (not-any? #(contains? config %) [:jev-run-root :jev-run-id :jev-provider-id])
+                       (every? #(and (string? (get config %)) (not (str/blank? (get config %))))
+                               [:jev-run-root :jev-run-id :jev-provider-id]))
                    (or (not real?) (and (string? (:archive-root config)) (string? (:cache-root config)))))
       (fail! 400 "Explicit owner mode and source configuration required"))
     (authority! database-url review-enabled?)
@@ -197,6 +205,7 @@
               state {:server server :executor executor :port port :url url :capability-file (str path)}
               context {:url url :database-url database-url :secret secret :sessions (atom {})
                        :source-config (when (:archive-root config) (select-keys config [:archive-root :cache-root]))
+                       :score-config (when (:jev-run-root config) (select-keys config [:jev-run-root :jev-run-id :jev-provider-id]))
                        :mode-info {:demo (not real?) :mode (if real? "real-inspection" "synthetic-demo") :review-enabled? review-enabled? :source-viewer? (boolean (:archive-root config))}}]
           (.createContext server "/" (reify HttpHandler (handle [_ e]
                                                           (try (routes! e context)
