@@ -608,3 +608,63 @@
           (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
             (is (= before (evaluation/run! dir (dataset) old runtime)))
             (is (= after (evaluation/run! dir (dataset) new runtime)))))))))
+
+(deftest five-question-local-batches-preserve-original-questions-and-order
+  (let [members (mapv #(assoc (first (cases)) :case-id (str "larger-" %)) (range 11))
+        cfg (assoc (local-config "https://example.com" 5) :probability-sum-tolerance 0.02)
+        singles (p/prepare-batches (assoc cfg :native-batch-size 1) members)
+        grouped (p/prepare-batches cfg members)
+        decode #(json/read-str (:body %))]
+    (is (= [5 5 1] (mapv #(count (:case-ids %)) grouped)))
+    (is (= (mapv :case-id members) (vec (mapcat :case-ids grouped))))
+    (is (every? #(= "shadow-adapters/12" (:adapter-version %)) grouped))
+    (is (= (mapv #(get-in (decode %) ["questions" "identity_0"]) singles)
+           (vec (mapcat #(vals (into (sorted-map) (get (decode %) "questions"))) grouped))))
+    (is (every? #(= (get (decode (first singles)) "state") (get (decode %) "state")) grouped))
+    (doseq [size [1 2]]
+      (is (every? #(= "shadow-adapters/11" (:adapter-version %))
+                  (p/prepare-batches (assoc cfg :native-batch-size size) members))))
+    (doseq [size [3 4 6 7 8]]
+      (is (every? #(= "shadow-adapters/12" (:adapter-version %))
+                  (p/prepare-batches (assoc cfg :native-batch-size size) members))))
+    (is (thrown? Exception (p/prepare-batches (dissoc cfg :probability-sum-tolerance) members)))
+    (is (thrown? Exception (p/prepare-batches (assoc cfg :max-request-bytes 1000) members)))
+    (is (thrown? Exception (p/prepare-batches (assoc cfg :companion-assessments [:contradiction]) members)))))
+
+(deftest five-question-rounded-http-results-replay-without-redispatch
+  (let [calls (atom 0) dir (runner/root)
+        sample (dataset)
+        sample (assoc sample :cases (mapv #(assoc (first (:cases sample)) :case-id (str "larger-" %)) (range 11)))]
+    (http/with-server
+      (fn [ex]
+        (swap! calls inc)
+        (let [body (json/read-str (slurp (.getRequestBody ex)))]
+          (http/reply! ex 200
+                       (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                        :answers (into {} (map (fn [id] [id (assoc (answer "match") :probabilities
+                                                                                   {"match" 0.93 "no_match" 0.01 "abstain" 0.05})])
+                                                               (keys (get body "questions"))))}))))
+      (fn [url]
+        (let [cfg [(assoc (local-config url 5) :probability-sum-tolerance 0.02)]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! dir sample cfg runtime)
+              report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])]
+          (is (= (vec (repeat 11 :match)) (mapv :outcome (:results report))))
+          (is (= 3 @calls))
+          (is (= [5 5 1] (get-in report [:request-metrics :batch-sizes])))
+          (is (= {:match 0.93 :no_match 0.01 :abstain 0.05} (get-in report [:results 0 :probabilities])))
+          (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
+            (is (= receipt (evaluation/run! dir sample cfg runtime))))
+          (is (= 3 @calls)))))))
+
+(deftest larger-question-local-batches-retain-total-and-per-question-byte-caps
+  (let [cfg (assoc (local-config "https://example.com" 5) :probability-sum-tolerance 0.02)
+        input (assoc-in (fixture/input) [:left :uncertainties]
+                        (vec (repeat 2 {:value (apply str (repeat 4000 "x")) :evidence-ids ["source-row-1"]})))
+        members (mapv #(assoc (first (cases)) :case-id (str "large-" %) :input input) (range 5))]
+    (is (= 5 (count (p/prepare-batches (assoc cfg :native-batch-size 1) members))))
+    (is (thrown? Exception (p/prepare-batches cfg members)))
+    (is (thrown? Exception
+                 (p/prepare-batches cfg [(assoc (first members) :input
+                                                (assoc-in input [:left :uncertainties]
+                                                          (vec (repeat 8 {:value (apply str (repeat 4000 "x")) :evidence-ids ["source-row-1"]}))))])))))

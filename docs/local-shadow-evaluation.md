@@ -444,7 +444,7 @@ actual billing and broader pilot/release limits remain
 
 ### Question-local structure protocol
 
-`freediving-question-local-v1` selects `shadow-adapters/10` through
+Without a probability-sum tolerance option, `freediving-question-local-v1` selects `shadow-adapters/10` through
 `prepare-batches`, including batch size 1. It requires `jev-1.13.0`, native
 diagnostics 2, no companions, and batch size 1 or 2. The original
 `freediving-source/1` closed evidence schema remains unchanged.
@@ -463,7 +463,7 @@ Requests retain the protocol descriptor and new adapter identity. Historical
 protocols, request identities and replay behavior remain unchanged. Strict
 response validation, numerical diagnostics, terminal stopping, one attempt,
 sequential HTTP, per-request accounting and durable replay are retained.
-The local protocol rejects companions and other batch sizes to keep the
+The original `/10` protocol rejects companions and other batch sizes to keep the
 structure experiment bounded. Direct `prepare-request` remains the historical
 single-question API; use `prepare-batches` with size 1 for this new protocol.
 
@@ -706,3 +706,67 @@ lint were clean. Live replay made zero calls and reproduced result/report with a
 615 store files unchanged in bytes, permissions and modification times. All 462
 inventoried prior files retained their hashes. An in-memory exact credential and
 service-token scan found no retained secrets. No deployment or authority mutation.
+
+### Five-question comparison, 2026-09-26
+
+The owner requested a larger-batch comparison with unchanged questions. Fixed
+batch size five was the largest size up to eight for which every consecutive
+group fit the unchanged 49,152-byte request cap: maximum 47,548 bytes, versus
+59,261 for size six. The frozen L5 arm comprised sixteen five-question requests
+and one singleton, covering all 81 original cases in order. All question objects,
+shared state, labels and source evidence exactly matched the B7 inputs.
+
+With `:probability-sum-tolerance 0.02`, question-local batch sizes 3-8 now select
+`shadow-adapters/12`. Sizes 1-2 retain `/11`, and omitted tolerance retains `/10`.
+The `/12` parser uses the same rounded-sum validation as `/11`, without
+normalization. Request and response byte caps, per-question bound, pinned model,
+15-second timeout, one attempt, terminal stopping and no-companion rule remain.
+
+| Measure | Single (S1) | Pairs (B1) | Five (L5) |
+| --- | ---: | ---: | ---: |
+| Requests | 81 | 41 | 17 |
+| Valid / total cases | 81/81 | 81/81 | 81/81 |
+| Match / no-match | 46/35 | 46/35 | 46/35 |
+| False merges / 35 negative labels | 0 | 0 | 0 |
+| Missed matches / 46 positive labels | 0 | 0 | 0 |
+| Abstentions / errors / undispatched | 0/0/0 | 0/0/0 | 0/0/0 |
+| Request-loop wall time, seconds | 34.580 | 20.396 | 10.308 |
+| Summed HTTP latency, seconds | 32.278 | 19.149 | 9.766 |
+| Request latency median / p95, ms | 391/469 | 452/582 | 574/726 |
+| Reported input tokens | 379,377 | 356,577 | 342,897 |
+| Reported output tokens | 3,518 | 3,398 | 3,326 |
+
+L5 made exactly 17 new requests / 81 question attempts, with no retries or
+resends. Every choice agreed with both earlier arms. Probability distributions
+differed on 34 cases versus S1 and 32 versus B1; maximum absolute component
+difference was 0.04 in both comparisons. Mean absolute component differences
+across all 243 components were 0.003621 and 0.003704 respectively. Stored-value
+comparisons and a 1e-9 roundoff threshold gave the same changed-case counts.
+Actual billed cost remains unknown.
+
+The runs occurred at different times, without randomized order or repeat
+controls. Their observed latency differences do not establish a causal batching
+benefit. All 81 cases had already been exposed before L5, and larger grouping
+was selected after the earlier results. The original owner approval by reference
+of assistant-authored labels/reasons, excluded seven adjudications, two-document
+dependence and hidden-identity limitations remain. This comparison supplies no
+fresh held-out, calibrated, generalization or production-safety claim.
+[Issue #6](https://github.com/jamiepratt/freediving-results/issues/6) remains open.
+
+Private evidence: `data/heldout-evaluation-81-20260926-b8/` in the saved project.
+Run identity: `d0f689974a196c734b8d492011da3a6b12ed5b0b93e9a76328bd20789b202ac2`.
+Live report SHA-256: `597a218f7548d1553ff225742f5f59482d04bf37048450d5fac56901e2896fd1`;
+summary: `270d6f0640d5797e1bb852a33a4fecd8ab92ab9e086ad7f2a3082d0c78383ac8`;
+paired outcomes: `372204b157326461bea9bf1e36d6c37378a6c5b84aff28d5a721e07adeddead3`.
+The separate launch manifest binds executable/input hashes and the expected
+identity. The one-shot launcher refuses any second live launch after a durable
+start. Replay made zero calls and preserved all 90 store files; all 1,064 prior
+inventory files retained bytes, size, permissions and modification times.
+Credential/service-token scanning found no retained secrets. Raw HTTP response
+bytes remain unavailable under the existing adapter design.
+
+TDD covered larger-group preparation and content equality, HTTP parsing,
+unchanged byte bounds, terminal stopping, interrupted launch refusal, and replay.
+The shadow suite passed 90 tests / 1,675 assertions; eight combined old/new
+launcher tests passed. Clojure delimiter repair and lint were clean. The B7
+packet still reproduces all 122 original prepared objects and its run identity.
