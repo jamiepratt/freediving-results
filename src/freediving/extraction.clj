@@ -9,6 +9,7 @@
             [freediving.novi-sad :as novi-sad]
             [freediving.croatia-open :as croatia-open]
             [freediving.italy-open :as italy-open]
+            [freediving.world-games-2025 :as world-games]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -93,6 +94,7 @@
         (novi-sad/supported? pages) (novi-sad/parse-pages pages)
         (croatia-open/supported? pages) (croatia-open/parse-pages pages)
         (italy-open/supported? pages) (italy-open/parse-pages pages)
+        (world-games/supported? pages) (world-games/parse-pages pages)
         (depth-2026/supported? pages) (depth-2026/parse-pages-with-geometry pages "")
         :else (parse-cmas-pages pages)))
 
@@ -124,6 +126,9 @@
 (defn italy-open-artifact? [artifact]
   (and (= 3 (:schema-version artifact)) (= italy-open/parser-version (:parser-version artifact))))
 
+(defn world-games-artifact? [artifact]
+  (and (= 3 (:schema-version artifact)) (= world-games/parser-version (:parser-version artifact))))
+
 (defn- athens-selected? [pages]
   (and (athens/supported? pages)
        (not-any? #(% pages) [depth/supported? depth-2025/supported? aida/supported?])))
@@ -147,7 +152,8 @@
   ([root artifact]
    (or (requires-geometry-validation? artifact)
        (when (and (not (legacy-novi-artifact? artifact)) (not (legacy-athens-artifact? artifact))
-                  (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact)))
+                  (not (croatia-open-artifact? artifact)) (not (italy-open-artifact? artifact))
+                  (not (world-games-artifact? artifact)))
          (let [source (archive/inspect root (:source-sha256 artifact))
                raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
                pages (str/split raw #"\f" -1)]
@@ -179,13 +185,16 @@
          novi? (novi-sad/supported? pages)
          croatia? (croatia-open/supported? pages)
          italy? (italy-open/supported? pages)
+         world-games? (world-games/supported? pages)
          _ (when (and italy? (not= sha256 italy-open/source-sha256))
              (throw (ex-info "Italian Open parser is bound to a different source PDF" {})))
+         _ (when (and world-games? (not= sha256 world-games/source-sha256))
+             (throw (ex-info "World Games parser is bound to a different source PDF" {})))
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version :else parser-version)
-                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 :else 1)
+                   :parser-version (cond indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version world-games? world-games/parser-version :else parser-version)
+                   :schema-version (cond indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 world-games? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
                            (or athens? indoor? depth-2025? depth-2026?) (assoc :geometry-arguments ["-bbox-layout" "-enc" "UTF-8"]))}
@@ -284,6 +293,24 @@
                    (= raw (:raw-text artifact))
                    (= replay (select-keys artifact (keys replay))))
       (throw (ex-info "Italian Open extraction differs from archived source replay" {})))
+    artifact))
+
+(defn validate-world-games-artifact!
+  "Replay the source-bound World Games layout before import."
+  [root artifact]
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        raw (:out (command! "pdftotext" "-layout" "-enc" "UTF-8" (:artifact-path source) "-"))
+        segments (vec (str/split raw #"\f" -1))
+        pages (if (= "" (last segments)) (pop segments) segments)
+        replay (world-games/parse-pages pages)]
+    (when-not (and (world-games-artifact? artifact)
+                   (= world-games/source-sha256 (:source-sha256 artifact))
+                   (= "pdftotext" (get-in artifact [:tool :name]))
+                   (= ["-layout" "-enc" "UTF-8"] (get-in artifact [:tool :arguments]))
+                   (= (str/trim (:err (command! "pdftotext" "-v"))) (get-in artifact [:tool :version]))
+                   (= raw (:raw-text artifact))
+                   (= replay (select-keys artifact (keys replay))))
+      (throw (ex-info "World Games extraction differs from archived source replay" {})))
     artifact))
 
 (defn -main [& args]

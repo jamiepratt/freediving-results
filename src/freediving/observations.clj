@@ -141,6 +141,7 @@
                      (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
                      (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
                      (extraction/italy-open-artifact? a) (->> (extraction/validate-italy-open-artifact! root))
+                     (extraction/world-games-artifact? a) (->> (extraction/validate-world-games-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
