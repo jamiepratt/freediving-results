@@ -57,7 +57,7 @@
     :else :unknown))
 
 (defn- pair-edges [observations]
-  (for [[_ group] (group-by (juxt :source-sha256 :position) observations)
+  (for [[_ group] (group-by (juxt :source-sha256 :position) (filter citation? observations))
         :when (> (count group) 1)
         [index left] (map-indexed vector group)
         right (drop (inc index) group)

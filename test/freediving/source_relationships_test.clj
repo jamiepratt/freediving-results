@@ -79,6 +79,21 @@
                                            :source-candidates [{:left "aggregate" :right "individual"
                                                                 :reason :uninspected-sporting-overlap}]})))))
 
+(deftest observations-without-valid-page-line-citations-are-unpaired
+  (let [missing (mapv (fn [n]
+                        (observation (str "job-" n) 0
+                                     {:position [] :source-text nil}))
+                      (range 100))
+        malformed [(observation "malformed-a" 0
+                                {:position [{:page nil :line nil}] :source-text "row"})
+                   (observation "malformed-b" 0
+                                {:position [{:page nil :line nil}] :source-text "row"})]
+        result (relationships/classify {:observations (into missing malformed)})]
+    (is (= 102 (count (:observations result))))
+    (is (empty? (:edges result)))
+    (is (empty? (:candidates result)))
+    (is (= 0 (get-in result [:counts-by-scope :observation :unknown])))))
+
 (defn -main []
   (let [result (run-tests 'freediving.source-relationships-test)]
     (System/exit (if (zero? (+ (:fail result) (:error result))) 0 1))))
