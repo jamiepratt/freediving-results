@@ -2,6 +2,10 @@ import sys
 import tempfile
 import time
 import unittest
+import json
+import os
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -10,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from browser_acquisition import BrowserAcquisitionError, capture_page
 from acquire_source import acquire
 from source_acquisition import AcquisitionClient, Policy
+from capture_browser import main as capture_main
 
 
 class Response:
@@ -89,8 +94,109 @@ class Page:
     def content(self):
         return "<html>rendered results</html>"
 
+    @property
+    def url(self):
+        return self.responses[-1][0]
+
 
 class BrowserCaptureTest(unittest.TestCase):
+    def test_capture_cli_validates_selection_file_before_browser_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = Path(directory) / "selection.json"
+            spec.write_text(json.dumps({"schema": "browser-selection/v1", "selected_date": "2025-06-28",
+                "actions": [{"type": "select_option", "selector": "select.day", "value": "2025-06-28"}],
+                "selected_state": {"selector": ".date", "text": "2025-06-28"},
+                "result_selector": "table.results tr", "min_results": 1,
+                "response_contains": "Athlete"}))
+            with redirect_stdout(StringIO()) as output:
+                result = capture_main(["https://publisher.example/results", str(Path(directory) / "output"),
+                                       "--selection-file", str(spec), "--dry-run"])
+        self.assertEqual(0, result)
+        self.assertEqual("2025-06-28", json.loads(output.getvalue())["selected_date"])
+
+    def test_capture_cli_rejects_broadly_readable_storage_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text("{}")
+            os.chmod(state, 0o644)
+            with redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    capture_main(["https://publisher.example/results", str(Path(directory) / "output"),
+                                  "--storage-state", str(state), "--dry-run"])
+
+    def test_selected_date_capture_verifies_result_view_and_response(self):
+        class SelectedPage(Page):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self.selected = None
+
+            def select_option(self, selector, value):
+                self.selected = (selector, value)
+
+            def locator(self, selector):
+                page = self
+
+                class Locator:
+                    def count(self):
+                        return 2 if selector == "table.results tbody tr" and page.selected else 0
+
+                    def inner_text(self):
+                        if not page.selected:
+                            return ""
+                        return {".selected-date": "2025-06-28", ".selected-discipline": "DYN"}.get(selector, "")
+
+                return Locator()
+
+            def content(self):
+                return "<html><table class='results'><tr><td>Athlete</td></tr></table></html>" if self.selected else "<html></html>"
+
+        url = "https://publisher.example/StartList/4349"
+        page = SelectedPage([(url, Response(body=b"<html>2025-06-28 Athlete</html>"))])
+        spec = {"schema": "browser-selection/v1", "selected_date": "2025-06-28",
+                "actions": [{"type": "select_option", "selector": "select.day", "value": "2025-06-28"}],
+                "selected_state": {"selector": ".selected-date", "text": "2025-06-28"},
+                "verified_filters": [{"name": "discipline", "selector": ".selected-discipline", "text": "DYN"}],
+                "result_selector": "table.results tbody tr", "min_results": 2,
+                "response_contains": "Athlete"}
+        with tempfile.TemporaryDirectory() as directory:
+            client = AcquisitionClient(default_policy=Policy(min_interval=0),
+                                       lease_path=Path(directory) / "lease.sqlite3")
+            capture = capture_page(page, url, client, opener=page, selection=spec)
+        self.assertEqual(("select.day", "2025-06-28"), page.selected)
+        self.assertEqual("2025-06-28", capture.selected_state["selected_date"])
+        self.assertEqual(2, capture.selected_state["result_count"])
+        self.assertEqual({"discipline": "DYN"}, capture.selected_state["filters"])
+        self.assertEqual(url, capture.final_url)
+
+    def test_selected_date_capture_rejects_missing_result_rows(self):
+        class EmptyPage(Page):
+            def select_option(self, selector, value):
+                pass
+
+            def locator(self, selector):
+                class Locator:
+                    def count(self):
+                        return 0
+
+                    def inner_text(self):
+                        return "2025-06-28"
+
+                return Locator()
+
+        url = "https://publisher.example/StartList/4349"
+        page = EmptyPage([(url, Response(body=b"<html>Athlete</html>"))])
+        spec = {"schema": "browser-selection/v1", "selected_date": "2025-06-28",
+                "actions": [{"type": "select_option", "selector": "select.day", "value": "2025-06-28"}],
+                "selected_state": {"selector": ".selected-date", "text": "2025-06-28"},
+                "result_selector": "table.results tbody tr", "min_results": 1,
+                "response_contains": "Athlete"}
+        with tempfile.TemporaryDirectory() as directory:
+            client = AcquisitionClient(default_policy=Policy(min_interval=0),
+                                       lease_path=Path(directory) / "lease.sqlite3")
+            with self.assertRaises(BrowserAcquisitionError) as caught:
+                capture_page(page, url, client, opener=page, selection=spec)
+        self.assertEqual("incomplete_rendered_results", caught.exception.reason)
+
     def test_unavailable_archive_stops_before_browser_request(self):
         url = "https://publisher.example/results"
         page = Page([(url, Response())])

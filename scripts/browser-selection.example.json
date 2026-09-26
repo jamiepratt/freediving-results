@@ -1,0 +1,29 @@
+{
+  "schema": "browser-selection/v1",
+  "selected_date": "2025-06-28",
+  "actions": [
+    {
+      "type": "select_option",
+      "selector": "DATE_SELECT_SELECTOR_FROM_CURRENT_PAGE",
+      "value": "DATE_OPTION_VALUE_FROM_CURRENT_PAGE"
+    },
+    {
+      "type": "click",
+      "selector": "DISCIPLINE_FILTER_SELECTOR_FROM_CURRENT_PAGE"
+    }
+  ],
+  "selected_state": {
+    "selector": "VISIBLE_SELECTED_DATE_SELECTOR_FROM_CURRENT_PAGE",
+    "text": "2025-06-28"
+  },
+  "verified_filters": [
+    {
+      "name": "discipline",
+      "selector": "VISIBLE_SELECTED_DISCIPLINE_SELECTOR_FROM_CURRENT_PAGE",
+      "text": "DYN"
+    }
+  ],
+  "result_selector": "RESULT_ATTEMPT_ROW_SELECTOR_FROM_CURRENT_PAGE",
+  "min_results": 1,
+  "response_contains": "RESULT_RESPONSE_MARKER_FROM_CURRENT_PAGE"
+}

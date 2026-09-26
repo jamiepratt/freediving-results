@@ -7,6 +7,7 @@ private archive; this module does not register observations.
 """
 
 from dataclasses import dataclass
+from datetime import date
 from hashlib import sha256
 import json
 import random
@@ -54,6 +55,49 @@ class BrowserCapture:
     redirects: tuple[tuple[str, str, int], ...]
     reuses: tuple[dict, ...] = ()
     events: tuple[dict, ...] = ()
+    final_url: str | None = None
+    selected_state: dict | None = None
+
+
+def _validate_selection(selection):
+    if selection is None:
+        return
+    if not isinstance(selection, dict) or selection.get("schema") != "browser-selection/v1":
+        raise ValueError("selection requires browser-selection/v1")
+    try:
+        date.fromisoformat(selection["selected_date"])
+        state = selection["selected_state"]
+        if not isinstance(state["selector"], str) or not state["selector"] or not isinstance(state["text"], str) or not state["text"]:
+            raise ValueError
+        if not isinstance(selection["result_selector"], str) or not selection["result_selector"]:
+            raise ValueError
+        if type(selection["min_results"]) is not int or selection["min_results"] < 1:
+            raise ValueError
+        if not isinstance(selection["response_contains"], str) or not selection["response_contains"]:
+            raise ValueError
+        actions = selection["actions"]
+        if not isinstance(actions, list) or not actions:
+            raise ValueError
+        for action in actions:
+            if not isinstance(action["selector"], str) or not action["selector"]:
+                raise ValueError
+            if action["type"] == "select_option":
+                if not isinstance(action["value"], str) or not action["value"]:
+                    raise ValueError
+            elif action["type"] != "click":
+                raise ValueError
+        filters = selection.get("verified_filters", [])
+        if not isinstance(filters, list):
+            raise ValueError
+        names = set()
+        for item in filters:
+            if (not isinstance(item["name"], str) or not item["name"] or
+                    not isinstance(item["selector"], str) or not item["selector"] or
+                    not isinstance(item["text"], str) or not item["text"] or item["name"] in names):
+                raise ValueError
+            names.add(item["name"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid browser selection") from error
 
 
 def _validate(host, status, content_type, body, resource_type):
@@ -84,13 +128,14 @@ def _validate(host, status, content_type, body, resource_type):
 
 
 def capture_page(page, url, client: AcquisitionClient, *, opener=None,
-                 archive_roots=(), source_context=None, refresh=False):
+                 archive_roots=(), source_context=None, refresh=False, selection=None):
     """Capture a Page through the shared lease; return exact response bytes and DOM.
 
     Each browser request is replayed through a bounded HTTP reader. Playwright's
     route.fetch buffers the response before its body can be checked. Redirects
     are fulfilled to the browser so each destination enters a new host lease.
     """
+    _validate_selection(selection)
     failures = []
     responses = []
     redirects = []
@@ -285,7 +330,44 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
         if failures:
             failures[0].events = tuple(events)
             raise failures[0]
-        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects),
-                              tuple(reuses), tuple(events))
+        selected_state = None
+        if selection is not None:
+            for action in selection["actions"]:
+                if action["type"] == "select_option":
+                    page.select_option(action["selector"], action["value"])
+                else:
+                    page.click(action["selector"])
+            if hasattr(page, "wait_for_load_state"):
+                page.wait_for_load_state("networkidle")
+            if failures:
+                failures[0].events = tuple(events)
+                raise failures[0]
+            state = selection["selected_state"]
+            actual_text = page.locator(state["selector"]).inner_text().strip()
+            count = page.locator(selection["result_selector"]).count()
+            filters = {}
+            for item in selection.get("verified_filters", []):
+                observed = page.locator(item["selector"]).inner_text().strip()
+                if observed != item["text"]:
+                    raise BrowserAcquisitionError(urlsplit(url).hostname, "selected_filter_mismatch", events=events)
+                filters[item["name"]] = item["text"]
+            if actual_text != state["text"] or count < selection["min_results"]:
+                raise BrowserAcquisitionError(urlsplit(url).hostname, "incomplete_rendered_results", events=events)
+            marker = selection["response_contains"].encode("utf-8")
+            if not any(marker in response.body for response in responses):
+                raise BrowserAcquisitionError(urlsplit(url).hostname, "missing_result_response", events=events)
+            selected_state = {"selected_date": selection["selected_date"],
+                              "selected_text": state["text"], "filters": filters,
+                              "result_count": count}
+        dom = page.content()
+        if len(dom.encode("utf-8")) > client.policy_for(urlsplit(url).hostname).max_bytes:
+            raise BrowserAcquisitionError(urlsplit(url).hostname, "size_limit", events=events)
+        final_url = getattr(page, "url", url)
+        try:
+            _safe_url(final_url)
+        except ValueError:
+            raise BrowserAcquisitionError(urlsplit(url).hostname, "unsafe_url", events=events) from None
+        return BrowserCapture(url, dom, tuple(responses), tuple(redirects),
+                              tuple(reuses), tuple(events), final_url, selected_state)
     finally:
         page.unroute("**/*", handle)

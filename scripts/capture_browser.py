@@ -7,9 +7,10 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 
-from browser_acquisition import BrowserAcquisitionError, capture_page
+from browser_acquisition import BrowserAcquisitionError, _validate_selection, capture_page
 from source_acquisition import AcquisitionClient, CMAS_POLICY, Policy
 
 
@@ -32,6 +33,8 @@ def main(argv=None):
     parser.add_argument("--archive-root", action="append", type=Path, default=[],
                         help="Existing private local or mounted remote acquisition root")
     parser.add_argument("--context-json", default="{}", help="Exact selected date/filter/version JSON object")
+    parser.add_argument("--selection-file", type=Path, help="Versioned date/filter selection JSON")
+    parser.add_argument("--storage-state", type=Path, help="Private Playwright storage state (0600)")
     parser.add_argument("--refresh", action="store_true", help="Request publisher even when verified bytes exist")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -40,9 +43,25 @@ def main(argv=None):
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
         parser.error("source URL must be HTTP(S) without credentials")
     host = parts.hostname.lower()
+    selection = None
+    if args.selection_file:
+        try:
+            selection = json.loads(args.selection_file.read_text())
+            _validate_selection(selection)
+        except (OSError, ValueError):
+            parser.error("invalid selection file")
+    if args.storage_state:
+        try:
+            info = args.storage_state.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    info.st_mode & 0o077 or not info.st_mode & stat.S_IRUSR):
+                raise ValueError
+        except (OSError, ValueError):
+            parser.error("storage state must be a private regular file readable only by its owner")
     if args.dry_run:
         policy = CMAS_POLICY if host == "cmas.org" or host.endswith(".cmas.org") else Policy()
-        print(json.dumps({"host": host, "policy": asdict(policy)}, sort_keys=True))
+        print(json.dumps({"host": host, "policy": asdict(policy),
+                          "selected_date": selection["selected_date"] if selection else None}, sort_keys=True))
         return 0
     client = AcquisitionClient(lease_path=args.lease_path)
     try:
@@ -51,6 +70,10 @@ def main(argv=None):
             raise ValueError
     except ValueError:
         parser.error("context must be a JSON object")
+    if selection:
+        if source_context.get("selected_date") not in (None, selection["selected_date"]):
+            parser.error("context selected_date conflicts with selection file")
+        source_context["selected_date"] = selection["selected_date"]
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -60,10 +83,12 @@ def main(argv=None):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True, channel=args.channel)
             try:
-                context = browser.new_context(accept_downloads=True, service_workers="block")
+                context = browser.new_context(accept_downloads=True, service_workers="block",
+                                              **({"storage_state": str(args.storage_state)} if args.storage_state else {}))
                 page = context.new_page()
                 capture = capture_page(page, args.url, client, archive_roots=args.archive_root,
-                                       source_context=source_context, refresh=args.refresh)
+                                       source_context=source_context, refresh=args.refresh,
+                                       selection=selection)
             finally:
                 browser.close()
         dom_bytes = capture.dom.encode("utf-8")
@@ -81,10 +106,12 @@ def main(argv=None):
                             "bytes": len(response.body), "file": name})
         _json(args.output / "capture.json", {"schema": "browser-capture/v1", "host": host,
               "entry_url": capture.entry_url,
+              "final_url": capture.final_url,
               "retrieved_at": datetime.now(timezone.utc).isoformat(), "dom_sha256": dom_hash,
               "redirects": [{"from": source, "to": target, "status": status}
                             for source, target, status in capture.redirects],
               "context": source_context, "reuses": capture.reuses,
+              "selected_state": capture.selected_state,
               "events": capture.events,
               "responses": records})
         print(json.dumps({"status": "captured", "host": host, "responses": len(records),
