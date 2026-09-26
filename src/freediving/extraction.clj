@@ -19,6 +19,7 @@
             [freediving.deep-dominica-2025 :as deep-dominica]
             [freediving.belgrade-2026 :as belgrade-2026]
             [freediving.deep-dominica-2026 :as deep-dominica-2026]
+            [freediving.camotes-challenge-2026 :as camotes-challenge-2026]
             [freediving.vertical-blue-2025 :as vertical-blue]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
@@ -592,7 +593,13 @@
                       (when-not (identical? eof (edn/read {:eof eof} reader))
                         (throw (ex-info "Expected one EDN options form" {})))
                       value))]
-      (prn (extract! root sha256 options))
+      (prn (if (= sha256 camotes-challenge-2026/source-sha256)
+             (let [ledger (:reviewed-ledger-path options)]
+               (when-not (and (string? ledger) (not (str/blank? ledger)))
+                 (throw (ex-info "Camotes 2026 requires :reviewed-ledger-path" {})))
+               (camotes-challenge-2026/extract-reviewed-scan!
+                root sha256 ledger (dissoc options :reviewed-ledger-path)))
+             (extract! root sha256 options)))
       (shutdown-agents))
     (catch Exception error
       (binding [*out* *err*] (println "Extraction failed:" (.getMessage error)))
