@@ -100,6 +100,34 @@ class Page:
 
 
 class BrowserCaptureTest(unittest.TestCase):
+    def test_capture_cli_rejects_sensitive_context_and_url_on_dry_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "output")
+            for url, context in [
+                ("https://publisher.example/results", '{"filters":{"session":"private"}}'),
+                ("https://publisher.example/results?token=private", "{}"),
+                ("https://publisher.example/results#session=private", "{}"),
+            ]:
+                with self.subTest(url=url, context=context), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit):
+                        capture_main([url, output, "--context-json", context, "--dry-run"])
+
+    def test_capture_cli_rejects_sensitive_selection_and_non_iso_date(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = Path(directory) / "selection.json"
+            baseline = {"schema": "browser-selection/v1", "selected_date": "2025-06-28",
+                        "actions": [{"type": "click", "selector": "button.date"}],
+                        "selected_state": {"selector": ".date", "text": "2025-06-28"},
+                        "result_selector": "table.results tr", "min_results": 1,
+                        "response_contains": "Athlete"}
+            for update in ({"selected_date": "20250628"}, {"session": "private"},
+                           {"verified_filters": [{"name": "discipline", "selector": ".filter", "text": "token=private"}]}):
+                spec.write_text(json.dumps({**baseline, **update}))
+                with self.subTest(update=update), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit):
+                        capture_main(["https://publisher.example/results", str(Path(directory) / "output"),
+                                      "--selection-file", str(spec), "--dry-run"])
+
     def test_capture_cli_validates_selection_file_before_browser_start(self):
         with tempfile.TemporaryDirectory() as directory:
             spec = Path(directory) / "selection.json"

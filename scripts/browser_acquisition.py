@@ -28,6 +28,8 @@ _CHALLENGE = (b"captcha", b"verify you are human", b"cloudflare challenge",
               b"checking your browser", b"attention required", b"unusual traffic")
 _RETRYABLE = (429, 500, 502, 503, 504)
 _REDIRECT = (301, 302, 303, 307, 308)
+_SENSITIVE_NAME = re.compile(r"token|api[_-]?key|secret|password|session|auth|credential|signature|jwt", re.I)
+_SENSITIVE_VALUE = re.compile(r"\b(?:token|api[_-]?key|secret|password|session|auth|credential|signature|jwt)\s*[:=]|\bbearer\s+", re.I)
 
 
 class BrowserAcquisitionError(Exception):
@@ -59,12 +61,32 @@ class BrowserCapture:
     selected_state: dict | None = None
 
 
+def reject_sensitive_metadata(value):
+    """Reject credential-shaped user metadata before it enters capture receipts."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or _SENSITIVE_NAME.search(key):
+                raise ValueError("sensitive metadata key")
+            reject_sensitive_metadata(item)
+    elif isinstance(value, list):
+        for item in value:
+            reject_sensitive_metadata(item)
+    elif isinstance(value, str):
+        if _SENSITIVE_VALUE.search(value):
+            raise ValueError("sensitive metadata value")
+        if value.startswith(("http://", "https://")):
+            _safe_url(value)
+
+
 def _validate_selection(selection):
     if selection is None:
         return
     if not isinstance(selection, dict) or selection.get("schema") != "browser-selection/v1":
         raise ValueError("selection requires browser-selection/v1")
+    reject_sensitive_metadata(selection)
     try:
+        if not isinstance(selection["selected_date"], str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", selection["selected_date"]):
+            raise ValueError
         date.fromisoformat(selection["selected_date"])
         state = selection["selected_state"]
         if not isinstance(state["selector"], str) or not state["selector"] or not isinstance(state["text"], str) or not state["text"]:
@@ -136,6 +158,8 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
     are fulfilled to the browser so each destination enters a new host lease.
     """
     _validate_selection(selection)
+    reject_sensitive_metadata(source_context or {})
+    reject_sensitive_metadata(url)
     failures = []
     responses = []
     redirects = []
@@ -155,6 +179,7 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
             return
         host = parts.hostname.lower()
         try:
+            reject_sensitive_metadata(request_url)
             _safe_url(request_url)
         except ValueError:
             failures.append(BrowserAcquisitionError(host, "unsafe_url"))
@@ -243,6 +268,7 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
                             if parts.scheme == "https" and target_parts.scheme != "https":
                                 raise BrowserAcquisitionError(host, "insecure_redirect", status)
                             try:
+                                reject_sensitive_metadata(target)
                                 _safe_url(target)
                             except ValueError:
                                 raise BrowserAcquisitionError(host, "unsafe_redirect", status) from None
@@ -364,6 +390,7 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
             raise BrowserAcquisitionError(urlsplit(url).hostname, "size_limit", events=events)
         final_url = getattr(page, "url", url)
         try:
+            reject_sensitive_metadata(final_url)
             _safe_url(final_url)
         except ValueError:
             raise BrowserAcquisitionError(urlsplit(url).hostname, "unsafe_url", events=events) from None

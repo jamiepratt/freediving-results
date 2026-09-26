@@ -10,7 +10,8 @@ from pathlib import Path
 import stat
 import sys
 
-from browser_acquisition import BrowserAcquisitionError, _validate_selection, capture_page
+from browser_acquisition import BrowserAcquisitionError, _validate_selection, capture_page, reject_sensitive_metadata
+from acquire_source import _safe_url
 from source_acquisition import AcquisitionClient, CMAS_POLICY, Policy
 
 
@@ -42,6 +43,11 @@ def main(argv=None):
     parts = urlsplit(args.url)
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
         parser.error("source URL must be HTTP(S) without credentials")
+    try:
+        _safe_url(args.url)
+        reject_sensitive_metadata(args.url)
+    except ValueError:
+        parser.error("source URL contains sensitive or invalid data")
     host = parts.hostname.lower()
     selection = None
     if args.selection_file:
@@ -58,22 +64,27 @@ def main(argv=None):
                 raise ValueError
         except (OSError, ValueError):
             parser.error("storage state must be a private regular file readable only by its owner")
+    try:
+        source_context = json.loads(args.context_json)
+        if not isinstance(source_context, dict):
+            raise ValueError
+        reject_sensitive_metadata(source_context)
+    except ValueError:
+        parser.error("context must be a credential-free JSON object")
+    if selection:
+        if source_context.get("selected_date") not in (None, selection["selected_date"]):
+            parser.error("context selected_date conflicts with selection file")
+        expected_filters = {item["name"]: item["text"] for item in selection.get("verified_filters", [])}
+        if source_context.get("filters") not in (None, expected_filters):
+            parser.error("context filters conflict with selection file")
+        source_context["selected_date"] = selection["selected_date"]
+        source_context["filters"] = expected_filters
     if args.dry_run:
         policy = CMAS_POLICY if host == "cmas.org" or host.endswith(".cmas.org") else Policy()
         print(json.dumps({"host": host, "policy": asdict(policy),
                           "selected_date": selection["selected_date"] if selection else None}, sort_keys=True))
         return 0
     client = AcquisitionClient(lease_path=args.lease_path)
-    try:
-        source_context = json.loads(args.context_json)
-        if not isinstance(source_context, dict):
-            raise ValueError
-    except ValueError:
-        parser.error("context must be a JSON object")
-    if selection:
-        if source_context.get("selected_date") not in (None, selection["selected_date"]):
-            parser.error("context selected_date conflicts with selection file")
-        source_context["selected_date"] = selection["selected_date"]
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
