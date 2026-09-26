@@ -160,6 +160,8 @@
                      (extraction/ffessm-2025-day2-artifact? a) (->> (extraction/validate-ffessm-2025-day2-artifact! root))
                      (extraction/ffessm-2026-artifact? a) (->> (extraction/validate-ffessm-2026-artifact! root))
                      (extraction/ffessm-2026-men-artifact? a) (->> (extraction/validate-ffessm-2026-men-artifact! root))
+                     (extraction/ffessm-2026-bipalmes-women-artifact? a) (->> (extraction/validate-ffessm-2026-bipalmes-women-artifact! root))
+                     (extraction/ffessm-2026-regular-artifact? a) (->> (extraction/validate-ffessm-2026-regular-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
