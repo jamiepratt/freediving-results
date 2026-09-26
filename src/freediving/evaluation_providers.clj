@@ -105,14 +105,16 @@
   Conservative UTF-8 byte caps leave headroom below provider 32k/64k token limits."
   [config cases]
   (let [size (:native-batch-size config) companions (get config :companion-assessments [])
-        local? (= :freediving-question-local-v1 (:identity-protocol config))
+        compact? (= :freediving-compact-v1 (:identity-protocol config))
+        local? (or compact? (= :freediving-question-local-v1 (:identity-protocol config)))
         rounded? (contains? config :probability-sum-tolerance)
         base-config (cond-> (apply dissoc config batch-option-keys)
                       local? (assoc :identity-protocol :freediving-source-v1))]
-    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1} (:identity-protocol config))
+    (when-not (and (= :jev (:provider config)) (#{:freediving-source-v1 :freediving-question-local-v1 :freediving-compact-v1} (:identity-protocol config))
                    (or (not local?) (and (= "jev-1.13.0" (:model config))
                                          (= 2 (:native-diagnostics-version config))
                                          (or (#{1 2} size) rounded?) (empty? companions)))
+                   (or (not compact?) rounded?)
                    (or (not rounded?) (and local? (= 0.02 (:probability-sum-tolerance config))))
                    (or (not (contains? config :native-diagnostics-version)) (#{1 2} (:native-diagnostics-version config)))
                    (bounded-int? size 1 8) (= 1 (get config :max-attempts 1))
@@ -127,14 +129,16 @@
        (let [singles (mapv #(prepare-request base-config %) members)
              records (vec (distinct (mapcat #(map (:input %) [:left :right]) singles)))
              names (zipmap records (map #(str "record_" %) (range)))
-             state (if local? (:instruction protocol/question-local-descriptor)
+             state (if local? (:instruction (if compact? protocol/compact-descriptor protocol/question-local-descriptor))
                        (json/write-str {:schema-version "freediving-source/1"
                                         :records (into (sorted-map) (map (fn [r] [(names r) r]) records))}))
              questions (into (sorted-map)
                              (mapcat (fn [i request]
                                        (let [left (str "/records/" (names (get-in request [:input :left])))
                                              right (str "/records/" (names (get-in request [:input :right])))
-                                             q (if local? (protocol/question-local (:input request)) (protocol/question left right))]
+                                             q (cond compact? (protocol/compact-question (:input request))
+                                                     local? (protocol/question-local (:input request))
+                                                     :else (protocol/question left right))]
                                          (cons [(str "identity_" i) q]
                                                (map (fn [kind]
                                                       [(str (name kind) "_" i)
@@ -151,12 +155,13 @@
          (when (or (> (count questions) 32)
                    (> (+ (byte-count state) (apply max (map #(byte-count (json/write-str %)) (vals questions)))) 24576)
                    (> (byte-count body) (min 49152 (:max-request-bytes normalized)))) (invalid!))
-         {:adapter-version (if local? (if rounded? (if (> size 2) "shadow-adapters/12" "shadow-adapters/11") "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7")) :provider :jev :config normalized
-          :protocol (if local? protocol/question-local-descriptor protocol/descriptor) :body body
-          :case-ids (mapv :case-id members)
-          :evidence (mapv #(select-keys % [:case-id :evidence]) members)
-          :question-ids (vec (keys questions))
-          :companions companions :context-policy (if local? :question-local-evidence :exact-record-dedup-shared-batch)}))
+         (cond-> {:adapter-version (if compact? "shadow-adapters/13" (if local? (if rounded? (if (> size 2) "shadow-adapters/12" "shadow-adapters/11") "shadow-adapters/10") (case (:native-diagnostics-version config) 2 "shadow-adapters/9" 1 "shadow-adapters/8" "shadow-adapters/7"))) :provider :jev :config normalized
+                  :protocol (cond compact? protocol/compact-descriptor local? protocol/question-local-descriptor :else protocol/descriptor) :body body
+                  :case-ids (mapv :case-id members)
+                  :evidence (mapv #(select-keys % [:case-id :evidence]) members)
+                  :question-ids (vec (keys questions))
+                  :companions companions :context-policy (if local? :question-local-evidence :exact-record-dedup-shared-batch)}
+           compact? (assoc :projections (mapv #(protocol/compact-projection (:input %)) members)))))
      (partition-all size cases))))
 
 (defn- base-result [outcome model]
@@ -436,8 +441,8 @@
                                                                            #{"match" "no_match" "abstain"}
                                                                            #{"yes" "no" "unknown"})
                                                                          (and (map? answers) (contains? answers id))
-                                                                         (#{"shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12"} (:adapter-version request))
-                                                                         (#{"shadow-adapters/11" "shadow-adapters/12"} (:adapter-version request))))]) ids))
+                                                                         (#{"shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))
+                                                                         (#{"shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))))]) ids))
             reasons (cond-> (:validation-reasons metadata)
                       (not (contains? data "answers")) (conj :missing-answers)
                       (and (contains? data "answers") (not (map? answers))) (conj :invalid-answers-type)
@@ -466,8 +471,8 @@
                 response (.get call (:timeout-ms config) TimeUnit/MILLISECONDS)
                 status (.statusCode response)]
             (assoc (if (<= 200 status 299)
-                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12"} (:adapter-version request))
-                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
+                     (if (#{"shadow-adapters/6" "shadow-adapters/7" "shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request))
+                       ((if (#{"shadow-adapters/8" "shadow-adapters/9" "shadow-adapters/10" "shadow-adapters/11" "shadow-adapters/12" "shadow-adapters/13"} (:adapter-version request)) parse-native-diagnostics parse-strict-jev) request (.body response) token)
                        (if (#{"shadow-adapters/3" "shadow-adapters/4" "shadow-adapters/5"} (:adapter-version request))
                          (parse-diagnostic-response (:provider request) (.body response) token
                                                     (boolean (#{"shadow-adapters/4" "shadow-adapters/5" "shadow-adapters/6"} (:adapter-version request)))

@@ -770,3 +770,42 @@ unchanged byte bounds, terminal stopping, interrupted launch refusal, and replay
 The shadow suite passed 90 tests / 1,675 assertions; eight combined old/new
 launcher tests passed. Clojure delimiter repair and lint were clean. The B7
 packet still reproduces all 122 original prepared objects and its run identity.
+
+### Compact question-local evidence
+
+`freediving-compact/1`, selected by `:identity-protocol :freediving-compact-v1`,
+uses adapter `shadow-adapters/13`. Each question contains both records, cited
+facts and its own source dictionary. Shared state contains shorter identity
+guidance. Outcomes and criteria are unchanged; explicit probability-sum tolerance
+`0.02` is required, with the same inclusive boundary as adapters /11 and /12.
+
+The wire projection omits internal record/observation/evidence IDs, audit hashes,
+page/line locators, nil fields and empty optional structures. Short `s` labels
+associate facts, uncertainty and publisher identity with exact excerpts. Each
+record's `source-order` preserves its original excerpt sequence, including table
+headers. All excerpt lines, spacing and ambiguous continuations remain unchanged:
+birth years and clubs present only in raw rows are retained without promoting
+uncertain extraction into structured facts. Exact whole excerpts are deduplicated
+only within a dependence group. Shared source-family, document or artifact hashes
+connect sources transitively into short `d` labels. Different labels do not prove
+independence. No heuristic removes raw headers or boilerplate.
+
+Prepared requests retain `:projections` locally, including the projection version,
+complete original input and each source label's complete references. This mapping
+is excluded from HTTP bodies. Frozen prior variants and run identities are unchanged.
+The shortened guidance retains name variation, missing evidence, contradictions,
+source dependence, extraction uncertainty, data-only treatment and abstention for
+material ambiguity. Application review requirements remain unchanged.
+
+`jev_compact_runner.clj prepare PACKET ORIGINAL_PACKET` materializes all 81 cases,
+the local mapping, exact request hashes, content/size statistics and a trial of
+each supported batch size. It chooses the largest passing fixed size without
+raising existing limits: eight pairs, 32 questions, 49,152 total UTF-8 bytes and
+24,576 bytes for shared state plus the largest question. A single 81-case batch
+is therefore unsupported. The new Python launcher uses the existing credential
+helper and hash manifest, adds an explicit `max_http` bound, refuses a second live
+launch after durable start, and verifies completed replay without dispatch.
+
+These cases were previously exposed. Any comparison is a regression experiment;
+changed batch grouping prevents attributing differences solely to compaction.
+Smaller payloads do not by themselves establish better accuracy.

@@ -115,3 +115,84 @@
                  (assoc identity :decision :match) (assoc identity :authority {:owner :match})]]
       (is (thrown? clojure.lang.ExceptionInfo
                    (protocol/validate-input! (assoc-in in [:left :publisher-identity] bad)))))))
+
+(deftest compact-projection-preserves-evidence-and-local-audit-mapping
+  (let [in (input)
+        project (requiring-resolve 'freediving.evaluation-protocol/compact-projection)
+        result (project in)
+        wire (:input result)]
+    (is (= result (project in)))
+    (is (= "freediving-compact/1" (:projection-version result)))
+    (is (= in (get-in result [:mapping :complete-input])))
+    (is (= {:value "José SILVA" :sources ["s1"]} (get-in wire [:left :fields :name])))
+    (is (not (contains? (get-in wire [:left :fields]) :birth-date)))
+    (is (= ["1 José SILVA BRA 75"] (get-in wire [:sources "s1" :excerpt])))
+    (is (= 1 (count (:sources wire))))
+    (doseq [removed ["source-row-1" "left-row" "publisher-event" (:source-sha256 reference)]]
+      (is (not (.contains (json/write-str wire) removed))))))
+
+(deftest compact-raw-only-biography-and-ambiguous-tables-remain-data
+  (let [lines ["POS  ATHLETE               BIRTH  CLUB" "1    CASINI Andrea         1985   Natatorium Treviso" "2    REDAELLI Luca          1987   Club B" "     wrapped ambiguous continuation"]
+        source (assoc (first (:sources (:left (input)))) :exact-lines lines :lines [1 4])
+        in (-> (input)
+               (assoc-in [:left :sources] [source])
+               (assoc-in [:right :sources] [source])
+               (assoc-in [:left :uncertainties] [{:value "Birth/club row association uncertain; do not infer citizenship" :evidence-ids ["source-row-1"]}]))
+        compact (:input (protocol/compact-projection in))]
+    (is (= lines (get-in compact [:sources "s1" :excerpt])))
+    (is (= ["s1"] (get-in compact [:left :source-order])))
+    (is (= "Birth/club row association uncertain; do not infer citizenship" (get-in compact [:left :uncertainties 0 :value])))
+    (is (= ["s1"] (get-in compact [:left :uncertainties 0 :sources])))
+    (is (not (contains? (get-in compact [:left :fields]) :birth-date)))))
+
+(deftest compact-native-questions-are-self-contained-and-opt-in
+  (let [cfg (assoc config :identity-protocol :freediving-compact-v1 :native-batch-size 2
+                   :native-diagnostics-version 2 :probability-sum-tolerance 0.02)
+        cases [{:case-id "one" :input (input)} {:case-id "two" :input (input)}]
+        batch (first (providers/prepare-batches cfg cases))
+        single (first (providers/prepare-batches (assoc cfg :native-batch-size 1) cases))
+        decode #(json/read-str (:body %) :key-fn keyword)]
+    (is (= "shadow-adapters/13" (:adapter-version batch)))
+    (is (= (get-in (decode single) [:questions :identity_0]) (get-in (decode batch) [:questions :identity_1])))
+    (is (= (:instruction protocol/compact-descriptor) (:state (decode batch))))
+    (is (= (input) (get-in batch [:projections 0 :mapping :complete-input])))
+    (is (not (.contains (:body batch) "source-sha256")))
+    (is (= (:criteria (protocol/question "/left" "/right")) (get-in (decode batch) [:questions :identity_0 :criteria])))))
+
+(deftest compact-duplicates-do-not-become-independent-corroboration
+  (let [a (first (:sources (:left (input))))
+        duplicate (assoc a :evidence-id "duplicate" :observation-id "copy" :source-family-id "misassigned-family")
+        header (assoc a :evidence-id "header" :lines [1 1] :exact-lines ["Name          Country    Result"])
+        in (-> (input)
+               (assoc-in [:left :sources] [header a duplicate])
+               (assoc-in [:left :fields :name :evidence-ids] ["source-row-1" "duplicate"]))
+        projected (protocol/compact-projection in)
+        wire (:input projected)]
+    (is (= 2 (count (:sources wire))))
+    (is (= 1 (count (set (map :dependence (vals (:sources wire)))))))
+    (is (= ["s1" "s2" "s2"] (get-in wire [:left :source-order])))
+    (is (= ["s2"] (get-in wire [:left :fields :name :sources])))
+    (is (= ["Name          Country    Result"] (get-in wire [:sources "s1" :excerpt])))
+    (is (= #{"source-row-1" "duplicate"} (set (map :evidence-id (get-in projected [:mapping :sources "s2"])))))))
+
+(deftest compact-dependence-is-transitive-without-erasing-distinct-lines
+  (let [a (first (:sources (:left (input))))
+        b (assoc a :evidence-id "b" :source-family-id "second-family" :exact-lines ["1985  Natatorium Treviso"])
+        c (assoc b :evidence-id "c" :source-sha256 (apply str (repeat 64 "c"))
+                 :artifact-sha256 (apply str (repeat 64 "d")) :exact-lines ["1987  Club B"])
+        in (-> (input) (assoc-in [:left :sources] [a c b]))
+        wire (:input (protocol/compact-projection in))]
+    (is (= 3 (count (:sources wire))))
+    (is (= 1 (count (set (map :dependence (vals (:sources wire)))))))
+    (is (= [["1 José SILVA BRA 75"] ["1987  Club B"] ["1985  Natatorium Treviso"]]
+           (mapv #(get-in wire [:sources % :excerpt]) (get-in wire [:left :source-order]))))))
+
+(deftest compact-probability-contract-and-limits-are-explicit
+  (let [cfg (assoc config :identity-protocol :freediving-compact-v1 :native-batch-size 1
+                   :native-diagnostics-version 2 :probability-sum-tolerance 0.02)
+        cases [{:case-id "one" :input (input)}]]
+    (doseq [bad [(dissoc cfg :probability-sum-tolerance)
+                 (assoc cfg :native-batch-size 81)
+                 (assoc cfg :max-request-bytes 100)
+                 (assoc cfg :companion-assessments [:contradiction])]]
+      (is (thrown? Exception (providers/prepare-batches bad cases))))))

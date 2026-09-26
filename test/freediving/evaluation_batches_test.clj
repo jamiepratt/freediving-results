@@ -668,3 +668,54 @@
                  (p/prepare-batches cfg [(assoc (first members) :input
                                                 (assoc-in input [:left :uncertainties]
                                                           (vec (repeat 8 {:value (apply str (repeat 4000 "x")) :evidence-ids ["source-row-1"]}))))])))))
+
+(deftest compact-rounded-http-results-replay-without-redispatch
+  (let [calls (atom 0) dir (runner/root)
+        sample (dataset)
+        sample (assoc sample :cases (mapv #(assoc (first (:cases sample)) :case-id (str "larger-" %)) (range 11)))]
+    (http/with-server
+      (fn [ex]
+        (swap! calls inc)
+        (let [body (json/read-str (slurp (.getRequestBody ex)))]
+          (http/reply! ex 200
+                       (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 27}
+                                        :answers (into {} (map (fn [id] [id (assoc (answer "match") :probabilities
+                                                                                   {"match" 0.93 "no_match" 0.01 "abstain" 0.05})])
+                                                               (keys (get body "questions"))))}))))
+      (fn [url]
+        (let [cfg [(assoc (local-config url 5) :identity-protocol :freediving-compact-v1 :probability-sum-tolerance 0.02)]
+              runtime {:providers {"native" {:bearer-token "fixture-secret"}}}
+              receipt (evaluation/run! dir sample cfg runtime)
+              report (get-in (evaluation/inspect-run dir (:run-id receipt)) [:report :providers "native"])]
+          (is (= (vec (repeat 11 :match)) (mapv :outcome (:results report))))
+          (is (= 3 @calls))
+          (is (= [5 5 1] (get-in report [:request-metrics :batch-sizes])))
+          (is (= {:match 0.93 :no_match 0.01 :abstain 0.05} (get-in report [:results 0 :probabilities])))
+          (with-redefs [p/execute! (fn [& _] (throw (ex-info "Unexpected replay dispatch" {})))]
+            (is (= receipt (evaluation/run! dir sample cfg runtime))))
+          (is (= 3 @calls)))))))
+
+(deftest compact-rounded-probabilities-accept-inclusive-two-percent-sums
+  (doseq [[values expected]
+          [[[0.93 0.01 0.05] :match]
+           [[0.93 0.01 0.04] :match]
+           [[0.93 0.04 0.05] :match]
+           [[0.93 0.01 0.039999999] :error]
+           [[0.93 0.04 0.050000001] :error]]]
+    (http/with-server
+      (fn [ex] (http/reply! ex 200 (json/write-str
+                                    (diagnostic-response
+                                     (assoc (answer "match") :probabilities
+                                            (zipmap ["match" "no_match" "abstain"] values))))))
+      (fn [url]
+        (let [cfg (assoc (local-config url 2) :identity-protocol :freediving-compact-v1 :probability-sum-tolerance 0.02)
+              prepared (first (p/prepare-batches cfg (cases)))
+              result (p/execute! prepared {:bearer-token "fixture-secret"})
+              prediction (get-in result [:answers "identity_0"])]
+          (is (= "shadow-adapters/13" (:adapter-version prepared)))
+          (is (= expected (:outcome prediction)) (pr-str values))
+          (if (= :match expected)
+            (is (= (zipmap [:match :no_match :abstain] values) (:probabilities prediction)))
+            (do (is (= [:invalid-probability-sum] (:validation-reasons prediction)))
+                (is (= 0.02 (get-in prediction [:probability-diagnostics :tolerance])))
+                (is (= :less-than-or-equal (get-in prediction [:probability-diagnostics :comparison]))))))))))
