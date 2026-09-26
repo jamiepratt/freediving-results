@@ -10,20 +10,30 @@
 (defn- text? [s] (and (string? s) (not (str/blank? s)) (<= (count s) 4096)))
 (defn- digest? [s] (and (string? s) (boolean (re-matches #"[a-f0-9]{64}" s))))
 (def ^:private reference-keys #{:evidence-id :source-sha256 :artifact-sha256 :observation-id :page :lines :source-family-id})
+(def ^:private row-reference-keys #{:evidence-id :source-sha256 :artifact-sha256 :observation-id :source-family-id :source-format :locator})
 (defn- valid-reference? [r]
-  (and (map? r) (= reference-keys (set (keys r)))
+  (and (map? r) (#{reference-keys row-reference-keys} (set (keys r)))
        (every? #(text? (get r %)) [:evidence-id :observation-id :source-family-id])
        (every? #(digest? (get r %)) [:source-sha256 :artifact-sha256])
-       (pos-int? (:page r)) (vector? (:lines r)) (= 2 (count (:lines r)))
-       (every? pos-int? (:lines r)) (apply <= (:lines r))
-       (<= (- (second (:lines r)) (first (:lines r))) 100)))
+       (if (= reference-keys (set (keys r)))
+         (and (pos-int? (:page r)) (vector? (:lines r)) (= 2 (count (:lines r)))
+              (every? pos-int? (:lines r)) (apply <= (:lines r))
+              (<= (- (second (:lines r)) (first (:lines r))) 100))
+         (case (:source-format r)
+           :html (and (= #{:table :row} (set (keys (:locator r))))
+                      (every? pos-int? (vals (:locator r))))
+           :json (and (= #{:row-index-zero-based :source-page-url} (set (keys (:locator r))))
+                      (nat-int? (get-in r [:locator :row-index-zero-based]))
+                      (text? (get-in r [:locator :source-page-url])))
+           false))))
 
 (defn source-evidence
   "Verify raw UTF-8 artifact digest and extract exact inclusive page-local lines
   from an EDN archive, or artifact-local lines from plain text. Caller independently
   verifies source PDF hash, record association and source-family attribution."
   [reference archived-text]
-  (require! (and (valid-reference? reference) (string? archived-text)))
+  (require! (and (= reference-keys (set (keys reference)))
+                 (valid-reference? reference) (string? archived-text)))
   (let [digest (format "%064x" (java.math.BigInteger. 1
                                                       (.digest (java.security.MessageDigest/getInstance "SHA-256")
                                                                (.getBytes ^String archived-text "UTF-8"))))
@@ -45,10 +55,12 @@
 (def field-keys [:name :event-name :event-date :discipline :representation :rank
                  :performance :age-category :birth-date])
 (defn- evidence? [e]
-  (and (map? e) (= (conj reference-keys :exact-lines) (set (keys e)))
+  (and (map? e) (contains? #{(conj reference-keys :exact-lines)
+                             (conj row-reference-keys :exact-lines)} (set (keys e)))
        (valid-reference? (dissoc e :exact-lines))
        (vector? (:exact-lines e))
-       (= (inc (- (second (:lines e)) (first (:lines e)))) (count (:exact-lines e)))
+       (= (if (:lines e) (inc (- (second (:lines e)) (first (:lines e)))) 1)
+          (count (:exact-lines e)))
        (every? #(and (string? %) (<= (count %) 4096)) (:exact-lines e))))
 (defn- cited? [fact ids unknown?]
   (and (map? fact) (= #{:value :evidence-ids} (set (keys fact)))
@@ -232,8 +244,9 @@
   (let [name-ids (get-in record [:fields :name :evidence-ids])
         row (when (= 1 (count name-ids))
               (first (filter #(= (first name-ids) (:evidence-id %)) (:sources record))))
-        same-page? #(= (select-keys row [:source-sha256 :artifact-sha256 :page])
-                       (select-keys % [:source-sha256 :artifact-sha256 :page]))
+        same-page? #(and (:lines row) (:lines %)
+                         (= (select-keys row [:source-sha256 :artifact-sha256 :page])
+                            (select-keys % [:source-sha256 :artifact-sha256 :page])))
         lines (for [s (:sources record)
                     :when (and row (same-page? s) (< (second (:lines s)) (first (:lines row))))
                     line (:exact-lines s)]

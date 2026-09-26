@@ -1,14 +1,67 @@
 (ns freediving.jev-candidates-test
   (:require [clojure.test :refer [deftest is]]
             [clojure.data.json :as json]
+            [clojure.string :as str]
             [freediving.evaluation-protocol-test :as fixture]
             [freediving.evaluation-providers :as providers]
             [freediving.evaluation-providers-test :as http]
             [freediving.evaluation-test :as runner]
             [freediving.evaluation :as evaluation]
+            [freediving.aida-html :as html]
+            [freediving.aida-html-test :as html-fixture]
+            [freediving.cmas-2025-indoor-json :as indoor-json]
+            [freediving.cmas-2025-indoor-json-test :as json-fixture]
             [freediving.candidates :as retrieval]
             [freediving.spelling-normalization :as spelling]
             [freediving.jev-candidates :as candidates]))
+
+(defn- source-row [job format artifact]
+  (let [payload (first (:candidates artifact))
+        archived (pr-str artifact)]
+    {:job-id job :ordinal 0 :kind "result-row" :source-format format
+     :candidate-id (str job "-candidate")
+     :source-sha256 (:source-sha256 artifact) :artifact-sha256 (fixture/sha archived)
+     :parser-version (:parser-version artifact) :schema-version (:schema-version artifact)
+     :source-page-url (:source-page-url artifact) :payload payload
+     :source-lines []}))
+
+(deftest html-and-json-pairs-retain-format-locators-and-exact-source-rows
+  (let [html-text (html-fixture/document (assoc html-fixture/cells 1 "BECHTEL Timothy"))
+        html-artifact (assoc (html/parse-html html-text) :schema-version 4
+                             :source-sha256 (fixture/sha html-text))
+        json-bytes (.getBytes
+                    (str/replace (String. ^bytes (json-fixture/static-source [json-fixture/static-row]) "UTF-8")
+                                 "\"PlaName\":\"Timothy\"" "\"PlaName\" : \"Timothy\"")
+                    "UTF-8")
+        json-text (String. ^bytes json-bytes "UTF-8")
+        json-artifact (assoc (indoor-json/parse-result json-bytes
+                                                       {:view-url json-fixture/static-view-url
+                                                        :json-url json-fixture/static-json-url})
+                             :schema-version 5 :source-sha256 (fixture/sha json-text))
+        rows [(source-row "html" :html html-artifact)
+              (source-row "json" :json json-artifact)]
+        archives {"html" (pr-str html-artifact) "json" (pr-str json-artifact)}
+        build (fn [rows]
+                (with-redefs-fn {#'freediving.jev-candidates/artifact
+                                 (fn [_ job] (get archives job))}
+                  #(candidates/candidate-case "reviewer" rows
+                                              {:job-id "html" :ordinal 0}
+                                              {:job-id "json" :ordinal 0})))
+        pair (build rows)]
+    (is (= pair (build rows)))
+    (is (= {:table 1 :row 2} (get-in pair [:input :left :sources 0 :locator])))
+    (is (= :html (get-in pair [:input :left :sources 0 :source-format])))
+    (is (= (get-in html-artifact [:candidates 0 :raw :html])
+           (get-in pair [:input :left :sources 0 :exact-lines 0])))
+    (is (= {:row-index-zero-based 0 :source-page-url json-fixture/static-view-url}
+           (get-in pair [:input :right :sources 0 :locator])))
+    (is (= :json (get-in pair [:input :right :sources 0 :source-format])))
+    (is (str/includes? (get-in pair [:input :right :sources 0 :exact-lines 0])
+                       "\"PlaName\" : \"Timothy\""))
+    (is (not (contains? (get-in pair [:input :right :sources 0]) :page)))
+    (is (thrown? Exception (build (assoc-in rows [0 :payload :flags] [:changed]))))
+    (is (thrown? Exception (build (assoc-in rows [1 :parser-version] "unknown/1"))))
+    (is (thrown? Exception (build (assoc-in rows [1 :payload :parsed :source-name] "tampered"))))))
 
 (defn- example []
   (let [left (pr-str {:pages [{:page 1 :lines [{:line 1 :text "Anastasiia Petrova"}]}]})
@@ -39,6 +92,10 @@
     (is (= 2 (count (:question-ids (first (providers/prepare-batches config [case]))))))
     (is (not= (:case-id case)
               (:case-id (build (assoc-in rows [1 :payload :parsed :source-name] "Anastasia Pétrova")))))
+    (is (not= (:case-id case)
+              (:case-id (build (assoc-in rows [1 :parser-version] "different-parser/2")))))
+    (is (not= (:case-id case)
+              (:case-id (build (assoc-in rows [1 :payload :uncertainties] [:ambiguous-layout])))))
     (is (thrown? Exception
                  (with-redefs-fn {#'freediving.jev-candidates/artifact (fn [_ _] "tampered")}
                    (fn [] (candidates/candidate-case "reviewer" rows {:job-id "left" :ordinal 0}

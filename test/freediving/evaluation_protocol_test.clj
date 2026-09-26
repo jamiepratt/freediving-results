@@ -45,6 +45,24 @@
         ref (assoc reference :artifact-sha256 (sha artifact) :page 2)]
     (is (= ["Exact row"] (:exact-lines (protocol/source-evidence ref artifact))))))
 
+(deftest html-and-json-source-locators-are-explicit
+  (let [base (dissoc reference :page :lines)
+        html (assoc base :source-format :html :locator {:table 1 :row 2}
+                    :exact-lines ["<tr><td>Ada</td></tr>"])
+        json (assoc base :source-format :json :locator {:row-index-zero-based 0
+                                                        :source-page-url "https://example.com/results"}
+                    :exact-lines ["{\"PlaName\":\"Ada\"}"])]
+    (doseq [source [html json]]
+      (let [validated (protocol/validate-input!
+                       (-> (input)
+                           (assoc-in [:left :sources] [source])
+                           (assoc-in [:right :sources] [source])))]
+        (is (= source (get-in validated [:left :sources 0])))))
+    (is (thrown? Exception
+                 (protocol/validate-input!
+                  (assoc-in (input) [:left :sources]
+                            [(assoc html :page 1 :lines [1 1])]))))))
+
 (def config {:provider :jev :identity-protocol :freediving-source-v1 :diagnostics-version 2
              :model "jev-1.13.0" :endpoint "http://127.0.0.1:1/"})
 (deftest opt-in-domain-request-freezes-source-only-semantics
