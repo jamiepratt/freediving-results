@@ -1,0 +1,17 @@
+{
+  "schema": "browser-selection/v1",
+  "selected_date": "2025-05-02",
+  "actions": [
+    {
+      "type": "click",
+      "selector": "#day_2"
+    }
+  ],
+  "selected_state": {
+    "selector": "li.active a.days",
+    "text": "2025-05-02"
+  },
+  "result_selector": ".body_ajax tr",
+  "min_results": 1,
+  "response_contains": "2025-05-02"
+}

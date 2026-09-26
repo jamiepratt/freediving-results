@@ -100,6 +100,16 @@ class Page:
 
 
 class BrowserCaptureTest(unittest.TestCase):
+    def test_mabini_may_2_selection_is_accepted_by_capture_cli(self):
+        spec = Path(__file__).resolve().parents[1] / "config" / "aida-mabini-2025-05-02.selection.json"
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()) as output:
+            result = capture_main([
+                "https://www.aidainternational.org/Events/EventResults-4545",
+                str(Path(directory) / "capture"), "--selection-file", str(spec), "--dry-run",
+            ])
+        self.assertEqual(0, result)
+        self.assertEqual("2025-05-02", json.loads(output.getvalue())["selected_date"])
+
     def test_capture_cli_rejects_sensitive_context_and_url_on_dry_run(self):
         with tempfile.TemporaryDirectory() as directory:
             output = str(Path(directory) / "output")
