@@ -1,3 +1,7 @@
 /data/
 /.cpcache/
 /.clj-kondo/.cache/
+# Local or remote Jev bearer configuration
+/jev.env
+/.env
+/.env.local

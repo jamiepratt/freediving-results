@@ -707,6 +707,37 @@ lint were clean. Live replay made zero calls and reproduced result/report with a
 inventoried prior files retained their hashes. An in-memory exact credential and
 service-token scan found no retained secrets. No deployment or authority mutation.
 
+### Jev launcher credential provisioning
+
+The frozen, larger, compact, guidance and table one-shot launchers resolve a
+runtime bearer before writing `dispatcher-started.json` or creating a store.
+Precedence is `TYPESAFE_API_KEY` in the process environment, then
+`TYPESAFE_API_KEY_FILE`, then `~/.config/freediving-results/jev.env`, then the
+existing read-only 1Password `Shell Access` lookup. An explicitly set empty
+variable or invalid explicit file fails closed; it does not fall through. The
+1Password lookup makes at most three attempts before dispatch. No provider
+request is retried by this credential logic.
+
+For local or remote hosts, copy [the placeholder](../jev.env.example) to a
+private path outside the repository and output root. Use `mkdir -p -m 700
+~/.config/freediving-results`, set the file to mode `0600`, and ensure its owner
+is the launching user. It must contain one `TYPESAFE_API_KEY=...` entry; blank
+lines and comments are allowed. Set `TYPESAFE_API_KEY_FILE` to a different
+absolute host path if required. Provision that file on each remote host through
+its secret mechanism. Do not copy the real key into Git, a launch manifest,
+packet, command argument, log or run artifact. The checked-in example contains
+only a placeholder; repo-root `.env`, `.env.local` and `jev.env` are ignored.
+
+The launcher's hash manifest and Clojure check still verify frozen inputs before
+credential lookup; the manifest is checked again after lookup and before the
+exclusive marker. Missing, empty or unreadable credentials fail before the
+marker, store or HTTP, so a corrected fresh launch is possible. Once the
+marker exists, another live launch is forbidden even if the provider outcome
+is unknown. Launcher failure metadata records a sanitized stage and whether
+dispatch may have begun. A credential rotation does not change request/run
+identity; use a distinct nonsecret scope when account or route meaning changes.
+Historical packets, results and identities are not rewritten.
+
 ### Five-question comparison, 2026-09-26
 
 The owner requested a larger-batch comparison with unchanged questions. Fixed

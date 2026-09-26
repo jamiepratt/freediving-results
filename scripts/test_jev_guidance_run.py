@@ -12,7 +12,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location('runner', Path(__file__).with_name('jev_guidance_run.py'))
 
 class DurableLaunch(unittest.TestCase):
-    def test_interrupted_start_can_never_launch_again(self):
+    def test_missing_credential_can_launch_after_correction(self):
         runner = importlib.util.module_from_spec(SPEC)
         SPEC.loader.exec_module(runner)
         with tempfile.TemporaryDirectory() as tmp:
@@ -22,7 +22,12 @@ class DurableLaunch(unittest.TestCase):
             with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'run_clojure'), patch.object(runner, 'credential', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.main(['live', '--manifest', str(root / 'manifest.json')])
-            self.assertTrue((root / 'dispatcher-started.json').is_file())
+            self.assertFalse((root / 'dispatcher-started.json').exists())
+            self.assertFalse((root / 'store').exists())
+            with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'credential', return_value='corrected-key'), patch.object(runner, 'run_clojure', return_value=0) as clj:
+                self.assertEqual(0, runner.main(['live', '--manifest', str(root / 'manifest.json')]))
+                self.assertTrue((root / 'dispatcher-started.json').is_file())
+                clj.assert_any_call(manifest, 'live', 'corrected-key')
             with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'credential') as cred, patch.object(runner, 'run_clojure') as clj:
                 with self.assertRaisesRegex(RuntimeError, 'never relaunch'):
                     runner.main(['live', '--manifest', str(root / 'manifest.json')])

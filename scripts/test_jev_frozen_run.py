@@ -12,7 +12,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location('runner', Path(__file__).with_name('jev_frozen_run.py'))
 
 class DurableLaunch(unittest.TestCase):
-    def test_interrupted_start_can_never_launch_again(self):
+    def test_missing_credential_can_launch_after_correction(self):
         runner = importlib.util.module_from_spec(SPEC)
         SPEC.loader.exec_module(runner)
         with tempfile.TemporaryDirectory() as tmp:
@@ -22,12 +22,107 @@ class DurableLaunch(unittest.TestCase):
             with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'run_clojure'), patch.object(runner, 'credential', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.main(['live', '--manifest', str(root / 'manifest.json')])
-            self.assertTrue((root / 'dispatcher-started.json').is_file())
+            self.assertFalse((root / 'dispatcher-started.json').exists())
+            self.assertFalse((root / 'store').exists())
+            with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'credential', return_value='corrected-key'), patch.object(runner, 'run_clojure', return_value=0) as clj:
+                self.assertEqual(0, runner.main(['live', '--manifest', str(root / 'manifest.json')]))
+                self.assertTrue((root / 'dispatcher-started.json').is_file())
+                clj.assert_any_call(manifest, 'live', 'corrected-key')
             with patch.object(runner, 'validate', return_value=manifest), patch.object(runner, 'credential') as cred, patch.object(runner, 'run_clojure') as clj:
                 with self.assertRaisesRegex(RuntimeError, 'never relaunch'):
                     runner.main(['live', '--manifest', str(root / 'manifest.json')])
                 cred.assert_not_called()
                 clj.assert_not_called()
+
+class CredentialSources(unittest.TestCase):
+    def setUp(self):
+        self.runner = importlib.util.module_from_spec(SPEC)
+        SPEC.loader.exec_module(self.runner)
+
+    def test_environment_and_private_file_preserve_frozen_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            keyfile = base / 'jev.env'
+            keyfile.write_text('TYPESAFE_API_KEY=file-key\n')
+            keyfile.chmod(0o600)
+            identities = []
+            for source in ('file', 'environment'):
+                root = base / source
+                root.mkdir()
+                manifest = {'root': str(root), 'cwd': str(root), 'packet': str(root)}
+                path = root / 'manifest.json'
+                path.write_text(json.dumps(manifest))
+                setting = {'TYPESAFE_API_KEY_FILE': str(keyfile)}
+                if source == 'environment':
+                    setting['TYPESAFE_API_KEY'] = 'env-key'
+                with patch.dict(os.environ, setting, clear=True), patch.object(self.runner, 'validate', return_value=manifest), patch.object(self.runner, 'run_clojure', return_value=0) as clj:
+                    self.assertEqual(0, self.runner.main(['live', '--manifest', str(path)]))
+                    clj.assert_any_call(manifest, 'live', 'env-key' if source == 'environment' else 'file-key')
+                identities.append(json.loads((root / 'dispatcher-started.json').read_text())['run_id'])
+            self.assertEqual(identities[0], identities[1])
+
+    def test_invalid_explicit_credentials_fail_before_dispatch_and_can_be_fixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / 'output'
+            root.mkdir()
+            keyfile = Path(tmp).resolve() / 'jev.env'
+            keyfile.write_text('TYPESAFE_API_KEY=\n')
+            keyfile.chmod(0o600)
+            manifest = {'root': str(root), 'cwd': str(root), 'packet': str(root)}
+            path = root / 'manifest.json'
+            path.write_text(json.dumps(manifest))
+            with patch.dict(os.environ, {'TYPESAFE_API_KEY_FILE': str(keyfile)}, clear=True), patch.object(self.runner, 'validate', return_value=manifest), patch.object(self.runner, 'run_clojure', return_value=0) as clj:
+                for mode, value in ((0o600, ''), (0o000, 'TYPESAFE_API_KEY=secret'), (0o644, 'TYPESAFE_API_KEY=secret')):
+                    keyfile.chmod(0o600)
+                    keyfile.write_text(value)
+                    keyfile.chmod(mode)
+                    with self.assertRaises((RuntimeError, PermissionError)):
+                        self.runner.main(['live', '--manifest', str(path)])
+                    self.assertFalse((root / 'dispatcher-started.json').exists())
+                    self.assertFalse((root / 'store').exists())
+                self.assertTrue(all(call.args[1] == "check" for call in clj.call_args_list))
+                keyfile.chmod(0o600)
+                keyfile.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    self.runner.main(['live', '--manifest', str(path)])
+                self.assertFalse((root / 'dispatcher-started.json').exists())
+                keyfile.write_text('TYPESAFE_API_KEY=corrected')
+                keyfile.chmod(0o600)
+                self.assertEqual(0, self.runner.main(['live', '--manifest', str(path)]))
+                clj.assert_any_call(manifest, 'live', 'corrected')
+
+    def test_explicit_empty_environment_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            manifest = {'root': str(root), 'cwd': str(root), 'packet': str(root)}
+            path = root / 'manifest.json'
+            path.write_text(json.dumps(manifest))
+            with patch.dict(os.environ, {'TYPESAFE_API_KEY': ''}, clear=True), patch.object(self.runner, 'validate', return_value=manifest), patch.object(self.runner, 'run_clojure', return_value=0) as clj, patch.object(self.runner.subprocess, 'check_output') as lookup:
+                with self.assertRaises(RuntimeError):
+                    self.runner.main(['live', '--manifest', str(path)])
+                lookup.assert_not_called()
+                self.assertTrue(all(call.args[1] == 'check' for call in clj.call_args_list))
+                self.assertFalse((root / 'dispatcher-started.json').exists())
+                self.assertFalse((root / 'store').exists())
+                self.assertFalse(self.runner.failure_status(RuntimeError(), ['live', '--manifest', str(path)])['dispatch_may_have_begun'])
+
+    def test_transient_one_password_lookup_retries_before_dispatch(self):
+        calls = []
+        def fake(args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(1, args)
+            if args[0] == 'security':
+                return 'service-token\n'
+            if args[2] == 'list':
+                return '[{"id":"item","title":"typesafe.ai"}]'
+            return '{"fields":[{"value":"provider-token","type":"CONCEALED"}]}'
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {'HOME': tmp, 'USER': 'test'}, clear=True), patch.object(self.runner.subprocess, 'check_output', side_effect=fake):
+                secrets = []
+                self.assertEqual('provider-token', self.runner.credential(secrets))
+                self.assertEqual(['service-token', 'provider-token'], secrets[-2:])
+                self.assertEqual(4, len(calls))
 
 class FrozenPacketCheck(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('JEV_FROZEN_TEST_PACKET'), 'private frozen packet unavailable')

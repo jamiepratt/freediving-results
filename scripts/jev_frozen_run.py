@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import stat
 
 RUN_ID = 'b437d63afdbfde706dbea25a7e0e3721dfdb9b02ef8adb71836fab36669608aa'
 PACKET_HASHES = {
@@ -31,7 +32,7 @@ def validate(path):
     required = {Path(sys.executable).resolve(), Path('/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home/bin/java').resolve(), Path(__file__).resolve(), cwd / 'scripts/jev_frozen_runner.clj', cwd / 'deps.edn'}
     required.update(p.resolve() for base in ('src', 'resources') for p in (cwd / base).rglob('*') if p.is_file())
     required.update(packet / name for name in PACKET_HASHES)
-    for binary in ('clojure', 'security', 'op'):
+    for binary in ('clojure',):
         resolved = shutil.which(binary)
         if not resolved:
             raise RuntimeError('Required executable unavailable')
@@ -58,28 +59,84 @@ def save(path, value):
     finally:
         os.close(fd)
 
-def credential(secrets):
-    def capture(args, env=None):
-        return subprocess.check_output(args, env=env, text=True, stderr=subprocess.DEVNULL).strip()
-    token = capture(['security', 'find-generic-password', '-s', 'api-shell 1Password service account', '-a', os.environ['USER'], '-w'])
-    secrets.append(token)
-    if not token:
-        raise RuntimeError('Empty service credential')
-    env = {**os.environ, 'OP_SERVICE_ACCOUNT_TOKEN': token}
-    items = json.loads(capture(['op', 'item', 'list', '--vault', 'Shell Access', '--format', 'json'], env))
-    ids = [i['id'] for i in items if 'typesafe' in i.get('title', '').lower()]
-    if len(ids) != 1:
-        raise RuntimeError('Ambiguous provider credential')
-    item = json.loads(capture(['op', 'item', 'get', ids[0], '--vault', 'Shell Access', '--format', 'json'], env))
-    fields = [f['value'] for f in item.get('fields', []) if f.get('value') and (f.get('type') == 'CONCEALED' or f.get('purpose') == 'PASSWORD')]
-    if len(fields) != 1 or '\n' in fields[0] or '\r' in fields[0]:
+def _valid_key(value, secrets):
+    if not value or value != value.strip() or value == 'REPLACE_WITH_REAL_KEY' or '\n' in value or '\r' in value:
         raise RuntimeError('Invalid provider credential')
-    secrets.append(fields[0])
-    return fields[0]
+    secrets.append(value)
+    return value
+
+def credential(secrets):
+    """Resolve runtime-only bearer: explicit environment, owner file, then 1Password."""
+    if 'TYPESAFE_API_KEY' in os.environ:
+        return _valid_key(os.environ['TYPESAFE_API_KEY'], secrets)
+    path = Path(os.environ.get('TYPESAFE_API_KEY_FILE', '~/.config/freediving-results/jev.env')).expanduser()
+    try:
+        os.lstat(path)
+        file_present = True
+    except FileNotFoundError:
+        file_present = False
+    if file_present or 'TYPESAFE_API_KEY_FILE' in os.environ:
+        if not path.is_absolute():
+            raise RuntimeError('Credential file path must be absolute')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or not metadata.st_mode & stat.S_IRUSR or metadata.st_mode & 0o177:
+                raise RuntimeError('Credential file must be owner-readable and private')
+            with os.fdopen(fd, 'r') as stream:
+                lines = stream.read().splitlines()
+            fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        value = None
+        for line in lines:
+            if line.startswith('TYPESAFE_API_KEY='):
+                if value is not None:
+                    raise RuntimeError('Duplicate credential entry')
+                value = line.partition('=')[2].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+            elif line.strip() and not line.lstrip().startswith('#'):
+                raise RuntimeError('Invalid credential file entry')
+        return _valid_key(value, secrets)
+    def capture(args, env=None):
+        return subprocess.check_output(args, env=env, text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
+    for attempt in range(3):
+        try:
+            token = capture(['security', 'find-generic-password', '-s', 'api-shell 1Password service account', '-a', os.environ['USER'], '-w'])
+            _valid_key(token, secrets)
+            env = {**os.environ, 'OP_SERVICE_ACCOUNT_TOKEN': token}
+            items = json.loads(capture(['op', 'item', 'list', '--vault', 'Shell Access', '--format', 'json'], env))
+            ids = [i['id'] for i in items if 'typesafe' in i.get('title', '').lower()]
+            if len(ids) != 1:
+                raise RuntimeError('Ambiguous provider credential')
+            item = json.loads(capture(['op', 'item', 'get', ids[0], '--vault', 'Shell Access', '--format', 'json'], env))
+            fields = [f['value'] for f in item.get('fields', []) if f.get('value') and (f.get('type') == 'CONCEALED' or f.get('purpose') == 'PASSWORD')]
+            if len(fields) != 1:
+                raise RuntimeError('Invalid provider credential')
+            return _valid_key(fields[0], secrets)
+        except (subprocess.SubprocessError, OSError):
+            if attempt == 2:
+                raise RuntimeError('Credential lookup unavailable') from None
+    raise RuntimeError('Credential lookup unavailable')
+
+def failure_status(error, argv):
+    started = False
+    try:
+        manifest = argv[argv.index('--manifest') + 1]
+        root = Path(json.loads(Path(manifest).read_text())['root'])
+        started = (root / 'dispatcher-started.json').exists() or (root / 'store').exists()
+    except (ValueError, IndexError, KeyError, OSError, json.JSONDecodeError):
+        pass
+    return {'status': 'stopped', 'exception_class': type(error).__name__,
+            'stage': 'dispatch' if started else 'preflight',
+            'dispatch_may_have_begun': started, 'resend_forbidden': started}
 
 def run_clojure(m, mode, key=None):
     env = dict(os.environ)
     env.pop('OP_SERVICE_ACCOUNT_TOKEN', None)
+    env.pop('TYPESAFE_API_KEY', None)
     env['JAVA_HOME'] = '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home'
     command = ['clojure', '-Sdeps', '{:paths ["src" "resources" "scripts"]}', '-M', '-m', 'jev-frozen-runner', mode, m['packet'], m['root']]
     # Never persist arbitrary JVM output: even unexpected exception data stays private.
@@ -103,19 +160,21 @@ def main(argv=None):
         run_clojure(m, 'check')
         if validate(args.manifest) != m:
             raise RuntimeError('Manifest changed during preflight')
-        save(start, {'run_id': RUN_ID, 'manifest_sha256': sha(args.manifest), 'max_http': 122, 'max_questions': 162, 'attempts': 1, 'concurrency': 1, 'started_at': time.time()})
         secrets = []
+        key = credential(secrets)
+        if validate(args.manifest) != m:
+            raise RuntimeError('Manifest changed during credential lookup')
+        save(start, {'run_id': RUN_ID, 'manifest_sha256': sha(args.manifest), 'max_http': 122, 'max_questions': 162, 'attempts': 1, 'concurrency': 1, 'started_at': time.time()})
         try:
-            key = credential(secrets)
             code = run_clojure(m, 'live', key)
             del key
             save(root / 'dispatcher-completed.json', {'returncode': code, 'completed_at': time.time()})
         except BaseException as e:
-            save(root / 'launcher-error.json', {'exception_class': type(e).__name__, 'resend_forbidden': True})
+            save(root / 'launcher-error.json', {'exception_class': type(e).__name__, 'stage': 'dispatch', 'dispatch_may_have_begun': True, 'resend_forbidden': True})
             raise
         finally:
-            hits = [str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and any(secret and secret.encode() in p.read_bytes() for secret in secrets)]
-            save(root / 'secret-scan.json', {'passed': not hits, 'exact_credential_and_service_token_hits': hits})
+            hits = sum(1 for p in root.rglob('*') if p.is_file() and any(secret and secret.encode() in p.read_bytes() for secret in secrets))
+            save(root / 'secret-scan.json', {'passed': hits == 0, 'exact_credential_and_service_token_hit_count': hits})
             if hits:
                 raise RuntimeError('Credential scan failed')
     else:
@@ -129,5 +188,5 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except Exception as error:
-        print(json.dumps({'status': 'stopped', 'exception_class': type(error).__name__, 'resend_forbidden': True}), file=sys.stderr)
+        print(json.dumps(failure_status(error, sys.argv[1:])), file=sys.stderr)
         sys.exit(1)

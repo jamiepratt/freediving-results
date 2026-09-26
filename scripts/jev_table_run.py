@@ -10,7 +10,7 @@ import sys
 import time
 import re
 
-from jev_frozen_run import credential, save, sha, PACKET_HASHES
+from jev_frozen_run import credential, failure_status, save, sha, PACKET_HASHES
 
 def validate(path):
     m = json.loads(Path(path).read_text())
@@ -26,7 +26,7 @@ def validate(path):
     required.update(p.resolve() for base in ('src', 'resources') for p in (cwd / base).rglob('*') if p.is_file())
     required.update(original / name for name in PACKET_HASHES)
     required.update(packet / name for name in ('candidate-frozen.edn', 'requests.json'))
-    for binary in ('clojure', 'security', 'op'):
+    for binary in ('clojure',):
         resolved = shutil.which(binary)
         if not resolved:
             raise RuntimeError('Required executable unavailable')
@@ -50,6 +50,7 @@ def validate(path):
 def run_clojure(m, mode, key=None):
     env = dict(os.environ)
     env.pop('OP_SERVICE_ACCOUNT_TOKEN', None)
+    env.pop('TYPESAFE_API_KEY', None)
     env['JAVA_HOME'] = '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home'
     command = ['clojure', '-Sdeps', '{:paths ["src" "resources" "scripts"]}', '-M', '-m', 'jev-table-runner', mode, m['packet'], m['root'], m['original_packet'], m['expected_run_id']]
     # Never persist arbitrary JVM output: even unexpected exception data stays private.
@@ -73,19 +74,21 @@ def main(argv=None):
         run_clojure(m, 'check')
         if validate(args.manifest) != m:
             raise RuntimeError('Manifest changed during preflight')
-        save(start, {'run_id': m['expected_run_id'], 'manifest_sha256': sha(args.manifest), 'max_http': m['max_http'], 'max_questions': 81, 'attempts': 1, 'concurrency': 1, 'started_at': time.time()})
         secrets = []
+        key = credential(secrets)
+        if validate(args.manifest) != m:
+            raise RuntimeError('Manifest changed during credential lookup')
+        save(start, {'run_id': m['expected_run_id'], 'manifest_sha256': sha(args.manifest), 'max_http': m['max_http'], 'max_questions': 81, 'attempts': 1, 'concurrency': 1, 'started_at': time.time()})
         try:
-            key = credential(secrets)
             code = run_clojure(m, 'live', key)
             del key
             save(root / 'dispatcher-completed.json', {'returncode': code, 'completed_at': time.time()})
         except BaseException as e:
-            save(root / 'launcher-error.json', {'exception_class': type(e).__name__, 'resend_forbidden': True})
+            save(root / 'launcher-error.json', {'exception_class': type(e).__name__, 'stage': 'dispatch', 'dispatch_may_have_begun': True, 'resend_forbidden': True})
             raise
         finally:
-            hits = [str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and any(secret and secret.encode() in p.read_bytes() for secret in secrets)]
-            save(root / 'secret-scan.json', {'passed': not hits, 'exact_credential_and_service_token_hits': hits})
+            hits = sum(1 for p in root.rglob('*') if p.is_file() and any(secret and secret.encode() in p.read_bytes() for secret in secrets))
+            save(root / 'secret-scan.json', {'passed': hits == 0, 'exact_credential_and_service_token_hit_count': hits})
             if hits:
                 raise RuntimeError('Credential scan failed')
     else:
@@ -99,5 +102,5 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except Exception as error:
-        print(json.dumps({'status': 'stopped', 'exception_class': type(error).__name__, 'resend_forbidden': True}), file=sys.stderr)
+        print(json.dumps(failure_status(error, sys.argv[1:])), file=sys.stderr)
         sys.exit(1)
