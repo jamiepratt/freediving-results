@@ -146,6 +146,8 @@
                      (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
                      (extraction/italy-open-artifact? a) (->> (extraction/validate-italy-open-artifact! root))
                      (extraction/san-mauro-artifact? a) (->> (extraction/validate-san-mauro-artifact! root))
+                     (extraction/san-mauro-static-claim? a) (->> (extraction/validate-san-mauro-static-artifact! root))
+                     (extraction/tuttinapnea-claim? a) (->> (extraction/validate-tuttinapnea-artifact! root))
                      (extraction/world-games-artifact? a) (->> (extraction/validate-world-games-artifact! root))
                      (extraction/world-games-series-artifact? a) (->> (extraction/validate-world-games-series-artifact! root))
                      (extraction/kaohsiung-artifact? a) (->> (extraction/validate-kaohsiung-artifact! root))
