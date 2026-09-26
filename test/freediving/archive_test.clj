@@ -30,6 +30,22 @@
       (is (= "abc" (when-let [path (:artifact-path result)] (slurp path))))
       (is (= [manifest] (mapv :manifest (:acquisitions result)))))))
 
+(deftest inventory-verifies-real-archive-layout-before-reporting
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")]
+    (spit source "abc")
+    (archive/register! root source manifest)
+    (is (= [{:acquisition-id (:acquisition-id (first (:acquisitions (archive/inspect root (:sha256 manifest)))))
+             :sha256 (:sha256 manifest)
+             :discovery-url (:discovery-url manifest)
+             :final-url (:final-url manifest)
+             :retrieved-at (:retrieved-at manifest)
+             :content-type (:content-type manifest)
+             :publisher (:publisher manifest)
+             :selected-date nil}]
+           (archive/inventory root)))
+    (spit (str root "/objects/" (:sha256 manifest)) "corrupt")
+    (is (thrown? clojure.lang.ExceptionInfo (archive/inventory root)))))
+
 (deftest malformed-and-mismatched-manifests-do-not-register
   (doseq [bad [(assoc manifest :sha256 (apply str (repeat 64 "0")))
                (dissoc manifest :acquisition-method)

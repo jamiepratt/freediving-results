@@ -1,5 +1,6 @@
 (ns freediving.archive
   (:require [clojure.edn :as edn]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.walk :as walk])
@@ -286,15 +287,41 @@
                             (sort-by :acquisition-id)
                             vec)}))))
 
+(defn inventory
+  "Verify every registered acquisition and source object; return metadata only."
+  [root]
+  (let [root (str (safe-path! root))]
+    (doseq [dir [root (io/file root "objects") (io/file root "acquisitions")]]
+      (private! dir true))
+    (->> (.listFiles (io/file root "acquisitions"))
+         (map (fn [file]
+                (let [{:keys [acquisition-id manifest]} (verified-record! file)
+                      digest (:sha256 manifest)]
+                  (verified-object! (io/file root "objects" digest) digest)
+                  (verified-browser-evidence! root manifest)
+                  {:acquisition-id acquisition-id
+                   :sha256 digest
+                   :discovery-url (:discovery-url manifest)
+                   :final-url (:final-url manifest)
+                   :retrieved-at (:retrieved-at manifest)
+                   :content-type (:content-type manifest)
+                   :publisher (:publisher manifest)
+                   :selected-date (get-in manifest [:provenance :browser-state :selected-date])})))
+         (sort-by :acquisition-id)
+         vec)))
+
 (defn -main [& args]
   (try
-    (let [[command root value manifest-file] args]
-      (prn (cond
-             (and (= command "import") (= 4 (count args)))
-             (register! root value (read-manifest manifest-file))
-             (and (= command "inspect") (= 3 (count args)))
-             (inspect root value)
-             :else (fail! "Usage: import ARCHIVE SOURCE MANIFEST.edn | inspect ARCHIVE SHA256"))))
+    (let [[command root value manifest-file] args
+          result (cond
+                   (and (= command "import") (= 4 (count args)))
+                   (register! root value (read-manifest manifest-file))
+                   (and (= command "inspect") (= 3 (count args)))
+                   (inspect root value)
+                   (and (= command "inventory-json") (= 2 (count args)))
+                   (json/write-str (inventory root))
+                   :else (fail! "Usage: import ARCHIVE SOURCE MANIFEST.edn | inspect ARCHIVE SHA256 | inventory-json ARCHIVE"))]
+      (if (= command "inventory-json") (println result) (prn result)))
     (catch Exception error
       (binding [*out* *err*] (println "Archive command failed:" (.getMessage error)))
       (System/exit 1))))
