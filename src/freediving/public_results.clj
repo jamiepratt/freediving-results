@@ -194,6 +194,12 @@
                           pairs (filterv (fn [[_ p]] (let [id (get-in p [:event-selection :id])]
                                                        (or (nil? id) (= (get (:expected plan) id) (get counts id))))) pairs)]
                       (if (= (count pairs) (count vs)) pairs (recur (mapv first pairs)))))
+        approved-ids (set (keep #(get-in % [1 :identity :id]) projected))
+        projected (mapv (fn [[v p]]
+                          (let [self-id (sha (str "local-observation:" (:job_id v) ":" (:ordinal v)))]
+                            [v (if (and (= {:status :unresolved} (:identity p))
+                                        (contains? approved-ids self-id))
+                                 (assoc p :identity {:status :approved :id self-id}) p)])) projected)
         review-count (:n (first (query c "SELECT count(*) AS n FROM freediving.review_decisions")))
         validation-count (:n (first (query c "SELECT count(*) AS n FROM freediving.publication_decisions")))]
     (execute! c "DELETE FROM freediving.public_projection_cache")

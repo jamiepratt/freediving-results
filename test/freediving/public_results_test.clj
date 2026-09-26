@@ -118,6 +118,34 @@
       (validate! t "v2") (public/refresh! reviewer)
       (is (= [] (public/athlete-history reader-url id)))
       (is (= {:status :unresolved} (:identity (first (public/results reader-url))))))))
+(deftest approved-local-match-includes-public-anchor-and-reversal-restores-both
+  (let [a (sample) b (assoc a :ordinal 1)
+        inspection (observations/inspect fixture/app (:job-id a))
+        anchor (second (:observations inspection))
+        ref {:job-id (:job-id b) :ordinal 1 :candidate-id (:candidate_id anchor)
+             :source-sha256 (get-in inspection [:artifact :source-sha256])
+             :artifact-sha256 (.formatHex (java.util.HexFormat/of)
+                                          (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                                   ^bytes (:artifact-bytes inspection)))
+             :page 1 :line 2}
+        p (assoc (review-fixture/proposal a "linked")
+                 :identity-target ref :evidence [{:page 1 :line 1} ref]
+                 :after {:outcome :matched :identity-id (str "local-observation:" (:job-id b) ":1")})]
+    (reviews/propose! fixture/app p)
+    (decide! "approve-link" :approve "linked" 0)
+    (validate! a "validate-a")
+    (validate! b "validate-b")
+    (is (= {:refreshed 2} (public/refresh! reviewer)))
+    (let [rows (public/results reader-url) id (some #(get-in % [:identity :id]) rows)]
+      (is (= 2 (count rows)))
+      (is (some? id))
+      (is (= 2 (count (public/athlete-history reader-url id))))
+      (is (= #{id} (set (map #(get-in % [:identity :id]) rows)))))
+    (decide! "reverse-link" :reverse "approve-link" 1)
+    (validate! a "revalidate-a")
+    (public/refresh! reviewer)
+    (is (every? #(= {:status :unresolved} (:identity %)) (public/results reader-url)))
+    (is (= 0 (:approved_identities (public/coverage reader-url))))))
 (deftest migration-restores-least-privilege-and-rejects-unsafe-roles
   (fixture/sql! fixture/admin "GRANT SELECT ON ALL TABLES IN SCHEMA freediving TO reviews_public")
   (public/migrate! fixture/admin "reviews_owner" "reviews_public")
