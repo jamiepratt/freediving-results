@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from acquire_source import SourceRejected, acquire, import_once
 from source_acquisition import AcquisitionClient, Policy
+from source_inventory import find_reusable_source
 from test_acquire_source import Publisher
 
 
@@ -45,6 +46,10 @@ class SourceInventoryTest(unittest.TestCase):
         self.assertEqual(Path(original["provenance_path"]).read_bytes(),
                          Path(reused["provenance_path"]).read_bytes())
         self.assertEqual(hashlib.sha256(Path(reused["source_path"]).read_bytes()).hexdigest(), reused["sha256"])
+        browser_candidate = find_reusable_source([remote], publisher.url, "pdf",
+                                                 {"event": "synthetic", "version": "results-1"})
+        self.assertEqual(Path(original["source_path"]).read_bytes(), browser_candidate["body"])
+        self.assertIsNone(find_reusable_source([remote], publisher.url, "pdf", {"version": "other"}))
 
     def test_corrupt_or_incomplete_evidence_is_not_reused(self):
         publisher = self.publisher()

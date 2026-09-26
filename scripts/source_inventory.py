@@ -115,3 +115,30 @@ def legacy_archive_gaps(roots, url, representation, context):
             # Its verified object is evidence, but cannot alone authorize reuse.
             count += 1
     return count
+
+
+def find_reusable_source(roots, url, representation, context=None):
+    """Return verified result bytes and original receipt for HTTP or browser routes.
+
+    The caller must still decide whether the selected browser state matches the
+    declared context and must report that publisher freshness was not checked.
+    """
+    context = context or {}
+    for _, source, provenance, record, body in verified_candidates(roots, url, representation, context):
+        mime = record["content_type"].split(";", 1)[0].lower()
+        if representation == "pdf" and not (body.startswith(b"%PDF-") and mime in ("application/pdf", "application/octet-stream")):
+            continue
+        if representation == "json":
+            if mime != "application/json" and not mime.endswith("+json"):
+                continue
+            try:
+                json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                continue
+        if representation == "html" and (mime not in ("text/html", "application/xhtml+xml") or
+                                           b"<html" not in body[:65536].lower() and
+                                           b"<!doctype html" not in body[:65536].lower()):
+            continue
+        return {"body": body, "source_path": source, "provenance_path": provenance,
+                "record": record, "freshness": "not_checked"}
+    return None
