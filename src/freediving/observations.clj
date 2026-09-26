@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
+            [freediving.camotes-challenge :as camotes-challenge]
             [freediving.aida-html :as html]
             [freediving.cmas-2025-indoor-json :as indoor-json])
   (:import [java.sql DriverManager Connection]
@@ -137,6 +138,7 @@
                    4 (html/validate-artifact! root a)
                    5 (indoor-json/validate-artifact! root a)
                    (cond-> (validate-pages! a)
+                     (= camotes-challenge/parser-version (:parser-version a)) (->> (camotes-challenge/validate-artifact! root))
                      (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
                      (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
                      (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
