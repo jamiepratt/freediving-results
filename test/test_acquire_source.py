@@ -136,6 +136,7 @@ class AcquireSourceTest(unittest.TestCase):
         gap_text = Path(caught.exception.gap_path).read_text()
         self.assertEqual(1, len(publisher.requests))
         self.assertEqual(403, json.loads(gap_text)["status"])
+        self.assertEqual(64, len(json.loads(gap_text)["source_identity"]))
         self.assertNotIn("secret", gap_text)
         self.assertNotIn(publisher.url, gap_text)
 

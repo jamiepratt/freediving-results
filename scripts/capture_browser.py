@@ -85,6 +85,7 @@ def main(argv=None):
               "redirects": [{"from": source, "to": target, "status": status}
                             for source, target, status in capture.redirects],
               "context": source_context, "reuses": capture.reuses,
+              "events": capture.events,
               "responses": records})
         print(json.dumps({"status": "captured", "host": host, "responses": len(records),
                           "dom_sha256": dom_hash}, sort_keys=True))
@@ -92,6 +93,7 @@ def main(argv=None):
     except BrowserAcquisitionError as error:
         _json(args.output / "coverage-gap.json", {"schema": "source-gap/v1", "host": error.host,
               "reason": error.reason, "status": error.status,
+              "events": error.events,
               "retrieved_at": datetime.now(timezone.utc).isoformat()})
         print(json.dumps({"status": "coverage_gap", "host": error.host,
                           "reason": error.reason}, sort_keys=True))

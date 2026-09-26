@@ -141,6 +141,42 @@ class BrowserCaptureTest(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_session_bound_browser_request_does_not_reuse_public_receipt(self):
+        class Handler(BaseHTTPRequestHandler):
+            calls = 0
+
+            def do_GET(self):
+                Handler.calls += 1
+                body = b"<html>results</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/results"
+            page = Page([(url, Response())], request_headers={"Cookie": "session=private"})
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                client = AcquisitionClient(default_policy=Policy(min_interval=0),
+                                           lease_path=root / "lease.sqlite3")
+                acquire(url, "html", root / "archive", client=client)
+                capture = capture_page(page, url, client, opener=None,
+                                       archive_roots=[root / "archive"])
+            self.assertEqual(2, Handler.calls)
+            self.assertEqual(0, len(capture.reuses))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_browser_session_header_reaches_bounded_http_route(self):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -252,6 +288,18 @@ class BrowserCaptureTest(unittest.TestCase):
                 capture_page(page, host + "/api", client, opener=page)
         self.assertEqual(2, len(page.requests))
         self.assertGreaterEqual(page.requests[1][1] - page.requests[0][1], 0.065)
+
+    def test_retry_decisions_are_retained_without_request_secrets(self):
+        url = "https://publisher.example/api?view=private"
+        page = Page([(url, [Response(status=429, headers={"retry-after": "0"}),
+                            Response(content_type="application/json", body=b'{"rows":[]}')])])
+        with tempfile.TemporaryDirectory() as directory:
+            client = AcquisitionClient(default_policy=Policy(min_interval=0, max_attempts=2),
+                                       lease_path=Path(directory) / "lease.sqlite3")
+            capture = capture_page(page, url, client, opener=page)
+        self.assertTrue(any(event["reason"] == "retry_after" for event in capture.events))
+        self.assertEqual(2, len(page.requests))
+        self.assertNotIn("private", str(capture.events))
 
     def test_sensitive_redirect_stops_before_browser_follows(self):
         page = Page([("https://publisher.example/start",

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import random
+import re
 import time
 from pathlib import Path
 from urllib.error import HTTPError
@@ -29,8 +30,9 @@ _REDIRECT = (301, 302, 303, 307, 308)
 
 
 class BrowserAcquisitionError(Exception):
-    def __init__(self, host, reason, status=None):
+    def __init__(self, host, reason, status=None, events=()):
         self.host, self.reason, self.status = host, reason, status
+        self.events = tuple(events)
         super().__init__(f"browser acquisition {reason} at {host}")
 
 
@@ -51,6 +53,7 @@ class BrowserCapture:
     responses: tuple[BrowserResponse, ...]
     redirects: tuple[tuple[str, str, int], ...]
     reuses: tuple[dict, ...] = ()
+    events: tuple[dict, ...] = ()
 
 
 def _validate(host, status, content_type, body, resource_type):
@@ -92,6 +95,7 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
     responses = []
     redirects = []
     reuses = []
+    events = []
     redirect_count = 0
     opener = opener or build_opener(_NoRedirect)
 
@@ -114,7 +118,10 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
         policy = client.policy_for(host)
         browser_request = route.request
         method = getattr(browser_request, "method", "GET")
-        if method == "GET" and not refresh:
+        request_headers = browser_request.all_headers() if hasattr(browser_request, "all_headers") else {}
+        session_bound = any(re.search(r"cookie|authorization|token|api-key|session|credential", key, re.I)
+                            for key in request_headers)
+        if method == "GET" and not refresh and not session_bound:
             for representation in ("html", "json", "pdf"):
                 try:
                     reusable = find_reusable_source(archive_roots, request_url, representation,
@@ -144,14 +151,15 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
                                "provenance_path": str(reusable["provenance_path"]),
                                "original_retrieved_at": reusable["record"]["retrieved_at"],
                                "freshness": "not_checked"})
+                events.append({"host": host, "attempt": 0, "wait": 0,
+                               "reason": "archive_reuse", "outcome": "complete"})
                 route.fulfill(status=200, headers={"content-type": content_type}, body=body)
                 return
         if method not in ("GET", "POST"):
             failures.append(BrowserAcquisitionError(host, "unsupported_method"))
             route.abort()
             return
-        headers = browser_request.all_headers() if hasattr(browser_request, "all_headers") else {}
-        headers = {key: value for key, value in headers.items()
+        headers = {key: value for key, value in request_headers.items()
                    if key.lower() not in ("host", "content-length", "transfer-encoding",
                                           "accept-encoding", "connection", "proxy-authorization")}
         data = (getattr(browser_request, "post_data_buffer", None) or b"") if method == "POST" else None
@@ -159,7 +167,10 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
         attempt_limit = 1 if method == "POST" else policy.max_attempts
         for attempt in range(1, attempt_limit + 1):
             try:
-                with client.lease(request_url):
+                with client.lease(request_url) as waited:
+                    if waited:
+                        events.append({"host": host, "attempt": attempt, "wait": waited,
+                                       "reason": "host_pacing", "outcome": "waited"})
                     request = Request(request_url, data=data, headers=headers, method=method)
                     try:
                         response = opener.open(request, timeout=policy.timeout)
@@ -171,6 +182,8 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
                         if status in _RETRYABLE:
                             retry_after = _retry_after(response_headers.get("retry-after"))
                             continue_retry = True
+                            events.append({"host": host, "attempt": attempt, "wait": 0,
+                                           "reason": "transient_status", "outcome": str(status)})
                         else:
                             continue_retry = False
                         if status in _REDIRECT:
@@ -220,6 +233,9 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
                                 responses.append(BrowserResponse(request_url, host, status, response_headers.get("content-type"),
                                                                  body, sha256(body).hexdigest()))
                         if not continue_retry:
+                            events.append({"host": host, "attempt": attempt, "wait": 0,
+                                           "reason": "redirect" if status in _REDIRECT else "success",
+                                           "outcome": "follow" if status in _REDIRECT else "complete"})
                             safe_headers = {key: value for key, value in response_headers.items()
                                             if key.lower() not in ("content-length", "transfer-encoding", "content-encoding")}
                             route.fulfill(status=status, headers=safe_headers, body=body)
@@ -229,12 +245,19 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
                 delay = retry_after if retry_after is not None else min(policy.max_delay, 2 ** (attempt - 1) + random.random())
                 if delay > policy.max_delay:
                     raise BrowserAcquisitionError(host, "retry_after_exceeds_max_delay", status)
+                events.append({"host": host, "attempt": attempt, "wait": delay,
+                               "reason": "retry_after" if retry_after is not None else "backoff",
+                               "outcome": "waited"})
                 time.sleep(delay)
             except BrowserAcquisitionError as failure:
+                events.append({"host": host, "attempt": attempt, "wait": 0,
+                               "reason": failure.reason, "outcome": "failed"})
                 failures.append(failure)
                 route.abort()
                 return
             except Exception:
+                events.append({"host": host, "attempt": attempt, "wait": 0,
+                               "reason": "network_error", "outcome": "failed"})
                 if attempt == attempt_limit:
                     failures.append(BrowserAcquisitionError(host, "network_error"))
                     route.abort()
@@ -256,10 +279,13 @@ def capture_page(page, url, client: AcquisitionClient, *, opener=None,
             page.goto(url, wait_until="networkidle")
         except Exception:
             if failures:
+                failures[0].events = tuple(events)
                 raise failures[0] from None
             raise
         if failures:
+            failures[0].events = tuple(events)
             raise failures[0]
-        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects), tuple(reuses))
+        return BrowserCapture(url, page.content(), tuple(responses), tuple(redirects),
+                              tuple(reuses), tuple(events))
     finally:
         page.unroute("**/*", handle)

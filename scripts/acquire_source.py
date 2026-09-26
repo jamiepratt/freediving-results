@@ -206,7 +206,8 @@ def acquire(url, representation, output_dir, *, client=None, dry_run=False,
         status = error.status if isinstance(error, AcquisitionError) else (result.status if "result" in locals() else None)
         events = [vars(event) for event in error.events] if isinstance(error, AcquisitionError) else []
         gap = directory / f"gap-{uuid4().hex}.json"
-        _json_write(gap, {"host": host, "representation": representation, "started_at": started_at,
+        _json_write(gap, {"host": host, "representation": representation,
+                          "source_identity": context_key, "started_at": started_at,
                           "retrieved_at": retrieved_at, "elapsed_seconds": time.monotonic() - started_clock,
                           "status": status, "reason": reason, "events": events,
                           "legacy_archive_incomplete": legacy_gaps})
