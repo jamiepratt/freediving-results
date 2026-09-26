@@ -147,6 +147,8 @@
                      (extraction/lodz-artifact? a) (->> (extraction/validate-lodz-artifact! root))
                      (extraction/unu-tampa-artifact? a) (->> (extraction/validate-unu-tampa-artifact! root))
                      (extraction/noxy-artifact? a) (->> (extraction/validate-noxy-artifact! root))
+                     (extraction/deep-dominica-artifact? a) (->> (extraction/validate-deep-dominica-artifact! root))
+                     (extraction/vertical-blue-artifact? a) (->> (extraction/validate-vertical-blue-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
