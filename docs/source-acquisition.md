@@ -6,7 +6,7 @@ The 27 September [VDST and FEDAS index batch](2025-onward-source-inventory-20260
 
 ## Remote 2025-onward discovery batch
 
-The 27 September bounded [FIPSAS Italian federation calendar probe](2025-onward-source-inventory-20260926.md#fipsas-italian-federation-calendar-probe-27-september-2026) retained four official HTML pages. The two completed Just 40th events show unlinked `Classifiche` labels, and the future Capri event is not final. No final result source or row was imported. The calendar's other months remain unverified; #16 is open.
+The 27 September bounded [FIPSAS Italian federation calendar probe](2025-onward-source-inventory-20260926.md#fipsas-italian-federation-calendar-probe-27-september-2026) retained four official HTML pages. Its two completed Just 40th events show unlinked `Classifiche` labels, and the future Capri event is not final. A subsequent [dated 2025 apnea calendar sweep](2025-onward-source-inventory-20260926.md#fipsas-2025-dated-apnea-calendar-27-september-2026) retained all twelve month responses and 17 event pages, found one eligible 2025 final PDF, and imported 49 cited Just Apnea rows into the isolated database. Fourteen labels remain unlinked and two cards link a 2026 PDF. #16 remains open.
 
 ### Archive route and revision validation, 27 September 2026
 
