@@ -17,6 +17,9 @@
         row (first (:candidates artifact))]
     (is (= "fipsas-classifica-2026/1" (:parser-version artifact)))
     (is (extraction/fipsas-artifact? artifact))
+    (is (not (contains? (get-in row [:raw :fields]) :penalty)))
+    (is (not (contains? (:parsed row) :penalty)))
+    (is (not (contains? (:parsed row) :source-role)))
     (is (= {:page 2 :line 5} (:coordinates row)))
     (is (= "De Mattia Martina" (get-in row [:parsed :source-name])))
     (is (= 80.00M (get-in row [:parsed :final-performance])))

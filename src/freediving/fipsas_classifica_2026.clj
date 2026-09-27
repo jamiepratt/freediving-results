@@ -104,17 +104,18 @@
                     (<= (count normalized-tokens) (if two-declarations? 7 (if time-only? 4 (if elite? 6 7)))))
         performance (if (or time-only? speed?) approved-time (decimal-distance approved-distance))]
     {:valid? valid?
-     :raw {:declared-time declared-time :declared-distance declared-distance :penalty penalty
-           :realized-time realized-time :realized-distance realized-distance
-           :approved-time approved-time :approved-distance approved-distance
-           :time-difference difference :points points :tokens (vec tokens)}
-     :parsed {:declared-time declared-time :declared-distance (decimal-distance declared-distance)
-              :realized-time realized-time :realized-distance (decimal-distance realized-distance)
-              :approved-time approved-time :approved-distance (decimal-distance approved-distance)
-              :penalty penalty
-              :time-difference difference :points (when (and points (re-matches points-pattern points))
-                                                    (bigdec points))
-              :final-performance performance :unit (if (or time-only? speed?) "min:sec.centisec" "m")}}))
+     :raw (cond-> {:declared-time declared-time :declared-distance declared-distance
+                   :realized-time realized-time :realized-distance realized-distance
+                   :approved-time approved-time :approved-distance approved-distance
+                   :time-difference difference :points points :tokens (vec tokens)}
+            penalty (assoc :penalty penalty))
+     :parsed (cond-> {:declared-time declared-time :declared-distance (decimal-distance declared-distance)
+                      :realized-time realized-time :realized-distance (decimal-distance realized-distance)
+                      :approved-time approved-time :approved-distance (decimal-distance approved-distance)
+                      :time-difference difference :points (when (and points (re-matches points-pattern points))
+                                                            (bigdec points))
+                      :final-performance performance :unit (if (or time-only? speed?) "min:sec.centisec" "m")}
+               penalty (assoc :penalty penalty))}))
 
 (defn- nearby-status [lines line]
   (let [preceding (->> lines (filter #(< (:line %) (:line line))) (take-last 2) reverse)
@@ -153,17 +154,17 @@
                          :calendar-event-date (:calendar-date source)
                          :printed-event-date (:printed-date source)
                          :category (:category section) :discipline (:discipline section)
-                         :source-role (when (> (:index source) 8)
-                                        (or (:source-role source)
-                                            (when (str/starts-with? (:category section) "Junior ")
-                                              :junior-supporting-ranking)
-                                            :individual-ranking))
                          :source-name (str surname " " given) :surname surname
                          :given-name given :club club :birth-year (parse-long birth-year)
                          :rank (some-> rank parse-long) :ranked? ranked?
                          :status (if ranked? :ranked (case status "BO" :blackout "DQ" :disqualified :unknown))
                          :final-performance (when (or ranked? (nil? status))
-                                              (get-in results [:parsed :final-performance]))}))]
+                                              (get-in results [:parsed :final-performance]))}
+                        (when (> (:index source) 8)
+                          {:source-role (or (:source-role source)
+                                            (when (str/starts-with? (:category section) "Junior ")
+                                              :junior-supporting-ranking)
+                                            :individual-ranking)})))]
     {:coordinates (select-keys line [:page :line])
      :source-lines (vec (concat [line (:heading-line section)] (:source-lines status-data)))
      :raw {:line (:text line)
