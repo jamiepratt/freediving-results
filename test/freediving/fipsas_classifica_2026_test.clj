@@ -15,7 +15,8 @@
         sha (fipsas/source-sha256 1)
         artifact (extraction/parse-pages sha pages)
         row (first (:candidates artifact))]
-    (is (= fipsas/parser-version (:parser-version artifact)))
+    (is (= "fipsas-classifica-2026/1" (:parser-version artifact)))
+    (is (extraction/fipsas-artifact? artifact))
     (is (= {:page 2 :line 5} (:coordinates row)))
     (is (= "De Mattia Martina" (get-in row [:parsed :source-name])))
     (is (= 80.00M (get-in row [:parsed :final-performance])))
@@ -57,6 +58,52 @@
     (is (= :disqualified (get-in row [:parsed :status])))
     (is (= "DQ" (get-in row [:raw :fields :status])))
     (is (= :partial (get-in artifact [:reconciliation :coverage])))))
+
+(deftest regional-standings-keep-printed-category-and-source-role
+  (let [pages (fixture "22° Campionato Regionale Toscano / 5° Memorial Marino Vannucchi"
+                       "8 marzo 2026" "regionale 1CF - DYN"
+                       " 1           Gentile   Eva    Barracuda Sub A.P.S.D.      2010                    1:40.00                                  0:53.90                 75,00                       0:53.90                75,00           0:46.10              15.0")
+        artifact (fipsas/parse-pages "f21d1ed286a97c55db8832fcee79fbdcf126822b3654d3f31d7914097a510998" pages)
+        row (first (:candidates artifact))]
+    (is (= "1CF" (get-in row [:parsed :category])))
+    (is (= :regional-supporting-ranking (get-in row [:parsed :source-role])))
+    (is (= 75.00M (get-in row [:parsed :final-performance])))
+    (is (= {:page 2 :line 5} (:coordinates row)))))
+
+(deftest championship-date-range-and-junior-standings
+  (let [pages (fixture "Campionati Italiani per Categorie Indoor" "20-22 marzo 2026"
+                       "Junior SPEEDF - SPEED"
+                       " 1           Spotti      Carolina    Np Varedo Ssd A.R.L.        2009                       2:00.00                                  0:41.81                100,00                       0:41.81              100,00         10.0")
+        artifact (fipsas/parse-pages "d28e6de1b4c353b1d9a94e283ee310a597264dd8e6d85cc31594782b61749e88" pages)
+        row (first (:candidates artifact))]
+    (is (= "Junior SPEEDF" (get-in row [:parsed :category])))
+    (is (= fipsas/parser-version (:parser-version artifact)))
+    (is (extraction/fipsas-artifact? artifact))
+    (is (= "2026-03-20/2026-03-22" (get-in row [:parsed :printed-event-date])))
+    (is (nil? (get-in row [:parsed :event-date])))
+    (is (= :junior-supporting-ranking (get-in row [:parsed :source-role])))
+    (is (= "0:41.81" (get-in row [:parsed :final-performance])))))
+
+(deftest printed-penalty-preserves-approved-distance
+  (let [pages (fixture "35° Trofeo Just Apnea" "14 marzo 2026" "1CM (14) - DYN"
+                       " 2           Solazzo    Donato     Ranidae S.S.D.R.L.     1997                    0:25.93                                   0:34.46                 25,00      PG               0:34.46                22,00           0:08.53           9.0")
+        row (first (:candidates (fipsas/parse-pages
+                                 "c81c2a99ce8cf1a9ab2824d384d415791cba30d1cd372877a3a896a74f489e5c" pages)))]
+    (is (= :parsed (:parse-status row)))
+    (is (= "PG" (get-in row [:raw :fields :penalty])))
+    (is (= 25.00M (get-in row [:parsed :realized-distance])))
+    (is (= 22.00M (get-in row [:parsed :final-performance])))))
+
+(deftest printed-distance-declaration-without-time
+  (let [pages (fixture "Campionati Italiani per Categorie Indoor" "20-22 marzo 2026"
+                       "M1F - DNF"
+                       " 1           Sacchi     Raffaella    Pro Desenzano Tritone Sub        1972                                              129,00            2:25.38                120,50                       2:25.38              120,50         10.0")
+        row (first (:candidates (fipsas/parse-pages
+                                 "d28e6de1b4c353b1d9a94e283ee310a597264dd8e6d85cc31594782b61749e88" pages)))]
+    (is (= :parsed (:parse-status row)))
+    (is (nil? (get-in row [:parsed :declared-time])))
+    (is (= 129.00M (get-in row [:parsed :declared-distance])))
+    (is (= 120.50M (get-in row [:parsed :final-performance])))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.fipsas-classifica-2026-test)]
