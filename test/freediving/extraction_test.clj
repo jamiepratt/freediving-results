@@ -10,11 +10,29 @@
             [freediving.deep-dominica-2026 :as deep-dominica-2026]
             [freediving.deep-dominica-2026-test :as dominica-2026-fixture]
             [freediving.fipsas-monsub-2026 :as monsub]
+            [freediving.fipsas-mediterranea-2026 :as mediterranea]
             [clojure.java.shell :as shell]
             [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (def header "2025 CMAS World Championship Freediving Outdoor\n09/09/2025\nCWT MEN SENIORS\nRANK SURNAME & NAME NAT CATEGORY DEPTH PEN. STATUS NOTES\n")
+
+(deftest mediterranea-source-routes-through-public-extraction
+  (let [pages ["Mediterranea Cup 2026\nCefalu' - 11-12 luglio 2026\nClassiﬁca OPEN M - CWT OPEN\n 1           Sergi          Giacomo      Mediterranea A.S.D.              1996              2:30.00                 84     2:39.05            82                 2:39.05           79     0:09.05         20.0\n"]
+        parsed (extraction/parse-pages mediterranea/source-sha256 pages)
+        artifact (merge parsed {:schema-version 3
+                                :source-sha256 mediterranea/source-sha256
+                                :raw-text (str (first pages) "\f")
+                                :tool {:name "pdftotext" :version "test-version"
+                                       :arguments ["-layout" "-enc" "UTF-8"]}})]
+    (is (= mediterranea/parser-version (:parser-version parsed)))
+    (is (= 1 (get-in parsed [:reconciliation :candidate-count])))
+    (is (extraction/fipsas-artifact? artifact))
+    (is (extraction/fipsas-claim? artifact))
+    (with-redefs [archive/inspect (fn [& _] {:artifact-path "archived.pdf"})
+                  shell/sh (fn [& args] {:exit 0 :out (if (= "-v" (second args)) "" (:raw-text artifact))
+                                         :err (if (= "-v" (second args)) "test-version" "")})]
+      (is (= artifact (extraction/validate-fipsas-artifact! "archive" artifact))))))
 
 (deftest monsub-results-route-and-replay-from-source-bound-pdfs
   (doseq [[sha heading row]
