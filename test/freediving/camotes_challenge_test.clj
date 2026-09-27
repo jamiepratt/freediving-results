@@ -24,13 +24,17 @@
     (is (= :parsed (:parse-status r)))
     (is (= :blocked (get-in r [:publication :status])))))
 
-(deftest unknown-page-date-and-clipped-cell-stay-unresolved
+(deftest unknown-page-date-remains-explicit-on-candidate
   (testing "the third scan does not print a session date"
-    (let [r (challenge/parse-row (sample-row 3 1))]
-      (is (= :unparsed (:parse-status r)))
-      (is (nil? (:parsed r)))
+    (let [r (challenge/parse-row (sample-row 3 1) {:candidate-scope :page-three-undated})]
+      (is (= :parsed (:parse-status r)))
+      (is (= "Thibault Guignes" (get-in r [:parsed :source-name])))
       (is (nil? (get-in r [:parsed :event-date])))
-      (is (some #{:missing-printed-date} (:unresolved-reasons r)))))
+      (is (nil? (get-in r [:parsed :session-day])))
+      (is (some #{:missing-printed-date} (:unresolved-reasons r)))
+      (is (= :blocked (get-in r [:publication :status]))))))
+
+(deftest clipped-cell-stays-unresolved
   (testing "a visible prefix is not completed from a later page"
     (let [r (challenge/parse-row
              (assoc (assoc-in (sample-row 1 15) [:cells :first-name] "Michael Angel")
@@ -50,22 +54,49 @@
 (deftest source-bound-ledger-reconciles-every-printed-position
   (let [rows (vec (for [page (range 1 5)
                         row (range 1 (inc (challenge/printed-counts page)))]
-                    (sample-row page row)))
+                    (if (= [page row] [1 15])
+                      (assoc (sample-row page row) :note "clipped-first-name")
+                      (sample-row page row))))
         parsed (challenge/parse-ledger {:source-sha256 challenge/source-sha256
-                                        :rows rows})]
+                                        :rows rows}
+                                       {:candidate-scope :page-three-undated})]
     (is (= 66 (get-in parsed [:reconciliation :printed-count])))
     (is (= 4 (:pdf-page-count parsed)))
     (is (= 4 (count (:pages parsed))))
-    (is (= (get-in parsed [:pages 1 :lines 0 :text])
-           (get-in parsed [:candidates 17 :raw :line])))
+    (is (= (get-in parsed [:pages 2 :lines 0 :text])
+           (get-in parsed [:candidates 0 :raw :line])))
     (is (= [17 17 17 15]
            (mapv :printed-count (get-in parsed [:reconciliation :per-page]))))
-    (is (= [17 17 0 15]
+    (is (= [0 0 17 0]
            (mapv :candidate-count (get-in parsed [:reconciliation :per-page]))))
-    (is (= 49 (get-in parsed [:reconciliation :parsed-count])))
-    (is (= 17 (get-in parsed [:reconciliation :unresolved-count])))
-    (is (= 49 (count (:candidates parsed))))
-    (is (= 17 (count (:unresolved-positions parsed))))))
+    (is (= 17 (get-in parsed [:reconciliation :parsed-count])))
+    (is (= 48 (get-in parsed [:reconciliation :previously-imported-count])))
+    (is (= 1 (get-in parsed [:reconciliation :unresolved-count])))
+    (is (= 17 (count (:candidates parsed))))
+    (is (= 1 (count (:unresolved-positions parsed))))))
+
+(deftest continuation-excludes-the-existing-forty-eight
+  (let [rows (vec (for [page (range 1 5)
+                        row (range 1 (inc (challenge/printed-counts page)))]
+                    (if (= [page row] [1 15])
+                      (assoc (sample-row page row) :note "clipped-first-name")
+                      (sample-row page row))))
+        ledger {:source-sha256 challenge/source-sha256 :rows rows}
+        original (challenge/parse-ledger ledger)
+        continuation (challenge/parse-ledger ledger {:candidate-scope :page-three-undated})]
+    (is (= 48 (count (:candidates original))))
+    (is (= [16 17 0 15]
+           (mapv :candidate-count (get-in original [:reconciliation :per-page]))))
+    (is (= 17 (count (:candidates continuation))))
+    (is (= (set (map #(select-keys (:coordinates %) [:page :row]) (:candidates original)))
+           (set (for [page [1 2 4]
+                      row (range 1 (inc (challenge/printed-counts page)))
+                      :when (not= [page row] [1 15])]
+                  {:page page :row row}))))
+    (is (every? #(= 3 (get-in % [:coordinates :page]))
+                (:candidates continuation)))
+    (is (= [[1 15]]
+           (mapv (comp (juxt :page :row) :coordinates) (:unresolved-positions continuation))))))
 
 (deftest checked-source-rejects-different-pdf-bytes
   (let [pdf (java.io.File/createTempFile "challenge-other" ".pdf")
@@ -112,6 +143,26 @@
               kinds (frequencies (map :kind (rows-for-import checked)))]
           (is (= artifact checked))
           (is (= {"result-row" 48} kinds)))
+        (let [continuation-receipt
+              (challenge/extract-reviewed-scan! root challenge/source-sha256
+                                                (.getPath ledger)
+                                                {:actor "scan-test"
+                                                 :config {:candidate-scope :page-three-undated}})
+              continuation (edn/read-string (slurp (:artifact-path continuation-receipt)))
+              verify-import (var-get (ns-resolve 'freediving.observations 'verified))
+              rows-for-import (var-get (ns-resolve 'freediving.observations 'observation-rows))]
+          (is (not= (:job-id receipt) (:job-id continuation-receipt)))
+          (is (= 17 (count (:candidates continuation))))
+          (is (= 48 (get-in continuation [:reconciliation :previously-imported-count])))
+          (is (= {"result-row" 17}
+                 (frequencies (map :kind (rows-for-import continuation)))))
+          (is (= continuation (:artifact (verify-import root (:job-id continuation-receipt)))))
+          (is (= :skipped (:run-status
+                           (challenge/extract-reviewed-scan! root challenge/source-sha256
+                                                             (.getPath ledger)
+                                                             {:actor "scan-test"
+                                                              :config {:candidate-scope :page-three-undated}}))))
+          (is (= artifact (:artifact (verify-import root (:job-id receipt))))))
         (is (thrown? clojure.lang.ExceptionInfo
                      (challenge/validate-artifact! root
                                                    (assoc-in artifact [:candidates 17 :raw :fields :rp] "999"))))))))
