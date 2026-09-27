@@ -346,6 +346,64 @@
     (is (thrown? java.sql.SQLException
                  (fixture/sql! reviewer "UPDATE freediving.extraction_reviews SET id=id")))
     (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))))
+
+(deftest pdf-extraction-acceptance-is-source-bound-and-reversible
+  (let [{:keys [root artifact] :as fixture} (fixture/synthetic 3 "synthetic-pdf/1")
+        _ (fixture/publish! fixture)
+        _ (observations/import! fixture/app root (:job-id artifact))
+        job (:job-id artifact)
+        publication-before (get-in (observations/inspect fixture/app job) [:artifact :publication])
+        target {:job-id job :ordinal 0}
+        candidate (first (:candidates artifact))
+        ref (merge target
+                   {:source-kind :pdf :schema-version 3
+                    :source-sha256 (:source-sha256 artifact)
+                    :acquisition-id (get-in artifact [:acquisitions 0 :acquisition-id])
+                    :artifact-sha256 (html-evidence/sha256 (:artifact-bytes (observations/inspect fixture/app job)))
+                    :parser-version (:parser-version artifact)
+                    :candidate-id (:candidate_id (first (:observations (observations/inspect fixture/app job))))
+                    :observation-id (str "local-observation:" job ":0")
+                    :page (get-in candidate [:coordinates :page])
+                    :line (get-in candidate [:coordinates :line])})
+        request {:id "pdf-accept" :job-id job :ordinal 0 :base-revision 0
+                 :evidence ref :owner-receipt-sha256 (apply str (repeat 64 "a"))
+                 :owner-response {:task-id "test-task" :user-message-id "test-message"
+                                  :response-annotation-index 1 :selected-text "Accept extraction 0-1"}
+                 :actor "owner" :reason "Synthetic PDF row inspected"}]
+    (is (= :accept (:action (reviews/accept-pdf-extraction! reviewer request))))
+    (is (= 1 (:revision (reviews/pdf-extraction-effective reviewer target))))
+    (is (= (reviews/accept-pdf-extraction! reviewer request)
+           (first (reviews/pdf-extraction-history reviewer target))))
+    (is (thrown? Exception (reviews/accept-pdf-extraction! fixture/app request)))
+    (doseq [changed [(assoc ref :source-kind :json)
+                     (assoc ref :schema-version 5)
+                     (assoc ref :acquisition-id "forged")
+                     (assoc ref :source-sha256 (apply str (repeat 64 "0")))
+                     (assoc ref :artifact-sha256 (apply str (repeat 64 "0")))
+                     (assoc ref :parser-version "forged/2")
+                     (assoc ref :ordinal 1)
+                     (assoc ref :candidate-id "forged")
+                     (assoc ref :observation-id "forged")
+                     (assoc ref :line 2)]]
+      (is (thrown? Exception (reviews/accept-pdf-extraction! reviewer
+                                                             (assoc request :id (str "bad-" (hash changed)) :evidence changed)))))
+    (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target))))
+    (is (= publication-before (get-in (observations/inspect fixture/app job) [:artifact :publication])))
+    (is (thrown? Exception (reviews/accept-extraction! reviewer request)))
+    (is (thrown-with-msg? Exception #"idempotency"
+                          (reviews/accept-pdf-extraction! reviewer (assoc request :reason "changed"))))
+    (let [revoke (merge target {:id "pdf-revoke" :base-revision 1
+                                :event-id "pdf-accept" :evidence ref
+                                :actor "owner" :reason "Synthetic reconsideration"})]
+      (is (thrown? Exception (reviews/revoke-pdf-extraction! reviewer (assoc revoke :event-id "forged"))))
+      (is (= :revoke (:action (reviews/revoke-pdf-extraction! reviewer revoke))))
+      (is (= (reviews/revoke-pdf-extraction! reviewer revoke)
+             (last (reviews/pdf-extraction-history reviewer target))))
+      (is (= :unreviewed (:status (reviews/pdf-extraction-effective reviewer target))))
+      (is (= 2 (:revision (reviews/pdf-extraction-effective reviewer target))))
+      (is (thrown? Exception (reviews/revoke-pdf-extraction! reviewer (assoc revoke :id "again"))))
+      (is (thrown? java.sql.SQLException
+                   (fixture/sql! reviewer "UPDATE freediving.pdf_extraction_reviews SET id=id"))))))
 (deftest pending-approval-and-reversal-retain-original
   (let [target (sample) before (observations/inspect fixture/app (:job-id target))
         p (reviews/propose! fixture/app (proposal target "p1"))]

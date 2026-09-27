@@ -54,17 +54,25 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=12"))]
                      (when-not (= checksum (:sha256 old)) (fail! "Extraction review migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(12,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/013-pdf-extraction-reviews.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=13"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "PDF extraction review migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(13,?)" checksum))))
                  (execute! c (str "REVOKE ALL ON freediving.extractions,freediving.observations FROM " reviewer-role))
                  (doseq [role [ingest-role reviewer-role]]
                    (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " role))
                    (execute! c (str "GRANT USAGE ON SCHEMA freediving TO " role))
                    (execute! c (str "REVOKE ALL ON freediving.review_proposals,freediving.review_decisions FROM " role))
                    (execute! c (str "REVOKE ALL ON freediving.extraction_reviews FROM " role))
+                   (execute! c (str "REVOKE ALL ON freediving.pdf_extraction_reviews FROM " role))
                    (execute! c (str "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions TO " role))
                    (execute! c (str "GRANT SELECT ON freediving.extraction_reviews TO " role))
+                   (execute! c (str "GRANT SELECT ON freediving.pdf_extraction_reviews TO " role))
                    (execute! c (str "GRANT INSERT ON freediving.review_proposals TO " role)))
                  (execute! c (str "GRANT INSERT ON freediving.review_decisions TO " reviewer-role))
                  (execute! c (str "GRANT INSERT ON freediving.extraction_reviews TO " reviewer-role))
+                 (execute! c (str "GRANT INSERT ON freediving.pdf_extraction_reviews TO " reviewer-role))
                  {:schema-version 2})))
 (defn- target [c {:keys [job-id ordinal]}]
   (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
@@ -471,6 +479,135 @@
                                    (:id request) (:job-id request) (:ordinal request) (:revision record)
                                    "revoke" (:event-id request) (encode record))
                          (existing c "extraction_reviews" (:id request) request)))))))
+
+(def ^:private pdf-reference-keys
+  #{:source-kind :schema-version :job-id :ordinal :acquisition-id :source-sha256
+    :artifact-sha256 :parser-version :candidate-id :observation-id :page :line})
+(defn- pdf-reference! [c ref]
+  (when-not (and (map? ref) (= pdf-reference-keys (set (keys ref)))
+                 (= :pdf (:source-kind ref)) (#{1 2 3} (:schema-version ref))
+                 (every? nonblank? ((juxt :job-id :acquisition-id :source-sha256
+                                          :artifact-sha256 :parser-version :candidate-id :observation-id) ref))
+                 (nat-int? (:ordinal ref)) (every? pos-int? ((juxt :page :line) ref)))
+    (fail! "Invalid PDF evidence reference"))
+  (let [o (target c ref)
+        bytes ^bytes (:artifact_bytes o)
+        artifact (edn/read-string (String. bytes "UTF-8"))
+        candidate (get (:candidates artifact) (:ordinal ref))
+        payload (edn/read-string (:payload_edn o))
+        position (select-keys (:coordinates candidate) [:page :line])
+        source-position (or (when (seq (:source-lines candidate))
+                              (mapv #(select-keys % [:page :line]) (:source-lines candidate)))
+                            [position])
+        acquisition (some #(when (= (:acquisition-id ref) (:acquisition-id %)) %)
+                          (:acquisitions artifact))]
+    (when-not (and (vector? (:candidates artifact))
+                   (= (:schema-version ref) (:schema-version artifact))
+                   (= (:parser-version ref) (:parser-version artifact))
+                   (= (:job-id ref) (:job-id artifact)
+                      (html/digest (select-keys artifact
+                                                [:source-sha256 :acquisitions :evidence-sha256
+                                                 :actor :config :parser-version :schema-version
+                                                 :pdfinfo-version :tool])))
+                   (= (:artifact-sha256 ref) (:artifact_sha256 o) (sha256 bytes))
+                   (= (:source-sha256 ref) (:source_sha256 o) (:source-sha256 artifact)
+                      (get-in acquisition [:manifest :sha256]))
+                   (= "application/pdf" (get-in acquisition [:manifest :content-type]))
+                   (= (:candidate-id ref) (:candidate_id o)
+                      (html/digest [(:source-sha256 ref) source-position]))
+                   (= (:observation-id ref)
+                      (str "local-observation:" (:job-id ref) ":" (:ordinal ref)))
+                   (= candidate payload)
+                   (= position (select-keys ref [:page :line]))
+                   (some #(= (:line ref) (:line %))
+                         (get-in artifact [:pages (dec (:page ref)) :lines]))
+                   (= "result-row" (:kind o)))
+      (fail! "PDF evidence provenance or source position mismatch"))
+    o))
+(defn- pdf-events [c t]
+  (mapv body (query c "SELECT * FROM freediving.pdf_extraction_reviews WHERE job_id=? AND ordinal=? ORDER BY revision"
+                    (:job-id t) (:ordinal t))))
+(defn- pdf-state [c t]
+  (target c t)
+  (reduce (fn [_ event]
+            (case (:action event)
+              :accept {:revision (:revision event) :status :accepted :active-event (:id event)}
+              :revoke {:revision (:revision event) :status :unreviewed :active-event nil}))
+          {:revision 0 :status :unreviewed :active-event nil}
+          (pdf-events c t)))
+(defn pdf-extraction-effective [url t]
+  (read-snapshot url #(pdf-state % t)))
+(defn pdf-extraction-history [url t]
+  (read-snapshot url (fn [c] (target c t) (pdf-events c t))))
+(defn- pdf-capability! [c]
+  (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.pdf_extraction_reviews','INSERT') AS allowed")))
+    (fail! "Owner PDF extraction review database capability required")))
+(defn- pdf-accept-request! [request]
+  (when-not (and (map? request)
+                 (= #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256
+                      :owner-response :actor :reason} (set (keys request)))
+                 (every? nonblank? ((juxt :id :job-id :actor :reason) request))
+                 (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
+                 (string? (:owner-receipt-sha256 request))
+                 (re-matches #"[0-9a-f]{64}" (:owner-receipt-sha256 request))
+                 (= #{:task-id :user-message-id :response-annotation-index :selected-text}
+                    (set (keys (:owner-response request))))
+                 (every? nonblank? ((juxt :task-id :user-message-id :selected-text)
+                                    (:owner-response request)))
+                 (nat-int? (get-in request [:owner-response :response-annotation-index]))
+                 (= (select-keys request [:job-id :ordinal])
+                    (select-keys (:evidence request) [:job-id :ordinal]))
+                 (when-let [[_ from to] (re-matches #"Accept extraction ([0-9]+)-([0-9]+)"
+                                                    (get-in request [:owner-response :selected-text]))]
+                   (<= (parse-long from) (:ordinal request) (parse-long to))))
+    (fail! "Invalid owner PDF extraction acceptance request")))
+(defn accept-pdf-extraction! [url request]
+  (pdf-accept-request! request)
+  (transaction url
+               (fn [c]
+                 (pdf-capability! c)
+                 (lock! c request)
+                 (pdf-reference! c (:evidence request))
+                 (or (existing c "pdf_extraction_reviews" (:id request) request)
+                     (let [state (pdf-state c request)]
+                       (when-not (= (:base-revision request) (:revision state))
+                         (fail! "Stale PDF extraction review revision"))
+                       (when (= :accepted (:status state))
+                         (fail! "PDF extraction position already accepted"))
+                       (let [record (assoc request :action :accept :revision (inc (:revision state))
+                                           :request request)]
+                         (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                   "accept" nil (encode record))
+                         (existing c "pdf_extraction_reviews" (:id request) request)))))))
+(defn revoke-pdf-extraction! [url request]
+  (when-not (and (map? request)
+                 (= #{:id :job-id :ordinal :base-revision :event-id :evidence :actor :reason}
+                    (set (keys request)))
+                 (every? nonblank? ((juxt :id :job-id :event-id :actor :reason) request))
+                 (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
+                 (= (select-keys request [:job-id :ordinal])
+                    (select-keys (:evidence request) [:job-id :ordinal])))
+    (fail! "Invalid PDF extraction revocation request"))
+  (transaction url
+               (fn [c]
+                 (pdf-capability! c)
+                 (lock! c request)
+                 (pdf-reference! c (:evidence request))
+                 (or (existing c "pdf_extraction_reviews" (:id request) request)
+                     (let [state (pdf-state c request)
+                           accepted (some #(when (= (:event-id request) (:id %)) %) (pdf-events c request))]
+                       (when-not (= (:base-revision request) (:revision state))
+                         (fail! "Stale PDF extraction review revision"))
+                       (when-not (and (= (:event-id request) (:active-event state))
+                                      (= (:evidence request) (:evidence accepted)))
+                         (fail! "Only the active source-bound PDF acceptance can be revoked"))
+                       (let [record (assoc request :action :revoke :revision (inc (:revision state))
+                                           :request request)]
+                         (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                   "revoke" (:event-id request) (encode record))
+                         (existing c "pdf_extraction_reviews" (:id request) request)))))))
 (defn- read-request [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (let [eof (Object.) request (edn/read {:eof eof} r)]
@@ -482,10 +619,13 @@
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (println (encode (case command
                          "migrate" (if (= 2 (count args)) (apply migrate! url args) (fail! "migrate INGEST-ROLE REVIEWER-ROLE"))
-                         ("propose" "decide" "effective" "history" "accept-extraction" "revoke-extraction" "extraction-effective" "extraction-history")
+                         ("propose" "decide" "effective" "history" "accept-extraction" "revoke-extraction" "extraction-effective" "extraction-history"
+                                    "accept-pdf-extraction" "revoke-pdf-extraction" "pdf-extraction-effective" "pdf-extraction-history")
                          (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history
                                                    "accept-extraction" accept-extraction! "revoke-extraction" revoke-extraction!
-                                                   "extraction-effective" extraction-effective "extraction-history" extraction-history} command) url (read-request (first args)))
+                                                   "extraction-effective" extraction-effective "extraction-history" extraction-history
+                                                   "accept-pdf-extraction" accept-pdf-extraction! "revoke-pdf-extraction" revoke-pdf-extraction!
+                                                   "pdf-extraction-effective" pdf-extraction-effective "pdf-extraction-history" pdf-extraction-history} command) url (read-request (first args)))
                              (fail! "Expected one EDN request file"))
-                         (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history|accept-extraction|revoke-extraction|extraction-effective|extraction-history REQUEST.edn")))))
+                         (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history|accept-extraction|revoke-extraction|extraction-effective|extraction-history|accept-pdf-extraction|revoke-pdf-extraction|pdf-extraction-effective|pdf-extraction-history REQUEST.edn")))))
     (catch Exception e (binding [*out* *err*] (println "Review operation failed:" (.getMessage e))) (System/exit 1))))
