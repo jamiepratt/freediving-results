@@ -4,6 +4,8 @@ Route baseline observed through 25 September 2026, with remote batch evidence th
 
 ## Remote 2025-onward discovery batch
 
+The 27 September bounded [FIPSAS Italian federation calendar probe](2025-onward-source-inventory-20260926.md#fipsas-italian-federation-calendar-probe-27-september-2026) retained four official HTML pages. The two completed Just 40th events show unlinked `Classifiche` labels, and the future Capri event is not final. No final result source or row was imported. The calendar's other months remain unverified; #16 is open.
+
 ### Archive route and revision validation, 27 September 2026
 
 The isolated worker's archive inventory verified all 56 acquisition records and 55 distinct original byte hashes. Grouping by exact final URL found 55 routes: one repeated route, the Athens 2025 CMAS/Microplus DNF Masters Men JSON, has two acquisition records with the same SHA-256 `3e34c617c4975368bc9ddde0e0c9cef7dd8e9d05a87c5f0f86a22c04572b87d8`. No exact final URL in this archive has two different byte hashes. Shared discovery pages are not source revisions: several discovery URLs legitimately lead to distinct result PDFs or views. The Vestico default and `comp=6` DYN source responses are byte-identical, SHA-256 `238dd1a1e5792f9c0ce5deb6be24263470271c4f2396f17399db27fc639ab09b`; the duplicate route was retained in acquisition evidence without registering a second archive acquisition or extraction job. Neither case proves a publisher revision.
