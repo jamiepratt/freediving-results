@@ -10,7 +10,28 @@
             [freediving.vdst-chemnitz-2025 :as chemnitz-2025]
             [freediving.vdst-chemnitz-2026 :as chemnitz-2026]
             [freediving.vdst-mitteldeutscher-2025 :as mitteldeutscher]
-            [freediving.vdst-national-2025 :as national]))
+            [freediving.vdst-national-2025 :as national]
+            [freediving.vdst-national-2026 :as national-2026]))
+
+(deftest national-2026-protocol-routes-and-replays-exact-source
+  (let [sha national-2026/source-sha256
+        source "/tmp/vdst-national-2026.pdf"]
+    (is (extraction/vdst-claim? {:source-sha256 sha}))
+    (is (extraction/vdst-artifact? {:schema-version 3 :source-sha256 sha
+                                    :parser-version national-2026/parser-version}))
+    (when (.exists (java.io.File. source))
+      (let [raw (:out (shell/sh "pdftotext" "-layout" "-enc" "UTF-8" source "-"))
+            pages (vec (remove str/blank? (str/split raw #"\f")))
+            artifact (assoc (extraction/parse-pages sha pages) :raw-text raw
+                            :tool {:name "pdftotext" :arguments ["-layout" "-enc" "UTF-8"]
+                                   :version (str/trim (:err (shell/sh "pdftotext" "-v")))})]
+        (is (= national-2026/parser-version (:parser-version artifact)))
+        (is (= 158 (count (:candidates artifact))))
+        (with-redefs [archive/inspect (fn [& _] {:artifact-path source})]
+          (is (= artifact (extraction/validate-vdst-artifact! "archive" artifact)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay"
+                                (extraction/validate-vdst-artifact! "archive"
+                                                                    (assoc-in artifact [:candidates 0 :parsed :result] "00:00,00")))))))))
 
 (deftest national-protocol-routes-and-replays-exact-source
   (let [sha national/source-sha256
