@@ -47,7 +47,7 @@ The [#8 championship inventory](championship-inventory-20260925.md#event-invento
 | 14 | [World Championship Indoor Masters](https://www.cmas.org/document/2025,-cmas-world-championship-freediving-indoor-masters/download.html) | Already present/duplicate: #8 Athens route; JSON/PDF paths separate, byte equivalence unverified. | [Championship inventory](championship-inventory-20260925.md#event-inventory). |
 | 15 | [World Championship Depth Masters](https://www.cmas.org/document/2025,-cmas-world-championship-freediving-depth-masters/download.html) | Already present/duplicate: #8 Mytikas route; timing PDFs separately retained, byte equivalence unverified. | [Championship inventory](championship-inventory-20260925.md#event-inventory). |
 
-Final document dispositions: seven imported, five previously inventoried routes, three unsupported as complete sources. Both Camotes scanned sources have partial imports: Challenge 48/66 and World Cup 143/146. Source positions across different documents are not deduplicated sporting attempts.
+Final document dispositions: seven imported, five previously inventoried routes, three unsupported as complete sources. Both Camotes scanned sources have partial imports: Challenge 65/66 and World Cup 143/146. Source positions across different documents are not deduplicated sporting attempts.
 
 ## Official 2026 index: 14 links
 
