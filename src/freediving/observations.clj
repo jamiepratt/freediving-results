@@ -106,12 +106,17 @@
       (let [coordinate (select-keys (:coordinates c) [:page :line])
             source-lines (or (seq (:source-lines c)) [(assoc coordinate :text (get lines ((juxt :page :line) coordinate)))])
             texts (mapv :text source-lines)]
-        (when-not (and (= coordinate (select-keys (first source-lines) [:page :line]))
+        (when-not (and (or (= coordinate (select-keys (first source-lines) [:page :line]))
+                           (and (extraction/vdst-claim? a)
+                                (some #(= coordinate (select-keys % [:page :line])) source-lines)))
                        (every? (fn [l] (and (every? pos-int? ((juxt :page :line) l))
                                             (string? (:text l)) (= (:text l) (get lines ((juxt :page :line) l))))) source-lines))
           (fail! "Invalid candidate page or source-lines evidence"))
         (when-not (or (= texts (get-in c [:raw :lines]))
-                      (= (str/join "\n" texts) (get-in c [:raw :line])))
+                      (= (str/join "\n" texts) (get-in c [:raw :line]))
+                      (and (extraction/vdst-claim? a)
+                           (= (get lines ((juxt :page :line) coordinate))
+                              (get-in c [:raw :line]))))
           (fail! "Candidate raw text differs from page evidence"))))) a)
 (defn- verified [root job-id]
   (when-not (hash? job-id) (fail! "Invalid job hash"))
@@ -177,6 +182,7 @@
                      (extraction/ffessm-2026-final-artifact? a) (->> (extraction/validate-ffessm-2026-final-artifact! root))
                      (extraction/ffessm-2026-juniors-artifact? a) (->> (extraction/validate-ffessm-2026-juniors-artifact! root))
                      (extraction/fedas-claim? a) (->> (extraction/validate-fedas-artifact! root))
+                     (extraction/vdst-claim? a) (->> (extraction/validate-vdst-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
   (if (= 5 (:schema-version artifact))
