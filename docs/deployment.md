@@ -38,12 +38,16 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all ten checksummed
+JAR dependencies. It takes a private database backup, applies all 13 checksummed
 migrations without seeding data, switches the release, verifies readiness, provisions
 the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations
 remain forward-applied; inspect the backup before any database rollback. No GitHub
 push automatically deploys this project.
+
+Migrations 12 and 13 add private JSON and PDF extraction reviews. The normal
+release installs them without accepting an extraction, validating publication,
+selecting an event or changing the active publication policy.
 
 ## HTML publication policy checkpoint
 
