@@ -6,7 +6,30 @@
             [freediving.extraction :as extraction]
             [freediving.observations :as observations]
             [freediving.vdst-neckar-2025 :as neckar]
-            [freediving.vdst-rhein-main-2025 :as rhein]))
+            [freediving.vdst-rhein-main-2025 :as rhein]
+            [freediving.vdst-chemnitz-2025 :as chemnitz-2025]
+            [freediving.vdst-chemnitz-2026 :as chemnitz-2026]))
+
+(deftest chemnitz-sources-are-vdst-claims
+  (doseq [[sha parser] [[chemnitz-2025/source-sha256 chemnitz-2025/parser-version]
+                        [chemnitz-2026/source-sha256 chemnitz-2026/parser-version]]]
+    (is (extraction/vdst-claim? {:source-sha256 sha}))
+    (is (extraction/vdst-artifact? {:schema-version 3
+                                    :source-sha256 sha :parser-version parser}))))
+
+(deftest chemnitz-originals-route-and-retain-printed-positions
+  (doseq [[path sha parser printed]
+          [["/tmp/vdst-chemnitz-20260927/capc2025.pdf"
+            chemnitz-2025/source-sha256 chemnitz-2025/parser-version 91]
+           ["/tmp/vdst-chemnitz-20260927/capc2026.pdf"
+            chemnitz-2026/source-sha256 chemnitz-2026/parser-version 121]]]
+    (when (.exists (java.io.File. path))
+      (let [raw (:out (shell/sh "pdftotext" "-layout" "-enc" "UTF-8" path "-"))
+            pages (vec (remove str/blank? (str/split raw #"\f")))
+            artifact (extraction/parse-pages sha pages)]
+        (is (= parser (:parser-version artifact)))
+        (is (= printed (count (:candidates artifact))))
+        (is (= :blocked (get-in artifact [:publication :status])))))))
 
 (def neckar-pages
   (mapv (fn [index]
@@ -103,4 +126,5 @@
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.vdst-integration-test)]
+    (shutdown-agents)
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
