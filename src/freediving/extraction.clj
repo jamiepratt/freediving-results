@@ -43,6 +43,7 @@
             [freediving.fedas-outdoor :as fedas-outdoor]
             [freediving.fipsas-just-2025 :as fipsas-just]
             [freediving.fipsas-monte-conero-2026 :as fipsas-monte-conero]
+            [freediving.fipsas-classifica-2026 :as fipsas-classifica]
             [freediving.vdst-neckar-2025 :as vdst-neckar]
             [freediving.vdst-rhein-main-2025 :as vdst-rhein-main]
             [freediving.vdst-chemnitz-2025 :as vdst-chemnitz-2025]
@@ -200,6 +201,7 @@
        (throw (ex-info "FEDAS outdoor parser is bound to a different source PDF" {})))
      (cond (= sha256 fipsas-just/source-sha256) (fipsas-just/parse-pages sha256 pages)
            (= sha256 fipsas-monte-conero/source-sha256) (fipsas-monte-conero/parse-pages sha256 pages)
+           (fipsas-classifica/supported? sha256) (fipsas-classifica/parse-pages sha256 pages)
            (= sha256 vdst-neckar/source-sha256) (vdst-neckar/parse-pages sha256 pages)
            (= sha256 vdst-rhein-main/source-sha256) (vdst-rhein-main/parse-pages sha256 pages)
            (= sha256 vdst-chemnitz-2025/source-sha256) (vdst-chemnitz-2025/parse-pages sha256 pages)
@@ -421,11 +423,14 @@
        (or (and (= fipsas-just/source-sha256 (:source-sha256 artifact))
                 (= fipsas-just/parser-version (:parser-version artifact)))
            (and (= fipsas-monte-conero/source-sha256 (:source-sha256 artifact))
-                (= fipsas-monte-conero/parser-version (:parser-version artifact))))))
+                (= fipsas-monte-conero/parser-version (:parser-version artifact)))
+           (and (fipsas-classifica/supported? (:source-sha256 artifact))
+                (= fipsas-classifica/parser-version (:parser-version artifact))))))
 
 (defn fipsas-claim? [artifact]
   (or (= fipsas-just/source-sha256 (:source-sha256 artifact))
       (= fipsas-monte-conero/source-sha256 (:source-sha256 artifact))
+      (fipsas-classifica/supported? (:source-sha256 artifact))
       (str/starts-with? (or (:parser-version artifact) "") "fipsas-")))
 
 (defn vdst-artifact? [artifact]
@@ -522,8 +527,9 @@
          raw (:out result)
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
-         fipsas? (contains? #{fipsas-just/source-sha256
-                              fipsas-monte-conero/source-sha256} sha256)
+         fipsas? (or (contains? #{fipsas-just/source-sha256
+                                  fipsas-monte-conero/source-sha256} sha256)
+                     (fipsas-classifica/supported? sha256))
          vdst? (contains? #{vdst-neckar/source-sha256 vdst-rhein-main/source-sha256
                             vdst-chemnitz-2025/source-sha256 vdst-chemnitz-2026/source-sha256
                             vdst-mitteldeutscher-2025/source-sha256 vdst-national-2025/source-sha256
@@ -621,7 +627,7 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond (= sha256 fipsas-just/source-sha256) fipsas-just/parser-version (= sha256 fipsas-monte-conero/source-sha256) fipsas-monte-conero/parser-version (= sha256 vdst-neckar/source-sha256) vdst-neckar/parser-version (= sha256 vdst-rhein-main/source-sha256) vdst-rhein-main/parser-version (= sha256 vdst-chemnitz-2025/source-sha256) vdst-chemnitz-2025/parser-version (= sha256 vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parser-version (= sha256 vdst-mitteldeutscher-2025/source-sha256) vdst-mitteldeutscher-2025/parser-version (= sha256 vdst-national-2025/source-sha256) vdst-national-2025/parser-version (= sha256 vdst-national-2026/source-sha256) vdst-national-2026/parser-version (= sha256 fedas-indoor/source-2025-sha256) fedas-indoor/parser-version (= sha256 fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :parser-version (cond (= sha256 fipsas-just/source-sha256) fipsas-just/parser-version (= sha256 fipsas-monte-conero/source-sha256) fipsas-monte-conero/parser-version (fipsas-classifica/supported? sha256) fipsas-classifica/parser-version (= sha256 vdst-neckar/source-sha256) vdst-neckar/parser-version (= sha256 vdst-rhein-main/source-sha256) vdst-rhein-main/parser-version (= sha256 vdst-chemnitz-2025/source-sha256) vdst-chemnitz-2025/parser-version (= sha256 vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parser-version (= sha256 vdst-mitteldeutscher-2025/source-sha256) vdst-mitteldeutscher-2025/parser-version (= sha256 vdst-national-2025/source-sha256) vdst-national-2025/parser-version (= sha256 vdst-national-2026/source-sha256) vdst-national-2026/parser-version (= sha256 fedas-indoor/source-2025-sha256) fedas-indoor/parser-version (= sha256 fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
                    :schema-version (cond fipsas? 3 vdst? 3 (or fedas-indoor? fedas-outdoor?) 3 ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro-static? 3 tuttinapnea? 3 tuttinapnea-2025-static? 3 tuttinapnea-2025-dynamic? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
@@ -735,7 +741,8 @@
 (defn validate-fipsas-artifact! [root artifact]
   (let [sha (:source-sha256 artifact)
         parser (cond (= sha fipsas-just/source-sha256) fipsas-just/parse-pages
-                     (= sha fipsas-monte-conero/source-sha256) fipsas-monte-conero/parse-pages)]
+                     (= sha fipsas-monte-conero/source-sha256) fipsas-monte-conero/parse-pages
+                     (fipsas-classifica/supported? sha) fipsas-classifica/parse-pages)]
     (when-not parser
       (throw (ex-info "FIPSAS extraction differs from archived source replay" {})))
     (validate-ffessm-artifact! root artifact (partial parser sha)
