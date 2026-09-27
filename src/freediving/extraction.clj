@@ -39,6 +39,7 @@
             [freediving.ffessm-2026-final-categories :as ffessm-final]
             [freediving.ffessm-2026-juniors :as ffessm-juniors]
             [freediving.fedas-indoor :as fedas-indoor]
+            [freediving.fedas-indoor-2026 :as fedas-indoor-2026]
             [freediving.fedas-outdoor :as fedas-outdoor]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
@@ -161,11 +162,15 @@
        (throw (ex-info "French 2025 monofin parser is bound to a different source PDF" {})))
      (when (and b18-sha (not= sha256 b18-sha))
        (throw (ex-info "French 2025 category parser is bound to a different source PDF" {})))
-     (when (and fedas-indoor? (not= sha256 fedas-indoor/source-2025-sha256))
+     (when (and fedas-indoor? (not (contains? #{fedas-indoor/source-2025-sha256
+                                                fedas-indoor-2026/source-2026-sha256} sha256)))
        (throw (ex-info "FEDAS indoor parser is bound to a different source PDF" {})))
-     (when (and fedas-outdoor? (not= sha256 fedas-outdoor/outdoor-2026-sha256))
+     (when (and fedas-outdoor? (not (contains? #{fedas-outdoor/outdoor-2025-sha256
+                                                 fedas-outdoor/outdoor-2026-sha256} sha256)))
        (throw (ex-info "FEDAS outdoor parser is bound to a different source PDF" {})))
      (cond (= sha256 fedas-indoor/source-2025-sha256) (fedas-indoor/parse-pages sha256 pages)
+           (= sha256 fedas-indoor-2026/source-2026-sha256) (fedas-indoor-2026/parse-pages sha256 pages)
+           (= sha256 fedas-outdoor/outdoor-2025-sha256) (fedas-outdoor/parse-pages sha256 pages)
            (= sha256 fedas-outdoor/outdoor-2026-sha256) (fedas-outdoor/parse-pages sha256 pages)
            b18-sha ((cond (ffessm-2025-bipalmes/parser-version b18-sha) ffessm-2025-bipalmes/parse-pages
                           (ffessm-2025-sans-palmes/parser-version b18-sha) ffessm-2025-sans-palmes/parse-pages
@@ -358,12 +363,16 @@
   (and (= 3 (:schema-version artifact))
        (or (and (= fedas-indoor/source-2025-sha256 (:source-sha256 artifact))
                 (= fedas-indoor/parser-version (:parser-version artifact)))
-           (and (= fedas-outdoor/outdoor-2026-sha256 (:source-sha256 artifact))
-                (= (fedas-outdoor/parser-version fedas-outdoor/outdoor-2026-sha256)
+           (and (= fedas-indoor-2026/source-2026-sha256 (:source-sha256 artifact))
+                (= fedas-indoor-2026/parser-version (:parser-version artifact)))
+           (and (contains? #{fedas-outdoor/outdoor-2025-sha256 fedas-outdoor/outdoor-2026-sha256}
+                           (:source-sha256 artifact))
+                (= (fedas-outdoor/parser-version (:source-sha256 artifact))
                    (:parser-version artifact))))))
 
 (defn fedas-claim? [artifact]
   (or (= fedas-indoor/source-2025-sha256 (:source-sha256 artifact))
+      (= fedas-indoor-2026/source-2026-sha256 (:source-sha256 artifact))
       (= fedas-outdoor/outdoor-2026-sha256 (:source-sha256 artifact))
       (= fedas-outdoor/outdoor-2025-sha256 (:source-sha256 artifact))
       (str/starts-with? (or (:parser-version artifact) "") "fedas-")))
@@ -437,8 +446,10 @@
          raw (:out result)
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
-         fedas-indoor? (= sha256 fedas-indoor/source-2025-sha256)
-         fedas-outdoor? (= sha256 fedas-outdoor/outdoor-2026-sha256)
+         fedas-indoor? (contains? #{fedas-indoor/source-2025-sha256
+                                    fedas-indoor-2026/source-2026-sha256} sha256)
+         fedas-outdoor? (contains? #{fedas-outdoor/outdoor-2025-sha256
+                                     fedas-outdoor/outdoor-2026-sha256} sha256)
          depth? (depth/supported? pages)
          depth-2025? (and (not depth?) (depth-2025/supported? pages))
          aida? (aida/supported? pages)
@@ -528,7 +539,7 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond fedas-indoor? fedas-indoor/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :parser-version (cond (= sha256 fedas-indoor/source-2025-sha256) fedas-indoor/parser-version (= sha256 fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
                    :schema-version (cond (or fedas-indoor? fedas-outdoor?) 3 ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro-static? 3 tuttinapnea? 3 tuttinapnea-2025-static? 3 tuttinapnea-2025-dynamic? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
@@ -631,7 +642,9 @@
 (defn validate-fedas-artifact! [root artifact]
   (let [sha (:source-sha256 artifact)
         parser (cond (= sha fedas-indoor/source-2025-sha256) fedas-indoor/parse-pages
-                     (= sha fedas-outdoor/outdoor-2026-sha256) fedas-outdoor/parse-pages)]
+                     (= sha fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parse-pages
+                     (contains? #{fedas-outdoor/outdoor-2025-sha256
+                                  fedas-outdoor/outdoor-2026-sha256} sha) fedas-outdoor/parse-pages)]
     (when-not parser
       (throw (ex-info "FEDAS extraction differs from archived source replay" {})))
     (validate-ffessm-artifact! root artifact (partial parser sha)

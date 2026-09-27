@@ -4,6 +4,7 @@
             [freediving.archive :as archive]
             [freediving.extraction :as extraction]
             [freediving.fedas-indoor :as indoor]
+            [freediving.fedas-indoor-2026 :as indoor-2026]
             [freediving.fedas-outdoor :as outdoor]))
 
 (def indoor-page
@@ -14,9 +15,19 @@
   (str "FEDERACIÓN ESPAÑOLA DE ACTIVIDADES SUBACUÁTICAS\nRadazul, Tenerife, 04-06/09/2026\n"
        "VIII CAMPEONATO DE ESPAÑA DE APNEA OUTDOOR TENERIFE 2026\nCLASIFICACIÓN MASCULINA FIM\n"
        "   1       Test               DIVER            FECDAS       86         86                   86      OK   100,00"))
+(def outdoor-2025-page
+  (str "FEDERACIÓN ESPAÑOLA DE ACTIVIDADES SUBACUÁTICAS\nLanzarote 20-21 de septiembre de 2025\n"
+       "RESULTADOS DEL CAMPEONATO DE ESPAÑA DE APNEA OUTDOOR\nCLASIFICACIÓN MASCULINA FIM\n"
+       "   1       Test               DIVER            FECDAS       86         86                   86      OK   100,00"))
+(def indoor-2026-page
+  (str "CLASIFICACIÓN FINAL POR PRUEBAS\nCLASIFICACIÓN MASCULINA DYN\n"
+       " 24       David            CERRATO TOMÀS     FBDAS - Balear       125    142,70   1   139,70   PEN   60,59"))
 
 (deftest only-selected-fedas-source-hashes-route-to-their-parsers
   (doseq [[sha page version] [[indoor/source-2025-sha256 indoor-page indoor/parser-version]
+                              [indoor-2026/source-2026-sha256 indoor-2026-page indoor-2026/parser-version]
+                              [outdoor/outdoor-2025-sha256 outdoor-2025-page
+                               (outdoor/parser-version outdoor/outdoor-2025-sha256)]
                               [outdoor/outdoor-2026-sha256 outdoor-page
                                (outdoor/parser-version outdoor/outdoor-2026-sha256)]]]
     (let [result (extraction/parse-pages sha [page])]
@@ -26,13 +37,13 @@
       (is (= 1 (count (:candidates result))))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"different source"
                         (extraction/parse-pages (apply str (repeat 64 "0")) [indoor-page])))
+  (is (= :partial-unsupported-needs-parser
+         (:status (extraction/parse-pages outdoor/outdoor-2025-sha256 [outdoor-page]))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"different source"
-                        (extraction/parse-pages outdoor/outdoor-2025-sha256 [outdoor-page]))))
+                        (extraction/parse-pages (apply str (repeat 64 "0")) [outdoor-page]))))
 
 (deftest unsupported-fedas-claims-cannot-enter-observations
-  (doseq [artifact [{:source-sha256 outdoor/outdoor-2025-sha256
-                     :parser-version "fedas-outdoor-2025/1" :schema-version 3}
-                    {:source-sha256 (apply str (repeat 64 "0"))
+  (doseq [artifact [{:source-sha256 (apply str (repeat 64 "0"))
                      :parser-version "fedas-indoor-2026/1" :schema-version 3}]]
     (is (extraction/fedas-claim? artifact))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay"
@@ -40,6 +51,9 @@
 
 (deftest fedas-extraction-identity-and-source-replay
   (doseq [[sha page version] [[indoor/source-2025-sha256 indoor-page indoor/parser-version]
+                              [indoor-2026/source-2026-sha256 indoor-2026-page indoor-2026/parser-version]
+                              [outdoor/outdoor-2025-sha256 outdoor-2025-page
+                               (outdoor/parser-version outdoor/outdoor-2025-sha256)]
                               [outdoor/outdoor-2026-sha256 outdoor-page
                                (outdoor/parser-version outdoor/outdoor-2026-sha256)]]]
     (let [raw (str page "\f")

@@ -40,7 +40,7 @@
   (when (and text (re-matches #"\d+(?:,\d+)?" text))
     (bigdec (str/replace text "," "."))))
 
-(defn- fields [text]
+(defn- fields [text other-column-start]
   (let [cells (vec (str/split (str/trim text) #"\s{2,}"))
         ranked? (boolean (re-matches #"\d+" (first cells)))
         offset (if ranked? 1 0)
@@ -51,6 +51,13 @@
           4 [(nth tail 0) nil (nth tail 1) (nth tail 2) (nth tail 3)]
           5 [(nth tail 0) (nth tail 1) (nth tail 2) (nth tail 3) (nth tail 4)]
           [nil nil nil nil nil])
+        penalty-label (when (and penalty obtained status (some? other-column-start))
+                        (let [status-start (.lastIndexOf ^String text ^String status)
+                              obtained-start (.lastIndexOf ^String text ^String obtained (dec status-start))
+                              penalty-start (.lastIndexOf ^String text ^String penalty (dec obtained-start))]
+                          (when (<= 0 penalty-start)
+                            (if (>= penalty-start other-column-start)
+                              "PEN OTROS" "PEN (AP>RP)"))))
         rank (when ranked? (parse-long (first cells)))
         announced-value (decimal announced)
         realized-value (decimal realized)
@@ -70,7 +77,8 @@
                       :else false))]
     {:raw {:rank (when ranked? (first cells)) :given-name given :surname surname
            :federation federation :announced announced :realized realized
-           :penalty penalty :obtained obtained :status status :points points}
+           :penalty penalty :penalty-label penalty-label
+           :obtained obtained :status status :points points}
      :values (when valid?
                {:rank rank :source-name (str given " " surname)
                 :representation federation :depth-declared announced-value
@@ -84,8 +92,8 @@
   (mapv (fn [index line] {:page page-number :line (inc index) :text line})
         (range) (str/split page #"\n" -1)))
 
-(defn- candidate [line scope profile]
-  (let [{:keys [raw values]} (fields (:text line))
+(defn- candidate [line scope profile other-column-start]
+  (let [{:keys [raw values]} (fields (:text line) other-column-start)
         [gender discipline] scope
         parsed (when values
                  (assoc values :federation "FEDAS" :gender (name gender)
@@ -110,16 +118,21 @@
                           {:page (inc index) :text page
                            :lines (source-lines (inc index) page)}) (range) pages)
         scope (atom nil)
+        other-column-start (atom nil)
         candidates (->> page-data
                         (mapcat :lines)
                         (keep (fn [line]
                                 (let [value (:text line)]
                                   (if (str/includes? value "CLASIFICACIÓN FINAL POR COMUNIDADES")
-                                    (do (reset! scope nil) nil)
+                                    (do (reset! scope nil) (reset! other-column-start nil) nil)
                                     (if-let [[_ sex discipline] (re-find header value)]
-                                      (do (reset! scope [(if (= sex "MASCULINA") :M :F) discipline]) nil)
-                                      (when (and @scope (some #(re-find (re-pattern (str "\\b" % "\\b")) value) federations))
-                                        (candidate line @scope profile)))))))
+                                      (do (reset! scope [(if (= sex "MASCULINA") :M :F) discipline])
+                                          (reset! other-column-start nil) nil)
+                                      (if (and @scope (str/includes? value "Posición")
+                                               (str/includes? value "OTROS"))
+                                        (do (reset! other-column-start (str/index-of value "OTROS")) nil)
+                                        (when (and @scope (some #(re-find (re-pattern (str "\\b" % "\\b")) value) federations))
+                                          (candidate line @scope profile @other-column-start))))))))
                         vec)
         counts (frequencies (map :ranking-scope candidates))
         parsed-count (count (filter #(= :parsed (:parse-status %)) candidates))

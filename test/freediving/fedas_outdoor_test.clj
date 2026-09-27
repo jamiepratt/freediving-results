@@ -53,6 +53,18 @@
     (is (= {[:M "CWT-BF"] 1} (get-in result [:reconciliation :section-counts])))
     (is (= "CWT-BF" (get-in result [:candidates 0 :parsed :discipline])))))
 
+(deftest printed-penalty-columns-remain-distinct
+  (let [page (str header-2025 "\nCLASIFICACIÓN MASCULINA CNF\n"
+                  "Posición   Nombre   APELLIDO   Comunidad Anunciada Realizada (AP>RP) OTROS OBTENIDA ESTADO PUNT.\n"
+                  "   4       Xan            LAMAS SERRANO      FEGAS        51        51             1      50         PEN        76,92\n"
+                  "CLASIFICACIÓN MASCULINA FIM\n"
+                  "Posición   Nombre                 APELLIDO     Comunidad Anunciada Realizada (AP>RP) OTROS OBTENIDA ESTADO PUNT.\n"
+                  "   6       Fabien                  DUCOS         FMDAS        61         58     4             54      PEN   62,79\n")
+        [other shortfall] (:candidates (outdoor/parse-pages outdoor/outdoor-2025-sha256 [page]))]
+    (is (= "PEN OTROS" (get-in other [:raw :fields :penalty-label])))
+    (is (= "PEN (AP>RP)" (get-in shortfall [:raw :fields :penalty-label])))
+    (is (= [1M 4M] (mapv #(get-in % [:parsed :depth-penalty]) [other shortfall])))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.fedas-outdoor-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
