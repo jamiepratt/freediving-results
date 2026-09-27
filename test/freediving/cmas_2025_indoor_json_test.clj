@@ -524,3 +524,32 @@
         (is (= legacy (indoor/validate-artifact! root legacy))))
       (is (thrown? clojure.lang.ExceptionInfo
                    (indoor/validate-artifact! root (assoc-in artifact [:candidates 0 :parsed :points-token] "99")))))))
+
+(deftest same-byte-reacquisition-preserves-earlier-artifact-replay
+  (let [dir (fixture/workspace) root (str dir "/archive") path (str dir "/result.json")
+        bytes (source [row]) hash (.formatHex (java.util.HexFormat/of)
+                                              (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        manifest (assoc fixture/manifest :sha256 hash :discovery-url json-url
+                        :final-url json-url :content-type "application/json"
+                        :provenance {:publisher-url json-url :redirect-chain [json-url]
+                                     :source-page-url view-url})]
+    (java.nio.file.Files/write (java.nio.file.Paths/get path (make-array String 0)) bytes
+                               (make-array java.nio.file.OpenOption 0))
+    (archive/register! root path manifest)
+    (let [run (indoor/extract! root hash {:actor "synthetic" :config {}})
+          artifact (edn/read-string (slurp (:artifact-path run)))
+          reacquired (assoc manifest :retrieved-at "2026-09-27T12:00:00Z")]
+      (archive/register! root path reacquired)
+      (is (= 2 (count (:acquisitions (archive/inspect root hash)))))
+      (is (= artifact (indoor/validate-artifact! root artifact)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (indoor/validate-artifact! root (assoc artifact :acquisitions []))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (indoor/validate-artifact! root
+                                              (update artifact :acquisitions conj
+                                                      (assoc (first (:acquisitions artifact))
+                                                             :acquisition-id (apply str (repeat 64 "0")))))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (indoor/validate-artifact! root
+                                              (update artifact :acquisitions conj
+                                                      (first (:acquisitions artifact)))))))))

@@ -328,7 +328,11 @@
                     "cmas-2025-indoor-json/8" parse-v8-result
                     parse-result)
                   bytes {:view-url view-url :json-url json-url})]
-    (when-not (and (= (:acquisitions source) (:acquisitions artifact))
+    (when-not (and (vector? (:acquisitions artifact))
+                   (seq (:acquisitions artifact))
+                   (= (count (:acquisitions artifact))
+                      (count (set (map :acquisition-id (:acquisitions artifact)))))
+                   (every? (set (:acquisitions source)) (:acquisitions artifact))
                    (= expected (select-keys artifact (keys expected))))
       (fail! "CMAS JSON source replay mismatch")))
   artifact)
