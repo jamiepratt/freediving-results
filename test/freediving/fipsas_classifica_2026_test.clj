@@ -154,6 +154,31 @@
     (is (nil? (get-in row [:parsed :declared-distance])))
     (is (= 68.00M (get-in row [:parsed :final-performance])))))
 
+(deftest just-apnea-2026-preserves-printed-date-range
+  (let [sha "41e5fc5f9032696219c17b245384272e434b9c9bee3f297b477942cba5695783"
+        pages (fixture "36° Trofeo Just Apnea" "23-24 maggio 2026" "1CM - DNF"
+                       " 1           Bäechtold      Thomas      U.S.S. Dario Gonzatti A.S.D.   1961                 2:30.00                                  2:11.98                113,00                       2:11.98              113,00            0:18.02         15.0")
+        artifact (fipsas/parse-pages sha pages)
+        row (first (:candidates artifact))]
+    (is (= sha (fipsas/source-sha256 19)))
+    (is (= :parsed (:parse-status row)))
+    (is (= 113.00M (get-in row [:parsed :final-performance])))
+    (is (= "2026-05-23" (get-in row [:parsed :calendar-event-date])))
+    (is (= "2026-05-23/2026-05-24" (get-in row [:parsed :printed-event-date])))
+    (is (nil? (get-in row [:parsed :event-date])))
+    (is (some #{:event-date-conflict} (:unresolved-reasons row)))))
+
+(deftest just-apnea-unranked-endurance-with-no-declaration
+  (let [sha (fipsas/source-sha256 19)
+        pages (fixture "36° Trofeo Just Apnea" "23-24 maggio 2026" "END4M - END4"
+                       "             Achille     Vito     Just Apnea A.S.D.        1990                                                                  1:55.78                                             1:55.78")
+        row (first (:candidates (fipsas/parse-pages sha pages)))]
+    (is (= :parsed (:parse-status row)))
+    (is (= :unknown (get-in row [:parsed :status])))
+    (is (nil? (get-in row [:parsed :declared-time])))
+    (is (= "1:55.78" (get-in row [:parsed :final-performance])))
+    (is (some #{:unprinted-status} (:unresolved-reasons row)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.fipsas-classifica-2026-test)]
     (shutdown-agents)

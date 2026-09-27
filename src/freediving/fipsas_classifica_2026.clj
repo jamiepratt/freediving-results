@@ -2,7 +2,7 @@
   "Source-bound positions from official 2026 FIPSAS classifica PDFs."
   (:require [clojure.string :as str]))
 
-(def parser-version "fipsas-classifica-2026/3")
+(def parser-version "fipsas-classifica-2026/4")
 
 (def ^:private sources
   {"44f8dc155619d30190270979b11e4ae3d5c9a32d9bf6023bc690c3e070ff9a66"
@@ -51,7 +51,10 @@
     :printed-date "2026-04-26" :date-label "26 aprile 2026" :expected 208}
    "205f29ca1108950dc9bb93dc4ce0d67435261ba9919bdec835391fd93ee2d3c8"
    {:index 18 :title "15° Trofeo Angelo Rota" :calendar-date "2026-05-10"
-    :printed-date "2026-05-10" :date-label "10 maggio 2026" :expected 237}})
+    :printed-date "2026-05-10" :date-label "10 maggio 2026" :expected 237}
+   "41e5fc5f9032696219c17b245384272e434b9c9bee3f297b477942cba5695783"
+   {:index 19 :title "36° Trofeo Just Apnea" :calendar-date "2026-05-23"
+    :printed-date "2026-05-23/2026-05-24" :date-label "23-24 maggio 2026" :expected 67}})
 
 (defn source-sha256 [index]
   (some (fn [[sha source]] (when (= index (:index source)) sha)) sources))
@@ -62,6 +65,7 @@
   (when-let [source (get sources sha)]
     (cond (<= (:index source) 8) "fipsas-classifica-2026/1"
           (<= (:index source) 14) "fipsas-classifica-2026/2"
+          (<= (:index source) 18) "fipsas-classifica-2026/3"
           :else parser-version)))
 
 (def ^:private heading-pattern #"Classiﬁca (?:regionale )?(.+?) - (DNF|DYNB|DYN|STA|END4|END8|SPEED)\s*$")
@@ -86,6 +90,12 @@
   (let [penalty (when (= 1 (count (filter #{"PG"} tokens))) "PG")
         new-source? (> (:index source) 14)
         normalized-tokens (if penalty (remove #{"PG"} tokens) tokens)
+        normalized-tokens (if (and (= 19 (:index source)) (not ranked?)
+                                   (contains? #{"SPEED" "END4" "END8"} discipline)
+                                   (= 2 (count normalized-tokens))
+                                   (every? #(re-matches time-pattern %) normalized-tokens))
+                            (cons nil normalized-tokens)
+                            normalized-tokens)
         distance-only? (re-matches distance-pattern (or (first normalized-tokens) ""))
         time-only? (or (= "STA" discipline)
                        (and (contains? #{"SPEED" "END4" "END8"} discipline)
