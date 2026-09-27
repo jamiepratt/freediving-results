@@ -96,6 +96,18 @@ class CorpusStatusCountsTest(unittest.TestCase):
         self.assertEqual(4, report["rows_by_kind"]["printed_positions"])
         self.assertEqual(2, report["link_count"])
 
+    def test_unknown_row_count_is_explicit_and_not_zero(self):
+        document = {"schema": "corpus-status-counts/v1", "scope": "unknown rows",
+                    "groups": [{"group_id": "index", "cutoff": "2026-09-27T00:00:00Z",
+                                "links": [{"link_id": "route", "status": "unresolved",
+                                           "reason": "source not retrieved", "row_count": None,
+                                           "row_count_kind": None}]}]}
+        completed = run_report(document)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual({}, report["rows_by_kind"])
+        self.assertEqual(1, report["unknown_row_count_link_count"])
+
     def test_rejects_conflicting_basis_and_partial_row_counts(self):
         row = {"link_id": "a", "status": "imported", "reason": "cited",
                "row_count": 4, "row_count_kind": "printed_positions",

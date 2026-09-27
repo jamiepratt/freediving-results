@@ -6,7 +6,8 @@ and groups of link observations. Every group needs a unique group_id, an ISO
 reason. event_ids and source_sha256 are optional and stay unknown when absent.
 An optional event_cards array records calendar cards separately from PDF links;
 one result link may serve several cards and cards may have no result link.
-An optional row_count requires row_count_kind and row_basis_id. A basis names
+An optional numeric row_count requires row_count_kind and row_basis_id. Null
+or absent row_count means unknown, never zero. A basis names
 one disjoint set of cited source positions (or one corpus observation snapshot)
 and can repeat across groups only with the same kind and count. The preparer
 must establish that different bases do not overlap. Link records are counted
@@ -71,7 +72,7 @@ def _summarize(links, cards):
     hashes = {link["source_sha256"] for link in links if link.get("source_sha256")}
     bases = {}
     for link in links:
-        if "row_count" not in link:
+        if link.get("row_count") is None:
             continue
         key = (link["row_count_kind"], link["row_basis_id"])
         count = link["row_count"]
@@ -92,6 +93,7 @@ def _summarize(links, cards):
         "event_cards_by_status": dict(sorted(card_statuses.items())),
         "distinct_source_hash_count": len(hashes),
         "unknown_source_hash_link_count": sum(not link.get("source_sha256") for link in links),
+        "unknown_row_count_link_count": sum(link.get("row_count") is None for link in links),
         "rows_by_kind": dict(sorted(rows.items())),
     }
 
@@ -163,12 +165,16 @@ def report(document):
                     raise ValueError("source_sha256 must be a lowercase SHA-256 hex digest")
             row_fields = ("row_count", "row_count_kind", "row_basis_id")
             if any(field in link for field in row_fields):
-                if not all(field in link and link[field] is not None for field in row_fields):
-                    raise ValueError("row_count requires row_count_kind and row_basis_id")
-                _count(link["row_count"], "row_count")
-                if link["row_count_kind"] not in ROW_KINDS:
-                    raise ValueError("unsupported row_count_kind")
-                _string(link["row_basis_id"], "row_basis_id")
+                if link.get("row_count") is None:
+                    if link.get("row_count_kind") is not None or link.get("row_basis_id") is not None:
+                        raise ValueError("row_count requires row_count_kind and row_basis_id")
+                else:
+                    if not all(field in link and link[field] is not None for field in row_fields):
+                        raise ValueError("row_count requires row_count_kind and row_basis_id")
+                    _count(link["row_count"], "row_count")
+                    if link["row_count_kind"] not in ROW_KINDS:
+                        raise ValueError("unsupported row_count_kind")
+                    _string(link["row_basis_id"], "row_basis_id")
             group_links.append(link)
         group_reports.append({"group_id": group_id, "cutoff": cutoff,
                               **_summarize(group_links, group_cards)})
