@@ -331,6 +331,39 @@
     (is (= "def" (slurp (:artifact-path (archive/inspect root (:sha256 changed))))))
     (is (= :skipped (:status (archive/register! root source changed {:report-status true}))))))
 
+;; Synthetic publisher bytes and routes; this does not assert a live revision.
+(deftest source-version-review-distinguishes-byte-duplicates-from-possible-revisions
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        old manifest
+        alternate-route (assoc old :final-url "https://example.org/alternate.pdf")
+        changed (assoc old :sha256 "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34"
+                       :retrieved-at "2026-09-24T13:14:09Z")]
+    (spit source "abc")
+    (let [first-id (:acquisition-id (archive/register! root source old))
+          duplicate-id (:acquisition-id (archive/register! root source alternate-route))]
+      (spit source "def")
+      (let [changed-id (:acquisition-id (archive/register! root source changed))
+            review (archive/version-relationships root)]
+        (is (= 2 (count (filter #(.isFile %) (file-seq (java.io.File. (str root "/objects")))))))
+        (is (= 3 (count (:acquisitions review))))
+        (is (= #{{:left first-id :right duplicate-id :kind :source-duplicate
+                  :basis {:source-sha256 (:sha256 old)}}}
+               (set (:source-duplicates review))))
+        (is (= #{#{first-id changed-id}}
+               (set (map #(set ((juxt :left :right) %)) (:revision-candidates review)))))
+        (is (every? #(and (= :unknown (:kind %))
+                          (= :possible-source-revision (:reason %))
+                          (= (:publisher old) (get-in % [:basis :publisher]))
+                          (= (:final-url old) (get-in % [:basis :final-url]))
+                          (= #{(:sha256 old) (:sha256 changed)}
+                             (set ((juxt (comp :left-source-sha256 :basis)
+                                         (comp :right-source-sha256 :basis)) %)))
+                          (not (contains? % :supersedes)))
+                    (:revision-candidates review)))
+        (is (= {:sha256 (:sha256 changed) :acquisition-id changed-id :status :skipped}
+               (archive/register! root source changed {:report-status true})))
+        (is (= review (archive/version-relationships root)))))))
+
 (deftest observed-aida-session-links-preserve-context
   (doseq [url ["https://www.aidainternational.org/StartList/4350#start"
                "https://www.aidainternational.org/StartList/4350?day_index=3"

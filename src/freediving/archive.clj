@@ -334,6 +334,34 @@
          (sort-by :acquisition-id)
          vec)))
 
+(defn version-relationships
+  "Review byte duplicates and possible revisions across verified acquisitions.
+   A changed source at one publisher route remains unknown until reviewed."
+  [root]
+  (let [acquisitions (inventory root)
+        pairs (for [[index left] (map-indexed vector acquisitions)
+                    right (drop (inc index) acquisitions)]
+                [left right])
+        duplicates (for [[left right] pairs
+                         :when (= (:sha256 left) (:sha256 right))]
+                     {:left (:acquisition-id left) :right (:acquisition-id right)
+                      :kind :source-duplicate
+                      :basis {:source-sha256 (:sha256 left)}})
+        candidates (for [[left right] pairs
+                         :when (and (not= (:sha256 left) (:sha256 right))
+                                    (= (:publisher left) (:publisher right))
+                                    (= (.normalize (URI. (:final-url left)))
+                                       (.normalize (URI. (:final-url right)))))]
+                     {:left (:acquisition-id left) :right (:acquisition-id right)
+                      :kind :unknown :reason :possible-source-revision
+                      :basis {:publisher (:publisher left)
+                              :final-url (str (.normalize (URI. (:final-url left))))
+                              :left-source-sha256 (:sha256 left)
+                              :right-source-sha256 (:sha256 right)}})]
+    {:acquisitions acquisitions
+     :source-duplicates (vec duplicates)
+     :revision-candidates (vec candidates)}))
+
 (defn -main [& args]
   (try
     (let [[command root value manifest-file] args
