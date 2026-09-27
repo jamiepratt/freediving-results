@@ -1,6 +1,6 @@
 # Isolated corpus relationship and status audit, 27 September 2026
 
-This is a bounded read-only audit for [issue #16](https://github.com/jamiepratt/freediving-results/issues/16), at the b44 cutoff `2026-09-27T14:52:15.018622+00:00`. It covers the existing isolated OVH ingestion corpus and retained dated inventories. It is not a global competition census, extraction approval, athlete identity decision or publication decision. The public application and #8 corpus were not changed.
+This is a bounded read-only audit for [issue #16](https://github.com/jamiepratt/freediving-results/issues/16), at the b44 cutoff `2026-09-27T14:52:15.018622+00:00`. It covers the existing isolated OVH ingestion corpus and retained dated inventories. A later Noxygen source comparison and archive registration are recorded below. It is not a global competition census, extraction approval, athlete identity decision or publication decision. The public application and #8 corpus were not changed.
 
 ## Corpus and archive boundary
 
@@ -43,11 +43,17 @@ The private normalized count input and output are in the same b44 run. `corpus-s
 | --- | --- |
 | FFESSM 2025 junior category versus daily results | The junior PDF's Florent VECCHIO result matches one dated male daily result, but the daily row prints no age or junior category. The other 55 category results have unique cited daily matches. No revision order follows. |
 | CMAS index links marked already present against #8 | Route identity is known, but current index-download bytes were not fetched and compared to the older championship originals. |
-| Submania 2026 Noxygen result view versus imported CMAS Croatian Open | The retained browser attempt did not produce a complete response or DOM, so no row-level comparison exists. |
+| Submania 2026 Noxygen result view versus imported CMAS Croatian Open | Resolved after this audit's cutoff by the b45 JSON snapshot and cited comparison below. Rank differences and one two-row individual pairing remain reviewable. |
 | FIPSAS 2026 unlinked cards, seven scans and the 404 PDF | Missing or unreadable result bytes prevent a complete source-row census and cross-source comparison. |
 | TuttinApnea January combined sheet unmatched cells | Exact supporting point links exist for 1,258 cells; unmatched cells remain source-level unknowns. |
 
 These gaps remain under [issue #16](https://github.com/jamiepratt/freediving-results/issues/16). The synthetic changed-byte fixture proves the reviewable-unknown behavior, but no live predecessor/successor relationship or unique-attempt total follows from this audit.
+
+## Noxygen continuation after the b44 cutoff
+
+At `2026-09-27T15:43:54Z`, the official Noxygen result snapshot added one complete JSON source, SHA-256 `9da14c170cd3085b68b3de577183af99e6c78ebab402bc4965ab536b72e00b89`. Its 246 `RESULT` rows match the imported CMAS Croatian Open PDF's 246 positions as a multiset; 85 `OVERALL` rows are supporting standings. The [dated inventory](2025-onward-source-inventory-20260926.md#croatian-noxygen-result-snapshot-b45-27-september-2026) records source and sporting context. The private ledger retains 244 individual pairs, one ambiguous two-by-two group and 13 rank differences, without declaring a publisher revision or adding observations.
+
+The original JSON, complete HTTP receipt, discovery link and relationship ledger were retained under `/srv/freediving-ingest/runs/20260927-b45-noxygen-bootstrap/`. The source is now registered in the central archive as acquisition `adff0c5f0ab1d8b644b374dd7997fd9e58ecea34ad3affcd6d652a94b410cbfe`; verified archive counts are 107 acquisitions, 105 original byte hashes and 105 exact final routes. The corpus remains 91 jobs, 89 observation source hashes and 11,150 immutable versions. The 466-file portable bundle `/srv/freediving-ingest/bundles/20260927-b45-noxygen-audited-v2` verified and restored, index SHA-256 `cebc88ea6907170fa28058e1ba3e40f2c541938cf75047be08f5665ffa3d305c`. A path and content pattern scan found zero credential or session findings. Publisher scripts and bootstrap HTML remain private on the worker and outside this portable bundle.
 
 ## FFESSM 2025 daily and category cross-publication comparison
 
