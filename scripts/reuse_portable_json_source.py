@@ -26,11 +26,17 @@ def export(bundle, sha, acquisition_id, destination):
         raise ValueError("invalid source or acquisition ID")
     bundle = portable_corpus.safe_existing(bundle)
     index = portable_corpus.verify(bundle)
-    archive = portable_corpus.safe_existing(bundle / "payload/archive")
-    object_name = "archive/objects/" + sha
-    record_name = "archive/acquisitions/" + acquisition_id + ".edn"
-    if object_name not in index["files"] or record_name not in index["files"]:
+    matches = []
+    for root in index.get("archive_roots", []):
+        root = str(portable_corpus.relative(root))
+        obj = root + "/objects/" + sha
+        record = root + "/acquisitions/" + acquisition_id + ".edn"
+        if obj in index["files"] and record in index["files"]:
+            matches.append((root, obj, record))
+    if len(matches) != 1:
         raise ValueError("source object or acquisition record absent from bundle")
+    root, object_name, record_name = matches[0]
+    archive = portable_corpus.safe_existing(bundle / "payload" / root)
     source = portable_corpus.safe_existing(bundle / "payload" / object_name)
     record = portable_corpus.safe_existing(bundle / "payload" / record_name)
 
@@ -61,8 +67,9 @@ def export(bundle, sha, acquisition_id, destination):
     if (not view or not response or view.group(1) != response.group(1)
             or (view.group(1), view.group(2)) not in
             {("2", "dynamic"), ("1", "static"), ("1", "speed")}
-            or publisher != "CMAS" or publisher_url != "https://www.cmas.org/"
+            or publisher not in {"CMAS", "CMAS / Microplus"}
             or not discovery_url.startswith("https://www.cmas.org/")
+            or publisher_url not in {"https://www.cmas.org/", discovery_url}
             or redirects[-1] != final_url):
         raise ValueError("unsupported CMAS JSON source relationship")
     if any(selected[0][key] != value for key, value in

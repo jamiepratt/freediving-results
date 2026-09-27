@@ -30,14 +30,15 @@ class ReusePortableJsonSourceTest(unittest.TestCase):
         self.export_dir = self.root / "export"
 
     def make_bundle(self, *, view=VIEW, response=RESPONSE, mime="application/json",
-                    method="Browser response archive"):
+                    method="Browser response archive", archive_path="archive",
+                    publisher="CMAS", publisher_url="https://www.cmas.org/"):
         manifest = self.root / "manifest.edn"
         manifest.write_text(
             '{:sha256 "' + self.sha + '" :discovery-url "' + DISCOVERY + '" '
             ':final-url "' + response + '" :acquisition-method "' + method + '" '
             ':retrieved-at "2026-09-25T14:30:42Z" :content-type "' + mime + '" '
-            ':publisher "CMAS" :relationship :publisher :mirror-of nil '
-            ':provenance {:publisher-url "https://www.cmas.org/" :source-page-url "' + view + '" '
+            ':publisher "' + publisher + '" :relationship :publisher :mirror-of nil '
+            ':provenance {:publisher-url "' + publisher_url + '" :source-page-url "' + view + '" '
             ':redirect-chain ["' + response + '"]}}')
         imported = subprocess.run(["clojure", "-M:archive", "import", str(self.archive),
                                    str(self.source), str(manifest)], cwd=ROOT,
@@ -48,10 +49,10 @@ class ReusePortableJsonSourceTest(unittest.TestCase):
         review.write_text("private review")
         spec = self.root / "spec.json"
         spec.write_text(json.dumps({"schema": "portable-corpus-spec/v1", "corpus": "fixture",
-                                    "entries": [{"source": str(self.archive), "path": "archive", "role": "source"},
+                                    "entries": [{"source": str(self.archive), "path": archive_path, "role": "source"},
                                                 {"source": str(review), "path": "review/private-review.txt",
                                                  "role": "review"}],
-                                    "archive_roots": ["archive"]}))
+                                    "archive_roots": [archive_path]}))
         bundled = subprocess.run([sys.executable, str(PORTABLE), "export", str(spec), str(self.bundle)],
                                  capture_output=True, text=True)
         self.assertEqual(0, bundled.returncode, bundled.stderr)
@@ -100,6 +101,15 @@ class ReusePortableJsonSourceTest(unittest.TestCase):
         self.make_bundle(method="Browser response token=private-value")
         self.run_cli(expected=1)
         self.assertFalse(self.export_dir.exists())
+
+    def test_exports_b32_prefixed_archive_with_cmas_microplus_publisher(self):
+        self.make_bundle(archive_path="athens/archive", publisher="CMAS / Microplus",
+                         publisher_url=DISCOVERY)
+        self.run_cli()
+        self.assertEqual(self.source_bytes, (self.export_dir / "source.json").read_bytes())
+        provenance = json.loads((self.export_dir / "provenance.json").read_text())
+        self.assertEqual("CMAS / Microplus", provenance["original_retrieval"]["publisher"])
+        self.assertEqual(DISCOVERY, provenance["original_retrieval"]["publisher_url"])
 
 
 if __name__ == "__main__":
