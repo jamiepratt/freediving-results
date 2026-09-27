@@ -1,5 +1,6 @@
 (ns freediving.fipsas-classifica-2026-test
-  (:require [clojure.test :refer [deftest is run-tests]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is run-tests]]
             [freediving.extraction :as extraction]
             [freediving.fipsas-classifica-2026 :as fipsas]))
 
@@ -80,7 +81,7 @@
         artifact (fipsas/parse-pages "d28e6de1b4c353b1d9a94e283ee310a597264dd8e6d85cc31594782b61749e88" pages)
         row (first (:candidates artifact))]
     (is (= "Junior SPEEDF" (get-in row [:parsed :category])))
-    (is (= fipsas/parser-version (:parser-version artifact)))
+    (is (= "fipsas-classifica-2026/2" (:parser-version artifact)))
     (is (extraction/fipsas-artifact? artifact))
     (is (= "2026-03-20/2026-03-22" (get-in row [:parsed :printed-event-date])))
     (is (nil? (get-in row [:parsed :event-date])))
@@ -107,6 +108,51 @@
     (is (nil? (get-in row [:parsed :declared-time])))
     (is (= 129.00M (get-in row [:parsed :declared-distance])))
     (is (= 120.50M (get-in row [:parsed :final-performance])))))
+
+(deftest april-and-may-classifica-sources
+  (doseq [[index sha title date iso-date heading row expected-performance]
+          [[15 "e5e90a2286cf658b4d19c3bfbadebdad8e8813ce020c141ac788a41da61cdf76"
+            "5° Trofeo Sporting Lodi Apnea" "19 aprile 2026" "2026-04-19" "1CF - DYN"
+            "1           Rainero       Cristina           1° Club Lacustre Sommozzatori              1972      1:55.00                   1:54.21      126,50                  1:54.21      126,50     0:00.79         15.0" 126.50M]
+           [16 "7ef04835ef26c9989f951e5e56e895816d5155c8100fc5f6e74e0a1ed14e1c68"
+            "Deep Blue Freediving Contest 2026" "19 aprile 2026" "2026-04-19" "1CF - DNF"
+            "1           Valdes    Tiziana    Deep Blue Sardinia      1974                    1:58.00                                  1:46.10                 85,50                       1:46.10                85,50           0:11.90         15.0" 85.50M]
+           [17 "05fff83f80421555516eecaf70e8061d4ebd5b4953e14902eaacd7d84cda42fc"
+            "12° Trofeo Club Subacqueo Scaligero Verona" "26 aprile 2026" "2026-04-26" "1CF - DNF"
+            "1           Brambilla   Lucia   1° Club Lacustre Sommozzatori     1973                       2:18.00                                 0:58.75                 45,00                       0:58.75                45,00           1:19.25         15.0" 45.00M]
+           [18 "205f29ca1108950dc9bb93dc4ce0d67435261ba9919bdec835391fd93ee2d3c8"
+            "15° Trofeo Angelo Rota" "10 maggio 2026" "2026-05-10" "1CF - DNF"
+            "1           Aloisio   Elena      Paviapnea                    1989                    2:10.00                                  1:27.41                 75,00                       1:27.41                75,00           0:42.59         15.0" 75.00M]]]
+    (is (= sha (fipsas/source-sha256 index)))
+    (let [artifact (fipsas/parse-pages sha (fixture title date heading row))
+          candidate (first (:candidates artifact))]
+      (is (= :parsed (:parse-status candidate)))
+      (is (= expected-performance (get-in candidate [:parsed :final-performance])))
+      (is (= {:page 2 :line 5} (:coordinates candidate)))
+      (is (= iso-date (get-in candidate [:parsed :calendar-event-date])))
+      (is (= iso-date (get-in candidate [:parsed :printed-event-date]))))))
+
+(deftest lodi-printed-absence-has-no-performance
+  (let [sha (fipsas/source-sha256 15)
+        pages (fixture "5° Trofeo Sporting Lodi Apnea" "19 aprile 2026" "EM - DYNB"
+                       (str "             Ferrario       Roberto             Sc63 S.S.D.R.L.                          1974                          150,00      0:00.00                                          0:00.00\n"
+                            "                                                                                                                                                             Assente"))
+        row (first (:candidates (fipsas/parse-pages sha pages)))]
+    (is (= :parsed (:parse-status row)))
+    (is (= :absent (get-in row [:parsed :status])))
+    (is (nil? (get-in row [:parsed :final-performance])))
+    (is (= "Assente" (get-in row [:raw :fields :status])))
+    (is (some #(= "Assente" (str/trim (:text %))) (:source-lines row)))))
+
+(deftest scaligero-elite-time-declaration-without-distance
+  (let [sha (fipsas/source-sha256 17)
+        pages (fixture "12° Trofeo Club Subacqueo Scaligero Verona" "26 aprile 2026" "EF - DNF"
+                       "4           Andreotti   Paola        Club Sommozzatori Mestre A.S.D.        1973                    2:02.00                                  1:23.90                 68,00                       1:23.90                68,00          6.0")
+        row (first (:candidates (fipsas/parse-pages sha pages)))]
+    (is (= :parsed (:parse-status row)))
+    (is (= "2:02.00" (get-in row [:parsed :declared-time])))
+    (is (nil? (get-in row [:parsed :declared-distance])))
+    (is (= 68.00M (get-in row [:parsed :final-performance])))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.fipsas-classifica-2026-test)]

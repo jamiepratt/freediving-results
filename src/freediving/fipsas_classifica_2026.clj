@@ -1,8 +1,8 @@
 (ns freediving.fipsas-classifica-2026
-  "Source-bound positions from eight official 2026 FIPSAS classifica PDFs."
+  "Source-bound positions from official 2026 FIPSAS classifica PDFs."
   (:require [clojure.string :as str]))
 
-(def parser-version "fipsas-classifica-2026/2")
+(def parser-version "fipsas-classifica-2026/3")
 
 (def ^:private sources
   {"44f8dc155619d30190270979b11e4ae3d5c9a32d9bf6023bc690c3e070ff9a66"
@@ -39,7 +39,19 @@
     :printed-date "2026-03-20/2026-03-22" :date-label "20-22 marzo 2026" :expected 518}
    "d36a52145021ac469fcfad31d7d30ce9a4a80d4737c3d7cbe2ef7fe9f3d74d1b"
    {:index 14 :title "7° Trofeo Città di Sestri Levante" :calendar-date "2026-04-12"
-    :printed-date "2026-04-12" :date-label "12 aprile 2026" :expected 171}})
+    :printed-date "2026-04-12" :date-label "12 aprile 2026" :expected 171}
+   "e5e90a2286cf658b4d19c3bfbadebdad8e8813ce020c141ac788a41da61cdf76"
+   {:index 15 :title "5° Trofeo Sporting Lodi Apnea" :calendar-date "2026-04-19"
+    :printed-date "2026-04-19" :date-label "19 aprile 2026" :expected 231}
+   "7ef04835ef26c9989f951e5e56e895816d5155c8100fc5f6e74e0a1ed14e1c68"
+   {:index 16 :title "Deep Blue Freediving Contest 2026" :calendar-date "2026-04-19"
+    :printed-date "2026-04-19" :date-label "19 aprile 2026" :expected 177}
+   "05fff83f80421555516eecaf70e8061d4ebd5b4953e14902eaacd7d84cda42fc"
+   {:index 17 :title "12° Trofeo Club Subacqueo Scaligero Verona" :calendar-date "2026-04-26"
+    :printed-date "2026-04-26" :date-label "26 aprile 2026" :expected 208}
+   "205f29ca1108950dc9bb93dc4ce0d67435261ba9919bdec835391fd93ee2d3c8"
+   {:index 18 :title "15° Trofeo Angelo Rota" :calendar-date "2026-05-10"
+    :printed-date "2026-05-10" :date-label "10 maggio 2026" :expected 237}})
 
 (defn source-sha256 [index]
   (some (fn [[sha source]] (when (= index (:index source)) sha)) sources))
@@ -48,7 +60,9 @@
 
 (defn parser-version-for [sha]
   (when-let [source (get sources sha)]
-    (if (<= (:index source) 8) "fipsas-classifica-2026/1" parser-version)))
+    (cond (<= (:index source) 8) "fipsas-classifica-2026/1"
+          (<= (:index source) 14) "fipsas-classifica-2026/2"
+          :else parser-version)))
 
 (def ^:private heading-pattern #"Classiﬁca (?:regionale )?(.+?) - (DNF|DYNB|DYN|STA|END4|END8|SPEED)\s*$")
 (def ^:private row-pattern #"^\s*(?:\d+\s+)?\S.+\s{2,}(?:19|20)\d{2}\s{2,}.+$")
@@ -68,8 +82,9 @@
   (when (and s (re-matches distance-pattern s))
     (bigdec (str/replace s "," "."))))
 
-(defn- result-fields [discipline category tokens ranked?]
+(defn- result-fields [source discipline category tokens ranked?]
   (let [penalty (when (= 1 (count (filter #{"PG"} tokens))) "PG")
+        new-source? (> (:index source) 14)
         normalized-tokens (if penalty (remove #{"PG"} tokens) tokens)
         distance-only? (re-matches distance-pattern (or (first normalized-tokens) ""))
         time-only? (or (= "STA" discipline)
@@ -78,10 +93,14 @@
         speed? (contains? #{"SPEED" "END4" "END8"} discipline)
         elite? (and (contains? #{"EF" "EM"} (first (str/split category #" ")))
                     (not time-only?) (not speed?))
-        two-declarations? (and elite? (re-matches time-pattern (or (first normalized-tokens) "")))
+        two-declarations? (and elite? (re-matches time-pattern (or (first normalized-tokens) ""))
+                               (or (not new-source?)
+                                   (re-matches distance-pattern (or (second normalized-tokens) ""))))
         [declared-time declared-distance values]
         (cond two-declarations? [(first normalized-tokens) (second normalized-tokens) (drop 2 normalized-tokens)]
               distance-only? [nil (first normalized-tokens) (rest normalized-tokens)]
+              (and new-source? elite? (re-matches time-pattern (or (first normalized-tokens) "")))
+              [(first normalized-tokens) nil (rest normalized-tokens)]
               elite? [nil (first normalized-tokens) (rest normalized-tokens)]
               :else [(first normalized-tokens) nil (rest normalized-tokens)])
         realized-time (first values)
@@ -117,16 +136,21 @@
                       :final-performance performance :unit (if (or time-only? speed?) "min:sec.centisec" "m")}
                penalty (assoc :penalty penalty))}))
 
-(defn- nearby-status [lines line]
+(defn- nearby-status [source lines line ranked?]
   (let [preceding (->> lines (filter #(< (:line %) (:line line))) (take-last 2) reverse)
         code (some #(when (contains? #{"BO" "DQ"} (str/upper-case (str/trim (:text %)))) %) preceding)
+        absent (when (and (= 15 (:index source)) (not ranked?))
+                 (first (filter #(and (> (:line %) (:line line))
+                                      (<= (:line %) (+ 2 (:line line)))
+                                      (= "Assente" (str/trim (:text %)))) lines)))
         inline (last (str/split (str/trim (:text line)) #"\s{2,}"))
         status (or (some-> code :text str/trim str/upper-case)
+                   (when absent "Assente")
                    (when (contains? #{"BO" "DQ"} inline) inline))
         note (when code (first (filter #(and (> (:line %) (:line line))
                                              (<= (:line %) (+ 3 (:line line)))
                                              (not (str/blank? (:text %)))) lines)))]
-    {:status status :source-lines (vec (remove nil? [code note]))
+    {:status status :source-lines (vec (remove nil? [code absent note]))
      :note (some-> note :text str/trim)}))
 
 (defn- parse-row [source line section lines]
@@ -134,13 +158,13 @@
         ranked? (boolean (re-matches #"\d+" (first chunks)))
         [rank surname given club birth-year & tokens]
         (if ranked? chunks (cons nil chunks))
-        status-data (nearby-status lines line)
+        status-data (nearby-status source lines line ranked?)
         status (:status status-data)
-        results (result-fields (:discipline section) (:category section) tokens ranked?)
+        results (result-fields source (:discipline section) (:category section) tokens ranked?)
         identity-valid? (and (seq surname) (seq given) (seq club)
                              (re-matches #"(?:19|20)\d\d" (or birth-year "")))
         valid? (and identity-valid? (or (:valid? results)
-                                        (and (not ranked?) (contains? #{"BO" "DQ"} status))
+                                        (and (not ranked?) (contains? #{"BO" "DQ" "Assente"} status))
                                         (and (not ranked?) (nil? status)
                                              (re-matches time-pattern (or (get-in results [:raw :realized-time]) ""))
                                              (= (get-in results [:raw :realized-time])
@@ -157,7 +181,8 @@
                          :source-name (str surname " " given) :surname surname
                          :given-name given :club club :birth-year (parse-long birth-year)
                          :rank (some-> rank parse-long) :ranked? ranked?
-                         :status (if ranked? :ranked (case status "BO" :blackout "DQ" :disqualified :unknown))
+                         :status (if ranked? :ranked (case status "BO" :blackout "DQ" :disqualified
+                                                           "Assente" :absent :unknown))
                          :final-performance (when (or ranked? (nil? status))
                                               (get-in results [:parsed :final-performance]))}
                         (when (> (:index source) 8)
@@ -185,7 +210,7 @@
 (defn parse-pages [sha256 pages]
   (let [source (get sources sha256)]
     (when-not source
-      (throw (ex-info "FIPSAS classifica parser is bound to eight exact source PDFs" {:sha256 sha256})))
+      (throw (ex-info "FIPSAS classifica parser is bound to exact source PDFs" {:sha256 sha256})))
     (when-not (and (seq pages) (str/includes? (first pages) (:title source))
                    (str/includes? (first pages) (:date-label source)))
       (throw (ex-info "FIPSAS title or printed date does not match bound source" {:sha256 sha256})))
