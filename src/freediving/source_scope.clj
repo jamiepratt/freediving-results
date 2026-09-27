@@ -107,3 +107,49 @@
     (when-not (= (count values) (count (set (map daily-collision-key values))))
       (throw (ex-info "Ambiguous daily participant across source rows" {})))
     values))
+
+(def pdf-results-source-sha256 "f403777b250b7ae816adea945db4cd5ddea51be7349c2efa57046a08671a5758")
+(def pdf-results-artifact-sha256 "c4d68ff2c14eb8a797658e247e10373114b7370c763b60afa9e7068835b3e6cf")
+(def pdf-results-job-id "b035efaef9e24ba8cee6e2b5cbcfa85416702068713442098dd7bfe1259fba65")
+(def pdf-results-ordinals [126 127 128 129])
+(def pdf-results-lines [9 10 11 12])
+(def pdf-results-names ["Ediz DUMAN" "Yusuf ERKAN" "Timur KURU" "Walter STRUMBICHLER"])
+(defn pdf-results-view!
+  "Exact retained CMAS PDF table census. Positions identify published claims only."
+  [artifact]
+  (let [page (get (:pages artifact) 9)
+        candidates (:candidates artifact)
+        table (mapv #(get candidates %) pdf-results-ordinals)
+        page-lines (into {} (map (juxt :line :text) (:lines page)))
+        scoped (keep-indexed (fn [i c]
+                               (when (and (= "DYN-BF" (get-in c [:parsed :discipline]))
+                                          (= "JUNIORS \u2014 MEN" (get-in c [:parsed :category]))
+                                          (= "2026-06-12" (get-in c [:parsed :event-date]))) i)) candidates)]
+    (when-not (and (= pdf-results-source-sha256 (:source-sha256 artifact))
+                   (= pdf-results-job-id (:job-id artifact))
+                   (= "cmas-2026-indoor-time/2" (:parser-version artifact))
+                   (= 2 (:schema-version artifact))
+                   (= 32 (count (:pages artifact)))
+                   (= 10 (:page page))
+                   (= (str/join "\n" (map :text (:lines page))) (:text page))
+                   (= [126 127 128 129] (vec scoped))
+                   (= 4 (count table))
+                   (every? true?
+                           (map-indexed
+                            (fn [i c]
+                              (let [line (get page-lines (nth pdf-results-lines i))]
+                                (and (= :parsed (:parse-status c))
+                                     (= {:page 10 :line (nth pdf-results-lines i)}
+                                        (select-keys (:coordinates c) [:page :line]))
+                                     (= [{:page 10 :line (nth pdf-results-lines i) :text line}] (:source-lines c))
+                                     (= line (get-in c [:raw :line]))
+                                     (= (nth pdf-results-names i) (get-in c [:raw :fields :source-name]))
+                                     (= (nth pdf-results-names i) (get-in c [:parsed :source-name]))
+                                     (= "CMAS" (get-in c [:parsed :federation]))
+                                     (= "DYN-BF" (get-in c [:parsed :discipline]))
+                                     (= "JUNIORS \u2014 MEN" (get-in c [:parsed :category]))
+                                     (= "2026-06-12" (get-in c [:parsed :event-date]))))) table)))
+      (throw (ex-info "Unsupported or incomplete PDF results-view census" {})))
+    {:ordinals pdf-results-ordinals :page 10 :source-sha256 pdf-results-source-sha256
+     :artifact-sha256 pdf-results-artifact-sha256 :discipline "DYN-BF"
+     :category "JUNIORS \u2014 MEN" :date "2026-06-12"}))

@@ -112,18 +112,35 @@
 (defn- descriptor [c d]
   (let [target (verified-target c (:reference d))
         html-values (when (= 4 (:schema-version (:artifact target)))
-                      (source-scope/html-values! (:artifact target) (:ordinal (:reference d))))]
+                      (source-scope/html-values! (:artifact target) (:ordinal (:reference d))))
+        pdf-view? (= :cmas-pdf-results-view/v1 (:scope-contract d))]
     (when-not (= (:reference d) (:reference target)) (fail! "Descriptor provenance mismatch"))
     (when-not (and (= (if (:scope-contract d) #{:reference :scope :scope-contract} #{:reference :scope}) (set (keys d)))
-                   (or (not (contains? d :scope-contract)) (= :aida-date-view/v1 (:scope-contract d)))
+                   (or (not (contains? d :scope-contract))
+                       (#{:aida-date-view/v1 :cmas-pdf-results-view/v1} (:scope-contract d)))
                    (map? (:scope d))) (fail! "Invalid descriptor"))
-    (when (:scope-contract d)
+    (when (= :aida-date-view/v1 (:scope-contract d))
       (when-not (and html-values
                      (every? #(contains? (:scope d) %) source-scope/daily-fields)
                      (every? (set (concat source-scope/daily-fields [:source-name :event-name])) (keys (:scope d))))
         (fail! "Incomplete or unsupported daily scope"))
       (source-scope/daily-values! (:artifact target)))
-    (into (if (:scope-contract d) {:scope-contract (:scope-contract d)} {})
+    (when pdf-view?
+      (when-not (and (= (:artifact-sha256 (:reference d)) source-scope/pdf-results-artifact-sha256)
+                     (= (:job-id (:reference d)) source-scope/pdf-results-job-id)
+                     (= (:source-sha256 (:reference d)) source-scope/pdf-results-source-sha256)
+                     (empty? (:scope d))
+                     (some #{(:ordinal (:reference d))} source-scope/pdf-results-ordinals))
+        (fail! "Unsupported PDF results-view descriptor"))
+      (source-scope/pdf-results-view! (:artifact target)))
+    (into (if pdf-view?
+            {:scope-contract :cmas-pdf-results-view/v1
+             :source-sha256 source-scope/pdf-results-source-sha256
+             :artifact-sha256 source-scope/pdf-results-artifact-sha256
+             :page 10 :date "2026-06-12" :discipline "DYN-BF" :category "JUNIORS \u2014 MEN"
+             :row-position (str "10:" (get-in (:artifact target) [:candidates (:ordinal (:reference d)) :coordinates :line]) ":" (:ordinal (:reference d)))
+             :source-name (get-in (:artifact target) [:candidates (:ordinal (:reference d)) :raw :fields :source-name])}
+            (if (:scope-contract d) {:scope-contract (:scope-contract d)} {}))
           (for [[k b] (:scope d)]
             (do (when (and html-values
                            (not (or (= [:html-scope k] (:path b))
@@ -141,8 +158,12 @@
                        (fail! "Scope source values must be nonblank scalars")) v)])))))
 (def event-fields [:federation :event-id :date :venue :discipline :category :round :session])
 (def date-view-fields [:scope-contract :federation :event-id :date :discipline :category])
+(def pdf-view-fields [:scope-contract :source-sha256 :artifact-sha256 :page :date :discipline :category])
 (defn scope-fields [scope]
-  (if (= :aida-date-view/v1 (:scope-contract scope)) date-view-fields event-fields))
+  (case (:scope-contract scope)
+    :aida-date-view/v1 date-view-fields
+    :cmas-pdf-results-view/v1 pdf-view-fields
+    event-fields))
 (defn event-scope [scope] (select-keys scope (scope-fields scope)))
 (defn- present? [v] (and (some? v) (not (and (string? v) (str/blank? v)))))
 (defn- match [a b]
@@ -151,7 +172,8 @@
                      (every? #(and (present? (a %)) (= (a %) (b %))) fields))
         athlete? (some #(and (present? (a %)) (= (a %) (b %))) [:source-athlete-id :bib])
         conflicting? (some #(and (present? (a %)) (present? (b %)) (not= (a %) (b %))) [:source-athlete-id :bib])]
-    (cond (and scoped? athlete? (not conflicting?)) :possible-revision
+    (cond (= :cmas-pdf-results-view/v1 (:scope-contract a)) :unmatched
+          (and scoped? athlete? (not conflicting?)) :possible-revision
           (and scoped? (present? (:source-name a)) (= (:source-name a) (:source-name b))) :name-only
           :else :unmatched)))
 (defn candidates
@@ -186,6 +208,9 @@
   (when-not (nonblank? (:mapping-rationale p)) (fail! "Mapping rationale required"))
   (let [successor (descriptor c (:successor p)) predecessor (when (:predecessor p) (descriptor c (:predecessor p)))
         refs (set (keep :reference [(:successor p) (:predecessor p)]))]
+    (when (or (= :cmas-pdf-results-view/v1 (:scope-contract successor))
+              (= :cmas-pdf-results-view/v1 (:scope-contract predecessor)))
+      (fail! "PDF results view does not establish revision relationships"))
     (when (= (:reference (:successor p)) (:reference (:predecessor p))) (fail! "Distinct observations required"))
     (when-not (and (vector? (:revision-evidence p)) (seq (:revision-evidence p))) (fail! "Revision evidence required"))
     (doseq [{:keys [kind binding] :as evidence} (:revision-evidence p)]

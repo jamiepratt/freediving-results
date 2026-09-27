@@ -9,8 +9,29 @@
             [freediving.revisions :as revisions]
             [freediving.aida-html :as html]
             [freediving.aida-html-test :as html-fixture]
-            [freediving.html-evidence :as html-evidence]))
+            [freediving.html-evidence :as html-evidence]
+            [freediving.source-scope :as source-scope]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
+(deftest exact-pdf-results-view-has-a-complete-source-position-census
+  (let [artifact {:source-sha256 source-scope/pdf-results-source-sha256
+                  :job-id source-scope/pdf-results-job-id :schema-version 2
+                  :parser-version "cmas-2026-indoor-time/2"
+                  :pages (assoc (vec (repeat 32 {:text ""})) 9
+                                {:page 10 :text "Ediz DUMAN\nYusuf ERKAN\nTimur KURU\nWalter STRUMBICHLER"
+                                 :lines (mapv (fn [i name] {:page 10 :line (+ 9 i) :text name})
+                                              (range 4) ["Ediz DUMAN" "Yusuf ERKAN" "Timur KURU" "Walter STRUMBICHLER"])})
+                  :candidates (vec (concat (repeat 126 {:coordinates {:page 1 :line 1}})
+                                           (map-indexed (fn [i name]
+                                                          {:coordinates {:page 10 :line (+ 9 i)}
+                                                           :source-lines [{:page 10 :line (+ 9 i) :text name}]
+                                                           :parse-status :parsed
+                                                           :parsed {:federation "CMAS" :event-date "2026-06-12"
+                                                                    :discipline "DYN-BF" :category "JUNIORS \u2014 MEN"
+                                                                    :source-name name}
+                                                           :raw {:line name :fields {:source-name name}}})
+                                                        ["Ediz DUMAN" "Yusuf ERKAN" "Timur KURU" "Walter STRUMBICHLER"])))}]
+    (is (= [126 127 128 129] (:ordinals (source-scope/pdf-results-view! artifact))))
+    (is (thrown? Exception (source-scope/pdf-results-view! (update artifact :candidates pop))))))
 (use-fixtures :each (fn [f]
                       (when-not fixture/admin (throw (ex-info "Isolated PostgreSQL required" {})))
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")

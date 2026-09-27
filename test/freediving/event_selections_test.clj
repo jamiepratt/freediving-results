@@ -1,5 +1,6 @@
 (ns freediving.event-selections-test
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
@@ -344,3 +345,87 @@
     (public/activate-html-policy! fixture/admin "hide-existing-public-results" "Synthetic UUID casing check")
     (validate-daily! a "lower") (validate-daily! b "upper")
     (is (thrown-with-msg? Exception #"attempt|identifiers" (selections/select! reviewer (daily-request "both" [a b] [(selected a "lower") (selected b "upper")]))))))
+
+(defn b37-descriptors! [packet]
+  (let [bytes (.getBytes (slurp (str packet "/extraction.edn")) "UTF-8")
+        artifact (edn/read-string (String. bytes "UTF-8"))]
+    ;; The portable private packet omits extractor evidence objects. Stage only the
+    ;; four exact rows in this isolated DB; the production import boundary is separate.
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin)
+                e (.prepareStatement c "INSERT INTO freediving.extractions(job_id,artifact_sha256,source_sha256,parser_version,schema_version,artifact_bytes) VALUES (?,?,?,?,?,?)")]
+      (doseq [[i value] (map-indexed vector [(:job-id artifact)
+                                             "c4d68ff2c14eb8a797658e247e10373114b7370c763b60afa9e7068835b3e6cf"
+                                             (:source-sha256 artifact) (:parser-version artifact)
+                                             (:schema-version artifact) bytes])]
+        (.setObject e (inc i) value))
+      (.executeUpdate e)
+      (with-open [o (.prepareStatement c "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) VALUES (?,?,?,?,?,?)")]
+        (doseq [ordinal [126 127 128 129]
+                :let [candidate (get (:candidates artifact) ordinal)
+                      position (mapv #(select-keys % [:page :line]) (:source-lines candidate))
+                      candidate-id (fixture/hash-value [(:source-sha256 artifact) position])]]
+          (doseq [[i value] (map-indexed vector [(:job-id artifact) ordinal candidate-id "result-row"
+                                                 "parsed-or-explicit-result-fields" (pr-str candidate)])]
+            (.setObject o (inc i) value))
+          (.executeUpdate o))))
+    (mapv (fn [ordinal]
+            {:reference (revisions/reference fixture/app {:job-id (:job-id artifact) :ordinal ordinal})
+             :scope-contract :cmas-pdf-results-view/v1 :scope {}})
+          [126 127 128 129])))
+(defn pdf-request [id members selected]
+  (assoc (request id members selected)
+         :event-scope {:scope-contract :cmas-pdf-results-view/v1
+                       :source-sha256 "f403777b250b7ae816adea945db4cd5ddea51be7349c2efa57046a08671a5758"
+                       :artifact-sha256 "c4d68ff2c14eb8a797658e247e10373114b7370c763b60afa9e7068835b3e6cf"
+                       :page 10 :date "2026-06-12" :discipline "DYN-BF" :category "JUNIORS \u2014 MEN"}
+         :coverage {:completeness :partial :gaps [selections/pdf-view-gap]}))
+(deftest exact-pdf-results-view-rejects-other-source-retention-and-rolls-back
+  (when-let [packet (System/getenv "FREEDIVING_B37_PACKET")]
+    (let [claimed-scope (assoc revision-fixture/scope :date "2026-06-12"
+                               :discipline "DYN-BF" :category "JUNIORS \u2014 MEN")
+          baseline (sample "other-pdf/1" claimed-scope)
+          _ (public-fixture/validate! (select-keys (:reference baseline) [:job-id :ordinal]) "baseline-v")
+          _ (public/refresh! reviewer)
+          members (b37-descriptors! packet)
+          retained [{:descriptor {:reference (:reference baseline) :scope {}} :validation-id "baseline-v"}]
+          before (set (map :result-id (public/results reader-url)))
+          first-request (assoc (pdf-request "pdf-first" members []) :retained retained)]
+      (is (= 1 (count before)))
+      (is (thrown-with-msg? Exception #"outside the verified 2025 baseline"
+                            (selections/select! reviewer first-request)))
+      (is (thrown-with-msg? Exception #"current extraction validation"
+                            (selections/select! reviewer (assoc first-request :selected [(selected (first members) "not-validated")]))))
+      (is (thrown-with-msg? Exception #"census"
+                            (selections/select! reviewer (update first-request :members pop))))
+      (is (thrown? Exception
+                   (selections/select! reviewer (assoc first-request :members
+                                                       (assoc members 1 (first members))))))
+      (is (thrown-with-msg? Exception #"provenance|descriptor"
+                            (selections/select! reviewer
+                                                (assoc first-request :members
+                                                       (assoc-in members [0 :reference :artifact-sha256]
+                                                                 (apply str (repeat 64 "0")))))))
+      (is (thrown-with-msg? Exception #"revision relationships"
+                            (revisions/propose! fixture/app
+                                                {:id "pdf-revision" :predecessor (first members)
+                                                 :successor (second members) :base-revision 0
+                                                 :actor "synthetic" :reason "Synthetic rejected relationship"
+                                                 :mapping-rationale "No publisher revision evidence"
+                                                 :revision-evidence [{:kind :correction-note
+                                                                      :binding {:reference (:reference (second members))
+                                                                                :path [:candidates 127 :raw :fields :source-name]
+                                                                                :value "Yusuf ERKAN"}}]})))
+      (is (thrown-with-msg? Exception #"partial gap"
+                            (selections/select! reviewer (assoc first-request :coverage {:completeness :complete :gaps []}))))
+      (public-fixture/validate! (select-keys (:reference baseline) [:job-id :ordinal]) "baseline-revoke" :revoke)
+      (public/refresh! reviewer)
+      (let [before (set (map :result-id (public/results reader-url)))
+            first-request (dissoc (pdf-request "pdf-first" members []) :retained)]
+        (selections/select! reviewer first-request)
+        (is (= before (set (map :result-id (public/results reader-url)))))
+        (is (= [selections/pdf-view-gap] (get-in (public/coverage reader-url) [:events 0 :gaps])))
+        (selections/select! reviewer (update-in (pdf-request "pdf-second" members []) [:coverage :gaps] conj "Additional source unknown"))
+        (selections/rollback! reviewer {:id "pdf-restore" :actor "owner" :reason "restore"
+                                        :selection-id "pdf-first" :base (selections/snapshot reviewer)})
+        (is (= before (set (map :result-id (public/results reader-url)))))
+        (is (= 3 (count (selections/history reviewer (:event-scope first-request)))))))))

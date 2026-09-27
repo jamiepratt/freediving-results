@@ -55,13 +55,14 @@
              [k (:n (first (query c sql)))])))
 (defn snapshot [url] (transaction url snapshot-on))
 (defn- event-key [scope] (sha (encode (mapv scope (revisions/scope-fields scope)))))
-(declare scope!)
+(declare scope! retained-scope!)
 (defn- records [c]
   (mapv (fn [row]
           (let [b (edn/read-string (:body_edn row))]
             (when-not (= [(:id row) (:revision row) (:event_key row)] [(:id b) (:revision b) (event-key (:event-scope b))])
               (fail! "Selection envelope mismatch"))
-            (doseq [d (concat (:members b) (map :descriptor (:retained b)))] (scope! c d))
+            (doseq [d (:members b)] (scope! c d))
+            (doseq [d (map :descriptor (:retained b))] (retained-scope! c d (:event-scope b)))
             (assoc b :db-role (:db_role row) :recorded-at (str (:recorded_at row)))))
         (query c "SELECT * FROM freediving.event_selections ORDER BY revision")))
 (defn history [url scope] (transaction url #(filterv (fn [r] (= scope (:event-scope r))) (records %))))
@@ -78,8 +79,27 @@
         payload (edn/read-string (:payload_edn (first (query c "SELECT payload_edn FROM freediving.observations WHERE job_id=? AND ordinal=?" (get-in d [:reference :job-id]) (get-in d [:reference :ordinal])))))]
     (when (= :ranking (:source-family payload)) (fail! "Ranking records are not sporting attempts"))
     (when-not (and (every? #(nonblank? (str (get scope % ""))) (revisions/scope-fields scope))
-                   (some #(nonblank? (str (get scope % ""))) [:bib :source-athlete-id]))
+                   (or (= :cmas-pdf-results-view/v1 (:scope-contract scope))
+                       (some #(nonblank? (str (get scope % ""))) [:bib :source-athlete-id])))
       (fail! "Complete event and own-row athlete scope required")) scope))
+(def pdf-retained-sources
+  {"dbaa2eeb572c1ccd851897e7fa39cbbf8ee3717312570062c0a5ff9e1a739c92" ["2025-09-10" "CWT" "Women SENIORS"]
+   "b732612eb386fff9781e5c119429289bcdd38bcf11c268252fe58cc1b55172c9" ["2025-09-13" "FIM" "Women SENIORS"]
+   "425037388b725fe22dcb521be0aff88e4c285b8f71ad585c7840017dc4be7124" ["2025-09-15" "CNF" "Women SENIORS"]})
+(defn- retained-scope! [c d selected-scope]
+  (if (and (= :cmas-pdf-results-view/v1 (:scope-contract selected-scope))
+           (= #{:reference :scope} (set (keys d))) (empty? (:scope d)))
+    (let [value (revisions/descriptor-values c d)
+          reference (:reference d)
+          payload (some-> (first (query c "SELECT payload_edn FROM freediving.observations WHERE job_id=? AND ordinal=?"
+                                        (:job-id reference) (:ordinal reference))) :payload_edn edn/read-string)
+          parsed (:parsed payload)
+          source-group (get pdf-retained-sources (:source-sha256 reference))]
+      (when-not (and source-group (= source-group ((juxt :event-date :discipline :category) parsed))
+                     (= "CMAS" (:federation parsed)) (= :parsed (:parse-status payload)))
+        (fail! "Unscoped retained row is outside the verified 2025 baseline sources"))
+      value)
+    (scope! c d)))
 (defn- equivalent? [c a b]
   ;; Equal scoped row text/position and original source bytes, never name/hash alone.
   (and (= (:source-sha256 a) (:source-sha256 b))
@@ -104,6 +124,7 @@
       (and (or (nil? (:attempt a)) (nil? (:attempt b)) (= (:attempt a) (:attempt b)))
            (some #(and (some? (a %)) (= (a %) (b %))) [:bib :source-athlete-id]))))
 (def daily-view-gap "Daily view only; venue, round and session are not established.")
+(def pdf-view-gap "PDF results view only; round, session, attempt and athlete identifiers are not established; other sources and revisions remain unverified.")
 (defn- check! [c r rs]
   (let [members (:members r) selected (:selected r) scope (:event-scope r)
         values (mapv #(scope! c %) members)
@@ -118,6 +139,18 @@
                (not (and (= :partial (get-in r [:coverage :completeness]))
                          (some #{daily-view-gap} (get-in r [:coverage :gaps])))))
       (fail! "Daily view requires partial coverage and the explicit missing-scope gap"))
+    (when (= :cmas-pdf-results-view/v1 (:scope-contract scope))
+      (when-not (and (= :partial (get-in r [:coverage :completeness]))
+                     (some #{pdf-view-gap} (get-in r [:coverage :gaps]))
+                     (= (set source-scope/pdf-results-ordinals)
+                        (set (map (comp :ordinal :reference) members)))
+                     (= #{source-scope/pdf-results-job-id}
+                        (set (map (comp :job-id :reference) members)))
+                     (= (count members) (count source-scope/pdf-results-ordinals))
+                     (= (set (map :row-position values))
+                        (set (map (fn [line ordinal] (str "10:" line ":" ordinal))
+                                  source-scope/pdf-results-lines source-scope/pdf-results-ordinals))))
+        (fail! "Exact PDF results-view census and partial gap required")))
     (when-not (and (#{:partial :complete} (get-in r [:coverage :completeness]))
                    (= #{:completeness :gaps} (set (keys (:coverage r))))
                    (vector? (get-in r [:coverage :gaps]))
@@ -133,10 +166,10 @@
       (when (some refs (map :reference (:members other))) (fail! "Observation already belongs to another event scope")))
     (doseq [{:keys [descriptor]} (:retained (first rs))
             :when (refs (:reference descriptor))]
-      (when-not (= scope (revisions/event-scope (scope! c descriptor)))
+      (when-not (= scope (revisions/event-scope (retained-scope! c descriptor (:event-scope (first rs)))))
         (fail! "Observation retained under another event scope")))
     (doseq [{:keys [descriptor]} (:retained (first rs))
-            :when (= scope (revisions/event-scope (scope! c descriptor)))]
+            :when (= scope (revisions/event-scope (retained-scope! c descriptor (:event-scope (first rs)))))]
       (when-not (refs (:reference descriptor)) (fail! "Previous retained event inventory cannot be omitted")))
     (when-not (every? refs (map :reference (:members previous))) (fail! "Previous event inventory cannot be silently omitted"))
     (when-not (= (count selected) (count (set (map :reference selected)))) (fail! "Duplicate selected observation"))
@@ -175,7 +208,7 @@
         (doseq [{:keys [descriptor validation-id]} retained]
           (when (= :aida-date-view/v1 (:scope-contract descriptor))
             (fail! "Daily views require explicit enrollment with partial coverage"))
-          (when (= scope (revisions/event-scope (scope! c descriptor))) (fail! "Same event cannot be retained outside inventory"))
+          (when (= scope (revisions/event-scope (retained-scope! c descriptor scope))) (fail! "Same event cannot be retained outside inventory"))
           (validation! c {:reference (:reference descriptor) :validation-id validation-id}))))
     (when (and (seq rs) (contains? r :retained)) (fail! "Retained baseline is fixed at initial cutover"))))
 (defn projection-plan [c validations]
@@ -185,7 +218,7 @@
                 (let [active (latest rs) rels (relationships c)
                       claimed (set (map :event-scope active))
                       retained (for [{:keys [descriptor validation-id]} (:retained (first rs))
-                                     :when (not (claimed (revisions/event-scope (scope! c descriptor))))]
+                                     :when (not (claimed (revisions/event-scope (retained-scope! c descriptor (:event-scope (first rs))))))]
                                  {:reference (:reference descriptor) :validation-id validation-id})
                       entries (concat (map #(vector % nil) retained)
                                       (for [r active entry (:selected r)] [entry r]))
