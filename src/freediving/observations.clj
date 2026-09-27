@@ -114,6 +114,9 @@
           (fail! "Invalid candidate page or source-lines evidence"))
         (when-not (or (= texts (get-in c [:raw :lines]))
                       (= (str/join "\n" texts) (get-in c [:raw :line]))
+                      (and (extraction/fipsas-claim? a)
+                           (= (get lines ((juxt :page :line) coordinate))
+                              (get-in c [:raw :line])))
                       (and (extraction/vdst-claim? a)
                            (= (get lines ((juxt :page :line) coordinate))
                               (get-in c [:raw :line]))))
@@ -182,6 +185,7 @@
                      (extraction/ffessm-2026-final-artifact? a) (->> (extraction/validate-ffessm-2026-final-artifact! root))
                      (extraction/ffessm-2026-juniors-artifact? a) (->> (extraction/validate-ffessm-2026-juniors-artifact! root))
                      (extraction/fedas-claim? a) (->> (extraction/validate-fedas-artifact! root))
+                     (extraction/fipsas-claim? a) (->> (extraction/validate-fipsas-artifact! root))
                      (extraction/vdst-claim? a) (->> (extraction/validate-vdst-artifact! root))
                      (extraction/requires-geometry-validation? root a) (->> (extraction/validate-geometry-artifact! root)))) :bytes bytes :hash h})))
 (defn- position [artifact candidate]
