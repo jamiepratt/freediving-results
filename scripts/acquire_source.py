@@ -23,7 +23,10 @@ from source_inventory import identity, legacy_archive_gaps, verified_candidates
 
 _REPRESENTATIONS = {"pdf", "json", "html"}
 _CHALLENGE = re.compile(
-    rb"(?:\bcaptcha\b|cloudflare|verify you are human|checking your browser|"
+    rb"(?:\bcaptcha\b\s*(?:required|challenge|verification)|"
+    rb"(?:solve|complete|enter|verify)\s+(?:the\s+|a\s+)?\bcaptcha\b|"
+    rb"<(?:title|h1)\b[^>]*>\s*captcha\s*</(?:title|h1)>|"
+    rb"cloudflare|verify you are human|checking your browser|"
     rb"access denied|bot detection|unusual traffic|attention required|"
     rb"security challenge|enable javascript and cookies)", re.I)
 _SENSITIVE = re.compile(r"(?:token|key|secret|password|session|auth|credential|signature|jwt)", re.I)

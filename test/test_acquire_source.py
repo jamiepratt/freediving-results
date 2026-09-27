@@ -96,6 +96,16 @@ class AcquireSourceTest(unittest.TestCase):
         receipt = acquire(publisher.url, "html", self.output, client=self.client)
         self.assertEqual(body, Path(receipt["source_path"]).read_bytes())
 
+    def test_html_result_index_with_footer_captcha_mention_is_retained(self):
+        body = (b'<!doctype html><html><head><title>Ergebnisse | VDST</title>'
+                b'<link rel="stylesheet" href="/wp-content/plugins/contact-form-7-image-captcha/css/cf7ic-style.css">'
+                b'</head>'
+                b'<body><h1>Ergebnisse</h1><a href="2026.pdf">Final 2026 results</a>'
+                b'<footer><script>const captcha = "contact-form";</script></footer></body></html>')
+        publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"}, body))
+        receipt = acquire(publisher.url, "html", self.output, client=self.client)
+        self.assertEqual(body, Path(receipt["source_path"]).read_bytes())
+
     def test_actual_captcha_challenge_is_rejected(self):
         publisher = self.publisher(lambda path: (200, {"Content-Type": "text/html"},
                                                  b"<html><body>CAPTCHA required</body></html>"))
