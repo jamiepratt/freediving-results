@@ -2,6 +2,8 @@
 
 Route baseline observed through 25 September 2026, with remote batch evidence through 26 September. This is a route and evidence guide, not a live availability check or a complete championship inventory. Start at the [CMAS results archive](https://www.cmas.org/freediving/results.html) or the AIDA event page, then retain what the route actually returns. Current source coverage and unresolved work live in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
+The 27 September [VDST and FEDAS index batch](2025-onward-source-inventory-20260926.md#german-vdst-and-spanish-fedas-results-indexes-27-september-2026) retained both official indexes and their in-window result links. Two FEDAS championship PDFs contributed 237 cited, unreviewed observations to the isolated corpus. Two German national protocols remain unsupported for import pending duplicate-ranking and status reconciliation; five VDST cup links and two FEDAS PDFs remain unimported under [issue #16](https://github.com/jamiepratt/freediving-results/issues/16). No public data or identity decisions changed.
+
 ## Remote 2025-onward discovery batch
 
 The 27 September bounded [FIPSAS Italian federation calendar probe](2025-onward-source-inventory-20260926.md#fipsas-italian-federation-calendar-probe-27-september-2026) retained four official HTML pages. The two completed Just 40th events show unlinked `Classifiche` labels, and the future Capri event is not final. No final result source or row was imported. The calendar's other months remain unverified; #16 is open.
