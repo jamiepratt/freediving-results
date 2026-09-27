@@ -9,11 +9,37 @@
             [freediving.belgrade-2026 :as belgrade-2026]
             [freediving.deep-dominica-2026 :as deep-dominica-2026]
             [freediving.deep-dominica-2026-test :as dominica-2026-fixture]
+            [freediving.fipsas-monsub-2026 :as monsub]
             [clojure.java.shell :as shell]
             [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (def header "2025 CMAS World Championship Freediving Outdoor\n09/09/2025\nCWT MEN SENIORS\nRANK SURNAME & NAME NAT CATEGORY DEPTH PEN. STATUS NOTES\n")
+
+(deftest monsub-results-route-and-replay-from-source-bound-pdfs
+  (doseq [[sha heading row]
+          [[monsub/dnf-source-sha256 "3CM - DNF"
+            " 1           Lazzaretti   Enrico     Sub Rimini \"Gian Neri\"   1991                    1:30.00                                  1:27.55                 75,00                         1:27.55                75,00           0:02.45           5.0"]
+           [monsub/dyn-source-sha256 "ESF - DYN"
+            " DQ\n             Di Tullio   Marzia   A.S.D. Apnea Team Abruzzo   1991             0:43.00                       0:56.06        58,50\n Superato distanza massima cat."]]]
+    (let [pages [(str "22° Trofeo Monsub / Memorial Luigino Ceppi\nClassiﬁca " heading "\n" row "\n")]
+          parsed (extraction/parse-pages sha pages)
+          raw (str (first pages) "\f")
+          artifact (merge parsed {:schema-version 3 :source-sha256 sha :raw-text raw
+                                  :tool {:name "pdftotext" :version "test-version"
+                                         :arguments ["-layout" "-enc" "UTF-8"]}})]
+      (is (= (monsub/parser-version-for sha) (:parser-version parsed)))
+      (is (= 1 (get-in parsed [:reconciliation :candidate-count])))
+      (is (extraction/fipsas-artifact? artifact))
+      (is (extraction/fipsas-claim? artifact))
+      (is (not (extraction/fipsas-artifact? (assoc artifact :parser-version "fipsas-counterfeit/1"))))
+      (with-redefs [archive/inspect (fn [& _] {:artifact-path "archived.pdf"})
+                    shell/sh (fn [& args] {:exit 0 :out (if (= "-v" (second args)) "" raw)
+                                           :err (if (= "-v" (second args)) "test-version" "")})]
+        (is (= artifact (extraction/validate-fipsas-artifact! "archive" artifact)))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (extraction/validate-fipsas-artifact!
+                      "archive" (assoc-in artifact [:candidates 0 :parsed :source-name] "edited"))))))))
 
 (deftest belgrade-2026-results-route-through-public-extraction
   (let [pages [(str "2026 Belgrade Freediving Open\n"
