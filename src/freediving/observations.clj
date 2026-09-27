@@ -6,6 +6,7 @@
             [freediving.extraction :as extraction]
             [freediving.camotes-challenge :as camotes-challenge]
             [freediving.camotes-challenge-2026 :as camotes-challenge-2026]
+            [freediving.camotes-world-cup :as camotes-world-cup]
             [freediving.aida-html :as html]
             [freediving.cmas-2025-indoor-json :as indoor-json])
   (:import [java.sql DriverManager Connection]
@@ -93,7 +94,8 @@
     (doseq [p pages]
       (when-not (and (string? (:text p))
                      (= (mapv :line (:lines p)) (vec (range 1 (inc (count (:lines p))))))
-                     (= (str/split (:text p) #"\n" -1) (mapv :text (:lines p))))
+                     (or (and (= "" (:text p)) (empty? (:lines p)))
+                         (= (str/split (:text p) #"\n" -1) (mapv :text (:lines p)))))
         (fail! "Invalid page line evidence")))
     (doseq [c (:candidates a)]
       (when-not (and (map? c) (map? (:raw c)) (#{:parsed :unparsed} (:parse-status c))
@@ -141,6 +143,7 @@
                    (cond-> (validate-pages! a)
                      (= camotes-challenge/parser-version (:parser-version a)) (->> (camotes-challenge/validate-artifact! root))
                      (= camotes-challenge-2026/parser-version (:parser-version a)) (->> (camotes-challenge-2026/validate-artifact! root))
+                     (= camotes-world-cup/parser-version (:parser-version a)) (->> (camotes-world-cup/validate-artifact! root))
                      (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
                      (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
                      (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
