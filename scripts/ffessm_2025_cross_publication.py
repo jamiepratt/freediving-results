@@ -37,6 +37,13 @@ def identity(row):
     return values if all(isinstance(v, str) and v.strip() for v in values) else None
 
 
+def profile_match(daily, category):
+    a, b = daily["parsed"], category["parsed"]
+    return all(isinstance(a.get(field), str) and a[field].strip()
+               and a[field] == b.get(field)
+               for field in ("federation", "nationality"))
+
+
 def citation(row):
     return {"ref": row["ref"], "source-sha256": row["source-sha256"],
             "position": row["position"], "source-text": row["source-text"]}
@@ -141,6 +148,7 @@ def classify(data):
                                                                category_source)
                  and category_heading_compatible(category_source, category)
                  and category_compatible(r, category)
+                 and profile_match(r, category)
                  and performance_match(r, category)]
         if not candidates:
             unmatched.append({"category": citation(category),
@@ -156,6 +164,8 @@ def classify(data):
                 kind, reason = "unknown", "category-heading-conflict"
             elif not category_compatible(row, category):
                 kind, reason = "unknown", "junior-category-unverified-in-daily-row"
+            elif not profile_match(row, category):
+                kind, reason = "unknown", "federation-or-nationality-conflict"
             elif matching and len(exact) == 1:
                 kind, reason = "same-result", "unique-exact-daily-row-in-two-day-scope"
             elif matching:

@@ -16,6 +16,7 @@ def row(source, ordinal, day, points=70, depth=70, card="Blanc", name="A Diver")
             "day": day, "discipline": "FIM", "position": [{"page": 1, "line": 8 + ordinal}],
             "source-text": f"{name} {depth} {points} {card}",
             "parsed": {"source-name": name, "gender": "F", "discipline": "FIM",
+                       "federation": "FFESSM", "nationality": "Française",
                        "realized-depth": depth, "final-points": points, "card": card,
                        "depth-penalty": depth - points, "plate-penalty": None if day else 0,
                        "announced-depth": depth, "unit": "m"}}
@@ -105,6 +106,19 @@ class CrossPublicationTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(0, ledger["counts"]["same-result"])
         self.assertEqual(1, ledger["counts"]["unknown"])
+
+    def test_same_name_and_performance_with_conflicting_affiliation_stays_unknown(self):
+        for field, value in (("federation", "Other federation"),
+                             ("nationality", "Italienne")):
+            with self.subTest(field=field):
+                data = fixture()
+                data["observations"][0]["parsed"][field] = value
+                result, ledger = self.run_cli(data)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(0, ledger["counts"]["same-result"])
+                self.assertEqual(1, ledger["counts"]["unknown"])
+                self.assertEqual("federation-or-nationality-conflict",
+                                 ledger["edges"][0]["reason"])
 
     def test_missing_citation_is_rejected(self):
         data = fixture()
