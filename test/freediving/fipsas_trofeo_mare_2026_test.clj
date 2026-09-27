@@ -1,5 +1,6 @@
 (ns freediving.fipsas-trofeo-mare-2026-test
   (:require [clojure.test :refer [deftest is run-tests]]
+            [freediving.extraction :as extraction]
             [freediving.fipsas-trofeo-mare-2026 :as trofeo]))
 
 (def women-page
@@ -56,6 +57,12 @@
 (deftest exact-source-identity-required
   (is (thrown? clojure.lang.ExceptionInfo
                (trofeo/parse-pages (apply str (repeat 64 "0")) [women-page]))))
+
+(deftest public-extraction-route-recognizes-trofeo
+  (let [artifact (extraction/parse-pages (trofeo/source-sha256 2) [women-page])]
+    (is (= trofeo/parser-version (:parser-version artifact)))
+    (is (extraction/fipsas-artifact? artifact))
+    (is (= 2 (get-in artifact [:reconciliation :candidate-count])))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.fipsas-trofeo-mare-2026-test)]
