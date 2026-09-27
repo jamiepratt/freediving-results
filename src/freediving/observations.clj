@@ -7,6 +7,7 @@
             [freediving.camotes-challenge :as camotes-challenge]
             [freediving.camotes-challenge-2026 :as camotes-challenge-2026]
             [freediving.camotes-world-cup :as camotes-world-cup]
+            [freediving.camotes-world-cup-continuation :as camotes-world-cup-continuation]
             [freediving.aida-html :as html]
             [freediving.cmas-2025-indoor-json :as indoor-json])
   (:import [java.sql DriverManager Connection]
@@ -144,6 +145,7 @@
                      (= camotes-challenge/parser-version (:parser-version a)) (->> (camotes-challenge/validate-artifact! root))
                      (= camotes-challenge-2026/parser-version (:parser-version a)) (->> (camotes-challenge-2026/validate-artifact! root))
                      (= camotes-world-cup/parser-version (:parser-version a)) (->> (camotes-world-cup/validate-artifact! root))
+                     (= camotes-world-cup-continuation/parser-version (:parser-version a)) (->> (camotes-world-cup-continuation/validate-artifact! root))
                      (extraction/legacy-athens-artifact? a) (->> (extraction/validate-legacy-athens-artifact! root))
                      (extraction/legacy-novi-artifact? a) (->> (extraction/validate-legacy-novi-artifact! root))
                      (extraction/croatia-open-artifact? a) (->> (extraction/validate-croatia-open-artifact! root))
