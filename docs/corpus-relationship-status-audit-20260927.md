@@ -22,7 +22,7 @@ These are **link or source counts within each named index**, not distinct event 
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | CMAS 2025 | 15 | 7 | 5 | 3 | 0 | Two scanned sources have partial imports: Camotes World Cup 143/146, Challenge 65/66; their three remaining positions are unresolved. |
 | CMAS 2026 | 14 | 4 | 5 | 5 | 0 | Unsupported includes image-only and unavailable complete result sources. |
-| FFESSM 2025 | 11 | 11 | 0 | 0 | 0 | Daily versus category ranking overlap remains unproved. |
+| FFESSM 2025 | 11 | 11 | 0 | 0 | 0 | A later bounded comparison found 55 same-result links, eight distinct alternative-day rows and one junior-category unknown; see below. |
 | FFESSM 2026 | 9 | 9 | 0 | 0 | 0 | The 29 cited same-result links are within imported source PDFs. |
 | Apnea Academy index | 20 | 7 | 0 | 13 | 0 | Supporting combined/team views and JPG/XLSX formats are not imported as attempts. |
 | VDST index | 7 | 7 | 0 | 0 | 0 | All seven linked protocols imported after bounded continuations. |
@@ -41,10 +41,18 @@ The private normalized count input and output are in the same b44 run. `corpus-s
 
 | Candidate cluster | Why it stays unknown |
 | --- | --- |
-| FFESSM 2025 daily and category rankings | Several category PDFs print no competition date. A shared name, category and result cannot establish the same attempt or revision order. |
+| FFESSM 2025 junior category versus daily results | The junior PDF's Florent VECCHIO result matches one dated male daily result, but the daily row prints no age or junior category. The other 55 category results have unique cited daily matches. No revision order follows. |
 | CMAS index links marked already present against #8 | Route identity is known, but current index-download bytes were not fetched and compared to the older championship originals. |
 | Submania 2026 Noxygen result view versus imported CMAS Croatian Open | The retained browser attempt did not produce a complete response or DOM, so no row-level comparison exists. |
 | FIPSAS 2026 unlinked cards, seven scans and the 404 PDF | Missing or unreadable result bytes prevent a complete source-row census and cross-source comparison. |
 | TuttinApnea January combined sheet unmatched cells | Exact supporting point links exist for 1,258 cells; unmatched cells remain source-level unknowns. |
 
 These gaps remain under [issue #16](https://github.com/jamiepratt/freediving-results/issues/16). The synthetic changed-byte fixture proves the reviewable-unknown behavior, but no live predecessor/successor relationship or unique-attempt total follows from this audit.
+
+## FFESSM 2025 daily and category cross-publication comparison
+
+The follow-up read-only comparison used the two archived daily PDFs (27 and 28 June) and all nine archived category PDFs from the official 2025 FFESSM index, SHA-256 `14e1b40b5620f9778e23345141e2382286cae1e49992d93b776321bff0639f5c`. Every one of the 11 original PDF byte hashes matched its retained acquisition, and its original heading identified the 2025 France outdoor championship at Villefranche-sur-Mer. Category PDFs omit a day. The input contains exactly 71 daily positions and 56 category positions from 11 existing extraction jobs, with no new import or database write. Independent `pdftotext -layout` page and line checks matched all 127 retained source texts exactly.
+
+The deterministic [comparison CLI](../scripts/ffessm_2025_cross_publication.py) finds **55 same-result edges**: 27 against Day 1 and 28 against Day 2. Each has a unique daily row across both days with matching athlete name, gender, discipline, announced and realized depths, depth penalty, final points, card and unit, plus citations to both originals. The daily parser records a blank plate penalty as null while the category parser records the same zero as 0; nonzero penalties are never normalized. Eight additional same-athlete, same-discipline pairs point to the other dated day and carry different immutable performance or status evidence, so they are **distinct sessions**, not duplicates. The junior men's monofin category position remains **unknown** because the daily result prints male but no junior eligibility. Every category row has a candidate; no category position was silently dropped. All original observation versions remain immutable. These are bounded source relationships, not athlete identity decisions, publisher revisions or a global unique-attempt total.
+
+Private input and ledger are under `/srv/freediving-ingest/runs/20260927-ffessm-2025-cross-publication/`. Input SHA-256 is `f99b27fa14fe8bc2082ab12cb280cde88e2808820e5ba405f1b5cc08b1476acd`; mode-0600 `ledger.json` SHA-256 is `99a0e613172a781d9aec255278ddca72dd43a7af2e4c86956abe2095fec05e73`. A second CLI run produced the same file hash. The ledger stores both original citations on each of its 64 edges and records the one unknown with its reason. The junior category gap and wider source discovery remain in [issue #16](https://github.com/jamiepratt/freediving-results/issues/16).
