@@ -67,8 +67,11 @@ class FipsasCalendarTest(unittest.TestCase):
         self.assertEqual(["jumper"], form["ajaxtype"])
         self.assertEqual(["none"], form["direction"])
         start = str(int(datetime(2025, 1, 1, tzinfo=ZoneInfo("Europe/Rome")).timestamp()))
-        self.assertEqual([start], form["start"])
         self.assertEqual([start], form["shortcode[focus_start_date_range]"])
+        self.assertEqual({"direction", "ajaxtype", "nonce", "shortcode[event_type]",
+                          "shortcode[fixed_year]", "shortcode[fixed_month]",
+                          "shortcode[fixed_day]", "shortcode[focus_start_date_range]",
+                          "shortcode[focus_end_date_range]"}, set(form))
 
     def test_wrong_month_response_is_rejected_before_evidence_write(self):
         class Publisher(BaseHTTPRequestHandler):

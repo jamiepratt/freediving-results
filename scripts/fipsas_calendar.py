@@ -88,8 +88,7 @@ def _form(shortcode, nonce, year, month):
     selected = {str(key): str(value) for key, value in shortcode.items()}
     selected.update(fixed_year=str(year), fixed_month=str(month), fixed_day="1",
                     focus_start_date_range=str(start), focus_end_date_range=str(end))
-    form = {"direction": "none", "ajaxtype": "jumper", "nonce": nonce,
-            "start": str(start), "end": str(end)}
+    form = {"direction": "none", "ajaxtype": "jumper", "nonce": nonce}
     form.update({f"shortcode[{key}]": value for key, value in selected.items()})
     return urlencode(form).encode("utf-8")
 
