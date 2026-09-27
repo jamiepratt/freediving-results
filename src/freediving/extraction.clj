@@ -45,6 +45,7 @@
             [freediving.vdst-rhein-main-2025 :as vdst-rhein-main]
             [freediving.vdst-chemnitz-2025 :as vdst-chemnitz-2025]
             [freediving.vdst-chemnitz-2026 :as vdst-chemnitz-2026]
+            [freediving.vdst-mitteldeutscher-2025 :as vdst-mitteldeutscher-2025]
             [freediving.indoor-2026 :as indoor-2026]
             [freediving.indoor-time-2026 :as indoor-time]
             [freediving.depth-2025 :as depth-2025]
@@ -128,6 +129,7 @@
          vdst-rhein-main? (str/includes? (str/join "\n" pages) "22. Rhein-Main Cup 2025")
          vdst-chemnitz-2025? (str/includes? (str/join "\n" pages) "2. Chemnitzer Apnoe Cup")
          vdst-chemnitz-2026? (str/includes? (str/join "\n" pages) "3. Chemnitzer Apnoe Cup - 50m Edition")
+         vdst-mitteldeutscher-2025? (str/includes? (str/join "\n" pages) "7. Mitteldeutscher Cup im Finswimming & Apnoetauchen")
          fedas-indoor? (str/includes? (str/join "\n" pages) "RESULTADOS DEL CAMPEONATO DE ESPAÑA DE APNEA INDOOR")
          fedas-outdoor? (and (str/includes? (str/join "\n" pages) "CAMPEONATO DE ESPAÑA DE APNEA OUTDOOR")
                              (str/includes? (str/join "\n" pages) "FEDERACIÓN ESPAÑOLA DE ACTIVIDADES SUBACUÁTICAS"))
@@ -178,6 +180,8 @@
        (throw (ex-info "VDST Chemnitz 2025 parser is bound to a different source PDF" {})))
      (when (and vdst-chemnitz-2026? (not= sha256 vdst-chemnitz-2026/source-sha256))
        (throw (ex-info "VDST Chemnitz 2026 parser is bound to a different source PDF" {})))
+     (when (and vdst-mitteldeutscher-2025? (not= sha256 vdst-mitteldeutscher-2025/source-sha256))
+       (throw (ex-info "VDST Mitteldeutscher 2025 parser is bound to a different source PDF" {})))
      (when (and fedas-indoor? (not (contains? #{fedas-indoor/source-2025-sha256
                                                 fedas-indoor-2026/source-2026-sha256} sha256)))
        (throw (ex-info "FEDAS indoor parser is bound to a different source PDF" {})))
@@ -188,6 +192,7 @@
            (= sha256 vdst-rhein-main/source-sha256) (vdst-rhein-main/parse-pages sha256 pages)
            (= sha256 vdst-chemnitz-2025/source-sha256) (vdst-chemnitz-2025/parse-pages sha256 pages)
            (= sha256 vdst-chemnitz-2026/source-sha256) (vdst-chemnitz-2026/parse-pages sha256 pages)
+           (= sha256 vdst-mitteldeutscher-2025/source-sha256) (vdst-mitteldeutscher-2025/parse-pages sha256 pages)
            (= sha256 fedas-indoor/source-2025-sha256) (fedas-indoor/parse-pages sha256 pages)
            (= sha256 fedas-indoor-2026/source-2026-sha256) (fedas-indoor-2026/parse-pages sha256 pages)
            (= sha256 fedas-outdoor/outdoor-2025-sha256) (fedas-outdoor/parse-pages sha256 pages)
@@ -406,11 +411,14 @@
            (and (= vdst-chemnitz-2025/source-sha256 (:source-sha256 artifact))
                 (= vdst-chemnitz-2025/parser-version (:parser-version artifact)))
            (and (= vdst-chemnitz-2026/source-sha256 (:source-sha256 artifact))
-                (= vdst-chemnitz-2026/parser-version (:parser-version artifact))))))
+                (= vdst-chemnitz-2026/parser-version (:parser-version artifact)))
+           (and (= vdst-mitteldeutscher-2025/source-sha256 (:source-sha256 artifact))
+                (= vdst-mitteldeutscher-2025/parser-version (:parser-version artifact))))))
 
 (defn vdst-claim? [artifact]
   (or (contains? #{vdst-neckar/source-sha256 vdst-rhein-main/source-sha256
-                   vdst-chemnitz-2025/source-sha256 vdst-chemnitz-2026/source-sha256}
+                   vdst-chemnitz-2025/source-sha256 vdst-chemnitz-2026/source-sha256
+                   vdst-mitteldeutscher-2025/source-sha256}
                  (:source-sha256 artifact))
       (str/starts-with? (or (:parser-version artifact) "") "vdst-")))
 
@@ -484,7 +492,8 @@
          segments (str/split raw #"\f" -1)
          pages (if (and (> (count segments) 1) (= "" (last segments))) (pop (vec segments)) (vec segments))
          vdst? (contains? #{vdst-neckar/source-sha256 vdst-rhein-main/source-sha256
-                            vdst-chemnitz-2025/source-sha256 vdst-chemnitz-2026/source-sha256} sha256)
+                            vdst-chemnitz-2025/source-sha256 vdst-chemnitz-2026/source-sha256
+                            vdst-mitteldeutscher-2025/source-sha256} sha256)
          fedas-indoor? (contains? #{fedas-indoor/source-2025-sha256
                                     fedas-indoor-2026/source-2026-sha256} sha256)
          fedas-outdoor? (contains? #{fedas-outdoor/outdoor-2025-sha256
@@ -578,7 +587,7 @@
          depth-2026? (depth-2026-selected? pages)
          identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                    :evidence-sha256 evidence :actor actor :config config
-                   :parser-version (cond (= sha256 vdst-neckar/source-sha256) vdst-neckar/parser-version (= sha256 vdst-rhein-main/source-sha256) vdst-rhein-main/parser-version (= sha256 vdst-chemnitz-2025/source-sha256) vdst-chemnitz-2025/parser-version (= sha256 vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parser-version (= sha256 fedas-indoor/source-2025-sha256) fedas-indoor/parser-version (= sha256 fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
+                   :parser-version (cond (= sha256 vdst-neckar/source-sha256) vdst-neckar/parser-version (= sha256 vdst-rhein-main/source-sha256) vdst-rhein-main/parser-version (= sha256 vdst-chemnitz-2025/source-sha256) vdst-chemnitz-2025/parser-version (= sha256 vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parser-version (= sha256 vdst-mitteldeutscher-2025/source-sha256) vdst-mitteldeutscher-2025/parser-version (= sha256 fedas-indoor/source-2025-sha256) fedas-indoor/parser-version (= sha256 fedas-indoor-2026/source-2026-sha256) fedas-indoor-2026/parser-version fedas-outdoor? (fedas-outdoor/parser-version sha256) ffessm-new? (:parser-version ffessm-new) ffessm-2025-day2? ffessm-2025-day2/parser-version ffessm-2026-men? ffessm-2026-men/parser-version indoor-time? indoor-time/parser-version indoor? indoor-2026/parser-version depth-2026? depth-2026/parser-version depth? depth/parser-version depth-2025? depth-2025/geometry-parser-version aida? aida/parser-version athens? athens-geometry/parser-version novi? novi-sad/parser-version croatia? croatia-open/parser-version italy? italy-open/parser-version san-mauro-static? san-mauro-static/parser-version tuttinapnea? tuttinapnea/parser-version tuttinapnea-2025-static? tuttinapnea-2025-static/parser-version tuttinapnea-2025-dynamic? tuttinapnea-2025-dynamic/parser-version san-mauro? san-mauro/parser-version world-games? world-games/parser-version world-games-series? world-games-series/parser-version kaohsiung? kaohsiung/parser-version lodz? lodz/parser-version lodz-2026? lodz-2026/parser-version unu-tampa? unu-tampa/parser-version noxy? noxy/parser-version deep-dominica? deep-dominica/parser-version belgrade-2026? belgrade-2026/parser-version deep-dominica-2026? deep-dominica-2026/parser-version vertical-blue? vertical-blue/parser-version ffessm-2025-day1? ffessm-2025-day1/parser-version ffessm-2026? ffessm-2026/parser-version :else parser-version)
                    :schema-version (cond vdst? 3 (or fedas-indoor? fedas-outdoor?) 3 ffessm-new? 3 ffessm-2025-day2? 3 ffessm-2026-men? 3 indoor? 2 depth-2026? 2 depth? 2 depth-2025? 2 aida? 2 athens? 3 novi? 3 croatia? 3 italy? 3 san-mauro-static? 3 tuttinapnea? 3 tuttinapnea-2025-static? 3 tuttinapnea-2025-dynamic? 3 san-mauro? 3 world-games? 3 world-games-series? 3 kaohsiung? 3 lodz? 3 lodz-2026? 3 unu-tampa? 3 noxy? 3 deep-dominica? 3 belgrade-2026? 3 deep-dominica-2026? 3 vertical-blue? 3 ffessm-2025-day1? 3 ffessm-2026? 3 :else 1)
                    :pdfinfo-version (str/trim (:err (command! "pdfinfo" "-v")))
                    :tool (cond-> {:name "pdftotext" :version tool-version :arguments ["-layout" "-enc" "UTF-8"]}
@@ -694,7 +703,8 @@
         parser (cond (= sha vdst-neckar/source-sha256) vdst-neckar/parse-pages
                      (= sha vdst-rhein-main/source-sha256) vdst-rhein-main/parse-pages
                      (= sha vdst-chemnitz-2025/source-sha256) vdst-chemnitz-2025/parse-pages
-                     (= sha vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parse-pages)]
+                     (= sha vdst-chemnitz-2026/source-sha256) vdst-chemnitz-2026/parse-pages
+                     (= sha vdst-mitteldeutscher-2025/source-sha256) vdst-mitteldeutscher-2025/parse-pages)]
     (when-not (and parser (vdst-artifact? artifact))
       (throw (ex-info "VDST extraction differs from archived source replay" {})))
     (validate-ffessm-artifact! root artifact (partial parser sha)

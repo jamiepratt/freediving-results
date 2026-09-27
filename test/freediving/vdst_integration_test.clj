@@ -8,7 +8,8 @@
             [freediving.vdst-neckar-2025 :as neckar]
             [freediving.vdst-rhein-main-2025 :as rhein]
             [freediving.vdst-chemnitz-2025 :as chemnitz-2025]
-            [freediving.vdst-chemnitz-2026 :as chemnitz-2026]))
+            [freediving.vdst-chemnitz-2026 :as chemnitz-2026]
+            [freediving.vdst-mitteldeutscher-2025 :as mitteldeutscher]))
 
 (deftest chemnitz-sources-are-vdst-claims
   (doseq [[sha parser] [[chemnitz-2025/source-sha256 chemnitz-2025/parser-version]
@@ -16,6 +17,28 @@
     (is (extraction/vdst-claim? {:source-sha256 sha}))
     (is (extraction/vdst-artifact? {:schema-version 3
                                     :source-sha256 sha :parser-version parser}))))
+
+(deftest mixed-sport-source-routes-only-apnea-results
+  (let [sha mitteldeutscher/source-sha256
+        source "/tmp/vdst-mdc-2025.pdf"]
+    (is (extraction/vdst-claim? {:source-sha256 sha}))
+    (is (extraction/vdst-artifact? {:schema-version 3 :source-sha256 sha
+                                    :parser-version mitteldeutscher/parser-version}))
+    (when (.exists (java.io.File. source))
+      (let [raw (:out (shell/sh "pdftotext" "-layout" "-enc" "UTF-8" source "-"))
+            pages (vec (remove str/blank? (str/split raw #"\f")))
+            version (str/trim (:err (shell/sh "pdftotext" "-v")))
+            artifact (assoc (extraction/parse-pages sha pages)
+                            :raw-text raw
+                            :tool {:name "pdftotext" :arguments ["-layout" "-enc" "UTF-8"]
+                                   :version version})]
+        (is (= mitteldeutscher/parser-version (:parser-version artifact)))
+        (is (= 28 (count (:candidates artifact))))
+        (with-redefs [archive/inspect (fn [& _] {:artifact-path source})]
+          (is (= artifact (extraction/validate-vdst-artifact! "archive" artifact)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source replay"
+                                (extraction/validate-vdst-artifact! "archive"
+                                                                    (assoc-in artifact [:candidates 0 :parsed :result] "00:00,00")))))))))
 
 (deftest chemnitz-originals-route-and-retain-printed-positions
   (doseq [[path sha parser printed]
