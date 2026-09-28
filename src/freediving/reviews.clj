@@ -129,6 +129,7 @@
                  (try (json/read-str raw-json) (catch Exception _ nil)))
         source-rows (case (:parser-version artifact)
                       "cmas-2026-roatan-json/1" (when (vector? source) source)
+                      "cmas-2026-roatan-json/2" (when (vector? source) source)
                       (when (map? source) (get source "data")))
         position (:row-index-zero-based ref)
         coordinate {:row-index-zero-based position}
@@ -136,7 +137,7 @@
                                  (:acquisitions artifact)))]
     (when-not (and (= 5 (:schema-version artifact))
                    (or (re-matches #"cmas-2025-indoor-json/[0-9]+" (:parser-version artifact))
-                       (= "cmas-2026-roatan-json/1" (:parser-version artifact)))
+                       (#{"cmas-2026-roatan-json/1" "cmas-2026-roatan-json/2"} (:parser-version artifact)))
                    (= (:parser-version ref) (:parser-version artifact))
                    (= (:job-id ref) (:job-id artifact))
                    (= (:job-id ref) (html/digest (select-keys artifact

@@ -151,6 +151,7 @@
                    4 (html/validate-artifact! root a)
                    5 (case (:parser-version a)
                        "cmas-2026-roatan-json/1" (roatan-json/validate-artifact! root a)
+                       "cmas-2026-roatan-json/2" (roatan-json/validate-artifact! root a)
                        (indoor-json/validate-artifact! root a))
                    (cond-> (validate-pages! a)
                      (= camotes-challenge/parser-version (:parser-version a)) (->> (camotes-challenge/validate-artifact! root))

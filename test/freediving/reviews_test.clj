@@ -316,13 +316,15 @@
   (let [ref (roatan-json-observation)
         target (select-keys ref [:job-id :ordinal])
         request (extraction-request ref "roatan-accept")]
+    (is (= "cmas-2026-roatan-json/2" (:parser-version ref)))
+    (is (= :unreviewed (:status (reviews/extraction-effective reviewer target))))
     (is (= :accept (:action (reviews/accept-extraction! reviewer request))))
     (is (= :accepted (:status (reviews/extraction-effective reviewer target))))
     (is (= "reviews_owner" (:db-role (first (reviews/extraction-history reviewer target)))))
     (doseq [bad [(assoc ref :row-index-zero-based 0)
                  (assoc ref :candidate-id (apply str (repeat 64 "0")))
                  (assoc ref :source-sha256 (apply str (repeat 64 "0")))
-                 (assoc ref :parser-version "cmas-2026-roatan-json/2")]]
+                 (assoc ref :parser-version "cmas-2026-roatan-json/1")]]
       (is (thrown? Exception
                    (reviews/accept-extraction! reviewer
                                                (assoc request :id (str "forged-" (hash bad))
