@@ -16,9 +16,9 @@
 (def international-listing [{:publisher :CMAS :kind :archive :citation {:url "archive"}}])
 (def local-listing [{:publisher :local-organizer :kind :local-results :citation {:url "local"}}])
 (def international-sanction [{:authority :CMAS :level :international :status :verified
-                             :citation {:document "designation"}}])
+                              :citation {:document "designation"}}])
 (def national-sanction [{:authority :national-federation :level :national :status :verified
-                        :citation {:document "permit"}}])
+                         :citation {:document "permit"}}])
 (def unsanctioned [{:status :unsanctioned :citation {:document "explicit notice"}}])
 
 (defn by-id [result id]

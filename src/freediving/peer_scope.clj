@@ -16,11 +16,11 @@
 (defn- sanction-class [evidence]
   (let [cited (filter cited? evidence)
         international? (some #(and (= :verified (:status %))
-                                  (= :international (:level %))
-                                  (#{:CMAS :AIDA} (:authority %))) cited)
+                                   (= :international (:level %))
+                                   (#{:CMAS :AIDA} (:authority %))) cited)
         national? (some #(and (= :verified (:status %))
-                             (= :national (:level %))
-                             (= :national-federation (:authority %))) cited)
+                              (= :national (:level %))
+                              (= :national-federation (:authority %))) cited)
         unsanctioned? (some #(= :unsanctioned (:status %)) cited)]
     (cond
       (and international? (not unsanctioned?)) :international
@@ -69,8 +69,8 @@
                        (let [listing (listing-class (get-in row [:event :listing-evidence]))
                              sanction (sanction-class (get-in row [:event :sanction-evidence]))]
                          (assoc (dissoc row :comparison-rank :discipline-rank :rank
-                                           :rank-descriptor :peer-status
-                                           :no-default-rank-reason :broader-scope-descriptor)
+                                        :rank-descriptor :peer-status
+                                        :no-default-rank-reason :broader-scope-descriptor)
                                 :event-classification {:listing listing :sanction sanction}))) classified)
           eligible (filter #(eligible? % category) rows)
           listed (filter #(or (= :all listing-filter)
@@ -98,7 +98,7 @@
                                              :else :ranked)]
                            (cond-> (assoc row :peer-status peer-status)
                              (= :ranked peer-status) (assoc :rank (get ranks (:id row))
-                                                           :rank-descriptor descriptor)
+                                                            :rank-descriptor descriptor)
                              (and eligible-row? listing-match? (not sanction-match?)
                                   (= :default sanction-scope))
                              (assoc :no-default-rank-reason :no-verified-international-sanction
