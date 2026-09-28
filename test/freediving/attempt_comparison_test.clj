@@ -23,7 +23,8 @@
                                 {:category "SENIORS - WOMEN" :realized-distance value :final-distance value :status nil}
                                 {:gender "Women" :performance value :realised-performance (str value " m")
                                  :card "WHITE" :penalty nil}))}
-   :evidence {:review :verified :outcome :finally-valid :final {:value value :unit "m" :basis :verified-post-penalty}
+   :evidence {:review :verified :outcome :finally-valid :final {:value value :unit "m" :basis :verified-post-penalty
+                                                                :decimal-places 0 :conversion :verified}
               :attempt-relationship :distinct :source-conflict :resolved}})
 
 (def request {:year 2026 :discipline "DNF" :environment :pool :gender :women
@@ -73,6 +74,16 @@
   (let [row (assoc-in (row "printed" "CMAS" 90M) [:candidate :parsed :category] "SENIORS – WOMEN")
         result (comparison/compare-attempts request [row])]
     (is (= :ranked (get-in result [:rows 0 :comparison-status])))))
+
+(deftest withholds-final-without-verified-precision-or-conversion
+  (let [missing-precision (update-in (row "precision" "CMAS" 90M) [:evidence :final] dissoc :decimal-places)
+        unknown-conversion (assoc-in (row "conversion" "AIDA" 91M) [:evidence :final :conversion] :unknown)
+        result (comparison/compare-attempts request [missing-precision unknown-conversion])]
+    (is (= 0 (get-in result [:coverage :ranked])))
+    (is (some #{:unverified-final-precision}
+              (:reasons (first (filter #(= "precision" (get-in % [:reference :candidate-id])) (:rows result))))))
+    (is (some #{:unverified-final-conversion}
+              (:reasons (first (filter #(= "conversion" (get-in % [:reference :candidate-id])) (:rows result))))))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.attempt-comparison-test)]

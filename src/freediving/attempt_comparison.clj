@@ -14,6 +14,15 @@
   (get-in row [:evidence :final :value]))
 (defn- positive-decimal? [v]
   (and (number? v) (pos? v)))
+(defn- verified-precision? [final]
+  (let [value (:value final)
+        places (:decimal-places final)]
+    (and (or (instance? java.math.BigDecimal value) (integer? value))
+         (int? places) (not (neg? places))
+         (try
+           (.setScale (bigdec value) places java.math.RoundingMode/UNNECESSARY)
+           true
+           (catch ArithmeticException _ false)))))
 (defn- source-conflict? [row]
   (or (= :unresolved (get-in row [:evidence :source-conflict]))
       (and (= "CMAS" (get-in row [:source :federation]))
@@ -57,6 +66,8 @@
       (not= :distinct (:attempt-relationship evidence)) (conj :unresolved-attempt-relationship)
       (not (and (positive-decimal? (:value final)) (= "m" (:unit final))
                 (= :verified-post-penalty (:basis final)))) (conj :unverified-final-distance)
+      (not (verified-precision? final)) (conj :unverified-final-precision)
+      (not= :verified (:conversion final)) (conj :unverified-final-conversion)
       (some? (:status parsed)) (conj :source-status-conflict)
       (source-conflict? row) (conj :source-conflict))))
 
