@@ -13,12 +13,65 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from owner_evidence_origin import make_server
+from owner_source_view import OriginalSourceView, SourceViewError
+from unified_evidence_query import SnapshotQuery
 from private_source_bundle import build
 from vestico_safe_derivative import canonical_bytes, derive
 
 HOST = 'owner-private.alphacompose.com'
 SECRET = 'a-private-gateway-secret-for-tests'
 EMAIL = 'owner@example.com'
+ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snapshot-20260928/snapshot')
+ROATAN_BUNDLE = Path('/Users/jamiep/Documents/ChatGPT/freediving-results/data/owner-evidence-source-bundle-20260928-roatan-v5/bundle-validated')
+
+
+@unittest.skipUnless(ROATAN_SNAPSHOT.exists() and ROATAN_BUNDLE.exists(), 'private Roatan evidence unavailable')
+class RoatanOriginalViewTest(unittest.TestCase):
+    def test_owner_routes_are_authenticated_bounded_and_read_only(self):
+        env = {'OWNER_EVIDENCE_GATEWAY_SECRET': SECRET, 'OWNER_EVIDENCE_ORIGIN_HOST': HOST,
+               'OWNER_EVIDENCE_EMAILS': EMAIL,
+               'OWNER_EVIDENCE_SNAPSHOT_SHA256': '30910ab400071613c902a23e3312072cf48abf6130928efad6ec0a6a1a76fefb'}
+        with make_server(ROATAN_SNAPSHOT, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            def request(path, method='GET', authorized=True):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port)
+                headers = {'Host': HOST}
+                if authorized:
+                    headers.update({'X-Freediving-Owner-Gateway': SECRET, 'X-Freediving-Owner-Email': EMAIL})
+                conn.request(method, path, headers=headers)
+                response = conn.getresponse()
+                result = response.status, response.read()
+                conn.close()
+                return result
+            try:
+                status, body = request('/owner-evidence/api/roatan')
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['total'], 31)
+                status, body = request('/owner-evidence/api/roatan/3551/5')
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['final_depth'], '34')
+                self.assertEqual(request('/owner-evidence/api/roatan/3551/5', authorized=False)[0], 403)
+                self.assertEqual(request('/owner-evidence/api/roatan/3551/999')[0], 404)
+                self.assertEqual(request('/owner-evidence/api/roatan/3551/5', method='POST')[0], 405)
+            finally:
+                server.shutdown()
+                thread.join()
+
+    def test_exact_top_level_array_row_and_citation(self):
+        with SnapshotQuery(ROATAN_SNAPSHOT) as query:
+            row = query.roatan_position(3551, 5)
+            detail = query.detail(row['position_record_id'])
+            wrong = dict(detail, citation=dict(detail['citation'], **{'row-index-zero-based': 6}))
+            viewer = OriginalSourceView(ROATAN_BUNDLE,
+                '07be5bbf08b604f7b53e38c3f90525ca5ee94ac5b2047ae54a20328141fd256d',
+                query.manifest['snapshot_sha256'])
+            shown = viewer.inspect(detail)
+            with self.assertRaises(SourceViewError) as raised:
+                viewer.inspect(wrong)
+        self.assertEqual(shown['locator'], '[5]')
+        self.assertEqual(shown['source_value']['ParPrintName'], 'LU San-Jen')
+        self.assertEqual(raised.exception.status, 422)
 
 
 def sha(data):

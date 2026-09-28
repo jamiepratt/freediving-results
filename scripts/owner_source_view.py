@@ -98,20 +98,32 @@ class OriginalSourceView:
         if content_type == 'application/json':
             citation = detail.get('citation')
             match = ROW.fullmatch(citation) if isinstance(citation, str) else None
-            if not match:
+            roatan = detail.get('source_schema') == 'roatan-2026-cwt-men-private-census/v1'
+            if roatan:
+                raw = detail.get('raw') or {}
+                index = citation.get('row-index-zero-based') if isinstance(citation, dict) else None
+                if (type(index) is not int or not 0 <= index <= 999
+                        or citation.get('unit') != raw.get('unit')
+                        or citation.get('source-sha256') != item['sha256']
+                        or raw.get('source_sha256') != item['sha256']
+                        or raw.get('json_index_zero_based') != index
+                        or detail.get('source_object_id') != 'sha256:' + item['sha256']):
+                    raise SourceViewError(422)
+            elif match:
+                index = int(match.group(1))
+            else:
                 raise SourceViewError(422)
-            index = int(match.group(1))
             try:
                 source = json.loads(data)
             except (UnicodeError, ValueError) as exc:
                 raise SourceViewError(503) from exc
-            rows = source.get('data') if isinstance(source, dict) else None
+            rows = source if roatan and isinstance(source, list) else source.get('data') if isinstance(source, dict) and not roatan else None
             if not isinstance(rows, list) or index >= len(rows) or rows[index] != detail['raw_fields']:
                 raise SourceViewError(422)
             row = rows[index]
             if len(json.dumps(row, ensure_ascii=False).encode('utf-8')) > MAX_JSON_ROW:
                 raise SourceViewError(413)
-            return {**base, 'format': 'json', 'locator': f'data[{index}]', 'source_value': row}
+            return {**base, 'format': 'json', 'locator': f'[{index}]' if roatan else f'data[{index}]', 'source_value': row}
         citation = detail.get('citation')
         page = citation.get('page') if isinstance(citation, dict) else None
         if type(page) is not int or not 1 <= page <= 500 or page != detail.get('page'):

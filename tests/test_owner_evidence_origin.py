@@ -113,6 +113,12 @@ class PrivateOriginTest(unittest.TestCase):
                                                ('Origin', 'https://poc.alphacompose.com')])[0], 200)
 
     def test_read_only_browse_and_detail(self):
+        status, _, body = self.request('/owner-evidence/api/roatan')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['total'], 0)
+        self.assertEqual(self.request('/owner-evidence/api/roatan/3551/0')[0], 404)
+        self.assertEqual(self.request('/owner-evidence/api/roatan?limit=1')[0], 404)
+        self.assertEqual(self.request('/owner-evidence/api/roatan', method='POST')[0], 405)
         status, _, body = self.request('/owner-evidence/api/browse?kind=candidate_position&limit=1')
         self.assertEqual(status, 200)
         record = json.loads(body)['records'][0]

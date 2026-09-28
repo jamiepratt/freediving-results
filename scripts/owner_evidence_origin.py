@@ -23,6 +23,7 @@ MAX_RESPONSE = 2 * 1024 * 1024
 DETAIL_PATH = re.compile(r'^/owner-evidence/api/detail/([a-f0-9]{64})$')
 SOURCE_VIEW_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})$')
 COMPARISON_PATH = re.compile(r'^/owner-evidence/api/comparison/([a-f0-9]{64})$')
+ROATAN_PATH = re.compile(r'^/owner-evidence/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 SOURCE_PAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 HOST_PATTERN = re.compile(r'^[a-z0-9-]+\.alphacompose\.com$')
 EMAIL_PATTERN = re.compile(r'^[^\s,@]+@[^\s,@]+\.[^\s,@]+$')
@@ -247,6 +248,11 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.queue(**self._queue_filters(parsed.query))
             elif path == '/owner-evidence/api/comparisons':
                 result = query.comparisons(**self._comparison_filters(parsed.query))
+            elif path == '/owner-evidence/api/roatan' and not parsed.query:
+                result = query.roatan_positions()
+            elif ROATAN_PATH.fullmatch(path) and not parsed.query:
+                unit, index = ROATAN_PATH.fullmatch(path).groups()
+                result = query.roatan_position(int(unit), int(index))
             elif COMPARISON_PATH.fullmatch(path) and not parsed.query:
                 result = query.comparison(COMPARISON_PATH.fullmatch(path).group(1))
                 if result is not None:

@@ -176,6 +176,15 @@ class SnapshotQuery:
             item['supporting_evidence'] = ['Uncertainty explicitly recorded on cited candidate row']
             item['unknown'] = ['No owner resolution recorded in this snapshot', 'Contrary evidence not recorded in this item']
             items.append(item)
+        for row in self.db.execute("SELECT * FROM records WHERE source_name='roatan-issue8' AND collection='uncertainties' ORDER BY record_path"):
+            item = _queue_item(row, self.manifest['inputs'][row['source_name']])
+            value = json.loads(row['raw_json']).get('value', '').lower()
+            item['group'] = ('same_attempt_relationship' if 'overlap' in value else
+                             'athlete_identity' if 'identity' in value else
+                             'event_publication' if 'publication' in value else
+                             'coverage_finality')
+            item['unknown'] = [item['trigger'], 'No owner resolution recorded in this snapshot']
+            items.append(item)
         for name, data in sorted(self.manifest['inputs'].items()):
             if data['status'] != 'excluded':
                 continue
@@ -199,7 +208,7 @@ class SnapshotQuery:
         total = len(items)
         return {'coverage': self.manifest['coverage'], 'cutoff': self.manifest['cutoff'],
                 'snapshot_sha256': self.manifest['snapshot_sha256'],
-                'denominators': {'candidate_positions': self.db.execute("SELECT count(*) FROM records WHERE kind='candidate_position'").fetchone()[0],
+                'denominators': {'candidate_positions': self.db.execute("SELECT count(*) FROM records WHERE kind='candidate_position' AND collection!='observation_versions'").fetchone()[0],
                                  'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts']},
                 'group_counts': counts, 'total': total, 'limit': limit, 'offset': offset,
                 'items': items[offset:offset + limit]}
@@ -260,6 +269,69 @@ class SnapshotQuery:
         result['source_schema'] = source.get('source_schema')
         result['snapshot_sha256'] = self.manifest['snapshot_sha256']
         return result
+
+    def _roatan_rows(self, collection):
+        return [self.detail(row['record_id']) for row in self.db.execute(
+            'SELECT record_id FROM records WHERE source_name=? AND collection=? ORDER BY record_path',
+            ('roatan-issue8', collection))]
+
+    def roatan_positions(self):
+        """List current positions without counting historical versions as new attempts."""
+        positions = self._roatan_rows('positions')
+        versions = self._roatan_rows('observation_versions')
+        decisions = self._roatan_rows('historical_extraction_decisions')
+        items = [{'unit': row['raw']['unit'], 'index': row['raw']['json_index_zero_based'],
+                  'name': row['raw']['name'], 'record_id': row['record_id'],
+                  'parser_version': row['parser_version'], 'source_sha256': row['raw']['source_sha256'],
+                  'citation': row['citation'], 'review_status': row['review_status']}
+                 for row in positions]
+        sources = [{'unit': row['raw'].get('unit'), 'source_object_id': row['source_object_id'],
+                    'source_sha256': row['raw'].get('sha256')}
+                   for row in self._roatan_rows('source_objects')]
+        return {'total': len(items), 'items': items,
+                'v1_observations': sum(row['parser_version'] == 'cmas-2026-roatan-json/1' for row in versions),
+                'v2_observations': sum(row['parser_version'] == 'cmas-2026-roatan-json/2' for row in versions),
+                'source_objects': len(sources), 'source_object_details': sources,
+                'historical_extraction_acceptances': len(decisions),
+                'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts'],
+                'snapshot_sha256': self.manifest['snapshot_sha256']}
+
+    def roatan_position(self, unit, index):
+        if type(unit) is not int or not 1 <= unit <= 999999 or type(index) is not int or not 0 <= index <= 999:
+            raise ValueError('invalid Roatan row locator')
+        matches = lambda rows: [row for row in rows if row['raw'].get('unit') == unit
+                                and row['raw'].get('json_index_zero_based') == index]
+        positions = matches(self._roatan_rows('positions'))
+        if len(positions) != 1:
+            return None
+        position = positions[0]
+        versions = matches(self._roatan_rows('observation_versions'))
+        by_version = {}
+        for row in versions:
+            version = row['parser_version'].rsplit('/', 1)[-1]
+            if version in ('1', '2') and 'v' + version not in by_version:
+                by_version['v' + version] = {
+                    'record_id': row['record_id'], 'parser_version': row['parser_version'],
+                    'observation_version': row['observation_version'], 'review_status': row['review_status'],
+                    'source_sha256': row['raw'].get('source_sha256'), 'source_object_id': row['source_object_id'],
+                    'citation': row['citation'], 'raw_fields': row['raw_fields'],
+                    'parsed_fields': row['parsed_fields']}
+        diff = matches(self._roatan_rows('version_diffs'))
+        decisions = matches(self._roatan_rows('historical_extraction_decisions'))
+        raw = position['raw']
+        return {'unit': unit, 'index': index, 'position_record_id': position['record_id'],
+                'position_review_status': position['review_status'],
+                'name': raw.get('name'), 'declared_depth': (raw.get('depths') or {}).get('declared'),
+                'raw_depth': (raw.get('depths') or {}).get('raw'),
+                'final_depth': (raw.get('depths') or {}).get('publisher_final'),
+                'penalty': raw.get('penalty'), 'status': raw.get('status'),
+                'notes': raw.get('notes') or raw.get('source_notes'),
+                'citation': position['citation'], 'source_sha256': raw.get('source_sha256'),
+                'source_object_id': position['source_object_id'], 'versions': by_version,
+                'parsed_field_changes': diff[0]['raw'].get('parsed_field_changes') if len(diff) == 1 else None,
+                'historical_extraction': decisions[0]['raw'] if len(decisions) == 1 else None,
+                'same_attempt': 'unknown', 'athlete_identity': 'unknown', 'overlap': 'unknown',
+                'snapshot_sha256': self.manifest['snapshot_sha256']}
 
     def comparisons(self, *, limit=50, offset=0):
         """List only candidate relationships explicitly retained in the snapshot."""

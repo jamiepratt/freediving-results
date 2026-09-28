@@ -13,6 +13,8 @@ SCRIPT = ROOT / 'scripts' / 'unified_evidence_snapshot.py'
 sys.path.insert(0, str(ROOT / 'scripts'))
 from unified_evidence_query import SnapshotQuery
 
+ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snapshot-20260928/snapshot')
+
 
 def snapshot(tmp_path):
     packet = tmp_path / 'packet.json'
@@ -37,6 +39,41 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    @unittest.skipUnless(ROATAN_SNAPSHOT.exists(), 'private Roatan snapshot unavailable')
+    def test_roatan_versions_keep_historical_extraction_scope(self):
+        with SnapshotQuery(ROATAN_SNAPSHOT) as query:
+            listing = query.roatan_positions()
+            first = query.roatan_position(3551, 0)
+            other = query.roatan_position(3559, 3)
+            queue = query.queue(source_name='roatan-issue8')
+            lu = next(query.roatan_position(item['unit'], item['index']) for item in listing['items']
+                      if item['name'] == 'LU San-Jen')
+        self.assertEqual(listing['total'], 31)
+        self.assertEqual(listing['v1_observations'], 31)
+        self.assertEqual(listing['v2_observations'], 31)
+        self.assertEqual(listing['source_objects'], 2)
+        self.assertEqual({source['unit'] for source in listing['source_object_details']}, {3551, 3559})
+        self.assertEqual(queue['total'], 5)
+        self.assertEqual(listing['historical_extraction_acceptances'], 7)
+        with SnapshotQuery(ROATAN_SNAPSHOT) as query:
+            rows = [query.roatan_position(item['unit'], item['index']) for item in listing['items']]
+        self.assertEqual({row['position_review_status'] for row in rows}, {'unreviewed'})
+        self.assertEqual(sum(row['versions']['v1']['review_status'] == 'unreviewed' for row in rows), 31)
+        self.assertEqual(sum(row['versions']['v2']['review_status'] == 'extraction_accepted' for row in rows), 7)
+        self.assertEqual(sum(row['versions']['v2']['review_status'] == 'unreviewed' for row in rows), 24)
+        self.assertEqual({(row['unit'], row['index']) for row in rows if row['historical_extraction']},
+                         {(3551, index) for index in range(7)})
+        self.assertEqual(first['historical_extraction']['scope'], 'extraction accuracy only')
+        self.assertEqual(first['versions']['v1']['review_status'], 'unreviewed')
+        self.assertEqual(first['versions']['v2']['review_status'], 'extraction_accepted')
+        self.assertIsNone(other['historical_extraction'])
+        self.assertEqual(lu['declared_depth'], '95')
+        self.assertEqual(lu['raw_depth'], '65')
+        self.assertEqual(lu['final_depth'], '34')
+        self.assertEqual(lu['penalty'], '31')
+        self.assertIn('EARLY TURN, NO MARKER', str(lu['notes']))
+        self.assertEqual(lu['same_attempt'], 'unknown')
+
     def test_comparison_uses_only_explicit_retained_position_link(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
