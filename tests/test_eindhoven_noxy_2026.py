@@ -1,5 +1,6 @@
 import hashlib
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +95,17 @@ def test_source_hash_mismatch_fails_closed(tmp_path):
     result = run(source, tmp_path / 'packet.json')
     assert result.returncode != 0
     assert 'source hash mismatch' in result.stderr
+
+
+def test_packet_is_written_owner_only(tmp_path):
+    source = corpus(tmp_path / 'source')
+    out = tmp_path / 'private' / 'packet.json'
+    assert run(source, out).returncode == 0
+    assert stat.S_IMODE(out.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    out.chmod(0o644)
+    assert run(source, out).returncode == 0
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
 def test_shared_id_with_conflicting_fields_is_not_linked(tmp_path):

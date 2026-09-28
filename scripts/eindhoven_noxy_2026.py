@@ -4,6 +4,8 @@
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -198,8 +200,15 @@ def main():
     command.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     packet = build(args.corpus)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(canon(packet), encoding='utf-8')
+    args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix='.packet-', dir=args.output.parent)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(canon(packet))
+        os.replace(temporary, args.output)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     print(canon({'output': str(args.output.resolve()), 'sha256': sha256(args.output.read_bytes()),
                  'counts': packet['counts'], 'result_rows_by_discipline': packet['result_rows_by_discipline']}), end='')
 
