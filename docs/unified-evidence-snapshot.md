@@ -34,6 +34,14 @@ The `cmas-worldcup-2026` namespace uses the official four-page World Cup image p
 
 All 368 new printed positions retain exact row IDs and image-region citations and link to their already bundled official PDF source objects. Neither packet creates an owner review, a source-equivalence decision, an observation version, or a confirmed distinct sporting attempt. For #54, show the packet disposition and uncertainty fields alongside raw cells; retain the World Cup clipped surname and Italian field notes as explicit gaps. The new source packets, snapshot, and manifest are in the versioned v6 private bundle described in [private-source-bundle.md](private-source-bundle.md).
 
+## AIDA and Eindhoven extension, 2026-09-28
+
+The next private snapshot is `/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-snapshot-20260928-v7/snapshot/`, cutoff `2026-09-28T19:01:11Z`. SQLite SHA-256 is `c53bd5df3420db36d7cf4fd0e36f0b87ea01ed48b2a3fafee055ea124ba16c91`; manifest SHA-256 is `8fd0f2423707b5eaaf91ed418bbf20ce1b7d06345e5d6dd96514e5e011ed1561`. It extends the v6 SQLite hash `0285cd65ebf9f63a422c3ed7122aa6f59b97f06ac69e42d810e986b02579a9e6`, retaining all 13,964 prior records. Eight pinned JSON inputs add 725 records for a total of 14,689. `verify` and byte-identical `replay` pass.
+
+Six selected-date AIDA packets add 24, 22, 67, 66, 52, and 50 cited candidate positions, respectively, for 281 source positions. The normalized date, discipline, source hash, and row locator support queries; the full source cells, parse disposition, and unreviewed state remain in each raw record. Eindhoven adds 92 RESULT candidate rows, 58 OVERALL aggregates, 94 endpoint source records, 92 exact `attempt_id` links, and ten other source, session, and uncertainty records. The 94 endpoint records are not imported observation versions; two have no RESULT row. The route roster adds 15 route and 83 lead records with their checked, inaccessible, acquired, and unchecked status histories. The roster cutoff is `2026-09-28T18:30:05.503923Z`.
+
+Every namespace has its own required packet hash in the manifest. The extension validates AIDA position counts and unique locators, Eindhoven row counts and exact result-to-endpoint IDs, and roster counts. It does not establish athlete identity, cross-source same-attempt links, owner review, new Roatan acceptances, or confirmed distinct attempts. The manifest keeps `confirmed_distinct_attempts: null`.
+
 ## Read-only owner query layer
 
 `scripts/unified_evidence_query.py` opens the snapshot in SQLite read-only immutable mode. It verifies the database hash against the manifest before opening it. It has no write or review route and creates no database files. Keep this module behind owner authentication if a web handler is added; this slice exposes no HTTP service or public Worker endpoint.
