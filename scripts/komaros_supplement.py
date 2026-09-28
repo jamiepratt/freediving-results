@@ -68,7 +68,7 @@ def checked_source(pdf_path, gap_path, expected_sha256):
 
 def calendar_date(card_ledger_path, source):
     if card_ledger_path is None:
-        return None, None
+        return None, None, None, None
     ledger, ledger_sha = read_json(card_ledger_path)
     matches = [card for card in ledger["cards"] if card.get("event_id") == 9678]
     require(len(matches) == 1, "card ledger needs exactly one event 9678")
@@ -79,17 +79,38 @@ def calendar_date(card_ledger_path, source):
     date = card.get("date")
     require(isinstance(date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date),
             "calendar event date is missing or malformed")
-    return date, {"source": "B45 discovery/card-ledger.json", "sha256": ledger_sha,
-                  "event_id": 9678, "field": "date"}
+    title = card.get("title")
+    require(isinstance(title, str) and title.strip(), "calendar event title is missing")
+    return date, title, 9678, {
+        "source": "B45 discovery/card-ledger.json", "sha256": ledger_sha,
+        "event_id": 9678, "fields": ["date", "title", "event_id"],
+    }
 
 
 def checked_pages(parts, source_hash):
     pages = []
     part_hashes = []
+    page_dimensions = {}
     for path in parts:
         part, digest = read_json(path)
         require(isinstance(part, dict) and isinstance(part.get("pages"), list),
                 "part must contain pages list")
+        require(part.get("source_sha256") == source_hash,
+                "part source SHA256 differs from verified PDF")
+        dimensions = None
+        if "render" in part:
+            render = part["render"]
+            require(isinstance(render, dict) and render.get("dpi") == 220,
+                    "part render metadata must declare 220 dpi")
+            dimensions = (render.get("pixel_width"), render.get("pixel_height"))
+        elif "rendered_page_size_pixels" in part:
+            dimensions = part["rendered_page_size_pixels"]
+        if dimensions is not None:
+            require(isinstance(dimensions, (list, tuple)) and len(dimensions) == 2 and
+                    all(type(value) is int and value > 0 for value in dimensions),
+                    "part render dimensions malformed")
+            for page in part["pages"]:
+                page_dimensions[page.get("page")] = dimensions
         pages.extend(part["pages"])
         part_hashes.append(digest)
     require([page.get("page") for page in pages] == list(range(1, 14)),
@@ -121,6 +142,11 @@ def checked_pages(parts, source_hash):
                     region["bbox"][0] < region["bbox"][2] and
                     region["bbox"][1] < region["bbox"][3],
                     f"page {number} row {ordinal}: region citation required")
+            dimensions = page_dimensions.get(number)
+            if dimensions is not None:
+                require(region["bbox"][2] <= dimensions[0] and
+                        region["bbox"][3] <= dimensions[1],
+                        f"page {number} row {ordinal}: region exceeds render dimensions")
             fields = row.get("fields")
             require(isinstance(fields, dict) and RAW_FIELDS <= fields.keys(),
                     f"page {number} row {ordinal}: raw fields incomplete")
@@ -154,7 +180,7 @@ def build_supplement(pdf_path, gap_path, parts, card_ledger_path=None,
         pdf_path, gap_path, expected_sha256)
     pages, part_hashes, unresolved_positions, unresolved_fields = checked_pages(
         parts, expected_sha256)
-    date, date_provenance = calendar_date(card_ledger_path, source)
+    date, title, event_id, date_provenance = calendar_date(card_ledger_path, source)
     return {
         "schema": "komaros-visual-evidence/v1",
         "source": source,
@@ -164,6 +190,8 @@ def build_supplement(pdf_path, gap_path, parts, card_ledger_path=None,
         "source_relationship_status": "unresolved",
         "input_sha256": {"gap_supplement": gap_sha, "page_parts": part_hashes},
         "event_date_calendar": date,
+        "event_title_calendar": title,
+        "event_id_calendar": event_id,
         "event_date_calendar_provenance": date_provenance,
         "pages": pages,
         "counts": {

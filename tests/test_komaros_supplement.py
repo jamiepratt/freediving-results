@@ -39,7 +39,8 @@ class KomarosSupplementTest(unittest.TestCase):
         }]}))
         self.parts = [self.root / "pages-01-07.json", self.root / "pages-08-13.json"]
         self.card_ledger = self.root / "card-ledger.json"
-        self.card_ledger.write_text(json.dumps({"cards": [{"event_id": 9678, "date": "2026-04-12",
+        self.card_ledger.write_text(json.dumps({"cards": [{"event_id": 9678,
+            "title": "15° Trofeo Komaros Sub Ancona", "date": "2026-04-12",
             "result_urls": [source["final_url"]]}]}))
         pages = []
         for page, count in enumerate(COUNTS, 1):
@@ -55,8 +56,11 @@ class KomarosSupplementTest(unittest.TestCase):
         pages[0]["rows"][0]["uncertainties"] = ["points illegible"]
         pages[0]["legend_raw"] = "DQ = printed legend"
         pages[3]["heading_raw"] = "Classifica EF (3) - DNF"
-        self.parts[0].write_text(json.dumps({"pages": pages[:7]}))
-        self.parts[1].write_text(json.dumps({"pages": pages[7:]}))
+        self.parts[0].write_text(json.dumps({"source_sha256": self.digest,
+            "render": {"dpi": 220, "pixel_width": 100, "pixel_height": 100},
+            "pages": pages[:7]}))
+        self.parts[1].write_text(json.dumps({"source_sha256": self.digest,
+            "rendered_page_size_pixels": [100, 100], "pages": pages[7:]}))
         self.output = self.root / "supplement.json"
 
     def run_cli(self):
@@ -80,6 +84,8 @@ class KomarosSupplementTest(unittest.TestCase):
                                           "confirmed_distinct_attempts": None})
         self.assertEqual(len(doc["pages"]), 13)
         self.assertEqual(doc["event_date_calendar"], "2026-04-12")
+        self.assertEqual(doc["event_id_calendar"], 9678)
+        self.assertEqual(doc["event_title_calendar"], "15° Trofeo Komaros Sub Ancona")
         self.assertEqual(doc["event_date_calendar_provenance"]["event_id"], 9678)
         self.assertIsNone(doc["pages"][0]["event_date_printed"])
         self.assertEqual(doc["pages"][0]["category_raw"], "1CM")
@@ -102,7 +108,7 @@ class KomarosSupplementTest(unittest.TestCase):
         self.assertIn("source SHA256", result.stderr)
         self.assertFalse(self.output.exists())
         self.pdf.write_bytes(b"fixture Komaros image PDF")
-        self.parts[1].write_text(json.dumps({"pages": []}))
+        self.parts[1].write_text(json.dumps({"source_sha256": self.digest, "pages": []}))
         result = self.run_cli()
         self.assertEqual(result.returncode, 2)
         self.assertIn("pages 1 through 13", result.stderr)
@@ -120,6 +126,20 @@ class KomarosSupplementTest(unittest.TestCase):
         result = self.run_cli()
         self.assertEqual(result.returncode, 2)
         self.assertIn("region", result.stderr)
+
+    def test_rejects_part_bound_to_other_source_or_bbox_outside_render(self):
+        part = json.loads(self.parts[0].read_text())
+        part["source_sha256"] = "0" * 64
+        self.parts[0].write_text(json.dumps(part))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("part source SHA256", result.stderr)
+        part["source_sha256"] = self.digest
+        part["pages"][0]["rows"][0]["region"]["bbox"] = [1, 2, 101, 4]
+        self.parts[0].write_text(json.dumps(part))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("render dimensions", result.stderr)
 
 
 if __name__ == "__main__":
