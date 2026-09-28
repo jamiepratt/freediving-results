@@ -3,7 +3,10 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import resource
 import subprocess
+import sys
+import tempfile
 
 from private_source_bundle import verify
 
@@ -12,6 +15,20 @@ ROW = re.compile(r'row index zero based ([0-9]{1,6})\Z')
 MAX_SOURCE = 100 * 1024 * 1024
 MAX_JSON_ROW = 128 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
+RECEIPT_FIELDS = ('discovery_url', 'final_url', 'retrieved_at', 'selected_view')
+
+
+def _limit_renderer():
+    _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    limit = min(MAX_IMAGE, hard) if hard != resource.RLIM_INFINITY else MAX_IMAGE
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+    _, cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
+    cpu_limit = min(10, cpu_hard) if cpu_hard != resource.RLIM_INFINITY else 10
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_hard))
+    if sys.platform.startswith('linux'):
+        _, memory_hard = resource.getrlimit(resource.RLIMIT_AS)
+        memory_limit = min(1024 * 1024 * 1024, memory_hard) if memory_hard != resource.RLIM_INFINITY else 1024 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_hard))
 
 
 class SourceViewError(Exception):
@@ -63,7 +80,11 @@ class OriginalSourceView:
 
     def inspect(self, detail):
         item, content_type, data = self._source(detail)
+        receipt = item.get('receipt') or {}
+        safe_receipt = {key: receipt[key] for key in RECEIPT_FIELDS
+                        if isinstance(receipt.get(key), str) and len(receipt[key]) <= 2048}
         base = {'source_sha256': item['sha256'], 'source_bytes': item['bytes'],
+                'receipt': safe_receipt,
                 'snapshot_sha256': detail['snapshot_sha256'], 'citation': detail['citation'],
                 'raw_fields': detail['raw_fields'], 'parsed_fields': detail['parsed_fields']}
         if content_type == 'application/json':
@@ -96,14 +117,18 @@ class OriginalSourceView:
             raise SourceViewError(404)
         _, _, data = self._source(detail)
         try:
-            rendered = subprocess.run(['pdftoppm', '-f', str(requested_page), '-l', str(requested_page),
-                                       '-scale-to', '1400', '-singlefile', '-png', '-'],
-                                      input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                      timeout=15, check=False)
+            with tempfile.TemporaryFile(mode='w+b') as output:
+                rendered = subprocess.run(['pdftoppm', '-f', str(requested_page), '-l', str(requested_page),
+                                           '-scale-to', '1400', '-singlefile', '-png', '-'],
+                                          input=data, stdout=output, stderr=subprocess.DEVNULL,
+                                          timeout=15, check=False, preexec_fn=_limit_renderer)
+                size = output.seek(0, 2)
+                if size >= MAX_IMAGE:
+                    raise SourceViewError(413)
+                output.seek(0)
+                image = output.read(MAX_IMAGE)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SourceViewError(503) from exc
-        if rendered.returncode or not rendered.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
+        if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
             raise SourceViewError(422)
-        if len(rendered.stdout) > MAX_IMAGE:
-            raise SourceViewError(413)
-        return rendered.stdout
+        return image

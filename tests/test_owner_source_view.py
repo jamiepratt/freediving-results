@@ -1,12 +1,14 @@
 import hashlib
 import http.client
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -22,25 +24,54 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def fixture(root):
-    original = root / 'original.json'
-    original.write_text(json.dumps({'data': [{'Name': 'Ada'}, {'Name': 'Bea'}]}))
+def pdf_bytes():
+    parts = [b'%PDF-1.4\n']
+    offsets = [0]
+    objects = [b'<< /Type /Catalog /Pages 2 0 R >>',
+               b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+               b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>',
+               b'<< /Length 0 >>\nstream\n\nendstream']
+    for index, obj in enumerate(objects, 1):
+        offsets.append(sum(map(len, parts)))
+        parts.append(f'{index} 0 obj\n'.encode() + obj + b'\nendobj\n')
+    xref = sum(map(len, parts))
+    parts.append(b'xref\n0 5\n0000000000 65535 f \n')
+    parts.extend(f'{offset:010d} 00000 n \n'.encode() for offset in offsets[1:])
+    parts.append(f'trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref}\n%%EOF\n'.encode())
+    return b''.join(parts)
+
+
+def fixture(root, *, original_bytes=None, content_type='application/json', positions=None,
+            classification='eligible'):
+    original = root / ('original.pdf' if content_type == 'application/pdf' else 'original.json')
+    original.write_bytes(original_bytes if original_bytes is not None else
+                         json.dumps({'data': [{'Name': 'Ada'}, {'Name': 'Bea'}]}).encode())
     digest = sha(original.read_bytes())
+    if positions is None:
+        positions = [{'fields': {'Name': 'Ada'}, 'locator': 'row index zero based 0',
+                      'parsed_fields': {'score': '3:00'}},
+                     {'fields': {'Name': 'Wrong'}, 'locator': 'row index zero based 1'},
+                     {'fields': {'Name': 'Bea'}, 'locator': 'row index zero based 999'},
+                     {'fields': {'Name': 'Bea'}, 'locator': 'not an original row'}]
     packet = root / 'packet.json'
     packet.write_text(json.dumps({'schema': 'visual/v1', 'source': {'id': 'sha256:' + digest},
-        'positions': [{'fields': {'Name': 'Ada'}, 'locator': 'row index zero based 0',
-                       'parsed_fields': {'score': '3:00'}},
-                      {'fields': {'Name': 'Wrong'}, 'locator': 'row index zero based 1'}]}))
+        'positions': positions, 'source_gaps': [{'id': 'gap', 'status': 'unresolved'}]}))
     snapshot = root / 'snapshot'
     subprocess.run([sys.executable, str(ROOT / 'scripts/unified_evidence_snapshot.py'), 'build',
                     '--cutoff', '2026-09-28T12:00:00Z', '--input', 'visual=' + str(packet),
                     '--output-dir', str(snapshot)], check=True, capture_output=True)
     snapshot_file = snapshot / 'snapshot.sqlite'
     snapshot_digest = sha(snapshot_file.read_bytes())
+    original_entry = {'id': 'sha256:' + digest, 'sha256': digest,
+        'bytes': original.stat().st_size, 'content_type': content_type, 'source_path': str(original),
+        'receipt': {'discovery_url': 'https://example.test/results?token=private',
+                    'final_url': 'https://example.test/final?secret=private',
+                    'retrieved_at': '2026-09-28T12:00:00Z', 'selected_view': 'results'},
+        'classification': classification, 'metadata': {}}
+    if classification != 'eligible':
+        original_entry['reason'] = 'restricted test original'
     inventory = root / 'inventory.json'
-    inventory.write_text(json.dumps({'sources': [{'id': 'sha256:' + digest, 'sha256': digest,
-        'bytes': original.stat().st_size, 'content_type': 'application/json', 'source_path': str(original),
-        'receipt': {}, 'classification': 'eligible', 'metadata': {}},
+    inventory.write_text(json.dumps({'sources': [original_entry,
         {'id': 'sha256:' + snapshot_digest, 'sha256': snapshot_digest,
          'bytes': snapshot_file.stat().st_size, 'content_type': 'application/vnd.sqlite3',
          'source_path': str(snapshot_file), 'receipt': {}, 'classification': 'eligible', 'metadata': {}}]}))
@@ -71,8 +102,9 @@ class SourceViewTest(unittest.TestCase):
         self.server.shutdown()
         self.thread.join(timeout=2)
 
-    def request(self, path, authorized=True):
-        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=4)
+    def request(self, path, authorized=True, server=None):
+        server = server or self.server
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=4)
         headers = {'Host': HOST}
         if authorized:
             headers.update({'X-Freediving-Owner-Gateway': SECRET, 'X-Freediving-Owner-Email': EMAIL})
@@ -83,7 +115,7 @@ class SourceViewTest(unittest.TestCase):
         return result
 
     def test_exact_json_row_requires_authenticated_record_and_matching_raw_fields(self):
-        first, second = [r['record_id'] for r in self.rows]
+        first, second, out_of_range, malformed = [r['record_id'] for r in self.rows]
         url = '/owner-evidence/api/source-view/' + first
         self.assertEqual(self.request(url, authorized=False)[0], 403)
         status, headers, body = self.request(url)
@@ -94,7 +126,8 @@ class SourceViewTest(unittest.TestCase):
         self.assertEqual(data['source_value'], {'Name': 'Ada'})
         self.assertEqual(data['parsed_fields'], {'score': '3:00'})
         self.assertEqual(headers['Cache-Control'], 'no-store')
-        self.assertEqual(self.request('/owner-evidence/api/source-view/' + second)[0], 422)
+        for wrong in (second, out_of_range, malformed):
+            self.assertEqual(self.request('/owner-evidence/api/source-view/' + wrong)[0], 422)
         self.assertEqual(self.request('/owner-evidence/api/source-view/' + '0' * 64)[0], 404)
         self.assertEqual(self.request(url + '?path=anything')[0], 404)
         self.assertEqual(self.request(url)[2], body)
@@ -108,6 +141,82 @@ class SourceViewTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_server(self.snapshot, {k: v for k, v in self.env.items()
                                         if k != 'OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256'})
+
+    def test_non_result_and_restricted_original_are_denied(self):
+        gap = self.server.query.browse(kind='gap')['records'][0]['record_id']
+        self.assertEqual(self.request('/owner-evidence/api/source-view/' + gap)[0], 422)
+        root = Path(self.tmp.name) / 'restricted'
+        root.mkdir()
+        snapshot, _, env = fixture(root, classification='restricted')
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                record = server.query.browse(kind='candidate_position')['records'][0]['record_id']
+                self.assertEqual(self.request('/owner-evidence/api/source-view/' + record,
+                                              server=server)[0], 403)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_pdf_page_auth_corruption_and_output_bound(self):
+        root = Path(self.tmp.name) / 'pdf'
+        root.mkdir()
+        snapshot, bundle, env = fixture(root, original_bytes=pdf_bytes(),
+            content_type='application/pdf', positions=[{'fields': {'Name': 'Ada'},
+                'citation': {'page': 1, 'region': {'bbox': [1, 2, 3, 4]}}}])
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                record = server.query.browse(kind='candidate_position')['records'][0]['record_id']
+                base = '/owner-evidence/api/source-view/' + record
+                self.assertEqual(self.request(base + '/page/1', authorized=False, server=server)[0], 403)
+                self.assertEqual(self.request(base + '/page/2', server=server)[0], 404)
+                self.assertEqual(self.request(base + '/page/1', server=server)[0], 200)
+                digest = server.query.detail(record)['source_object_id'].split(':', 1)[1]
+                (bundle / 'objects' / digest).write_bytes(b'%PDF-1.4\ncorrupt')
+                self.assertEqual(self.request(base + '/page/1', server=server)[0], 503)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_pdf_render_is_stopped_at_output_limit(self):
+        root = Path(self.tmp.name) / 'pdf-limit'
+        root.mkdir()
+        snapshot, _, env = fixture(root, original_bytes=pdf_bytes(),
+            content_type='application/pdf', positions=[{'fields': {'Name': 'Ada'},
+                'citation': {'page': 1}}])
+        marker_file = root / 'renderer-finished'
+        fake = root / 'pdftoppm'
+        fake.write_text('#!' + sys.executable + '\nimport sys\nfrom pathlib import Path\n'
+                        'sys.stdout.buffer.write(b"\\x89PNG\\r\\n\\x1a\\n" + b"x" * 3000000)\n'
+                        + 'Path(' + repr(str(marker_file)) + ').write_text("finished")\n')
+        fake.chmod(0o700)
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                record = server.query.browse(kind='candidate_position')['records'][0]['record_id']
+                with mock.patch.dict(os.environ, {'PATH': str(root) + os.pathsep + os.environ['PATH']}):
+                    status = self.request('/owner-evidence/api/source-view/' + record + '/page/1',
+                                          server=server)[0]
+                self.assertEqual(status, 413)
+                self.assertFalse(marker_file.exists())
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_receipt_has_screened_urls(self):
+        record = self.rows[0]['record_id']
+        status, _, body = self.request('/owner-evidence/api/source-view/' + record)
+        self.assertEqual(status, 200)
+        receipt = json.loads(body)['receipt']
+        self.assertEqual(receipt['discovery_url'], 'https://example.test/results')
+        self.assertEqual(receipt['final_url'], 'https://example.test/final')
+        self.assertEqual(receipt['retrieved_at'], '2026-09-28T12:00:00Z')
+        self.assertEqual(receipt['selected_view'], 'results')
+        self.assertNotIn('private', str(receipt))
 
     def test_changed_object_fails_closed_after_startup(self):
         first = self.rows[0]['record_id']
