@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [freediving.cmas-2025-indoor-json :as indoor-json]
             [freediving.cmas-2025-indoor-json-test :as indoor-fixture]
+            [freediving.cmas-2026-roatan-json :as roatan]
+            [freediving.cmas-2026-roatan-json-test :as roatan-fixture]
             [clojure.java.shell :as shell]
             [freediving.observations :as observations]
             [freediving.aida-html :as html]
@@ -288,6 +290,49 @@
    :owner-response {:task-id "test-task" :user-message-id "test-message"
                     :response-annotation-index 1 :selected-text "Accept 0-1"}
    :actor "owner-label" :reason "Synthetic exact-source extraction review"})
+
+(defn roatan-json-observation []
+  (let [root (str (archive-fixture/workspace) "/archive")
+        rows [(roatan-fixture/row 3551)
+              (assoc (roatan-fixture/row 3551) "ResID" 101 "ParID" 201
+                     "ParPrintName" "EXAMPLE Bea")]
+        hash (roatan-fixture/registered-source root 3551 rows)
+        evidence (archive/retain-evidence!
+                  root (.getBytes (json/write-str (roatan-fixture/visible-evidence 3551 rows hash)) "UTF-8"))
+        job (:job-id (roatan/extract! root hash
+                                      {:actor "synthetic" :config {}
+                                       :citation-evidence-sha256 (:sha256 evidence)}))]
+    (observations/import! fixture/app root job)
+    (let [inspection (observations/inspect fixture/app job)]
+      {:job-id job :ordinal 1
+       :candidate-id (:candidate_id (second (:observations inspection)))
+       :source-sha256 hash
+       :artifact-sha256 (html-evidence/sha256 (:artifact-bytes inspection))
+       :parser-version (:parser-version (:artifact inspection))
+       :source-page-url (:view-url (roatan-fixture/routes 3551))
+       :row-index-zero-based 1})))
+
+(deftest roatan-array-extraction-review-is-bound-to-exact-source-row
+  (let [ref (roatan-json-observation)
+        target (select-keys ref [:job-id :ordinal])
+        request (extraction-request ref "roatan-accept")]
+    (is (= :accept (:action (reviews/accept-extraction! reviewer request))))
+    (is (= :accepted (:status (reviews/extraction-effective reviewer target))))
+    (is (= "reviews_owner" (:db-role (first (reviews/extraction-history reviewer target)))))
+    (doseq [bad [(assoc ref :row-index-zero-based 0)
+                 (assoc ref :candidate-id (apply str (repeat 64 "0")))
+                 (assoc ref :source-sha256 (apply str (repeat 64 "0")))
+                 (assoc ref :parser-version "cmas-2026-roatan-json/2")]]
+      (is (thrown? Exception
+                   (reviews/accept-extraction! reviewer
+                                               (assoc request :id (str "forged-" (hash bad))
+                                                      :base-revision 1 :evidence bad)))))
+    (let [revoke (merge target {:id "roatan-revoke" :base-revision 1
+                                :event-id "roatan-accept" :actor "owner-label"
+                                :reason "Synthetic reconsideration"})]
+      (is (= :revoke (:action (reviews/revoke-extraction! reviewer revoke))))
+      (is (= :unreviewed (:status (reviews/extraction-effective reviewer target))))
+      (is (= 2 (count (reviews/extraction-history reviewer target)))))))
 
 (deftest json-extraction-acceptance-is-separate-from-identity-and-publication
   (let [ref (json-observation) target (select-keys ref [:job-id :ordinal])
