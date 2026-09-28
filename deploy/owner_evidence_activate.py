@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Stage a pinned private owner snapshot and activate its loopback-only service.
+
+Run on the VPS as root only after the external Access, tunnel and Worker gate
+checks in the guarded activation workflow. No public release path is changed.
+"""
+import argparse
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+
+
+SERVICE = 'freediving-owner-evidence.service'
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/unified_evidence_query.py',
+         'resources/evidence_workspace.html', 'resources/evidence_workspace.js',
+         'resources/evidence_workspace.css')
+REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGIN_HOST',
+                          'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
+
+
+@dataclass(frozen=True)
+class Layout:
+    app: Path
+    state: Path
+    units: Path
+    config: Path
+
+
+def _regular(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('missing or linked private activation input')
+
+
+def _sha(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _config(path, owner_uid, expected):
+    _regular(path)
+    info = path.stat()
+    if info.st_uid != owner_uid or info.st_mode & 0o077:
+        raise ValueError('private environment file must be owner-only')
+    values = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        match = re.fullmatch(r'([A-Z_0-9]+)=([^\s"\']+)', line)
+        if not match or match[1] in values:
+            raise ValueError('invalid private environment file')
+        values[match[1]] = match[2]
+    if values.keys() != REQUIRED_ENV or values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected:
+        raise ValueError('private environment does not match snapshot')
+    secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
+    host = values['OWNER_EVIDENCE_ORIGIN_HOST']
+    emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
+    if not (16 <= len(secret) <= 256 and secret.isascii() and
+            host == 'owner-origin.alphacompose.com' and
+            emails and len(set(emails)) == len(emails) and
+            all(re.fullmatch(r'[^\s,@]+@[^\s,@]+\.[^\s,@]+', e) and e == e.lower() for e in emails)):
+        raise ValueError('invalid private environment')
+    return values
+
+
+def _inputs(bundle, source, expected):
+    if not re.fullmatch(r'[a-f0-9]{64}', expected):
+        raise ValueError('invalid expected SHA256')
+    if bundle.is_symlink() or source.is_symlink():
+        raise ValueError('linked activation directory')
+    for name in FILES:
+        _regular(bundle / name)
+    for name in ('manifest.json', 'snapshot.sqlite'):
+        _regular(source / name)
+    manifest = json.loads((source / 'manifest.json').read_text(encoding='utf-8'))
+    if (manifest.get('schema') != 'unified-evidence-snapshot/v1' or
+            manifest.get('snapshot_sha256') != expected or
+            _sha(source / 'snapshot.sqlite') != expected):
+        raise ValueError('snapshot manifest or content differs from pinned hash')
+
+
+def _atomic_link(link, target):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    temporary = link.with_name(link.name + '.new')
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(target)
+    os.replace(temporary, link)
+
+
+def _atomic_write(path, content, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.write-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _stage_directory(parent, name, files, uid, gid, mode):
+    parent.mkdir(parents=True, exist_ok=True)
+    destination = parent / name
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_dir():
+            raise ValueError('invalid staged directory')
+        for relative, source in files:
+            staged = destination / relative
+            _regular(staged)
+            info = staged.stat()
+            if (_sha(staged) != _sha(source) or info.st_mode & 0o777 != mode or
+                    info.st_uid != uid or info.st_gid != gid):
+                raise ValueError('staged content differs from pinned source')
+        return destination
+    work = Path(tempfile.mkdtemp(prefix='.stage-', dir=parent))
+    try:
+        for relative, source in files:
+            target = work / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target, follow_symlinks=False)
+            target.chmod(mode)
+            os.chown(target, uid, gid)
+        for directory in sorted((p for p in work.rglob('*') if p.is_dir()), reverse=True):
+            directory.chmod(0o700 if mode == 0o600 else 0o755)
+            os.chown(directory, uid, gid)
+        work.chmod(0o700 if mode == 0o600 else 0o755)
+        os.chown(work, uid, gid)
+        os.replace(work, destination)
+    finally:
+        if work.exists():
+            shutil.rmtree(work)
+    return destination
+
+
+def _health(values, expected):
+    headers = {
+        'Host': values['OWNER_EVIDENCE_ORIGIN_HOST'],
+        'X-Freediving-Owner-Gateway': values['OWNER_EVIDENCE_GATEWAY_SECRET'],
+        'X-Freediving-Owner-Email': values['OWNER_EVIDENCE_EMAILS'].split(',')[0],
+    }
+    url = 'http://127.0.0.1:8081/owner-evidence/api/overview'
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
+        if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
+            raise RuntimeError('private origin health check failed')
+    for change in ({'Host': 'poc.alphacompose.com'},
+                   {'X-Freediving-Owner-Gateway': 'invalid'},
+                   {'X-Freediving-Owner-Email': 'unlisted@example.invalid'}):
+        request = urllib.request.Request(url, headers={**headers, **change})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                raise RuntimeError('private origin accepted invalid identity')
+        except urllib.error.HTTPError as exc:
+            if exc.code != 403:
+                raise RuntimeError('private origin returned unexpected denial') from exc
+
+
+def activate(bundle, source, expected, layout, *, command=None, health=None,
+             owner_uid=0, owner_gid=0):
+    """Activate local inputs; raises with old links/unit restored on service failure."""
+    bundle, source = Path(bundle), Path(source)
+    values = _config(layout.config, os.geteuid(), expected)
+    _inputs(bundle, source, expected)
+    unit_source = Path(__file__).with_name(SERVICE)
+    _regular(unit_source)
+    unit = unit_source.read_bytes()
+    command = command or (lambda *args: subprocess.run(args, check=True))
+    health = health or (lambda: _health(values, expected))
+    code_hash = hashlib.sha256()
+    for name in FILES:
+        code_hash.update(name.encode())
+        code_hash.update(bytes.fromhex(_sha(bundle / name)))
+    app_version = code_hash.hexdigest()
+    app_parent = layout.app / 'versions'
+    snapshot_parent = layout.state / 'snapshots'
+    layout.app.parent.mkdir(parents=True, exist_ok=True)
+    layout.app.parent.chmod(0o755)
+    layout.app.mkdir(exist_ok=True)
+    layout.app.chmod(0o755)
+    app_parent.mkdir(exist_ok=True)
+    app_parent.chmod(0o755)
+    layout.state.mkdir(parents=True, exist_ok=True)
+    layout.state.chmod(0o711)
+    os.chown(layout.state, os.geteuid(), os.getegid())
+    app = _stage_directory(app_parent, app_version,
+                           [(name, bundle / name) for name in FILES], os.geteuid(),
+                           os.getegid(), 0o644)
+    snapshot = _stage_directory(snapshot_parent, expected,
+                                [(name, source / name) for name in ('manifest.json', 'snapshot.sqlite')],
+                                owner_uid, owner_gid, 0o600)
+    snapshot_parent.chmod(0o711)
+    _inputs(app, snapshot, expected)
+    staged_code_hash = hashlib.sha256()
+    for name in FILES:
+        staged_code_hash.update(name.encode())
+        staged_code_hash.update(bytes.fromhex(_sha(app / name)))
+    if staged_code_hash.hexdigest() != app_version:
+        raise ValueError('staged application hash mismatch')
+    old_app = (layout.app / 'current').resolve() if (layout.app / 'current').exists() else None
+    old_snapshot = (layout.state / 'current').resolve() if (layout.state / 'current').exists() else None
+    unit_path = layout.units / SERVICE
+    old_unit = unit_path.read_bytes() if unit_path.exists() else None
+    active_env = layout.state / 'active.env'
+    old_env = active_env.read_bytes() if active_env.exists() else None
+    new_env = layout.config.read_bytes()
+    if old_app == app.resolve() and old_snapshot == snapshot.resolve() and old_unit == unit and old_env == new_env:
+        if not command('systemctl', 'is-active', '--quiet', SERVICE):
+            raise RuntimeError('private origin service inactive')
+        return 'unchanged'
+    layout.units.mkdir(parents=True, exist_ok=True)
+    try:
+        _atomic_link(layout.app / 'current', app)
+        _atomic_link(layout.state / 'current', snapshot)
+        _atomic_write(active_env, new_env, 0o600)
+        _atomic_write(unit_path, unit, 0o644)
+        command('systemctl', 'daemon-reload')
+        command('systemctl', 'restart', SERVICE)
+        health()
+        command('systemctl', 'enable', SERVICE)
+    except Exception:
+        for link, previous in ((layout.app / 'current', old_app),
+                               (layout.state / 'current', old_snapshot)):
+            if previous is None:
+                link.unlink(missing_ok=True)
+            else:
+                _atomic_link(link, previous)
+        if old_unit is None:
+            unit_path.unlink(missing_ok=True)
+        else:
+            _atomic_write(unit_path, old_unit, 0o644)
+        if old_env is None:
+            active_env.unlink(missing_ok=True)
+        else:
+            _atomic_write(active_env, old_env, 0o600)
+        command('systemctl', 'daemon-reload')
+        if old_app is not None and old_snapshot is not None:
+            command('systemctl', 'restart', SERVICE)
+        else:
+            command('systemctl', 'stop', SERVICE)
+        raise
+    return 'activated'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bundle-dir', type=Path, required=True)
+    parser.add_argument('--snapshot-source', type=Path, required=True)
+    parser.add_argument('--expected-sha256', required=True)
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('root required')
+    layout = Layout(Path('/opt/freediving/owner-evidence/app'),
+                    Path('/var/lib/freediving-owner-evidence'),
+                    Path('/etc/systemd/system'), Path('/etc/freediving/owner-evidence.env'))
+    try:
+        _config(layout.config, 0, args.expected_sha256)
+        _inputs(args.bundle_dir, args.snapshot_source, args.expected_sha256)
+    except (ValueError, OSError, KeyError, json.JSONDecodeError):
+        parser.exit(1, 'Private origin activation prerequisites missing or invalid\n')
+    try:
+        identity = pwd.getpwnam('freediving-evidence')
+    except KeyError:
+        subprocess.run(['useradd', '--system', '--home', '/nonexistent',
+                        '--shell', '/usr/sbin/nologin', 'freediving-evidence'], check=True)
+        identity = pwd.getpwnam('freediving-evidence')
+    if (identity.pw_uid == 0 or identity.pw_dir != '/nonexistent' or
+            identity.pw_shell not in ('/usr/sbin/nologin', '/sbin/nologin')):
+        parser.exit(1, 'Private origin service account is not restricted\n')
+    try:
+        result = activate(args.bundle_dir, args.snapshot_source, args.expected_sha256,
+                          layout, owner_uid=identity.pw_uid, owner_gid=identity.pw_gid)
+    except Exception as exc:
+        parser.exit(1, f'Private origin activation refused or rolled back: {type(exc).__name__}\n')
+    print(result)
+
+
+if __name__ == '__main__':
+    main()

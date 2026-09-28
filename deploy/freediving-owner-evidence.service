@@ -1,0 +1,26 @@
+[Unit]
+Description=Freediving private owner evidence origin
+After=network.target
+
+[Service]
+User=freediving-evidence
+Group=freediving-evidence
+WorkingDirectory=/opt/freediving/owner-evidence/app/current
+EnvironmentFile=/var/lib/freediving-owner-evidence/active.env
+ExecStart=/usr/bin/python3 /opt/freediving/owner-evidence/app/current/scripts/owner_evidence_origin.py --snapshot-dir /var/lib/freediving-owner-evidence/current --port 8081
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadOnlyPaths=/var/lib/freediving-owner-evidence /opt/freediving/owner-evidence
+InaccessiblePaths=/etc/freediving/public.env /etc/freediving/migration.env
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

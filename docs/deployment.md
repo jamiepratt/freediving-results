@@ -138,3 +138,93 @@ Pre-deployment PostgreSQL custom-format dumps are in `/var/backups/freediving`
 backup. Offsite backup integration and restore drills remain tracked in issue #1.
 To withdraw the site, disable its Worker custom-domain route; stopping the tunnel
 also makes its origin unavailable. Private data remains on the VPS/local archive.
+
+## Owner evidence remote activation checkpoint
+
+The read-only owner evidence origin and `/owner-evidence` Worker route are prepared,
+but **not activated by `deploy/release.sh`**. The private snapshot remains separate
+from the public PostgreSQL database, public service, release tar and Git. The
+normal release reconciles the public tunnel ingress and preserves an already
+activated `owner-origin.alphacompose.com` ingress; unexpected tunnel drift stops
+it. Worker private bindings are secrets, which Wrangler preserves on later
+[deploys](https://developers.cloudflare.com/workers/wrangler/commands/workers/).
+
+Activation requires a Cloudflare Access self-hosted application for exactly
+`poc.alphacompose.com/owner-evidence*`, one Allow policy with only the exact owner
+email selector(s), its audience and issuer, and a token with `Access: Apps and
+Policies Read`. The current `alphacompose` Wrangler token returned HTTP 403 for
+Access application reads on 28 September 2026. An operator must grant a suitably
+scoped read token and configure the Access app/policy before activation. Access
+must protect both `/owner-evidence` and child paths. The Worker independently
+checks the signed assertion, audience, issuer and owner allowlist. No private
+binding is set by a normal public release.
+
+On the VPS, first create `/etc/freediving/owner-evidence.env` as root, mode 0600,
+with unquoted `KEY=VALUE` lines for:
+
+```text
+OWNER_EVIDENCE_GATEWAY_SECRET=<new random ASCII secret of at least 16 characters>
+OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com
+OWNER_EVIDENCE_EMAILS=<comma-separated lowercase owner email addresses>
+OWNER_EVIDENCE_SNAPSHOT_SHA256=<sha256 of snapshot.sqlite>
+```
+
+Do not reuse the public gateway secret. The origin reads only the pinned private
+SQLite snapshot, not PostgreSQL or review credentials. Retain the verified source
+snapshot and its manifest in a separate private backup before activation. Check
+that `manifest.json` declares the same SHA-256 and that the code bundle and
+snapshot were not copied into the public release tar. Stage the five code files
+listed below and `manifest.json` plus `snapshot.sqlite` on the VPS under root-only
+temporary directories outside `/opt/freediving/releases`:
+
+```sh
+# Run from the matching repository checkout. Replace SNAPSHOT_DIR with the
+# private snapshot directory and SHA256 with its independently checked digest.
+SNAPSHOT_DIR=/absolute/path/to/private/snapshot
+SHA256=$(shasum -a 256 "$SNAPSHOT_DIR/snapshot.sqlite" | awk '{print $1}')
+ssh bridge-vps 'sudo -n install -d -m 0700 /var/lib/freediving-owner-evidence/import/code /var/lib/freediving-owner-evidence/import/snapshot'
+tar -cf - scripts/owner_evidence_origin.py scripts/unified_evidence_query.py resources/evidence_workspace.html resources/evidence_workspace.js resources/evidence_workspace.css | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
+tar -C "$SNAPSHOT_DIR" -cf - manifest.json snapshot.sqlite | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/snapshot'
+tar -cf - deploy/owner_evidence_activate.py deploy/freediving-owner-evidence.service | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
+ssh bridge-vps "sudo -n python3 /var/lib/freediving-owner-evidence/import/code/deploy/owner_evidence_activate.py --bundle-dir /var/lib/freediving-owner-evidence/import/code --snapshot-source /var/lib/freediving-owner-evidence/import/snapshot --expected-sha256 '$SHA256'"
+```
+
+The host helper verifies the manifest, database hash, file type and root-only
+configuration before staging. It starts a dedicated `freediving-evidence` service
+on loopback port 8081, checks its pinned snapshot response, and restores previous
+links/unit if restart fails. Re-running unchanged inputs is idempotent. The
+private service has no public database credentials.
+
+From the same checkout, read-check Access policy, private origin positive and
+negative responses, tunnel drift, and DNS before any Cloudflare write:
+
+```sh
+python3 deploy/owner_evidence_cloudflare.py --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER"
+```
+
+A 403, wrong policy, owner mismatch, origin failure, tunnel drift or DNS conflict
+stops here. Once those checks pass and the public site is healthy, the explicit
+activation command adds the private tunnel ingress and proxied CNAME, then sets
+all five private Worker bindings in one secret bulk deployment:
+
+```sh
+python3 deploy/owner_evidence_cloudflare.py --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER" --activate
+python3 deploy/verify.py
+```
+
+Finish with an authenticated owner browser check at
+`https://poc.alphacompose.com/owner-evidence`, including source/detail API and
+an unauthenticated denial check. Do not declare activation complete before these
+checks. The private origin URL is `https://owner-origin.alphacompose.com` only
+for the Worker; direct unauthenticated requests must return 403. Keep the
+pre-activation tunnel configuration, DNS state, Worker version and private
+snapshot hash as a rollback receipt.
+
+If any check fails after activation, remove `OWNER_EVIDENCE_GATEWAY_SECRET` from
+the Worker first to close the route, then restore the recorded Worker version and
+prior tunnel configuration/DNS as needed. Stop the private service only after the
+Worker route is closed. Do not overwrite public ingress or public `GATEWAY_SECRET`.
+The host helper retains prior app/snapshot versions for local service rollback.
+An incomplete activation is not evidence that owner access or archive durability
+has been verified; keep [issue #54](https://github.com/jamiepratt/freediving-results/issues/54)
+open until remote checks and the wider UI acceptance are complete.
