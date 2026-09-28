@@ -83,6 +83,9 @@ class PrivateOriginTest(unittest.TestCase):
                 self.assertNotEqual(status, 200)
                 self.assertNotIn(b'visual', body)
                 self.assertEqual(response_headers['Cache-Control'], 'no-store')
+                status, _, body = self.request('/owner-evidence/api/queue', headers=headers)
+                self.assertEqual(status, 403)
+                self.assertNotIn(b'Sample meet', body)
 
     def test_duplicate_or_conflicting_security_headers_are_rejected(self):
         base = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
@@ -116,6 +119,12 @@ class PrivateOriginTest(unittest.TestCase):
         status, _, body = self.request('/owner-evidence/api/detail/' + record['record_id'])
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['raw_fields'], {'Name': 'Ada'})
+        status, _, body = self.request('/owner-evidence/api/queue?group=event_publication&limit=1')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['total'], 1)
+        self.assertEqual(self.request('/owner-evidence/api/queue?limit=101')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/queue?group=athlete_identity&group=athlete_identity')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/queue', method='POST')[0], 405)
         self.assertEqual(self.request('/owner-evidence/api/browse?limit=101')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/browse?kind=gap&kind=gap')[0], 400)
         status, _, body = self.request('/owner-evidence/api/overview', method='HEAD')

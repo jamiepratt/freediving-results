@@ -7,6 +7,58 @@ import sqlite3
 from pathlib import Path
 
 
+QUEUE_GROUPS = (
+    'extraction_source_semantics', 'source_revision_same_result',
+    'same_attempt_relationship', 'athlete_identity', 'coverage_finality',
+    'event_publication',
+)
+
+
+def _queue_group(row, raw):
+    if row['kind'] == 'relationship':
+        return 'event_publication' if raw.get('relationship_type') == 'calendar_event_link' else 'source_revision_same_result'
+    if row['collection'] == 'unparsed_rows':
+        return 'extraction_source_semantics'
+    if row['collection'] == 'source_relationship_gaps':
+        return 'event_publication'
+    if row['collection'] == 'retained_only_artifacts':
+        return 'extraction_source_semantics'
+    disposition = (raw.get('assessment') or {}).get('disposition')
+    if disposition in ('duplicate_rendering', 'supporting_overlap', 'matching_timing_view'):
+        return 'source_revision_same_result'
+    if disposition in ('unsupported_image_results', 'supplemental_aggregate', 'supplemental_combined_ranking'):
+        return 'extraction_source_semantics'
+    return 'coverage_finality'
+
+
+def _queue_item(row, input_data):
+    raw = json.loads(row['raw_json'])
+    assessment = raw.get('assessment') or {}
+    group = _queue_group(row, raw)
+    trigger = (assessment.get('failure_reason') or raw.get('reason') or raw.get('value')
+               or assessment.get('disposition') or raw.get('relationship_type') or 'Explicit evidence record')
+    supporting = [str(value) for value in (assessment.get('evidence'), raw.get('basis')) if value]
+    contrary = [str(value) for value in (assessment.get('contrary_evidence'), raw.get('contrary_evidence')) if value]
+    unknown = []
+    if not supporting:
+        unknown.append('Supporting evidence not recorded in this item')
+    if not contrary:
+        unknown.append('Contrary evidence not recorded in this item')
+    if group in ('source_revision_same_result', 'event_publication'):
+        unknown.append('Relationship or publication approval not recorded')
+    return {
+        'id': 'queue:' + row['record_id'], 'group': group, 'trigger': str(trigger),
+        'supporting_evidence': supporting, 'contrary_evidence': contrary, 'unknown': unknown,
+        'citation': {'record_id': row['record_id'], 'source_name': row['source_name'],
+                     'collection': row['collection'], 'record_path': row['record_path'],
+                     'source_id': row['source_id'], 'source_object_id': row['source_object_id'],
+                     'page': row['page'], 'locator': json.loads(row['citation_json'])},
+        'context': {'kind': row['kind'], 'review_status': row['review_status'],
+                    'parser_version': row['parser_version'], 'observation_version': row['observation_version'],
+                    'input_sha256': input_data['sha256'], 'source_sha256': input_data.get('source_sha256')},
+    }
+
+
 class SnapshotQuery:
     def __init__(self, directory):
         directory = Path(directory)
@@ -43,6 +95,68 @@ class SnapshotQuery:
             'snapshot_sha256': self.manifest['snapshot_sha256'],
             'counts': counts,
         }
+
+    def queue(self, *, group=None, source_name=None, limit=50, offset=0):
+        if group is not None and group not in QUEUE_GROUPS:
+            raise ValueError('invalid queue group')
+        if source_name is not None and (not isinstance(source_name, str) or not source_name or len(source_name) > 200 or '\x00' in source_name):
+            raise ValueError('invalid source_name')
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('limit must be an integer from 1 to 100')
+        if type(offset) is not int or not 0 <= offset <= 100000:
+            raise ValueError('offset must be an integer from 0 to 100000')
+        rows = self.db.execute("SELECT * FROM records WHERE kind IN ('gap','relationship') ORDER BY source_name, collection, record_path, record_id")
+        items = [_queue_item(row, self.manifest['inputs'][row['source_name']]) for row in rows]
+        aggregate_parents = set()
+        for row in self.db.execute("SELECT * FROM records WHERE kind='aggregate' AND collection='sheets.rows' ORDER BY source_name, record_path"):
+            raw = json.loads(row['raw_json'])
+            if row['parent_path'] in aggregate_parents or not any('not individual attempts' in str(note).lower() for note in raw.get('ambiguities', [])):
+                continue
+            aggregate_parents.add(row['parent_path'])
+            item = _queue_item(row, self.manifest['inputs'][row['source_name']])
+            item['group'] = 'extraction_source_semantics'
+            item['trigger'] = '; '.join(map(str, raw['ambiguities']))
+            item['supporting_evidence'] = ['Aggregate row ambiguity recorded in retained packet']
+            item['unknown'] = ['Attempt-level equivalence is not recorded', 'Contrary evidence not recorded in this item']
+            items.append(item)
+        for row in self.db.execute("SELECT * FROM records WHERE kind='candidate_position' ORDER BY source_name, collection, record_path, record_id"):
+            raw = json.loads(row['raw_json'])
+            notes = raw.get('uncertainties') or raw.get('ambiguities') or []
+            if not isinstance(notes, list) or not notes:
+                continue
+            item = _queue_item(row, self.manifest['inputs'][row['source_name']])
+            item['group'] = 'athlete_identity' if any('surname' in str(note).lower() or 'athlete identity' in str(note).lower() for note in notes) else 'extraction_source_semantics'
+            item['trigger'] = '; '.join(map(str, notes))
+            item['supporting_evidence'] = ['Uncertainty explicitly recorded on cited candidate row']
+            item['unknown'] = ['No owner resolution recorded in this snapshot', 'Contrary evidence not recorded in this item']
+            items.append(item)
+        for name, data in sorted(self.manifest['inputs'].items()):
+            if data['status'] != 'excluded':
+                continue
+            items.append({
+                'id': 'queue:source:' + hashlib.sha256(name.encode()).hexdigest(),
+                'group': 'coverage_finality', 'trigger': 'Source excluded from this partial snapshot: ' + data.get('reason', 'reason unknown'),
+                'supporting_evidence': [], 'contrary_evidence': [],
+                'unknown': ['Source records absent from this snapshot', 'Supporting and contrary evidence not recorded in the snapshot'],
+                'citation': {'source_name': name, 'record_id': None, 'collection': None, 'record_path': None,
+                             'source_id': None, 'source_object_id': None, 'page': None, 'locator': None},
+                'context': {'kind': 'excluded_source', 'review_status': None, 'parser_version': None,
+                            'observation_version': None, 'input_sha256': data['sha256'],
+                            'source_sha256': data.get('source_sha256')},
+            })
+        items.sort(key=lambda item: (item['group'], item['citation']['source_name'], item['citation']['record_path'] or '', item['id']))
+        counts = {name: sum(item['group'] == name for item in items) for name in QUEUE_GROUPS}
+        if group:
+            items = [item for item in items if item['group'] == group]
+        if source_name:
+            items = [item for item in items if item['citation']['source_name'] == source_name]
+        total = len(items)
+        return {'coverage': self.manifest['coverage'], 'cutoff': self.manifest['cutoff'],
+                'snapshot_sha256': self.manifest['snapshot_sha256'],
+                'denominators': {'candidate_positions': self.db.execute("SELECT count(*) FROM records WHERE kind='candidate_position'").fetchone()[0],
+                                 'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts']},
+                'group_counts': counts, 'total': total, 'limit': limit, 'offset': offset,
+                'items': items[offset:offset + limit]}
 
     def browse(self, *, source_name=None, collection=None, kind=None, event_name=None,
                date_from=None, date_to=None, session=None, discipline=None,

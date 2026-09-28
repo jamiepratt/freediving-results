@@ -175,6 +175,18 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result[key] = int(result[key])
         return result
 
+    def _queue_filters(self, query):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+        if set(args) - {'group', 'source_name', 'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+            raise ValueError('invalid queue filters')
+        result = {key: value[0] for key, value in args.items()}
+        for key in ('limit', 'offset'):
+            if key in result:
+                if not result[key].isdigit() or len(result[key]) > 6:
+                    raise ValueError('invalid paging')
+                result[key] = int(result[key])
+        return result
+
     def _json(self, value):
         self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
 
@@ -203,6 +215,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.source(args['name'][0])
             elif path == '/owner-evidence/api/browse':
                 result = query.browse(**self._filters(parsed.query))
+            elif path == '/owner-evidence/api/queue':
+                result = query.queue(**self._queue_filters(parsed.query))
             elif path in ('/owner-evidence/api/gaps', '/owner-evidence/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = query.browse(**self._filters(parsed.query, fixed_kind=kind))

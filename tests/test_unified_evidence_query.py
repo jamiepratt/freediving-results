@@ -23,7 +23,7 @@ def snapshot(tmp_path):
                        {'id': 'a', 'fields': {'Name': 'Ada'}, 'parsed_fields': {'score': '3:00'},
                         'citation': {'page': 1, 'line': 3}, 'parser_version': 'parser/1'},
                        {'id': 'b', 'fields': {'Name': 'Bea'}, 'citation': {'page': 1, 'line': 4}}]}],
-        'source_relationship_candidates': [{'id': 'rel', 'status': 'unresolved'}],
+        'source_relationship_candidates': [{'id': 'rel', 'status': 'unresolved', 'relationship_type': 'calendar_event_link'}],
         'source_gaps': [{'id': 'gap', 'status': 'needs review'}],
     }), encoding='utf-8')
     excluded = tmp_path / 'excluded.json'
@@ -36,6 +36,23 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    def test_exception_queue_groups_explicit_evidence_without_decisions(self):
+        with tempfile.TemporaryDirectory() as d:
+            with SnapshotQuery(snapshot(Path(d))) as query:
+                queue = query.queue(limit=1)
+                next_page = query.queue(limit=1, offset=1)
+                relationship = query.queue(group='event_publication')
+                with self.assertRaises(ValueError):
+                    query.queue(group='invented')
+        self.assertEqual(queue['coverage'], 'dated partial census')
+        self.assertEqual(queue['denominators']['candidate_positions'], 2)
+        self.assertIsNone(queue['denominators']['confirmed_distinct_attempts'])
+        self.assertEqual(queue['total'], 3)  # gap, relationship, excluded source
+        self.assertNotEqual(queue['items'][0]['id'], next_page['items'][0]['id'])
+        self.assertEqual(relationship['total'], 1)
+        self.assertEqual(relationship['items'][0]['citation']['record_path'], 'source_relationship_candidates[0]')
+        self.assertIn('unknown', relationship['items'][0])
+
     def test_overview_keeps_namespaces_and_distinct_attempts_unknown(self):
         with tempfile.TemporaryDirectory() as d:
             with SnapshotQuery(snapshot(Path(d))) as query:

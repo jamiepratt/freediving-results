@@ -167,6 +167,17 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                 result = self.server.snapshot().source(args['name'][0])
             elif path == '/api/browse':
                 result = self.server.snapshot().browse(**self._filters(parsed.query))
+            elif path == '/api/queue':
+                args = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+                if set(args) - {'group', 'source_name', 'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+                    raise ValueError('invalid queue filters')
+                options = {key: value[0] for key, value in args.items()}
+                for key in ('limit', 'offset'):
+                    if key in options:
+                        if not options[key].isdigit() or len(options[key]) > 6:
+                            raise ValueError('invalid paging')
+                        options[key] = int(options[key])
+                result = self.server.snapshot().queue(**options)
             elif path in ('/api/gaps', '/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = self.server.snapshot().browse(**self._filters(parsed.query, fixed_kind=kind))

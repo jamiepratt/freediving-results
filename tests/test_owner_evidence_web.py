@@ -44,7 +44,7 @@ class WorkspaceTest(unittest.TestCase):
         return headers['Set-Cookie'].split(';', 1)[0]
 
     def test_private_api_and_assets_require_login(self):
-        for path in ('/', '/assets/app.js', '/api/overview', '/api/browse', '/api/sources'):
+        for path in ('/', '/assets/app.js', '/api/overview', '/api/browse', '/api/sources', '/api/queue'):
             with self.subTest(path=path):
                 status, headers, data = self.request('GET', path)
                 self.assertEqual(status, 401)
@@ -73,13 +73,18 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(json.loads(self.request('GET', '/api/gaps', headers=headers)[2])['total'], 1)
         self.assertEqual(json.loads(self.request('GET', '/api/relationships', headers=headers)[2])['total'], 1)
         self.assertEqual(json.loads(self.request('GET', '/api/sources', headers=headers)[2])[0]['status'], 'excluded')
+        queue = json.loads(self.request('GET', '/api/queue?group=event_publication&limit=1', headers=headers)[2])
+        self.assertEqual(queue['total'], 1)
+        self.assertEqual(queue['items'][0]['citation']['source_name'], 'visual')
         for method, path in (('POST', '/api/browse'), ('PUT', '/api/detail/' + record_id), ('DELETE', '/api/detail/' + record_id)):
             self.assertIn(self.request(method, path, headers=headers)[0], (403, 405))
+        self.assertIn(self.request('POST', '/api/queue', headers=headers)[0], (403, 405))
 
     def test_query_bounds_and_asset_isolation(self):
         cookie = self.login()
         headers = {'Cookie': cookie}
         for path in ('/api/browse?limit=101', '/api/browse?offset=-1', '/api/browse?foo=x',
+                     '/api/queue?group=unknown', '/api/queue?limit=101', '/api/queue?offset=-1', '/api/queue?foo=x',
                      '/api/browse?source_name=' + 'a' * 201, '/assets/../scripts/unified_evidence_query.py',
                      '/api/detail/' + 'x' * 64):
             self.assertIn(self.request('GET', path, headers=headers)[0], (400, 404))
@@ -94,6 +99,30 @@ REAL_SNAPSHOT = Path('/Users/jamiep/.codex/worktrees/1ad1/freediving-results/dat
 
 @unittest.skipUnless(REAL_SNAPSHOT.exists(), 'private snapshot unavailable')
 class RealSnapshotSmokeTest(unittest.TestCase):
+    def test_real_exception_queue_keeps_explicit_limits(self):
+        from unified_evidence_query import SnapshotQuery
+        with SnapshotQuery(REAL_SNAPSHOT) as query:
+            queue = query.queue(limit=100)
+            b45 = query.queue(group='extraction_source_semantics', source_name='gap', limit=100)
+            identity = query.queue(group='athlete_identity')
+            same_attempt = query.queue(group='same_attempt_relationship')
+        self.assertEqual(queue['snapshot_sha256'],
+                         'c681566922dc93adfb5d54db6d50c0fe8267961a0de32188cec0fc2d9990943e')
+        self.assertEqual(queue['denominators']['candidate_positions'], 12253)
+        self.assertIsNone(queue['denominators']['confirmed_distinct_attempts'])
+        self.assertEqual(queue['group_counts'], {
+            'extraction_source_semantics': 392, 'source_revision_same_result': 3,
+            'same_attempt_relationship': 0, 'athlete_identity': 2,
+            'coverage_finality': 19, 'event_publication': 7})
+        self.assertEqual(sum(item['citation']['collection'] == 'unparsed_rows' for item in b45['items']), 4)
+        self.assertEqual(identity['total'], 2)
+        self.assertEqual(same_attempt['total'], 0)
+        self.assertEqual(len({item['id'] for item in queue['items']}), len(queue['items']))
+        for item in queue['items']:
+            self.assertTrue(item['citation']['source_name'])
+            self.assertTrue(item['trigger'])
+            self.assertTrue(item['unknown'])
+
     def test_real_snapshot_examples_stay_candidates_and_quarantined(self):
         from unified_evidence_query import SnapshotQuery
         with SnapshotQuery(REAL_SNAPSHOT) as query:
