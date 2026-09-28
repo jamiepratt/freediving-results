@@ -76,6 +76,33 @@ def test_snapshot_replay_is_byte_identical(tmp_path):
     assert first == second
 
 
+def test_required_complete_packet_cannot_be_omitted(tmp_path):
+    args, baseline, visual, excluded = build(tmp_path)
+    complete = write(tmp_path / 'komaros-complete.json', {
+        'schema': 'komaros-visual-evidence/v1',
+        'pages': [{'page': 1, 'rows': [{'id': 'printed-row-1'}]}],
+    })
+    digest = hashlib.sha256(complete.read_bytes()).hexdigest()
+    args += ['--required-input', f'komaros-visual={digest}']
+    missing = subprocess.run(args, capture_output=True, text=True)
+    assert missing.returncode != 0
+    assert 'required input missing: komaros-visual' in missing.stderr
+
+    args += ['--input', f'komaros-visual={complete}']
+    subprocess.run(args, check=True)
+    out = tmp_path / 'out'
+    manifest = json.loads((out / 'manifest.json').read_text())
+    assert manifest['required_inputs'] == {'komaros-visual': digest}
+    assert manifest['inputs']['komaros-visual']['status'] == 'included'
+    assert manifest['inputs']['komaros']['status'] == 'excluded'
+    with sqlite3.connect(out / 'snapshot.sqlite') as db:
+        assert db.execute('select count(*) from records where source_name="komaros-visual" and collection="pages.rows"').fetchone()[0] == 1
+
+    first = hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest()
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)], check=True)
+    assert hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest() == first
+
+
 def test_corrupt_input_keeps_last_good_snapshot(tmp_path):
     args, baseline, visual, _ = build(tmp_path)
     subprocess.run(args, check=True)
@@ -116,6 +143,10 @@ class SnapshotContractTest(unittest.TestCase):
     def test_replay(self):
         with tempfile.TemporaryDirectory() as d:
             test_snapshot_replay_is_byte_identical(Path(d))
+
+    def test_required_complete_packet(self):
+        with tempfile.TemporaryDirectory() as d:
+            test_required_complete_packet_cannot_be_omitted(Path(d))
 
 
 if __name__ == "__main__":

@@ -35,6 +35,13 @@ def excluded_path(spec):
     return name, Path(path), reason
 
 
+def required_input(spec):
+    name, sep, digest = spec.partition('=')
+    if not sep or not name or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise ValueError('expected NAME=SHA256 for required input')
+    return name, digest
+
+
 def classify(collection, obj, parent=None):
     parent = parent or {}
     c = collection.lower()
@@ -151,20 +158,26 @@ def create_db(path):
 def build(args):
     included = dict(named_path(x) for x in args.input)
     excluded = [excluded_path(x) for x in args.excluded]
+    required = dict(required_input(x) for x in args.required_input)
     names = list(included) + [x[0] for x in excluded]
     if len(names) != len(set(names)) or not included:
         raise ValueError('source names must be unique and at least one input is required')
+    for name in required:
+        if name not in included:
+            raise ValueError(f'required input missing: {name}')
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     work = tempfile.TemporaryDirectory(prefix='.snapshot-build-', dir=out)
     db_path = Path(work.name) / 'snapshot.sqlite'
     db = create_db(db_path)
     manifest = {'schema': SCHEMA, 'cutoff': args.cutoff, 'coverage': 'dated partial census',
-                'confirmed_distinct_attempts': None, 'inputs': {},
+                'confirmed_distinct_attempts': None, 'inputs': {}, 'required_inputs': dict(sorted(required.items())),
                 'reconciliation': 'Input namespaces remain separate; cross-source attempt equivalence unassessed.'}
     try:
         for name in sorted(included):
             data = included[name].read_bytes()
+            if name in required and sha(data) != required[name]:
+                raise ValueError(f'required input hash mismatch: {name}')
             root = json.loads(data)
             if not isinstance(root, dict):
                 raise ValueError(f'{name} must be a JSON object')
@@ -249,7 +262,8 @@ def replay(args):
         else:
             excluded.append(f"{name}={path}:{item['reason']}")
     build(argparse.Namespace(output_dir=str(out), cutoff=manifest['cutoff'],
-                             input=inputs, excluded=excluded))
+                             input=inputs, excluded=excluded,
+                             required_input=[f'{name}={digest}' for name, digest in manifest.get('required_inputs', {}).items()]))
     new = json.loads((out / 'manifest.json').read_text())
     if new['snapshot_sha256'] != manifest['snapshot_sha256']:
         raise ValueError('replay hash mismatch')
@@ -262,6 +276,7 @@ def main():
     b = sub.add_parser('build')
     b.add_argument('--cutoff', required=True)
     b.add_argument('--input', action='append', default=[], metavar='NAME=PATH')
+    b.add_argument('--required-input', action='append', default=[], metavar='NAME=SHA256')
     b.add_argument('--excluded', action='append', default=[], metavar='NAME=PATH:REASON')
     b.add_argument('--output-dir', required=True)
     v = sub.add_parser('verify')
