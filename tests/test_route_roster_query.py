@@ -1,11 +1,13 @@
 import hashlib
 import http.client
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -18,6 +20,41 @@ SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/cmas-issue55-snapshot-2026
 ROSTER_SHA = '5865e082eb929d8995a2d42a24dab3b3765b4df65fdbbaf341a10f9dc33d24bd'
 SNAPSHOT_SHA = '0285cd65ebf9f63a422c3ed7122aa6f59b97f06ac69e42d810e986b02579a9e6'
 V7_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-snapshot-20260928-v7/snapshot')
+LATEST_ROSTER = Path('/Users/jamiep/.codex/private-corpora/issue55-san-mauro-jpg-20260928/roster.json')
+
+
+@unittest.skipUnless(LATEST_ROSTER.exists(), 'private latest route roster unavailable')
+class LatestRouteRosterTest(unittest.TestCase):
+    def test_snapshot_coverage_prefers_latest_embedded_roster(self):
+        roster = json.loads(LATEST_ROSTER.read_text())
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        db.executescript('CREATE TABLE records(source_name TEXT, collection TEXT, record_path TEXT, raw_json TEXT);'
+                         'CREATE TABLE source_metadata(source_name TEXT, metadata_json TEXT);')
+        db.execute('INSERT INTO records VALUES (?,?,?,?)',
+                   ('route-roster-v3', 'routes', 'routes[0]', json.dumps({'id': 'stale'})))
+        for collection in ('routes', 'leads'):
+            for index, item in enumerate(roster[collection]):
+                db.execute('INSERT INTO records VALUES (?,?,?,?)',
+                           ('route-roster-v4', collection, f'{collection}[{index}]', json.dumps(item)))
+        db.execute('INSERT INTO source_metadata VALUES (?,?)',
+                   ('route-roster-v4', json.dumps({k: v for k, v in roster.items() if not isinstance(v, list)})))
+        snapshot = SimpleNamespace(db=db, detail=lambda _record_id: None, manifest={
+            'confirmed_distinct_attempts': None,
+            'inputs': {
+                'route-roster-v3': {'source_schema': 'issue55-route-roster/v3',
+                                    'collections': {'routes': 1, 'leads': 0}, 'sha256': 'old'},
+                'route-roster-v4': {'source_schema': 'issue55-route-roster/v3',
+                                    'collections': {'routes': 15, 'leads': 83}, 'sha256': 'new'},
+            }})
+        try:
+            query = RouteRosterQuery.from_snapshot(snapshot)
+            self.assertEqual(query.sha256, 'new')
+            self.assertEqual(query.routes()['total'], 15)
+            self.assertEqual(query.leads()['total'], 83)
+            self.assertEqual(query.leads()['summary']['leads_by_status']['unchecked'], 0)
+        finally:
+            db.close()
 
 
 @unittest.skipUnless(V7_SNAPSHOT.exists(), 'private v7 evidence unavailable')

@@ -42,6 +42,16 @@ Six selected-date AIDA packets add 24, 22, 67, 66, 52, and 50 cited candidate po
 
 Every namespace has its own required packet hash in the manifest. The extension validates AIDA position counts and unique locators, Eindhoven row counts and exact result-to-endpoint IDs, and roster counts. It does not establish athlete identity, cross-source same-attempt links, owner review, new Roatan acceptances, or confirmed distinct attempts. The manifest keeps `confirmed_distinct_attempts: null`.
 
+## Retained source refresh, 2026-09-28
+
+The private v8 snapshot is `/Users/jamiep/.codex/private-corpora/issue55-unified-snapshot-20260928-v8/snapshot/`, cutoff `2026-09-28T20:22:00Z`. SQLite SHA-256 is `40997d52fc409647f4ab3cbacb8e926abcd5920401aa224f5c73195a1ff89fb3`; manifest SHA-256 is `493f9962850d4db67c449c02ac67f2d1785b87de08269cbff1a8b3ba3500c248`. It extends v7 with 17 pinned inputs and 1,041 records, retaining all 14,689 prior records for 15,730 total. Verification, SQLite integrity, and byte-identical replay passed. The 17 inputs are 11 selected-date AIDA packets, cumulative FFESSM rankings, FFESSM daily results and correspondence evidence, Apnea Academy file reconciliation, San Mauro JPG evidence, and the latest route roster.
+
+The five Mabini packets add 116 cited positions; the six Adriatic packets add 63. Cumulative FFESSM rankings add nine source records, 56 cited ranking positions linked to existing observation references, and 18 candidate publication links. Its earlier three-PDF packet is ancestry, not 11 extra positions. Two daily PDFs add two source records and 71 printed positions with parser observations. A separate correspondence packet records 56 shared printed-field profiles and 15 unmatched daily positions. These profiles do not establish same sporting attempts; daily positions are not imported observations. Rankings do not print individual result dates.
+
+Apnea Academy adds 40 GIA club aggregates, one placeholder, and ten San Mauro 2026 team aggregates. The prior GIA individual workbook is the same original as the earlier 898-position packet, so v8 adds zero individual positions from it. Six San Mauro 2025 JPGs add 238 cited positions: 148 individual discipline rows and 90 combined aggregates. Their 238 manual observation versions are separate records, with five positions containing unresolved fields and four candidate source relationships. No new import or review is implied.
+
+The latest embedded roster keeps 15 routes and 83 leads: 49 acquired, 34 checked, zero unchecked; one CMAS route remains inaccessible. Zero unchecked known leads does not establish a complete global census. The query layer selects this newest embedded roster and still reads v7. All new candidate positions, aggregates, and manual observation versions have source object bindings and citations. Source relationships remain unapproved; `confirmed_distinct_attempts` stays null. The known source search and refresh scope continues through 2026-12-31.
+
 ## Read-only owner query layer
 
 `scripts/unified_evidence_query.py` opens the snapshot in SQLite read-only immutable mode. It verifies the database hash against the manifest before opening it. It has no write or review route and creates no database files. Keep this module behind owner authentication if a web handler is added; this slice exposes no HTTP service or public Worker endpoint.

@@ -44,7 +44,7 @@ def required_input(spec):
     return name, digest
 
 
-def classify(collection, obj, parent=None):
+def classify(collection, obj, parent=None, schema=None):
     parent = parent or {}
     c = collection.lower()
     if c == 'result_rows':
@@ -59,6 +59,20 @@ def classify(collection, obj, parent=None):
         return 'discovery_lead'
     if c == 'candidate_result_appearances':
         return 'relationship'
+    if c in ('sources', 'source_objects', 'artifacts'):
+        return 'source'
+    if c == 'observation_versions' and schema == 'san-mauro-jpg-supplement/v1':
+        return 'observation_version'
+    if c == 'unmatched_daily':
+        return 'gap'
+    if c == 'observations':
+        return 'candidate_position'
+    if c == 'positions' and obj.get('kind') == 'aggregate':
+        return 'aggregate'
+    if c == 'gia_team.placeholder':
+        return 'other'
+    if c in ('gia_team.rows', 'san_mauro.rows'):
+        return 'aggregate'
     if c == 'pages.rows':
         disposition = obj.get('disposition')
         if disposition == 'duplicate_render':
@@ -77,8 +91,6 @@ def classify(collection, obj, parent=None):
         return 'gap'
     if 'relationship' in c:
         return 'relationship'
-    if c == 'sources' or c == 'source_objects' or c == 'artifacts':
-        return 'source'
     if c == 'candidate_versions' or 'candidate' in c or c in ('positions', 'observation_versions', 'pages.rows', 'pages.athlete_rows', 'athlete_appearances', 'sheets.rows'):
         return 'candidate_position'
     if c == 'events':
@@ -107,28 +119,37 @@ def normalize(obj, parent, root, kind):
     if not isinstance(parsed, dict):
         parsed = {}
     citation_obj = obj.get('citation') if isinstance(obj.get('citation'), dict) else {}
-    page = value(obj.get('page'), parent.get('page'), citation_obj.get('page'))
+    position_obj = obj.get('position') if isinstance(obj.get('position'), dict) else {}
+    competition_date = obj.get('competition_date') if isinstance(obj.get('competition_date'), dict) else {}
+    coordinates = obj.get('coordinates') if isinstance(obj.get('coordinates'), dict) else {}
+    page = value(obj.get('page'), coordinates.get('page'), parent.get('page'), citation_obj.get('page'))
     date_scope = value(obj.get('date_scope'), parent.get('date_scope'))
-    date_from = date_scope[0] if isinstance(date_scope, list) and len(date_scope) > 1 else None
-    date_to = date_scope[1] if isinstance(date_scope, list) and len(date_scope) > 1 else None
+    date_from = value(obj.get('date_from'), date_scope[0] if isinstance(date_scope, list) and len(date_scope) > 1 else None,
+                      competition_date.get('start'))
+    date_to = value(obj.get('date_to'), date_scope[1] if isinstance(date_scope, list) and len(date_scope) > 1 else None,
+                    competition_date.get('end'))
     exact_date = date_from if date_from == date_to else None
     acquisition = obj.get('acquisition_id') or ((obj.get('source') or {}).get('acquisition_id') if isinstance(obj.get('source'), dict) else None)
     observations = obj.get('observation_refs') or []
     root_source = root.get('source') if isinstance(root.get('source'), dict) else {}
     root_source_hash = root.get('source_sha256') or root_source.get('sha256')
-    source_object_id = value(obj.get('source_id'), obj.get('source_sha256'),
-                             citation_obj.get('source_sha256'), parent.get('source_id'), root_source.get('id'),
+    source_object_id = value(obj.get('source_object_id'), obj.get('source_id'), obj.get('source_sha256'),
+                             obj.get('id') if kind == 'source' else None,
+                             obj.get('sha256') if kind == 'source' else None,
+                             citation_obj.get('source_sha256'), parent.get('source_id'),
+                             (parent.get('source') or {}).get('sha256') if isinstance(parent.get('source'), dict) else None,
+                             root_source.get('id'),
                              'sha256:' + root_source_hash if root_source_hash else None)
     if source_object_id and len(source_object_id) == 64 and all(c in '0123456789abcdef' for c in source_object_id):
         source_object_id = 'sha256:' + source_object_id
     return {
-        'source_id': obj.get('id'),
+        'source_id': value(obj.get('id'), obj.get('position_id')),
         'source_object_id': source_object_id,
         'acquisition_id': value(acquisition, (root.get('source') or {}).get('acquisition_id') if isinstance(root.get('source'), dict) else None),
         'parser_version': value(obj.get('parser_version'), observations[0].get('parser_version') if observations else None),
         'observation_version': value(obj.get('observation_version'), obj.get('job_id'), observations[0].get('candidate_id') if observations else None),
         'event_name': value(obj.get('event_name'), obj.get('name') if kind == 'event' else None, root.get('event_title_calendar')),
-        'event_date': value(obj.get('event_date'), (obj.get('position') or {}).get('date'), exact_date,
+        'event_date': value(obj.get('event_date'), position_obj.get('date'), exact_date,
                             parent.get('event_date'), root.get('event_date_calendar')),
         'date_from': date_from, 'date_to': date_to, 'date_scope_json': canon(date_scope),
         'session': normalized_session(value(obj.get('session'), parent.get('session'))),
@@ -137,7 +158,12 @@ def normalize(obj, parent, root, kind):
                             (obj.get('cells') or {}).get('Discipline', {}).get('value'),
                             parent.get('discipline_raw'), parsed.get('discipline')),
         'page': page,
-        'citation': value(obj.get('citation'), obj.get('position'), obj.get('locator'), obj.get('source_lines')),
+        'citation': value(obj.get('citation'),
+                          {'daily': obj['daily'], 'ranking': obj['ranking'],
+                           'field_correspondences': obj.get('field_correspondences')}
+                          if kind == 'relationship' and isinstance(obj.get('daily'), dict)
+                          and isinstance(obj.get('ranking'), dict) else None,
+                          obj.get('position'), obj.get('locator'), obj.get('source_lines')),
         'review_status': value(obj.get('review_status'), root.get('owner_review_status'), 'unreviewed' if kind == 'candidate_position' else None),
         'raw_fields_json': canon(raw_fields),
         'parsed_fields_json': canon(parsed),
@@ -149,7 +175,17 @@ def normalized_session(session):
 
 
 def records(name, root):
+    if root.get('schema') == 'apnea-academy-file-reconciliation/v1':
+        for section in ('gia_team', 'san_mauro'):
+            parent = root[section]
+            for index, obj in enumerate(parent['rows']):
+                yield f'{section}.rows', f'{section}.rows[{index}]', obj, parent, True
+            if section == 'gia_team':
+                yield 'gia_team.placeholder', 'gia_team.placeholder', parent['placeholder'], parent, True
+        return
     for key in sorted(root):
+        if key == 'limits':
+            continue
         arr = root[key]
         if not isinstance(arr, list):
             continue
@@ -224,6 +260,44 @@ def validate_extension_packet(name, root):
         if any(not isinstance(root.get(key), list) or len(root[key]) != summary.get(count_key)
                for key, count_key in (('routes', 'route_count'), ('leads', 'lead_count'))):
             raise ValueError(f'route roster count mismatch: {name}')
+    elif schema == 'ffessm-2025-rankings/v1':
+        counts = root.get('counts') or {}
+        if (len(root.get('sources') or []) != counts.get('source_objects')
+                or len(root.get('positions') or []) != counts.get('source_positions')
+                or counts.get('existing_observation_versions') != counts.get('source_positions')):
+            raise ValueError(f'FFESSM ranking count mismatch: {name}')
+    elif schema == 'ffessm-2025-daily/v1':
+        counts = root.get('counts') or {}
+        if (len(root.get('sources') or []) != counts.get('source_objects')
+                or len(root.get('observations') or []) != counts.get('printed_positions')
+                or counts.get('parser_observations') != counts.get('printed_positions')):
+            raise ValueError(f'FFESSM daily count mismatch: {name}')
+    elif schema == 'ffessm-2025-daily-relationships/v1':
+        counts = root.get('counts') or {}
+        if (len(root.get('relationships') or []) != counts.get('shared_printed_field_correspondences')
+                or len(root.get('unmatched_daily') or []) != counts.get('unmatched_daily_positions')
+                or counts.get('daily_positions') != counts.get('shared_printed_field_correspondences') + counts.get('unmatched_daily_positions')):
+            raise ValueError(f'FFESSM relationship count mismatch: {name}')
+    elif schema == 'apnea-academy-file-reconciliation/v1':
+        counts = root.get('counts') or {}
+        gia = root.get('gia_team') or {}
+        san = root.get('san_mauro') or {}
+        individual = root.get('individual_equivalence') or {}
+        if (len(gia.get('rows') or []) != counts.get('gia_team_standings_rows')
+                or int(gia.get('placeholder') is not None) != counts.get('gia_team_placeholder_rows')
+                or len(san.get('rows') or []) != counts.get('san_mauro_team_rows')
+                or individual.get('new_rows_counted') != 0 or individual.get('same_original_sha256') is not True):
+            raise ValueError(f'Apnea source accounting mismatch: {name}')
+    elif schema == 'san-mauro-jpg-supplement/v1':
+        counts = root.get('counts') or {}
+        positions = root.get('positions') or []
+        if (len(root.get('source_objects') or []) != counts.get('source_objects')
+                or len(positions) != counts.get('source_positions')
+                or len(root.get('observation_versions') or []) != counts.get('observation_versions')
+                or len(root.get('relationships') or []) != counts.get('relationship_candidates')
+                or sum(row.get('kind') == 'aggregate' for row in positions) != counts.get('aggregate_positions')
+                or sum(row.get('kind') == 'individual' for row in positions) != counts.get('individual_positions')):
+            raise ValueError(f'San Mauro JPG count mismatch: {name}')
     elif schema not in ('roatan-2026-cwt-men-private-census/v1',
                         'cmas-worldcup-2026-visual-evidence/v1',
                         'italian-open-2025-visual-evidence/v3'):
@@ -275,7 +349,7 @@ def extend(args):
             for name, (_, _, root) in packets.items():
                 counts = Counter()
                 for collection, record_path, obj, parent, nested in records(name, root):
-                    kind = classify(collection, obj, parent)
+                    kind = classify(collection, obj, parent, root.get('schema'))
                     norm = normalize(obj, parent, root, kind)
                     db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                (sha(f'{name}:{record_path}'.encode()), name, collection, record_path,
@@ -354,7 +428,7 @@ def build(args):
                 if path in seen_paths:
                     raise ValueError(f'duplicate path {name}:{path}')
                 seen_paths.add(path)
-                kind = classify(collection, obj, parent)
+                kind = classify(collection, obj, parent, root.get('schema'))
                 norm = normalize(obj, parent, root, kind)
                 rid = sha(f'{name}:{path}'.encode())
                 parent_path = path.rsplit('.', 1)[0] if nested else None

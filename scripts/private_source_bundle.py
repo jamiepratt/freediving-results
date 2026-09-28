@@ -178,14 +178,15 @@ def build(inventory, target):
         raise ValueError('duplicate source id')
     pairs = sorted(zip(raw, entries), key=lambda pair: pair[1]['id'])
     for source, item in pairs:
-        if item['status'] != 'included':
+        if item['status'] != 'included' and not (item['status'] == 'restricted' and source.get('source_path')):
             continue
         path = Path(source['source_path'])
         if path.is_symlink() or not path.is_file():
-            raise ValueError(f"missing eligible original: {item['id']}")
+            raise ValueError(f"missing retained original: {item['id']}")
         if digest(path) != (item['sha256'], item['bytes']):
-            raise ValueError(f"original hash/size mismatch: {item['id']}")
-        screen_eligible(path, item['content_type'])
+            raise ValueError(f"retained original hash/size mismatch: {item['id']}")
+        if item['status'] == 'included':
+            screen_eligible(path, item['content_type'])
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='.private-source-bundle-', dir=target.parent))
     try:

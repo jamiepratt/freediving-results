@@ -105,6 +105,29 @@ def test_bad_original_and_bad_restore_fail(tmp_path):
     assert not restored.exists()
 
 
+def test_restricted_original_hash_is_checked_without_copying_bytes(tmp_path):
+    original = tmp_path / 'selected-view.html'
+    original.write_bytes(b'<html>retained original</html>')
+    derivative = tmp_path / 'selected-view.json'
+    derivative.write_bytes(b'{"rows":[]}')
+    entries = [entry(original, b'<html>different version</html>', 'restricted',
+                     content_type='text/html', reason='original retained privately',
+                     derivative='safe-derivative'),
+               entry(derivative, derivative.read_bytes(), id='safe-derivative',
+                     content_type='application/json')]
+    spec = inventory(tmp_path, entries)
+    bundle = tmp_path / 'bundle'
+    bad = run('build', '--inventory', spec, '--bundle-dir', bundle)
+    assert bad.returncode != 0
+    assert not bundle.exists()
+    entries[0]['sha256'] = sha(original.read_bytes())
+    entries[0]['bytes'] = len(original.read_bytes())
+    spec = inventory(tmp_path, entries)
+    good = run('build', '--inventory', spec, '--bundle-dir', bundle)
+    assert good.returncode == 0, good.stderr
+    assert len(list((bundle / 'objects').iterdir())) == 1
+
+
 def test_html_and_secret_receipts_cannot_enter_bundle(tmp_path):
     html = tmp_path / 'page.html'
     html.write_text('<html>token=SECRET</html>')

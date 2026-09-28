@@ -305,6 +305,122 @@ def test_extend_keeps_aida_positions_noxy_views_and_route_leads_separate(tmp_pat
     assert hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest() == first
 
 
+def test_extend_accounts_for_ffessm_sources_positions_and_correspondences(tmp_path):
+    args, *_ = build(tmp_path)
+    subprocess.run(args, check=True)
+    ranking = write(tmp_path / 'ranking.json', {
+        'schema': 'ffessm-2025-rankings/v1',
+        'counts': {'source_objects': 1, 'source_positions': 1,
+                   'existing_observation_versions': 1, 'confirmed_distinct_attempts': None},
+        'sources': [{'id': 'sha256:' + 'a' * 64, 'sha256': 'a' * 64, 'source_positions': 1}],
+        'limits': ['source date is not exact'],
+        'positions': [{'position_id': 'ranking-1', 'source_object_id': 'sha256:' + 'a' * 64,
+                       'event_date': '2025-07-01', 'date_from': '2025-07-01', 'date_to': '2025-07-01',
+                       'discipline': 'CWT', 'citation': 'page 2 line 3', 'coordinates': {'page': 2, 'line': 3},
+                       'raw_fields': {'rank': '1'}, 'observation_refs': [{'parser_version': 'prior/1'}]}],
+        'relationship_candidates': [{'kind': 'same-source-candidate', 'same_attempt': None}]})
+    daily = write(tmp_path / 'daily.json', {
+        'schema': 'ffessm-2025-daily/v1',
+        'counts': {'source_objects': 1, 'printed_positions': 1, 'parser_observations': 1,
+                   'confirmed_distinct_attempts': None},
+        'sources': [{'id': 'sha256:' + 'b' * 64, 'sha256': 'b' * 64, 'printed_positions': 1}],
+        'observations': [{'id': 'daily-1', 'source_id': 'sha256:' + 'b' * 64,
+                          'event_date': '2025-07-01', 'discipline': 'CWT',
+                          'citation': 'page 1 line 4', 'coordinates': {'page': 1, 'line': 4},
+                          'raw_line': 'rank athlete depth'}]})
+    links = write(tmp_path / 'links.json', {
+        'schema': 'ffessm-2025-daily-relationships/v1',
+        'counts': {'daily_positions': 1, 'ranking_positions': 1,
+                   'shared_printed_field_correspondences': 1, 'unmatched_daily_positions': 0,
+                   'confirmed_distinct_attempts': None},
+        'relationships': [{'daily_position_id': 'daily-1', 'ranking_position_id': 'ranking-1',
+                           'same_attempt': None, 'basis': 'printed fields'}],
+        'unmatched_daily': []})
+    inputs = {'ranking': ranking, 'daily': daily, 'links': links}
+    out = tmp_path / 'extended'
+    command = [sys.executable, str(SCRIPT), 'extend', '--base-dir', str(tmp_path / 'out'),
+               '--cutoff', '2026-09-28T13:00:00Z']
+    for name, path in inputs.items():
+        command += ['--input', f'{name}={path}', '--required-input',
+                    f'{name}={hashlib.sha256(path.read_bytes()).hexdigest()}']
+    subprocess.run(command + ['--output-dir', str(out)], check=True)
+    with sqlite3.connect(out / 'snapshot.sqlite') as db:
+        assert db.execute('select kind,source_object_id,date_from,date_to,citation_json,page '
+                          'from records where source_name="ranking" and collection="positions"').fetchone() == (
+                              'candidate_position', 'sha256:' + 'a' * 64, '2025-07-01', '2025-07-01',
+                              '"page 2 line 3"', 2)
+        assert db.execute('select kind,source_object_id from records where source_name="daily" '
+                          'and collection="observations"').fetchone() == ('candidate_position', 'sha256:' + 'b' * 64)
+        assert db.execute('select source_object_id from records where source_name="ranking" '
+                          'and collection="sources"').fetchone()[0] == 'sha256:' + 'a' * 64
+        assert db.execute('select count(*) from records where source_name="ranking" '
+                          'and collection="limits"').fetchone()[0] == 0
+        assert db.execute('select kind from records where source_name="links" '
+                          'and collection="relationships"').fetchone()[0] == 'relationship'
+        assert db.execute("select count(*) from records where kind='observation_version'").fetchone()[0] == 0
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)], check=True)
+
+
+def test_extend_accounts_for_apnea_aggregates_and_san_mauro_versions(tmp_path):
+    args, *_ = build(tmp_path)
+    subprocess.run(args, check=True)
+    apnea = write(tmp_path / 'apnea.json', {
+        'schema': 'apnea-academy-file-reconciliation/v1',
+        'counts': {'gia_team_standings_rows': 1, 'gia_team_placeholder_rows': 1,
+                   'san_mauro_team_rows': 1, 'confirmed_distinct_attempts': None},
+        'gia_team': {'source': {'sha256': 'c' * 64}, 'sheet': 'Clubs',
+                     'rows': [{'classification': 'club_standing', 'citation': 'Clubs!B6',
+                               'cells': {'B6': 'Club'}}],
+                     'placeholder': {'classification': 'formula_placeholder', 'citation': 'Clubs!B7'}},
+        'individual_equivalence': {'same_original_sha256': True, 'new_rows_counted': 0,
+                                   'prior_sheet_rows': 898, 'source': {'sha256': 'd' * 64}},
+        'san_mauro': {'source': {'sha256': 'e' * 64}, 'event_date': '2026-03-01',
+                      'rows': [{'classification': 'team_aggregate', 'citation': 'page 1 line 2',
+                                'fields': {'team': 'X'}}]}})
+    jpg = write(tmp_path / 'jpg.json', {
+        'schema': 'san-mauro-jpg-supplement/v1',
+        'counts': {'source_objects': 1, 'source_positions': 2, 'individual_positions': 1,
+                   'aggregate_positions': 1, 'observation_versions': 2,
+                   'manual_observation_versions': 2, 'relationship_candidates': 1,
+                   'confirmed_distinct_attempts': None},
+        'source_objects': [{'source_id': 'sha256:' + 'f' * 64, 'sha256': 'f' * 64,
+                            'kind': 'aggregate'}],
+        'positions': [{'source_id': 'sha256:' + 'f' * 64, 'kind': 'individual',
+                       'citation': {'page': 1, 'row': 2}},
+                      {'source_id': 'sha256:' + 'f' * 64, 'kind': 'aggregate',
+                       'citation': {'page': 1, 'row': 3}}],
+        'observation_versions': [{'source_id': 'sha256:' + 'f' * 64,
+                                  'position': {'row': 2}, 'parser_version': 'manual/1'},
+                                 {'source_id': 'sha256:' + 'f' * 64,
+                                  'position': {'row': 3}, 'parser_version': 'manual/1'}],
+        'relationships': [{'left_source_sha256': 'f' * 64, 'right_source_sha256': 'f' * 64,
+                           'state': 'candidate'}]})
+    out = tmp_path / 'extended'
+    command = [sys.executable, str(SCRIPT), 'extend', '--base-dir', str(tmp_path / 'out'),
+               '--cutoff', '2026-09-28T13:00:00Z']
+    for name, path in {'apnea': apnea, 'jpg': jpg}.items():
+        command += ['--input', f'{name}={path}', '--required-input',
+                    f'{name}={hashlib.sha256(path.read_bytes()).hexdigest()}']
+    subprocess.run(command + ['--output-dir', str(out)], check=True)
+    with sqlite3.connect(out / 'snapshot.sqlite') as db:
+        assert db.execute('select kind,source_object_id from records where source_name="apnea" '
+                          'and collection="gia_team.rows"').fetchone() == ('aggregate', 'sha256:' + 'c' * 64)
+        assert db.execute('select kind,event_date from records where source_name="apnea" '
+                          'and collection="san_mauro.rows"').fetchone() == ('aggregate', '2026-03-01')
+        assert db.execute('select count(*) from records where source_name="apnea" '
+                          'and collection="individual_equivalence.rows"').fetchone()[0] == 0
+        assert db.execute('select kind from records where source_name="jpg" and collection="positions" '
+                          'order by record_path').fetchall() == [('candidate_position',), ('aggregate',)]
+        assert db.execute("select count(*) from records where source_name='jpg' "
+                          "and kind='observation_version'").fetchone()[0] == 2
+        assert db.execute("select count(*) from records where source_name='jpg' "
+                          "and kind='observation_version' and source_object_id=?",
+                          ('sha256:' + 'f' * 64,)).fetchone()[0] == 2
+        assert db.execute("select kind from records where source_name='jpg' "
+                          "and collection='source_objects'").fetchone()[0] == 'source'
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)], check=True)
+
+
 class SnapshotContractTest(unittest.TestCase):
     def test_records(self):
         with tempfile.TemporaryDirectory() as d:

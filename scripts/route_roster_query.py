@@ -30,13 +30,17 @@ def _filter(value, label, allowed=None):
 class RouteRosterQuery:
     @classmethod
     def from_snapshot(cls, snapshot):
-        """Read a roster embedded as v3 records in the verified immutable snapshot."""
-        source = snapshot.manifest['inputs'].get('route-roster-v3')
+        """Read the newest supported embedded roster in the verified snapshot."""
+        inputs = snapshot.manifest['inputs']
+        names = [name for name in inputs if name.startswith('route-roster-v')
+                 and name[len('route-roster-v'):].isdigit()]
+        name = max(names, key=lambda value: int(value[len('route-roster-v'):])) if names else None
+        source = inputs.get(name)
         if source is None or source.get('source_schema') != 'issue55-route-roster/v3':
             raise ValueError('snapshot has no supported embedded route roster')
         rows = snapshot.db.execute(
-            "SELECT collection, raw_json FROM records WHERE source_name='route-roster-v3' "
-            "AND collection IN ('routes','leads') ORDER BY record_path")
+            "SELECT collection, raw_json FROM records WHERE source_name=? "
+            "AND collection IN ('routes','leads') ORDER BY record_path", (name,))
         entries = {'routes': [], 'leads': []}
         for row in rows:
             entries[row['collection']].append(json.loads(row['raw_json']))
@@ -65,7 +69,7 @@ class RouteRosterQuery:
                 'by_status': {s: sum(l['status'] == s for l in subset) for s in sorted(STATUSES)},
                 'by_year': {y: sum(year_of(l) == y for l in subset) for y in years}}
         metadata_row = snapshot.db.execute(
-            "SELECT metadata_json FROM source_metadata WHERE source_name='route-roster-v3'").fetchone()
+            "SELECT metadata_json FROM source_metadata WHERE source_name=?", (name,)).fetchone()
         if metadata_row is None:
             raise ValueError('embedded roster metadata missing')
         metadata = json.loads(metadata_row['metadata_json'])
