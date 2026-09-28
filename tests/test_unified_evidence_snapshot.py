@@ -127,6 +127,37 @@ def test_workbook_scores_are_aggregates_and_date_scope_queryable(tmp_path):
         assert db.execute('select kind from records where record_path="sheets[0].rows[1]"').fetchone()[0] == 'other'
 
 
+def test_extend_preserves_historical_snapshot_and_requires_roatan_packet(tmp_path):
+    args, *_ = build(tmp_path)
+    subprocess.run(args, check=True)
+    base = tmp_path / 'out'
+    old_db = hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest()
+    packet = write(tmp_path / 'roatan.json', {'schema': 'roatan-2026-cwt-men-private-census/v1',
+        'issue_namespace': '#8', 'confirmed_distinct_attempts': None,
+        'counts': {'source_objects': 1, 'source_positions': 1, 'observation_versions': 2,
+                   'historical_extraction_acceptances': 0, 'confirmed_distinct_attempts': None},
+        'positions': [{'unit': 3551, 'json_index_zero_based': 0, 'event_date': '2026-08-17',
+                       'discipline': 'CWT', 'category': 'SENM', 'citation': {'row-index-zero-based': 0},
+                       'raw_fields': {'ResResult': '65'}, 'parsed_fields': {'achieved-depth-token': '65'}}],
+        'observation_versions': [{'unit': 3551, 'parser_version': 'p/1'},
+                                 {'unit': 3551, 'parser_version': 'p/2'}]})
+    packet_hash = hashlib.sha256(packet.read_bytes()).hexdigest()
+    dest = tmp_path / 'extended'
+    subprocess.run([sys.executable, str(SCRIPT), 'extend', '--base-dir', str(base),
+                    '--input', f'roatan-issue8={packet}', '--required-input',
+                    f'roatan-issue8={packet_hash}', '--output-dir', str(dest)], check=True)
+    manifest = json.loads((dest / 'manifest.json').read_text())
+    assert manifest['base_snapshot_sha256'] == old_db
+    assert manifest['confirmed_distinct_attempts'] is None
+    assert manifest['inputs']['roatan-issue8']['collections'] == {'observation_versions': 2, 'positions': 1}
+    with sqlite3.connect(dest / 'snapshot.sqlite') as db:
+        assert db.execute('select count(*) from records where source_name="roatan-issue8" and kind="candidate_position"').fetchone()[0] == 3
+    assert hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest() == old_db
+    first = hashlib.sha256((dest / 'snapshot.sqlite').read_bytes()).hexdigest()
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(dest)], check=True)
+    assert hashlib.sha256((dest / 'snapshot.sqlite').read_bytes()).hexdigest() == first
+
+
 class SnapshotContractTest(unittest.TestCase):
     def test_records(self):
         with tempfile.TemporaryDirectory() as d:
@@ -147,6 +178,10 @@ class SnapshotContractTest(unittest.TestCase):
     def test_required_complete_packet(self):
         with tempfile.TemporaryDirectory() as d:
             test_required_complete_packet_cannot_be_omitted(Path(d))
+
+    def test_extend(self):
+        with tempfile.TemporaryDirectory() as d:
+            test_extend_preserves_historical_snapshot_and_requires_roatan_packet(Path(d))
 
 
 if __name__ == "__main__":
