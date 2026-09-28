@@ -2,10 +2,78 @@ const ORIGIN = 'https://poc.alphacompose.com';
 const UPSTREAM = 'https://poc-origin.alphacompose.com';
 const allowed = /^(?:\/|\/public\.(?:js|css)|\/api\/results|\/(?:api\/)?(?:results|athletes)\/[a-f0-9]{64}|\/api\/corrections)$/;
 const failure = (status) => new Response('Request unavailable', {status, headers: {'Cache-Control':'no-store', 'Content-Type':'text/plain; charset=utf-8'}});
+const privatePath = (path) => path === '/owner-evidence' || path.startsWith('/owner-evidence/');
+const safePrivatePath = /^\/owner-evidence(?:\/[A-Za-z0-9._~-]+)*\/?$/;
+const decoder = new TextDecoder('utf-8', {fatal:true});
+function decodeSegment(value) {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw Error('Invalid JWT encoding');
+  const binary = atob(value.replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from(binary, c => c.charCodeAt(0));
+}
+function privateConfig(env) {
+  const {ACCESS_ISSUER, ACCESS_AUDIENCE, OWNER_EVIDENCE_EMAILS, OWNER_EVIDENCE_UPSTREAM, OWNER_EVIDENCE_GATEWAY_SECRET} = env;
+  if (typeof ACCESS_ISSUER !== 'string' || !/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(ACCESS_ISSUER)) return null;
+  if (typeof ACCESS_AUDIENCE !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(ACCESS_AUDIENCE)) return null;
+  if (typeof OWNER_EVIDENCE_GATEWAY_SECRET !== 'string' || OWNER_EVIDENCE_GATEWAY_SECRET.length < 16) return null;
+  if (typeof OWNER_EVIDENCE_EMAILS !== 'string') return null;
+  const emails = OWNER_EVIDENCE_EMAILS.split(',').map(s => s.trim());
+  if (!emails.length || emails.some(s => !/^[^\s,@]+@[^\s,@]+\.[^\s,@]+$/.test(s) || s !== s.toLowerCase())) return null;
+  let upstream;
+  try { upstream = new URL(OWNER_EVIDENCE_UPSTREAM); } catch { return null; }
+  if (upstream.protocol !== 'https:' || !/^[a-z0-9-]+\.alphacompose\.com$/.test(upstream.hostname) ||
+      [new URL(ORIGIN).hostname,new URL(UPSTREAM).hostname].includes(upstream.hostname) ||
+      upstream.port || upstream.username || upstream.password || upstream.pathname !== '/' || upstream.search || upstream.hash ||
+      upstream.origin !== OWNER_EVIDENCE_UPSTREAM) return null;
+  return {issuer:ACCESS_ISSUER,audience:ACCESS_AUDIENCE,emails:new Set(emails),upstream:upstream.origin,secret:OWNER_EVIDENCE_GATEWAY_SECRET};
+}
+async function verifiedOwner(token, config) {
+  if (typeof token !== 'string' || token.length > 8192) return null;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(decoder.decode(decodeSegment(parts[0])));
+    const claims = JSON.parse(decoder.decode(decodeSegment(parts[1])));
+    if (header.alg !== 'RS256' || typeof header.kid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(header.kid)) return null;
+    const now = Math.floor(Date.now()/1000);
+    if (claims.iss !== config.issuer || !(claims.aud === config.audience || Array.isArray(claims.aud) && claims.aud.includes(config.audience)) ||
+        claims.type !== 'app' || typeof claims.email !== 'string' || !config.emails.has(claims.email) ||
+        !Number.isInteger(claims.exp) || claims.exp <= now || !Number.isInteger(claims.nbf) || claims.nbf > now ||
+        !Number.isInteger(claims.iat) || claims.iat > now) return null;
+    const keysResponse = await fetch(`${config.issuer}/cdn-cgi/access/certs`, {redirect:'error',signal:AbortSignal.timeout(5000),cf:{cacheTtl:0,cacheEverything:false}});
+    if (!keysResponse.ok) return null;
+    const keys = (await keysResponse.json()).keys;
+    if (!Array.isArray(keys)) return null;
+    const key = keys.find(k => k.kid === header.kid && k.kty === 'RSA' && (k.alg === undefined || k.alg === 'RS256') && (k.use === undefined || k.use === 'sig'));
+    if (!key) return null;
+    const publicKey = await crypto.subtle.importKey('jwk',key,{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['verify']);
+    const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5',publicKey,decodeSegment(parts[2]),new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
+    return valid ? claims.email : null;
+  } catch { return null; }
+}
+async function privateRequest(request, url, env) {
+  if (!safePrivatePath.test(url.pathname) || url.pathname.length > 2048 || url.search.length > 2048) return failure(404);
+  if (request.method !== 'GET' && request.method !== 'HEAD') return failure(405);
+  const origin = request.headers.get('Origin');
+  if (origin && origin !== ORIGIN) return failure(403);
+  const config = privateConfig(env);
+  if (!config) return failure(503);
+  const email = await verifiedOwner(request.headers.get('Cf-Access-Jwt-Assertion'),config);
+  if (!email) return failure(403);
+  const headers = new Headers({'X-Freediving-Owner-Gateway':config.secret,'X-Freediving-Owner-Email':email});
+  try {
+    const result = await fetch(config.upstream + url.pathname + url.search, {method:request.method,headers,redirect:'manual',signal:AbortSignal.timeout(15000),cf:{cacheTtl:0,cacheEverything:false}});
+    if (result.status >= 300 && result.status < 400) return failure(502);
+    const responseHeaders = new Headers({'Cache-Control':'no-store','Strict-Transport-Security':'max-age=31536000','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
+    const contentType = result.headers.get('Content-Type');
+    if (contentType) responseHeaders.set('Content-Type',contentType);
+    return new Response(request.method === 'HEAD' || [204,304].includes(result.status) ? null : result.body,{status:result.status,headers:responseHeaders});
+  } catch { return failure(503); }
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.hostname !== new URL(ORIGIN).hostname) return failure(403);
+    if (privatePath(url.pathname)) return url.protocol === 'https:' ? privateRequest(request,url,env) : failure(403);
     if (url.protocol !== 'https:') return Response.redirect(ORIGIN + url.pathname + url.search, 308);
     if (!allowed.test(url.pathname)) return failure(404);
     const post = request.method === 'POST' && url.pathname === '/api/corrections';
