@@ -88,6 +88,30 @@
     (is (= :unknown (get-in (by-id result "uncited") [:event-classification :listing])))
     (is (= ["both"] (:peer-list result)))))
 
+(deftest recomparison-clears-stale-rank-and-scope-metadata
+  (let [base (attempt "base" 100M international-listing international-sanction)
+        ranked (-> (peer/compare-peers {} [base]) :rows first)
+        revoked (assoc ranked :review :unreviewed :publication :pending
+                       :no-default-rank-reason :old-reason
+                       :broader-scope-descriptor {:sanction-scope :broad})
+        result (peer/compare-peers {:sanction-scope :broad} [revoked])
+        row (first (:rows result))]
+    (is (= :ineligible (:peer-status row)))
+    (is (= 0 (get-in result [:coverage :denominator])))
+    (is (every? #(not (contains? row %))
+                [:rank :rank-descriptor :no-default-rank-reason :broader-scope-descriptor]))))
+
+(deftest rank-descriptor-binds-exact-peers-and-denominator
+  (let [rows [(attempt "first" 100M international-listing international-sanction)
+              (attempt "second" 90M local-listing international-sanction)]
+        result (peer/compare-peers {} rows)
+        descriptor (:rank-descriptor (by-id result "first"))]
+    (is (= ["first" "second"] (:peer-ids descriptor)))
+    (is (= 2 (:denominator descriptor)))
+    (is (= descriptor (:descriptor result)))
+    (is (= descriptor (:peer-list-descriptor result)))
+    (is (= descriptor (:denominator-descriptor result)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.peer-scope-test)]
     (shutdown-agents)

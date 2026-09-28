@@ -61,14 +61,16 @@
                    (= :international geography)
                    (every? #{:sanction-scope :listing-filter :category :geography} (keys request)))
       (throw (ex-info "Unsupported peer scope" {:request request})))
-    (let [descriptor {:sanction-scope sanction-scope :listing-filter listing-filter
-                      :category category :geography geography
-                      :comparison-policy score/policy}
+    (let [base-descriptor {:sanction-scope sanction-scope :listing-filter listing-filter
+                           :category category :geography geography
+                           :comparison-policy score/policy}
           classified (:rows (score/compare-verified attempts))
           rows (mapv (fn [row]
                        (let [listing (listing-class (get-in row [:event :listing-evidence]))
                              sanction (sanction-class (get-in row [:event :sanction-evidence]))]
-                         (assoc (dissoc row :comparison-rank :discipline-rank)
+                         (assoc (dissoc row :comparison-rank :discipline-rank :rank
+                                           :rank-descriptor :peer-status
+                                           :no-default-rank-reason :broader-scope-descriptor)
                                 :event-classification {:listing listing :sanction sanction}))) classified)
           eligible (filter #(eligible? % category) rows)
           listed (filter #(or (= :all listing-filter)
@@ -78,6 +80,11 @@
           ranks (competition-ranks peers)
           peer-list (->> peers (sort-by (juxt (comp - :comparison-score) (comp str :id)))
                          (mapv :id))
+          descriptor (assoc base-descriptor :denominator (count peers) :peer-ids peer-list)
+          broader-list (->> listed (sort-by (juxt (comp - :comparison-score) (comp str :id)))
+                            (mapv :id))
+          broader-descriptor (assoc base-descriptor :sanction-scope :broad
+                                    :denominator (count listed) :peer-ids broader-list)
           output (mapv (fn [row]
                          (let [eligible-row? (eligible? row category)
                                listing-match? (or (= :all listing-filter)
@@ -95,6 +102,7 @@
                              (and eligible-row? listing-match? (not sanction-match?)
                                   (= :default sanction-scope))
                              (assoc :no-default-rank-reason :no-verified-international-sanction
-                                    :broader-scope-descriptor (assoc descriptor :sanction-scope :broad))))) rows)]
-      {:descriptor descriptor :rows output :peer-list peer-list
+                                    :broader-scope-descriptor broader-descriptor)))) rows)]
+      {:descriptor descriptor :peer-list-descriptor descriptor
+       :denominator-descriptor descriptor :rows output :peer-list peer-list
        :coverage {:provided (count attempts) :denominator (count peers)}})))
