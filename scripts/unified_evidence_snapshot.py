@@ -47,6 +47,16 @@ def required_input(spec):
 def classify(collection, obj, parent=None):
     parent = parent or {}
     c = collection.lower()
+    if c == 'candidate_result_appearances':
+        return 'relationship'
+    if c == 'pages.rows':
+        disposition = obj.get('disposition')
+        if disposition == 'duplicate_render':
+            return 'repeated_position'
+        if disposition == 'summary':
+            return 'summary'
+        if disposition == 'aggregate':
+            return 'aggregate'
     if obj.get('kind') == 'formula_placeholder':
         return 'other'
     if ('aggregate' in c or obj.get('kind') in ('aggregate', 'club_standing', 'standings', 'combined_score', 'secondary_score')
@@ -94,9 +104,16 @@ def normalize(obj, parent, root, kind):
     exact_date = date_from if date_from == date_to else None
     acquisition = obj.get('acquisition_id') or ((obj.get('source') or {}).get('acquisition_id') if isinstance(obj.get('source'), dict) else None)
     observations = obj.get('observation_refs') or []
+    root_source = root.get('source') if isinstance(root.get('source'), dict) else {}
+    root_source_hash = root.get('source_sha256') or root_source.get('sha256')
+    source_object_id = value(obj.get('source_id'), obj.get('source_sha256'),
+                             parent.get('source_id'), root_source.get('id'),
+                             'sha256:' + root_source_hash if root_source_hash else None)
+    if source_object_id and len(source_object_id) == 64 and all(c in '0123456789abcdef' for c in source_object_id):
+        source_object_id = 'sha256:' + source_object_id
     return {
         'source_id': obj.get('id'),
-        'source_object_id': value(obj.get('source_id'), obj.get('source_sha256'), parent.get('source_id'), (root.get('source') or {}).get('id') if isinstance(root.get('source'), dict) else None),
+        'source_object_id': source_object_id,
         'acquisition_id': value(acquisition, (root.get('source') or {}).get('acquisition_id') if isinstance(root.get('source'), dict) else None),
         'parser_version': value(obj.get('parser_version'), observations[0].get('parser_version') if observations else None),
         'observation_version': value(obj.get('observation_version'), obj.get('job_id'), observations[0].get('candidate_id') if observations else None),
@@ -158,7 +175,7 @@ def create_db(path):
 
 
 def extend(args):
-    """Append one required namespace to a verified historical database."""
+    """Append required namespaces to a verified historical database."""
     base = Path(args.base_dir)
     base_manifest_bytes = (base / 'manifest.json').read_bytes()
     base_manifest = json.loads(base_manifest_bytes)
@@ -171,55 +188,75 @@ def extend(args):
     base_db = base / 'snapshot.sqlite'
     if sha(base_db.read_bytes()) != base_manifest['snapshot_sha256']:
         raise ValueError('base snapshot hash mismatch')
-    name, path = named_path(args.input)
-    required_name, required_hash = required_input(args.required_input)
-    if name != required_name or name in base_manifest['inputs']:
-        raise ValueError('new namespace must match required input and be unique')
-    data = path.read_bytes()
-    if sha(data) != required_hash:
-        raise ValueError(f'required input hash mismatch: {name}')
-    root = json.loads(data)
-    if root.get('schema') != 'roatan-2026-cwt-men-private-census/v1' or root.get('issue_namespace') != '#8':
-        raise ValueError('expected #8 Roatan census packet')
-    if root.get('confirmed_distinct_attempts') is not None:
-        raise ValueError('distinct attempts must remain unknown')
+    inputs = dict(named_path(spec) for spec in args.input)
+    required = dict(required_input(spec) for spec in args.required_input)
+    if not inputs or len(inputs) != len(args.input) or len(required) != len(args.required_input):
+        raise ValueError('extension namespaces must be unique and nonempty')
+    if set(inputs) != set(required) or set(inputs) & set(base_manifest['inputs']):
+        raise ValueError('new namespaces must match required inputs and be unique')
+    packets = {}
+    for name, path in sorted(inputs.items()):
+        data = path.read_bytes()
+        if sha(data) != required[name]:
+            raise ValueError(f'required input hash mismatch: {name}')
+        root = json.loads(data)
+        schema = root.get('schema') if isinstance(root, dict) else None
+        if schema not in ('roatan-2026-cwt-men-private-census/v1',
+                          'cmas-worldcup-2026-visual-evidence/v1',
+                          'italian-open-2025-visual-evidence/v3'):
+            raise ValueError(f'unsupported extension packet: {name}')
+        if schema == 'roatan-2026-cwt-men-private-census/v1' and root.get('issue_namespace') != '#8':
+            raise ValueError('expected #8 Roatan census packet')
+        if root.get('confirmed_distinct_attempts') is not None or (root.get('counts') or {}).get('confirmed_distinct_attempts') is not None:
+            raise ValueError('distinct attempts must remain unknown')
+        packets[name] = (path, data, root)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.snapshot-extend-', dir=out) as work:
         db_path = Path(work) / 'snapshot.sqlite'
         shutil.copyfile(base_db, db_path)
-        counts = Counter()
+        counts_by_name = {}
         with sqlite3.connect(db_path) as db:
-            for collection, record_path, obj, parent, nested in records(name, root):
-                kind = classify(collection, obj, parent)
-                norm = normalize(obj, parent, root, kind)
-                db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (sha(f'{name}:{record_path}'.encode()), name, collection, record_path,
-                            record_path.rsplit('.', 1)[0] if nested else None, kind,
-                            norm['source_id'], norm['source_object_id'], norm['acquisition_id'],
-                            norm['parser_version'], norm['observation_version'], norm['event_name'],
-                            norm['event_date'], norm['date_from'], norm['date_to'], norm['date_scope_json'],
-                            norm['session'], norm['category'], norm['discipline'], norm['page'],
-                            canon(norm['citation']), norm['review_status'], norm['raw_fields_json'],
-                            norm['parsed_fields_json'], canon(obj)))
-                counts[collection] += 1
-            db.execute('INSERT INTO source_metadata VALUES (?,?)',
-                       (name, canon({k: v for k, v in root.items() if not isinstance(v, list)})))
+            for name, (_, _, root) in packets.items():
+                counts = Counter()
+                for collection, record_path, obj, parent, nested in records(name, root):
+                    kind = classify(collection, obj, parent)
+                    norm = normalize(obj, parent, root, kind)
+                    db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                               (sha(f'{name}:{record_path}'.encode()), name, collection, record_path,
+                                record_path.rsplit('.', 1)[0] if nested else None, kind,
+                                norm['source_id'], norm['source_object_id'], norm['acquisition_id'],
+                                norm['parser_version'], norm['observation_version'], norm['event_name'],
+                                norm['event_date'], norm['date_from'], norm['date_to'], norm['date_scope_json'],
+                                norm['session'], norm['category'], norm['discipline'], norm['page'],
+                                canon(norm['citation']), norm['review_status'], norm['raw_fields_json'],
+                                norm['parsed_fields_json'], canon(obj)))
+                    counts[collection] += 1
+                counts_by_name[name] = counts
+                db.execute('INSERT INTO source_metadata VALUES (?,?)',
+                           (name, canon({k: v for k, v in root.items() if not isinstance(v, list)})))
             db.commit()
             db.execute('VACUUM')
         manifest = dict(base_manifest)
         manifest['inputs'] = dict(base_manifest['inputs'])
-        manifest['inputs'][name] = {'status': 'included', 'sha256': required_hash, 'bytes': len(data),
-                                    'path': str(path.resolve()), 'source_schema': root['schema'],
-                                    'source_sha256': None, 'collections': dict(sorted(counts.items())),
-                                    'record_count': sum(counts.values()), 'metadata_table': 'source_metadata',
-                                    'top_level_list_lengths': {k: len(v) for k, v in sorted(root.items()) if isinstance(v, list)}}
+        for name, (path, data, root) in packets.items():
+            counts = counts_by_name[name]
+            manifest['inputs'][name] = {'status': 'included', 'sha256': required[name], 'bytes': len(data),
+                                        'path': str(path.resolve()), 'source_schema': root['schema'],
+                                        'source_sha256': root.get('source_sha256') or (root.get('source') or {}).get('sha256') or (root.get('source') or {}).get('original_sha256'),
+                                        'collections': dict(sorted(counts.items())),
+                                        'record_count': sum(counts.values()), 'metadata_table': 'source_metadata',
+                                        'top_level_list_lengths': {k: len(v) for k, v in sorted(root.items()) if isinstance(v, list)}}
         manifest['base_snapshot_path'] = str(base.resolve())
         manifest['cutoff'] = args.cutoff
         manifest['base_snapshot_sha256'] = base_manifest['snapshot_sha256']
         manifest['base_manifest_sha256'] = sha(base_manifest_bytes)
-        manifest['extension_namespace'] = name
-        manifest['required_inputs'] = {**base_manifest.get('required_inputs', {}), name: required_hash}
+        manifest['extension_namespaces'] = list(packets)
+        if len(packets) == 1:
+            manifest['extension_namespace'] = next(iter(packets))
+        else:
+            manifest.pop('extension_namespace', None)
+        manifest['required_inputs'] = {**base_manifest.get('required_inputs', {}), **required}
         manifest['confirmed_distinct_attempts'] = None
         manifest['snapshot_sha256'] = sha(db_path.read_bytes())
         manifest_path = Path(work) / 'manifest.json'
@@ -227,7 +264,7 @@ def extend(args):
         os.replace(db_path, out / 'snapshot.sqlite')
         os.replace(manifest_path, out / 'manifest.json')
     print(canon({'db': str(out / 'snapshot.sqlite'), 'sha256': manifest['snapshot_sha256'],
-                 'added_records': sum(counts.values())}))
+                 'added_records': sum(sum(counts.values()) for counts in counts_by_name.values())}))
 
 
 def build(args):
@@ -330,10 +367,11 @@ def replay(args):
         base = Path(manifest['base_snapshot_path'])
         if sha((base / 'manifest.json').read_bytes()) != manifest['base_manifest_sha256']:
             raise ValueError('base manifest hash mismatch')
-        name = manifest['extension_namespace']
-        item = manifest['inputs'][name]
-        extend(argparse.Namespace(base_dir=str(base), cutoff=manifest['cutoff'], input=f"{name}={item['path']}",
-                                  required_input=f"{name}={item['sha256']}", output_dir=str(out)))
+        names = manifest.get('extension_namespaces') or [manifest['extension_namespace']]
+        extend(argparse.Namespace(base_dir=str(base), cutoff=manifest['cutoff'],
+                                  input=[f"{name}={manifest['inputs'][name]['path']}" for name in names],
+                                  required_input=[f"{name}={manifest['inputs'][name]['sha256']}" for name in names],
+                                  output_dir=str(out)))
         new = json.loads((out / 'manifest.json').read_text())
         if new['snapshot_sha256'] != manifest['snapshot_sha256']:
             raise ValueError('replay hash mismatch')
@@ -370,8 +408,8 @@ def main():
     e = sub.add_parser('extend')
     e.add_argument('--base-dir', required=True)
     e.add_argument('--cutoff', required=True)
-    e.add_argument('--input', required=True, metavar='NAME=PATH')
-    e.add_argument('--required-input', required=True, metavar='NAME=SHA256')
+    e.add_argument('--input', action='append', required=True, metavar='NAME=PATH')
+    e.add_argument('--required-input', action='append', required=True, metavar='NAME=SHA256')
     e.add_argument('--output-dir', required=True)
     v = sub.add_parser('verify')
     v.add_argument('--output-dir', required=True)

@@ -168,6 +168,67 @@ def test_extend_preserves_historical_snapshot_and_requires_roatan_packet(tmp_pat
     assert hashlib.sha256((dest / 'snapshot.sqlite').read_bytes()).hexdigest() == first
 
 
+def test_extend_adds_two_visual_packets_without_promoting_non_results(tmp_path):
+    args, *_ = build(tmp_path)
+    subprocess.run(args, check=True)
+    base = tmp_path / 'out'
+    original_sha = hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest()
+    source_hash = 'b' * 64
+    world = write(tmp_path / 'world.json', {
+        'schema': 'cmas-worldcup-2026-visual-evidence/v1',
+        'source': {'id': 'sha256:' + source_hash, 'sha256': source_hash},
+        'source_sha256': source_hash,
+        'pages': [{'page': 2, 'event_date': '2026-05-26', 'discipline_raw': 'CWT',
+                   'rows': [{'id': 'world-row', 'disposition': 'visual_source_position',
+                             'fields': {'Last Name': 'Bai'},
+                             'citation': {'page': 2, 'region': {'bbox': [1, 2, 3, 4]}}}]}]})
+    italian_hash = 'c' * 64
+    italian_rows = [
+        {'id': name, 'disposition': disposition,
+         'citation': {'page': 1, 'source_sha256': italian_hash, 'region': {'bbox': [i, 2, i + 1, 4]}},
+         'fields_raw': {'Nome': name}}
+        for i, (name, disposition) in enumerate([
+            ('result', 'candidate_result'), ('club', 'aggregate'),
+            ('total', 'summary'), ('repeat', 'duplicate_render')])]
+    italian = write(tmp_path / 'italian.json', {
+        'schema': 'italian-open-2025-visual-evidence/v3',
+        'source_sha256': italian_hash,
+        'candidate_result_appearances': [dict(italian_rows[0])],
+        'pages': [{'page': 1, 'rows': italian_rows}]})
+    out = tmp_path / 'extended'
+    command = [sys.executable, str(SCRIPT), 'extend', '--base-dir', str(base),
+               '--cutoff', '2026-09-28T13:00:00Z',
+               '--input', f'worldcup={world}', '--input', f'italian={italian}',
+               '--required-input', f'worldcup={hashlib.sha256(world.read_bytes()).hexdigest()}',
+               '--required-input', f'italian={hashlib.sha256(italian.read_bytes()).hexdigest()}',
+               '--output-dir', str(out)]
+    subprocess.run(command, check=True)
+    manifest = json.loads((out / 'manifest.json').read_text())
+    assert set(manifest['required_inputs']) == {'worldcup', 'italian'}
+    assert manifest['base_snapshot_sha256'] == original_sha
+    assert set(manifest['extension_namespaces']) == {'worldcup', 'italian'}
+    with sqlite3.connect(out / 'snapshot.sqlite') as db:
+        rows = db.execute('select source_id,kind,source_object_id,citation_json,page,event_date '
+                          'from records where source_name="italian" and collection="pages.rows" '
+                          'order by record_path').fetchall()
+        assert [(r[0], r[1]) for r in rows] == [
+            ('result', 'candidate_position'), ('club', 'aggregate'),
+            ('total', 'summary'), ('repeat', 'repeated_position')]
+        assert all(r[2] == 'sha256:' + italian_hash for r in rows)
+        assert all(json.loads(r[3])['region']['bbox'] for r in rows)
+        assert db.execute('select source_object_id,event_date,page from records '
+                          'where source_name="worldcup" and collection="pages.rows"').fetchone() == (
+                              'sha256:' + source_hash, '2026-05-26', 2)
+        assert db.execute('select kind from records where source_name="italian" '
+                          'and collection="candidate_result_appearances"').fetchone()[0] == 'relationship'
+        assert db.execute('select count(*) from records where source_name="baseline"').fetchone()[0] == 3
+    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in out.iterdir()}
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)], check=True)
+    after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in out.iterdir()}
+    assert before == after
+    assert hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest() == original_sha
+
+
 class SnapshotContractTest(unittest.TestCase):
     def test_records(self):
         with tempfile.TemporaryDirectory() as d:
@@ -192,6 +253,10 @@ class SnapshotContractTest(unittest.TestCase):
     def test_extend(self):
         with tempfile.TemporaryDirectory() as d:
             test_extend_preserves_historical_snapshot_and_requires_roatan_packet(Path(d))
+
+    def test_extend_two_packets(self):
+        with tempfile.TemporaryDirectory() as d:
+            test_extend_adds_two_visual_packets_without_promoting_non_results(Path(d))
 
 
 if __name__ == "__main__":
