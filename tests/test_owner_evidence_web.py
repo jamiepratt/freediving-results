@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import threading
 import unittest
@@ -14,6 +15,20 @@ from owner_evidence_web import make_server
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_roatan_routes_are_authenticated_bounded_and_read_only(self):
+        self.assertEqual(self.request('GET', '/api/roatan')[0], 401)
+        cookie = self.login()
+        headers = {'Cookie': cookie}
+        status, _, body = self.request('GET', '/api/roatan', headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['total'], 0)
+        self.assertEqual(self.request('GET', '/api/roatan/3551/0', headers=headers)[0], 404)
+        for path in ('/api/roatan?limit=1', '/api/roatan/0/0', '/api/roatan/3551/-1',
+                     '/api/roatan/3551/1000', '/api/roatan/3551/0?x=1'):
+            self.assertEqual(self.request('GET', path, headers=headers)[0], 404)
+        self.assertIn(self.request('POST', '/api/roatan', headers=headers)[0], (403, 405))
+        self.assertEqual(self.request('PUT', '/api/roatan/3551/0', headers=headers)[0], 405)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.server = make_server(snapshot(Path(self.tmp.name)), password='local secret')
@@ -114,6 +129,49 @@ class WorkspaceTest(unittest.TestCase):
 
 
 REAL_SNAPSHOT = Path('/Users/jamiep/.codex/worktrees/1ad1/freediving-results/data/issue55-unified-snapshot-20260928')
+ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snapshot-20260928/snapshot')
+
+
+@unittest.skipUnless(ROATAN_SNAPSHOT.exists(), 'private Roatan snapshot unavailable')
+class RoatanWebSmokeTest(unittest.TestCase):
+    def test_real_positions_and_review_scope_are_read_only(self):
+        path = ROATAN_SNAPSHOT / 'snapshot.sqlite'
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        server = make_server(ROATAN_SNAPSHOT, password='temporary test secret')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host = f'127.0.0.1:{server.server_port}'
+        def request(method, route, body=None, headers=None):
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port)
+            connection.request(method, route, body=body, headers={'Host': host, **(headers or {})})
+            response = connection.getresponse()
+            result = response.status, dict(response.getheaders()), response.read()
+            connection.close()
+            return result
+        try:
+            self.assertEqual(request('GET', '/api/roatan')[0], 401)
+            status, headers, _ = request('POST', '/login', b'password=temporary+test+secret',
+                                         {'Origin': f'http://{host}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            self.assertEqual(status, 303)
+            auth = {'Cookie': headers['Set-Cookie'].split(';', 1)[0]}
+            status, _, body = request('GET', '/api/roatan', headers=auth)
+            self.assertEqual(status, 200)
+            listing = json.loads(body)
+            self.assertEqual((listing['total'], listing['v1_observations'], listing['v2_observations']), (31, 31, 31))
+            status, _, body = request('GET', '/api/roatan/3551/5', headers=auth)
+            self.assertEqual(status, 200)
+            lu = json.loads(body)
+            self.assertEqual((lu['declared_depth'], lu['raw_depth'], lu['final_depth'], lu['penalty']),
+                             ('95', '65', '34', '31'))
+            self.assertEqual(lu['versions']['v2']['review_status'], 'extraction_accepted')
+            self.assertEqual(lu['position_review_status'], 'unreviewed')
+            self.assertEqual(request('GET', '/api/roatan/3551/999', headers=auth)[0], 404)
+            self.assertEqual(request('PUT', '/api/roatan/3551/5', headers=auth)[0], 405)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
 
 
 @unittest.skipUnless(REAL_SNAPSHOT.exists(), 'private snapshot unavailable')

@@ -26,6 +26,7 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
            'session', 'discipline', 'category', 'limit', 'offset'}
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 COMPARISON_PATH = re.compile(r'^/api/comparison/([a-f0-9]{64})$')
+ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 
 
 class EvidenceServer(HTTPServer):
@@ -190,6 +191,11 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                         raise ValueError('invalid comparison paging')
                     options[key] = int(value[0])
                 result = self.server.snapshot().comparisons(**options)
+            elif path == '/api/roatan' and not parsed.query:
+                result = self.server.snapshot().roatan_positions()
+            elif ROATAN_PATH.fullmatch(path) and not parsed.query:
+                unit, index = ROATAN_PATH.fullmatch(path).groups()
+                result = self.server.snapshot().roatan_position(int(unit), int(index))
             elif COMPARISON_PATH.fullmatch(path) and not parsed.query:
                 result = self.server.snapshot().comparison(COMPARISON_PATH.fullmatch(path).group(1))
                 if result is not None:
