@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
 from owner_source_view import OriginalSourceView, SourceViewError
+from route_roster_query import RouteRosterQuery
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
@@ -116,6 +117,11 @@ class PrivateOrigin(HTTPServer):
             if bool(bundle_dir) != bool(bundle_sha):
                 raise ValueError('source bundle configuration incomplete')
             self.source_view = OriginalSourceView(bundle_dir, bundle_sha, expected_digest) if bundle_dir else None
+            roster_dir = env.get('OWNER_EVIDENCE_ROSTER_DIR')
+            roster_sha = env.get('OWNER_EVIDENCE_ROSTER_SHA256')
+            if bool(roster_dir) != bool(roster_sha):
+                raise ValueError('route roster configuration incomplete')
+            self.roster = RouteRosterQuery(roster_dir, roster_sha, self.query) if roster_dir else None
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()
@@ -216,6 +222,20 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             result[key] = int(value[0])
         return result
 
+    def _route_filters(self, query, routes=False):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=6)
+        allowed = {'route_id', 'status', 'limit', 'offset'} if routes else {
+            'route_id', 'status', 'year', 'relationship', 'limit', 'offset'}
+        if set(args) - allowed or any(len(values) != 1 for values in args.values()):
+            raise ValueError('invalid route filters')
+        result = {key: values[0] for key, values in args.items()}
+        for key in ('limit', 'offset'):
+            if key in result:
+                if not result[key].isdigit() or len(result[key]) > 6:
+                    raise ValueError('invalid route paging')
+                result[key] = int(result[key])
+        return result
+
     def _json(self, value):
         self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
 
@@ -248,6 +268,13 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.queue(**self._queue_filters(parsed.query))
             elif path == '/owner-evidence/api/comparisons':
                 result = query.comparisons(**self._comparison_filters(parsed.query))
+            elif path in ('/owner-evidence/api/routes', '/owner-evidence/api/route-leads'):
+                if self.server.roster is None:
+                    return self._reply(503)
+                if path.endswith('route-leads'):
+                    result = self.server.roster.leads(**self._route_filters(parsed.query))
+                else:
+                    result = self.server.roster.routes(**self._route_filters(parsed.query, routes=True))
             elif path == '/owner-evidence/api/roatan' and not parsed.query:
                 result = query.roatan_positions()
             elif ROATAN_PATH.fullmatch(path) and not parsed.query:

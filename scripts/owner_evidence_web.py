@@ -15,6 +15,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
+from route_roster_query import RouteRosterQuery
 
 
 ASSETS = {
@@ -30,11 +31,16 @@ ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 
 
 class EvidenceServer(HTTPServer):
-    def __init__(self, snapshot_dir, password):
+    def __init__(self, snapshot_dir, password, roster_dir=None, roster_sha256=None):
         if not password:
             raise ValueError('password is required')
+        if bool(roster_dir) != bool(roster_sha256):
+            raise ValueError('route roster configuration incomplete')
         self.snapshot_dir = snapshot_dir
         self.query = None
+        self.roster = None
+        self.roster_dir = roster_dir
+        self.roster_sha256 = roster_sha256
         self.password = password
         self.sessions = {}
         self.login_attempts = deque()
@@ -57,6 +63,13 @@ class EvidenceServer(HTTPServer):
     def snapshot(self):
         if self.query is None:
             self.query = SnapshotQuery(self.snapshot_dir)
+            try:
+                if self.roster_dir:
+                    self.roster = RouteRosterQuery(self.roster_dir, self.roster_sha256, self.query)
+            except Exception:
+                self.query.close()
+                self.query = None
+                raise
         return self.query
 
 
@@ -139,6 +152,20 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                 result[key] = int(result[key])
         return result
 
+    def _route_filters(self, query, routes=False):
+        values = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=6)
+        allowed = {'route_id', 'status', 'limit', 'offset'} if routes else {
+            'route_id', 'status', 'year', 'relationship', 'limit', 'offset'}
+        if set(values) - allowed or any(len(v) != 1 for v in values.values()):
+            raise ValueError('invalid route filters')
+        result = {key: value[0] for key, value in values.items()}
+        for key in ('limit', 'offset'):
+            if key in result:
+                if not result[key].isdigit() or len(result[key]) > 6:
+                    raise ValueError('invalid route paging')
+                result[key] = int(result[key])
+        return result
+
     def do_GET(self):
         if not self._rate_allowed():
             return
@@ -191,6 +218,14 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                         raise ValueError('invalid comparison paging')
                     options[key] = int(value[0])
                 result = self.server.snapshot().comparisons(**options)
+            elif path in ('/api/routes', '/api/route-leads'):
+                self.server.snapshot()
+                if self.server.roster is None:
+                    return self._reply(503)
+                if path.endswith('route-leads'):
+                    result = self.server.roster.leads(**self._route_filters(parsed.query))
+                else:
+                    result = self.server.roster.routes(**self._route_filters(parsed.query, routes=True))
             elif path == '/api/roatan' and not parsed.query:
                 result = self.server.snapshot().roatan_positions()
             elif ROATAN_PATH.fullmatch(path) and not parsed.query:
@@ -262,16 +297,18 @@ class EvidenceHandler(BaseHTTPRequestHandler):
     do_DELETE = do_PUT
 
 
-def make_server(snapshot_dir, password):
-    return EvidenceServer(snapshot_dir, password)
+def make_server(snapshot_dir, password, roster_dir=None, roster_sha256=None):
+    return EvidenceServer(snapshot_dir, password, roster_dir, roster_sha256)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--snapshot-dir', required=True)
+    parser.add_argument('--roster-dir')
+    parser.add_argument('--roster-sha256')
     args = parser.parse_args()
     password = getpass.getpass('Local evidence password: ')
-    with make_server(args.snapshot_dir, password) as server:
+    with make_server(args.snapshot_dir, password, args.roster_dir, args.roster_sha256) as server:
         print(f'Open http://127.0.0.1:{server.server_port}/login', flush=True)
         try:
             server.serve_forever()
