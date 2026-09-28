@@ -1,6 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let offset = 0, total = 0, active = 'browse', queueOffset = 0, comparisonOffset = 0, comparisonTotal = 0;
+let routeOffset = 0;
+const routeAuthorities = new Map();
 function cell(text, tag='td') { const n=document.createElement(tag); n.textContent=text==null?'unknown':String(text); return n; }
 function heading(text) { const n=document.createElement('h3'); n.textContent=text; return n; }
 function jsonBlock(value) { const n=document.createElement('pre'); n.textContent=JSON.stringify(value,null,2); return n; }
@@ -8,6 +10,102 @@ async function fetchJson(path) { const r=await fetch(path,{credentials:'same-ori
 function entries(parent, object) { const dl=document.createElement('dl'); for(const [k,v] of Object.entries(object)){dl.append(cell(k,'dt'),cell(v==null?'unknown':typeof v==='object'?JSON.stringify(v):v,'dd'));} parent.append(dl); }
 async function loadOverview(){const o=await fetchJson('/api/overview');$('overview').replaceChildren();entries($('overview'),{coverage:o.coverage,cutoff:o.cutoff,confirmed_distinct_attempts:o.confirmed_distinct_attempts,normalized_federation:o.normalized_federation,snapshot_sha256:o.snapshot_sha256});const table=document.createElement('table');table.append(makeRow(['Source','Collection','Kind','Records'],'th'));for(const x of o.counts)table.append(makeRow([x.source_name,x.collection,x.kind,x.records]));$('counts').replaceChildren(table);const sources=await fetchJson('/api/sources');for(const s of sources){for(const id of ['source','queue-source']){const opt=document.createElement('option');opt.value=s.source_name;opt.textContent=`${s.source_name} (${s.status}${s.reason?', '+s.reason:''})`;$(id).append(opt);}} }
 function makeRow(values,tag='td'){const tr=document.createElement('tr');for(const value of values)tr.append(cell(value,tag));return tr;}
+function safeLink(url, label) {
+  if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return cell(label || url || 'unknown', 'span');
+  const a=document.createElement('a');
+  a.href=url;
+  a.textContent=label || url;
+  a.target='_blank';
+  a.rel='noopener noreferrer';
+  return a;
+}
+function routeCitation(citation) {
+  const wrap=document.createElement('div');
+  if (!citation) return wrap;
+  wrap.append(safeLink(citation.url, 'Citation'), cell(` ${citation.locator || 'unknown locator'}; SHA-256 ${citation.sha256 || 'unknown'}`, 'span'));
+  return wrap;
+}
+function routeGaps(gaps) {
+  const wrap=document.createElement('div');
+  wrap.append(cell((gaps || []).length ? gaps.join('; ') : 'No explicit gap recorded', 'span'));
+  return wrap;
+}
+function renderRoutes(result) {
+  const routes=result.items || result.routes || [];
+  routeAuthorities.clear();
+  for(const route of routes)routeAuthorities.set(route.id,route.authority);
+  const summary=result.summary || {};
+  $('route-summary').textContent=`${summary.route_count ?? result.total ?? routes.length} route groups; ${summary.lead_count ?? 'unknown'} leads. Dated partial inventory checked through ${result.cutoff || 'unknown'}. Roster SHA-256 ${result.roster_sha256 || 'unknown'}.`;
+  const table=document.createElement('table');
+  table.append(makeRow(['Publisher / route','Status / role','Checked at','Leads / disposition','Citation / gaps'],'th'));
+  for (const route of routes) {
+    const publisher=document.createElement('div');
+    publisher.append(cell(`${route.authority || 'unknown'} / ${route.id}`, 'span'));
+    if (route.discovery_url) publisher.append(cell(' Discovery: ', 'span'), safeLink(route.discovery_url, 'publisher route'));
+    const provenance=document.createElement('div');
+    provenance.append(routeCitation(route.citation),routeGaps(route.gaps));
+    const counts=route.lead_status_counts || summary.leads_by_route?.[route.id]?.by_status || {};
+    const dispositions=Object.entries(counts).filter(([,count])=>count).map(([status,count])=>`${status}: ${count}`).join('; ');
+    const tr=document.createElement('tr');
+    for (const value of [publisher,cell(`${route.status} / ${route.role}`),cell(route.checked_at),cell(`${route.lead_count ?? summary.leads_by_route?.[route.id]?.count ?? 0} leads; ${dispositions || 'none'}`),provenance]) {
+      const td=document.createElement('td');td.append(value);tr.append(td);
+    }
+    table.append(tr);
+  }
+  const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);
+  $('route-list').replaceChildren(scroll);
+  const select=$('route-id');
+  const selected=select.value;
+  select.replaceChildren();
+  const all=document.createElement('option');all.value='';all.textContent='All routes';select.append(all);
+  for(const route of routes){const option=document.createElement('option');option.value=route.id;option.textContent=`${route.authority} / ${route.id}`;select.append(option);}
+  select.value=selected;
+}
+function sourceRecordLinks(records,label) {
+  const wrap=document.createElement('div');
+  for(const source of records || []){
+    const line=document.createElement('div');
+    line.append(cell(`${label}: ${source.source_name || 'unknown'} / ${source.record_path || 'source only'}; record ${source.record_id || 'unknown'}`, 'span'));
+    if (/^[a-f0-9]{64}$/i.test(source.record_id || '')) {
+      const button=document.createElement('button');button.type='button';button.textContent='Inspect source record';
+      button.addEventListener('click',()=>run(()=>detail(source.record_id),'detail'));
+      line.append(button);
+    }
+    wrap.append(line);
+  }
+  return wrap;
+}
+function renderRouteLeads(result) {
+  routeOffset=result.offset;
+  const items=result.items || [];
+  const start=result.total ? result.offset+1 : 0;
+  $('route-lead-summary').textContent=`${result.total} leads; showing ${start} to ${result.offset+items.length}. Dated partial roster ${result.cutoff || 'unknown'}. Exact source records are URL-proven source links only; candidate links carry no equality decision.`;
+  const table=document.createElement('table');
+  table.append(makeRow(['Publisher route / event','Competition date / year','Status / source role','Citation / evidence gap','Snapshot source links'],'th'));
+  for(const lead of items){
+    const provenance=document.createElement('div');provenance.append(routeCitation(lead.citation),routeGaps(lead.gaps));
+    const links=document.createElement('div');
+    links.append(sourceRecordLinks(lead.exact_source_records,'Exact source record'),sourceRecordLinks(lead.candidate_source_records,'Candidate source record'));
+    if(!(lead.exact_source_records || []).length && !(lead.candidate_source_records || []).length)links.append(cell('No linked snapshot source record', 'span'));
+    const date=lead.competition_date ? `${lead.competition_date}${lead.competition_date_to ? ' to '+lead.competition_date_to : ''}` : 'Competition date unknown';
+    const tr=document.createElement('tr');
+    for(const value of [cell(`${lead.authority || routeAuthorities.get(lead.route_id) || lead.route_id} / ${lead.title}`),cell(`${date} / ${lead.competition_year || 'unknown year'}`),cell(`${lead.status} / ${lead.relationship}`),provenance,links]){
+      const td=document.createElement('td');td.append(value);tr.append(td);
+    }
+    table.append(tr);
+  }
+  const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);
+  $('route-lead-results').replaceChildren(scroll);
+  $('route-previous').disabled=result.offset===0;
+  $('route-next').disabled=result.offset+items.length>=result.total;
+}
+async function loadRoutes(){renderRoutes(await fetchJson('/api/routes?limit=100&offset=0'));}
+async function loadRouteLeads(){
+  const params=new URLSearchParams();
+  for(const [key,value] of new FormData($('route-filters')))if(value)params.set(key,value);
+  params.set('offset',String(routeOffset));
+  renderRouteLeads(await fetchJson('/api/route-leads?'+params));
+}
 function params(){const data=new FormData($('filters'));const p=new URLSearchParams();for(const [k,v] of data)if(v)p.set(k,v);p.set('offset',String(offset));return p;}
 async function browse(){const p=params();let path='/api/'+active;if(active==='browse')path='/api/browse';if(active==='gaps'||active==='relationships')p.delete('kind');const result=await fetchJson(path+'?'+p);total=result.total;const area=$('results');const table=document.createElement('table');table.append(makeRow(['Source','Kind','Event / date','Session','Discipline','Category','Path','Review'],'th'));for(const x of result.records){const tr=makeRow([x.source_name,x.kind,`${x.event_name||'unknown'} / ${x.event_date||x.date_from||'unknown'}`,x.session,x.discipline,x.category,x.record_path,x.review_status]);tr.tabIndex=0;tr.addEventListener('click',()=>detail(x.record_id));tr.addEventListener('keydown',e=>{if(e.key==='Enter')detail(x.record_id)});table.append(tr);}const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);area.replaceChildren(scroll);$('summary').textContent=`${result.total} ${active==='browse'?'records':active}; showing ${result.records.length} from ${result.offset+1}. Counts are records, not distinct attempts.`;$('previous').disabled=offset===0;$('next').disabled=offset+result.records.length>=total;}
 async function detail(id){const d=await fetchJson('/api/detail/'+id);const area=$('detail');area.replaceChildren();const basic={source_name:d.source_name,collection:d.collection,kind:d.kind,event_name:d.event_name,event_date:d.event_date,date_scope:d.date_scope,session:d.session,discipline:d.discipline,category:d.category,review_status:d.review_status,record_path:d.record_path,parser_version:d.parser_version,observation_version:d.observation_version,source_object_id:d.source_object_id,acquisition_id:d.acquisition_id,input_sha256:d.input_sha256,source_sha256:d.source_sha256,snapshot_sha256:d.snapshot_sha256};entries(area,basic);for(const [label,value] of [['Citation',d.citation],['Raw fields',d.raw_fields],['Parsed fields',d.parsed_fields],['Retained packet record',d.raw]]){area.append(heading(label),jsonBlock(value));}const button=document.createElement('button');button.textContent='Inspect cited evidence';const view=document.createElement('div');view.className='source-view';button.addEventListener('click',()=>{button.disabled=true;view.textContent='Loading cited original...';showSourceView(id,view).catch(e=>{view.textContent=`Source view unavailable: ${e.message}`;}).finally(()=>{button.disabled=false;});});area.append(button,view);}
@@ -21,3 +119,9 @@ async function showComparison(id){const item=await fetchJson('/api/comparison/'+
 async function loadRoatan(){const result=await fetchJson('/api/roatan');entries($('roatan-summary'),{current_positions:result.total,v1_observations:result.v1_observations,v2_observations:result.v2_observations,source_objects:result.source_objects,source_object_details:result.source_object_details,historical_extraction_acceptances:result.historical_extraction_acceptances,confirmed_distinct_attempts:result.confirmed_distinct_attempts,snapshot_sha256:result.snapshot_sha256});const table=document.createElement('table');table.append(makeRow(['Unit','JSON row','Name','Current parser','Review'],'th'));for(const item of result.items){const tr=makeRow([item.unit,item.index,item.name,item.parser_version,item.review_status]);tr.tabIndex=0;const show=()=>run(()=>showRoatan(item.unit,item.index),'roatan-detail');tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show();});table.append(tr);}const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);$('roatan-list').replaceChildren(scroll);}
 async function showRoatan(unit,index){const item=await fetchJson('/api/roatan/'+unit+'/'+index);const area=$('roatan-detail');area.replaceChildren();entries(area,{unit:item.unit,json_row_zero_based:item.index,name:item.name,declared_depth:item.declared_depth,raw_DEPTH:item.raw_depth,FINAL_DEPTH:item.final_depth,penalty:item.penalty,status:item.status,notes:item.notes,current_position_review:item.position_review_status,source_object_id:item.source_object_id,source_sha256:item.source_sha256,same_attempt:item.same_attempt,athlete_identity:item.athlete_identity,overlap:item.overlap});area.append(heading('Exact current citation'),jsonBlock(item.citation));const button=document.createElement('button');button.textContent='Inspect exact original JSON row';const view=document.createElement('div');view.className='source-view';button.addEventListener('click',()=>{button.disabled=true;showSourceView(item.position_record_id,view).catch(e=>{view.textContent=`Source view unavailable: ${e.message}`;}).finally(()=>{button.disabled=false;});});area.append(button,view);const sides=document.createElement('div');sides.className='comparison-sides';for(const version of ['v1','v2']){const data=item.versions[version];if(!data)continue;const side=document.createElement('div');side.append(heading(`Parser ${version}`));entries(side,{parser_version:data.parser_version,observation_version:data.observation_version,review_status:data.review_status,source_object_id:data.source_object_id,source_sha256:data.source_sha256,record_id:data.record_id});side.append(heading('Citation'),jsonBlock(data.citation),heading('Publisher raw fields'),jsonBlock(data.raw_fields),heading('Parsed fields'),jsonBlock(data.parsed_fields));sides.append(side);}area.append(sides,heading('v1 to v2 parsed changes'),jsonBlock(item.parsed_field_changes),heading('Historical extraction acceptance'),jsonBlock(item.historical_extraction));}
 document.addEventListener('DOMContentLoaded',()=>{run(loadRoatan,'roatan-detail');run(loadOverview);run(browse);run(loadQueue,'queue-summary');run(loadComparisons,'comparison-summary');$('comparison-previous').addEventListener('click',()=>{comparisonOffset=Math.max(0,comparisonOffset-25);run(loadComparisons,'comparison-summary');});$('comparison-next').addEventListener('click',()=>{comparisonOffset+=25;run(loadComparisons,'comparison-summary');});$('filters').addEventListener('submit',e=>{e.preventDefault();offset=0;run(browse);});$('queue-filters').addEventListener('submit',e=>{e.preventDefault();queueOffset=0;run(loadQueue,'queue-summary');});$('queue-previous').addEventListener('click',()=>{queueOffset=Math.max(0,queueOffset-Number($('queue-filters').elements.limit.value));run(loadQueue,'queue-summary');});$('queue-next').addEventListener('click',()=>{queueOffset+=Number($('queue-filters').elements.limit.value);run(loadQueue,'queue-summary');});$('show-source').addEventListener('click',()=>run(sourceDetail));for(const name of ['candidates','gaps','relationships'])$(name).addEventListener('click',()=>{active=name==='candidates'?'browse':name;if(name==='candidates')document.querySelector('[name=kind]').value='candidate_position';offset=0;run(browse);});$('previous').addEventListener('click',()=>{offset=Math.max(0,offset-Number(document.querySelector('[name=limit]').value));run(browse);});$('next').addEventListener('click',()=>{offset+=Number(document.querySelector('[name=limit]').value);run(browse);});});
+document.addEventListener('DOMContentLoaded',()=>{
+  run(async()=>{await loadRoutes();await loadRouteLeads();},'route-summary');
+  $('route-filters').addEventListener('submit',event=>{event.preventDefault();routeOffset=0;run(loadRouteLeads,'route-lead-summary');});
+  $('route-previous').addEventListener('click',()=>{routeOffset=Math.max(0,routeOffset-Number($('route-filters').elements.limit.value));run(loadRouteLeads,'route-lead-summary');});
+  $('route-next').addEventListener('click',()=>{routeOffset+=Number($('route-filters').elements.limit.value);run(loadRouteLeads,'route-lead-summary');});
+});
