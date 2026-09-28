@@ -52,7 +52,7 @@ def classify(collection, obj, parent=None):
     if c == 'overall_rows':
         return 'aggregate'
     if c == 'endpoint_records':
-        return 'observation_version'
+        return 'endpoint_source_record'
     if c == 'routes':
         return 'discovery_route'
     if c == 'leads':
@@ -131,7 +131,7 @@ def normalize(obj, parent, root, kind):
         'event_date': value(obj.get('event_date'), (obj.get('position') or {}).get('date'), exact_date,
                             parent.get('event_date'), root.get('event_date_calendar')),
         'date_from': date_from, 'date_to': date_to, 'date_scope_json': canon(date_scope),
-        'session': value(obj.get('session'), parent.get('session')),
+        'session': normalized_session(value(obj.get('session'), parent.get('session'))),
         'category': value(obj.get('category'), obj.get('category_raw'), parent.get('category_raw'), parsed.get('category')),
         'discipline': value(obj.get('discipline'), obj.get('discipline_raw'),
                             (obj.get('cells') or {}).get('Discipline', {}).get('value'),
@@ -142,6 +142,10 @@ def normalize(obj, parent, root, kind):
         'raw_fields_json': canon(raw_fields),
         'parsed_fields_json': canon(parsed),
     }
+
+
+def normalized_session(session):
+    return canon(session) if isinstance(session, (dict, list)) else session
 
 
 def records(name, root):

@@ -248,6 +248,7 @@ def test_extend_keeps_aida_positions_noxy_views_and_route_leads_separate(tmp_pat
                    'linked_result_endpoint_records': 1, 'endpoint_only_records': 1,
                    'confirmed_distinct_attempts': None},
         'result_rows': [{'attempt_id': 10, 'event_date': '2026-05-09', 'discipline': 'DYN',
+                         'session': {'discipline': 'DYN', 'raw_fields': {'session_id': 1}},
                          'citation': {'source_sha256': 'b' * 64, 'json_pointer': '/rows/1'},
                          'raw_fields': {'athlete': 'Ada'}}],
         'overall_rows': [{'event_date': '2026-05-09', 'discipline': 'OVERALL',
@@ -285,11 +286,16 @@ def test_extend_keeps_aida_positions_noxy_views_and_route_leads_separate(tmp_pat
                                          separators=(',', ':')))
         assert db.execute('select collection,kind from records where source_name="eindhoven" '
                           'order by collection').fetchall() == [
-                              ('endpoint_records', 'observation_version'),
-                              ('endpoint_records', 'observation_version'),
+                              ('endpoint_records', 'endpoint_source_record'),
+                              ('endpoint_records', 'endpoint_source_record'),
                               ('overall_rows', 'aggregate'),
                               ('relationships', 'relationship'),
                               ('result_rows', 'candidate_position')]
+        assert db.execute('select session from records where source_name="eindhoven" '
+                          'and collection="result_rows"').fetchone()[0] == (
+                              '{"discipline":"DYN","raw_fields":{"session_id":1}}')
+        assert db.execute('select count(*) from records where source_name="eindhoven" '
+                          'and kind="observation_version"').fetchone()[0] == 0
         assert db.execute('select collection,kind from records where source_name="route-roster" '
                           'order by collection').fetchall() == [
                               ('leads', 'discovery_lead'), ('leads', 'discovery_lead'),
