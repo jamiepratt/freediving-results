@@ -1,9 +1,12 @@
 (ns freediving.cmas-2026-roatan-json
   "Source-bound transport rows from two official Roatan 2026 CWT men result APIs."
   (:require [clojure.data.json :as json]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [freediving.archive :as archive])
   (:import [java.nio ByteBuffer]
-           [java.nio.charset CodingErrorAction StandardCharsets]))
+           [java.nio.charset CodingErrorAction StandardCharsets]
+           [java.security MessageDigest]
+           [java.util HexFormat]))
 
 (def parser-version "cmas-2026-roatan-json/1")
 
@@ -112,3 +115,108 @@
        :reconciliation {:source-row-count (count rows)
                         :candidate-count (count valid)
                         :unparsed-count (count invalid)}})))
+
+(def tool {:name "clojure.data.json" :version "2.5.1"
+           :arguments ["strict-UTF-8" "Roatan CWT men visible rows"]})
+
+(defn- digest [value]
+  (letfn [(canonical [x]
+            (cond (map? x) (into (sorted-map) (map (fn [[k v]] [k (canonical v)]) x))
+                  (sequential? x) (mapv canonical x)
+                  :else x))]
+    (.formatHex (HexFormat/of)
+                (.digest (MessageDigest/getInstance "SHA-256")
+                         (.getBytes (pr-str (canonical value)) "UTF-8")))))
+
+(defn- registered-source [root sha256]
+  (let [source (archive/inspect root sha256)
+        manifests (mapv :manifest (:acquisitions source))
+        views (set (map #(get-in % [:provenance :source-page-url]) manifests))
+        urls (set (map :final-url manifests))]
+    (when-not (and (seq manifests) (= 1 (count views)) (= 1 (count urls))
+                   (every? #(re-matches #"(?i)application/json(?:;.*)?" (:content-type %)) manifests))
+      (fail! "Roatan JSON requires one result view and JSON response URL"))
+    {:source source :bytes (archive/read-source-bytes (:artifact-path source))
+     :view-url (first views) :json-url (first urls)}))
+
+(defn- visible-evidence [root evidence-sha source-sha view-url json-url parsed]
+  (when-not (and (string? evidence-sha) (re-matches #"[0-9a-f]{64}" evidence-sha)
+                 (some #{evidence-sha} (archive/extraction-evidence root)))
+    (fail! "Missing Roatan visible-row evidence"))
+  (let [bytes (archive/read-source-bytes (str root "/evidence/" evidence-sha))
+        evidence (try (json/read-str (source-text bytes))
+                      (catch Exception _ (fail! "Malformed Roatan visible-row evidence")))
+        route (some #(when (= json-url (get % "requested_url")) %) (get evidence "routes"))
+        browser (some #(when (= view-url (get % "view_url")) %) (get evidence "browser_observations"))
+        n (get-in parsed [:reconciliation :source-row-count])]
+    (when-not (and (= "roatan-cwt-men-source-check/v1" (get evidence "schema"))
+                   (= 1 (count (filter #(= json-url (get % "requested_url")) (get evidence "routes"))))
+                   (= 1 (count (filter #(= view-url (get % "view_url")) (get evidence "browser_observations"))))
+                   (= json-url (get route "final_url")) (= 200 (get route "status"))
+                   (re-matches #"(?i)application/json(?:;.*)?" (get route "content_type"))
+                   (= source-sha (get route "sha256")) (= n (get route "transport_rows"))
+                   (= "OFFICIAL" (get browser "label")) (= n (get browser "rows"))
+                   (str/includes? (get browser "row_key_check" "") (str "All " n " visible "))
+                   (populated? (get browser "observed_window_utc")))
+      (fail! "Roatan visible-row evidence does not match archived source"))
+    browser))
+
+(defn- cite [source-sha json-url view-url browser candidate]
+  (let [raw (:raw candidate) index (get-in candidate [:coordinates :row-index-zero-based])]
+    {:source-sha256 source-sha :unit (get raw "UtID")
+     :row-index-zero-based index :json-url json-url :view-url view-url
+     :view-label (get browser "label") :visible-row-match (get browser "row_key_check")
+     :visible-tuple {:rank (or (get raw "ResRnk") (get raw "ResReasonCode"))
+                     :raw-rank (get raw "ResRnk") :name (get raw "ParPrintName")
+                     :representation (get raw "ParOrgCode")
+                     :birth-year (get raw "ParYearBirthDate")}}))
+
+(defn- replay [root source-sha evidence-sha]
+  (let [{:keys [bytes view-url json-url]} (registered-source root source-sha)
+        parsed (parse-result bytes {:view-url view-url :json-url json-url})
+        browser (visible-evidence root evidence-sha source-sha view-url json-url parsed)]
+    (when-not (and (= (get-in parsed [:reconciliation :source-row-count])
+                      (count (:candidates parsed)))
+                   (empty? (:unparsed-rows parsed)))
+      (fail! "Roatan visible rows include unsupported source positions"))
+    (update parsed :candidates
+            (fn [candidates]
+              (mapv #(assoc % :citation (cite source-sha json-url view-url browser %)) candidates)))))
+
+(defn validate-artifact!
+  "Replay every unreviewed visible-row citation from archived JSON and retained packet evidence."
+  [root artifact]
+  (when-not (and (= 5 (:schema-version artifact))
+                 (= parser-version (:parser-version artifact)) (= tool (:tool artifact))
+                 (= (:citation-evidence-sha256 artifact)
+                    (get-in artifact [:config :citation-evidence-sha256])))
+    (fail! "Unsupported Roatan JSON extraction contract"))
+  (let [source (archive/inspect root (:source-sha256 artifact))
+        expected (replay root (:source-sha256 artifact) (:citation-evidence-sha256 artifact))]
+    (when-not (and (vector? (:acquisitions artifact)) (seq (:acquisitions artifact))
+                   (= (count (:acquisitions artifact))
+                      (count (set (map :acquisition-id (:acquisitions artifact)))))
+                   (every? (set (:acquisitions source)) (:acquisitions artifact))
+                   (some #{(:citation-evidence-sha256 artifact)} (:evidence-sha256 artifact))
+                   (= expected (select-keys artifact (keys expected))))
+      (fail! "Roatan JSON source or visible-row citation replay mismatch")))
+  artifact)
+
+(defn extract!
+  "Derive immutable, blocked schema 5 observations from archived Roatan JSON."
+  [root sha256 {:keys [actor config citation-evidence-sha256] :as options}]
+  (when-not (and (= #{:actor :config :citation-evidence-sha256} (set (keys options)))
+                 (populated? actor) (map? config))
+    (fail! "Expected actor, config and visible-row evidence SHA-256"))
+  (let [{:keys [source]} (registered-source root sha256)
+        parsed (replay root sha256 citation-evidence-sha256)
+        identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
+                  :evidence-sha256 (archive/extraction-evidence root)
+                  :actor actor :config (assoc config :citation-evidence-sha256 citation-evidence-sha256)
+                  :parser-version parser-version :schema-version 5 :tool tool}
+        job-id (digest identity)]
+    (archive/derive! root job-id
+                     #(merge parsed identity
+                             {:citation-evidence-sha256 citation-evidence-sha256
+                              :job-id job-id :processed-at (str (java.time.Instant/now))
+                              :publication {:status :blocked}}) nil)))

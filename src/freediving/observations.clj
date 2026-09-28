@@ -9,7 +9,8 @@
             [freediving.camotes-world-cup :as camotes-world-cup]
             [freediving.camotes-world-cup-continuation :as camotes-world-cup-continuation]
             [freediving.aida-html :as html]
-            [freediving.cmas-2025-indoor-json :as indoor-json])
+            [freediving.cmas-2025-indoor-json :as indoor-json]
+            [freediving.cmas-2026-roatan-json :as roatan-json])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -148,7 +149,9 @@
         (when-not (every? evidence (:evidence-sha256 a)) (fail! "Missing extraction evidence")))
       {:artifact (case (:schema-version a)
                    4 (html/validate-artifact! root a)
-                   5 (indoor-json/validate-artifact! root a)
+                   5 (case (:parser-version a)
+                       "cmas-2026-roatan-json/1" (roatan-json/validate-artifact! root a)
+                       (indoor-json/validate-artifact! root a))
                    (cond-> (validate-pages! a)
                      (= camotes-challenge/parser-version (:parser-version a)) (->> (camotes-challenge/validate-artifact! root))
                      (= camotes-challenge-2026/parser-version (:parser-version a)) (->> (camotes-challenge-2026/validate-artifact! root))

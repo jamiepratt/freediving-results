@@ -1,6 +1,9 @@
 (ns freediving.cmas-2026-roatan-json-test
   (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [freediving.archive :as archive]
+            [freediving.archive-test :as fixture]
             [freediving.cmas-2026-roatan-json :as roatan]))
 
 (def routes
@@ -66,3 +69,70 @@
                    (roatan/parse-result (source [(assoc (row 3551) "EvID" 655)]) provenance)))
       (is (thrown? Exception
                    (roatan/parse-result (source [(assoc (row 3551) "AGCodeDescr" "SENF")]) provenance))))))
+
+(defn registered-source [root unit rows]
+  (let [bytes (source rows)
+        sha (.formatHex (java.util.HexFormat/of)
+                        (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        path (str root "-source-" unit ".json")
+        {:keys [view-url json-url]} (routes unit)
+        manifest (assoc fixture/manifest :sha256 sha :discovery-url json-url
+                        :final-url json-url :content-type "application/json"
+                        :provenance {:publisher-url json-url :redirect-chain [json-url]
+                                     :source-page-url view-url})]
+    (spit path (String. bytes "UTF-8"))
+    (archive/register! root path manifest)
+    sha))
+
+(defn visible-evidence [unit rows sha]
+  (let [{:keys [view-url json-url]} (routes unit)]
+    {:schema "roatan-cwt-men-source-check/v1"
+     :routes [{:requested_url json-url :final_url json-url :status 200
+               :content_type "application/json; charset=utf-8"
+               :sha256 sha :transport_rows (count rows)}]
+     :browser_observations [{:view_url view-url :label "OFFICIAL" :rows (count rows)
+                             :row_key_check (str "All " (count rows) " visible rank/name/representation/birth-year tuples matched the corresponding source API rows in order.")
+                             :observed_window_utc "2026-09-28 08:30-08:33 UTC"}]}))
+
+(deftest archived-roatan-json-requires-visible-row-evidence
+  (let [dir (fixture/workspace) root (str dir "/archive") rows [(row 3551)]
+        sha (registered-source root 3551 rows)
+        evidence (archive/retain-evidence! root (.getBytes (json/write-str (visible-evidence 3551 rows sha)) "UTF-8"))
+        options {:actor "synthetic" :config {} :citation-evidence-sha256 (:sha256 evidence)}
+        first-run (roatan/extract! root sha options)
+        artifact (edn/read-string (slurp (:artifact-path first-run)))]
+    (is (= :created (:run-status first-run)))
+    (is (= :skipped (:run-status (roatan/extract! root sha options))))
+    (is (= 5 (:schema-version artifact)))
+    (is (= :unreviewed (get-in artifact [:candidates 0 :review-status])))
+    (is (= (:view-url (routes 3551)) (get-in artifact [:candidates 0 :citation :view-url])))
+    (is (= 0 (get-in artifact [:candidates 0 :citation :row-index-zero-based])))
+    (is (= artifact (roatan/validate-artifact! root artifact)))
+    (is (thrown? Exception (roatan/validate-artifact! root (update-in artifact [:candidates 0] dissoc :citation))))
+    (is (thrown? Exception (roatan/validate-artifact! root (assoc-in artifact [:candidates 0 :citation :visible-tuple :name] "Other name"))))
+    (is (thrown? Exception (roatan/extract! root sha (assoc options :citation-evidence-sha256 (apply str (repeat 64 "0"))))))
+    (is (thrown? Exception (roatan/extract! root sha (dissoc options :citation-evidence-sha256))))))
+
+(deftest changed-json-bytes-retain-both-unreviewed-versions
+  (let [dir (fixture/workspace) root (str dir "/archive") rows [(row 3559)]
+        first-sha (registered-source root 3559 rows)
+        first-evidence (:sha256 (archive/retain-evidence! root
+                                                          (.getBytes (json/write-str (visible-evidence 3559 rows first-sha)) "UTF-8")))
+        first-run (roatan/extract! root first-sha {:actor "synthetic" :config {}
+                                                   :citation-evidence-sha256 first-evidence})
+        changed [(assoc (row 3559) "ResResult" "81")]
+        second-sha (registered-source root 3559 changed)
+        second-evidence (:sha256 (archive/retain-evidence! root
+                                                           (.getBytes (json/write-str (visible-evidence 3559 changed second-sha)) "UTF-8")))
+        second-run (roatan/extract! root second-sha {:actor "synthetic" :config {}
+                                                     :citation-evidence-sha256 second-evidence})
+        first-artifact (edn/read-string (slurp (:artifact-path first-run)))
+        second-artifact (edn/read-string (slurp (:artifact-path second-run)))]
+    (is (not= first-sha second-sha))
+    (is (not= (:job-id first-run) (:job-id second-run)))
+    (is (= first-artifact (roatan/validate-artifact! root first-artifact)))
+    (is (= second-artifact (roatan/validate-artifact! root second-artifact)))
+    (is (= "80" (get-in first-artifact [:candidates 0 :raw "ResResult"])))
+    (is (= "81" (get-in second-artifact [:candidates 0 :raw "ResResult"])))
+    (is (= [:unreviewed :unreviewed]
+           (mapv #(get-in % [:candidates 0 :review-status]) [first-artifact second-artifact])))))

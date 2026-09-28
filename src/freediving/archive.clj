@@ -63,19 +63,22 @@
 (defn- cmas-result-page? [v]
   (try
     (let [u (URI. v)]
-      (and (= "https" (.getScheme u))
-           (= "results.microplustimingservices.com" (.getHost u))
-           (= -1 (.getPort u))
+      (and (= "https" (.getScheme u)) (= -1 (.getPort u))
            (nil? (.getRawUserInfo u))
            (nil? (.getRawQuery u))
-           (= "/CMAS/Results/" (.getRawPath u))
-           (let [fragment (or (.getRawFragment u) "")]
-             (or (re-matches #"/[12]/dynamic-result-json/[A-Z]{3}/[0-9]{3}/[0-9]{3}/[0-9]{3}"
-                             fragment)
-                 (re-matches #"/1/static-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/001/007/001"
-                             fragment)
-                 (re-matches #"/1/speed-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/(?:002|003|004)/007/001"
-                             fragment)))))
+           (case (.getHost u)
+             "results.microplustimingservices.com"
+             (and (= "/CMAS/Results/" (.getRawPath u))
+                  (let [fragment (or (.getRawFragment u) "")]
+                    (or (re-matches #"/[12]/dynamic-result-json/[A-Z]{3}/[0-9]{3}/[0-9]{3}/[0-9]{3}" fragment)
+                        (re-matches #"/1/static-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/001/007/001" fragment)
+                        (re-matches #"/1/speed-result-json/(?:JUF|JUM|MAF|MAM|SEF|SEM)/(?:002|003|004)/007/001" fragment))))
+             "cmas.microplustimingservices.com"
+             (and (= "/" (.getRawPath u))
+                  (contains? #{"/event-detail/FRD/30/110/661/594/3551/result"
+                               "/event-detail/FRD/30/110/655/588/3559/result"}
+                             (.getRawFragment u)))
+             false)))
     (catch Exception _ false)))
 
 (defn- google-drive-download? [^URI u]

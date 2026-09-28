@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.shell :as shell]
             [clojure.edn :as edn]
+            [clojure.string :as str]
             [freediving.archive :as archive])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -29,6 +30,25 @@
       (is (= (:sha256 manifest) (:sha256 receipt)))
       (is (= "abc" (when-let [path (:artifact-path result)] (slurp path))))
       (is (= [manifest] (mapv :manifest (:acquisitions result)))))))
+
+(deftest roatan-json-acquisition-retains-exact-visible-view-selector
+  (let [dir (workspace) root (str dir "/archive") source (str dir "/source")
+        json-url "https://cmas-api.microplustimingservices.com/api/units/3551/results"
+        view-url "https://cmas.microplustimingservices.com/#/event-detail/FRD/30/110/661/594/3551/result"
+        manifest (assoc manifest :discovery-url json-url :final-url json-url
+                        :content-type "application/json"
+                        :provenance {:publisher-url json-url :redirect-chain [json-url]
+                                     :source-page-url view-url})]
+    (spit source "abc")
+    (archive/register! root source manifest)
+    (is (= view-url (get-in (first (:acquisitions (archive/inspect root (:sha256 manifest))))
+                            [:manifest :provenance :source-page-url])))
+    (doseq [bad [(str/replace view-url "/3551/" "/3559/")
+                 (str view-url "?token=private")
+                 (str/replace view-url "https://" "http://")]]
+      (is (thrown? Exception
+                   (archive/register! (str dir "/bad") source
+                                      (assoc-in manifest [:provenance :source-page-url] bad)))))))
 
 (deftest public-google-drive-download-preserves-final-url
   (let [file-id "1xPXmh6mvthipz_sU5tYroYiJPbmFk0Ub"
