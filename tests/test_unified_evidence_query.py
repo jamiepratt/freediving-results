@@ -1,0 +1,164 @@
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / 'scripts' / 'unified_evidence_snapshot.py'
+sys.path.insert(0, str(ROOT / 'scripts'))
+from unified_evidence_query import SnapshotQuery
+
+
+def snapshot(tmp_path):
+    packet = tmp_path / 'packet.json'
+    packet.write_text(json.dumps({
+        'schema': 'visual/v1', 'source': {'id': 'sha256:original', 'acquisition_id': 'capture-1'},
+        'event_date_calendar': '2026-05-08', 'event_title_calendar': 'Sample meet',
+        'pages': [{'page': 1, 'session': 'morning', 'category_raw': 'Women',
+                   'discipline_raw': 'STA', 'rows': [
+                       {'id': 'a', 'fields': {'Name': 'Ada'}, 'parsed_fields': {'score': '3:00'},
+                        'citation': {'page': 1, 'line': 3}, 'parser_version': 'parser/1'},
+                       {'id': 'b', 'fields': {'Name': 'Bea'}, 'citation': {'page': 1, 'line': 4}}]}],
+        'source_relationship_candidates': [{'id': 'rel', 'status': 'unresolved'}],
+        'source_gaps': [{'id': 'gap', 'status': 'needs review'}],
+    }), encoding='utf-8')
+    excluded = tmp_path / 'excluded.json'
+    excluded.write_text('{"pages":[]}', encoding='utf-8')
+    out = tmp_path / 'out'
+    subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-09-28T12:00:00Z',
+                    '--input', f'visual={packet}', '--excluded', f'pending={excluded}:unfinished',
+                    '--output-dir', str(out)], check=True, capture_output=True)
+    return out
+
+
+class QueryContractTest(unittest.TestCase):
+    def test_overview_keeps_namespaces_and_distinct_attempts_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            with SnapshotQuery(snapshot(Path(d))) as query:
+                result = query.overview()
+        self.assertEqual(result['coverage'], 'dated partial census')
+        self.assertIsNone(result['confirmed_distinct_attempts'])
+        self.assertEqual(result['counts'], [
+            {'source_name': 'visual', 'collection': 'pages', 'kind': 'other', 'records': 1},
+            {'source_name': 'visual', 'collection': 'pages.rows', 'kind': 'candidate_position', 'records': 2},
+            {'source_name': 'visual', 'collection': 'source_gaps', 'kind': 'gap', 'records': 1},
+            {'source_name': 'visual', 'collection': 'source_relationship_candidates', 'kind': 'relationship', 'records': 1},
+        ])
+
+    def test_browse_filters_and_pages_stably(self):
+        with tempfile.TemporaryDirectory() as d:
+            with SnapshotQuery(snapshot(Path(d))) as query:
+                first = query.browse(source_name='visual', collection='pages.rows', kind='candidate_position',
+                                     event_name='Sample meet', date_from='2026-05-08', date_to='2026-05-08',
+                                     session='morning', discipline='STA', category='Women', limit=1)
+                second = query.browse(kind='candidate_position', limit=1, offset=1)
+        self.assertEqual(first['total'], 2)
+        self.assertEqual(len(first['records']), 1)
+        self.assertEqual(first['records'][0]['record_path'], 'pages[0].rows[0]')
+        self.assertEqual(second['records'][0]['record_path'], 'pages[0].rows[1]')
+        self.assertNotEqual(first['records'][0]['record_id'], second['records'][0]['record_id'])
+
+
+    def test_detail_preserves_raw_citation_and_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = snapshot(Path(d))
+            packet_sha = hashlib.sha256((Path(d) / 'packet.json').read_bytes()).hexdigest()
+            with SnapshotQuery(out) as query:
+                record_id = query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
+                detail = query.detail(record_id)
+                missing = query.detail('0' * 64)
+        self.assertIsNone(missing)
+        self.assertEqual(detail['raw']['fields'], {'Name': 'Ada'})
+        self.assertEqual(detail['raw_fields'], {'Name': 'Ada'})
+        self.assertEqual(detail['parsed_fields'], {'score': '3:00'})
+        self.assertEqual(detail['citation'], {'page': 1, 'line': 3})
+        self.assertEqual(detail['parser_version'], 'parser/1')
+        self.assertEqual(detail['source_object_id'], 'sha256:original')
+        self.assertEqual(detail['acquisition_id'], 'capture-1')
+        self.assertEqual(detail['input_sha256'], packet_sha)
+
+    def test_gaps_relationships_and_source_dispositions(self):
+        with tempfile.TemporaryDirectory() as d:
+            with SnapshotQuery(snapshot(Path(d))) as query:
+                gaps = query.gaps()
+                relationships = query.relationships()
+                sources = query.sources()
+                visual = query.source('visual')
+                missing_source = query.source('nonexistent')
+        self.assertEqual(gaps['total'], 1)
+        self.assertEqual(relationships['total'], 1)
+        self.assertEqual(gaps['records'][0]['kind'], 'gap')
+        self.assertEqual(relationships['records'][0]['kind'], 'relationship')
+        self.assertEqual([s['source_name'] for s in sources], ['pending', 'visual'])
+        self.assertEqual(sources[0]['status'], 'excluded')
+        self.assertEqual(sources[0]['reason'], 'unfinished')
+        self.assertEqual(visual['metadata']['source']['id'], 'sha256:original')
+        self.assertIsNone(missing_source)
+
+    def test_rejects_unbounded_and_malformed_queries(self):
+        with tempfile.TemporaryDirectory() as d:
+            with SnapshotQuery(snapshot(Path(d))) as query:
+                for kwargs in ({'limit': 0}, {'limit': 101}, {'limit': True},
+                               {'offset': -1}, {'offset': 100001}, {'source_name': 'x' * 201},
+                               {'date_from': '2026-02-30'}, {'date_from': '2026-05-09', 'date_to': '2026-05-08'}):
+                    with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                        query.browse(**kwargs)
+                with self.assertRaises(ValueError):
+                    query.detail('x' * 1000)
+                with self.assertRaises(ValueError):
+                    query.source('x' * 1000)
+
+
+    def test_cli_emits_json_and_rejects_bad_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = snapshot(Path(d))
+            script = ROOT / 'scripts' / 'unified_evidence_query.py'
+            good = subprocess.run([sys.executable, str(script), '--snapshot-dir', str(out),
+                                   'browse', '--kind', 'candidate_position', '--limit', '1'],
+                                  text=True, capture_output=True)
+            bad = subprocess.run([sys.executable, str(script), '--snapshot-dir', str(out),
+                                  'browse', '--limit', '101'], text=True, capture_output=True)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(json.loads(good.stdout)['total'], 2)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn('limit must be', bad.stderr)
+
+
+    def test_snapshot_hash_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = snapshot(Path(d))
+            manifest_path = out / 'manifest.json'
+            manifest = json.loads(manifest_path.read_text())
+            manifest['snapshot_sha256'] = '0' * 64
+            manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'snapshot hash mismatch'):
+                SnapshotQuery(out)
+
+
+    def test_date_range_overlaps_printed_span_without_inventing_exact_date(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            packet = root / 'gia.json'
+            packet.write_text(json.dumps({'schema': 'gia/v1', 'sheets': [
+                {'name': 'Napoli', 'date_scope': ['2025-02-01', '2025-02-02', 'cell G4'],
+                 'rows': [{'id': 'row-1', 'date_scope': ['2025-02-01', '2025-02-02', 'cell G4']}]}]}),
+                encoding='utf-8')
+            out = root / 'out'
+            subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-09-28T12:00:00Z',
+                            '--input', f'gia={packet}', '--output-dir', str(out)],
+                           check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                hit = query.browse(collection='sheets.rows', date_from='2025-02-02', date_to='2025-02-02')
+                miss = query.browse(collection='sheets.rows', date_from='2025-02-03', date_to='2025-02-03')
+        self.assertEqual(hit['total'], 1)
+        self.assertIsNone(hit['records'][0]['event_date'])
+        self.assertEqual(miss['total'], 0)
+
+
+
+if __name__ == '__main__':
+    unittest.main()
