@@ -14,10 +14,25 @@ URLS = [
     "https://apnee.ffessm.fr/uploads/media/default/0001/13/b81f1b021ed2ee18c7b84aa77ed5a9b1dd1f9e81.pdf",
     "https://apnee.ffessm.fr/uploads/media/default/0001/13/a1d6b065d17c907e07cb9311010a65c4921bcdb3.pdf",
     "https://apnee.ffessm.fr/uploads/media/default/0001/13/fe9c48ac711c081e9f1b098c4564dc8285748163.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/9e1c31c82820eb05495eef8d9a11b2a05ea73aff.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/a93ad9a3a528fd57641588db683e92942a5ab725.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/cbc45b63e8c11d5feffc7f7aa60dd06227033ae9.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/211dc3fd42841e867d7fa513971699745b497dd0.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/4ce0aaa231a74fdc48e8905e2889f52c03086d90.pdf",
+    "https://apnee.ffessm.fr/uploads/media/default/0001/13/14733a89f0ca3dcaab4d4881eaf20f0fd032961b.pdf",
 ]
-LABELS = ["Monopalme Femmes", "Monopalme Hommes", "Monopalme Hommes Juniors"]
+LABELS = ["Monopalme Femmes", "Monopalme Hommes", "Monopalme Hommes Juniors",
+          "Bi-palmes Femmes", "Bi-palmes Hommes", "Sans palmes Femmes", "Sans palmes Hommes",
+          "Immersion Libre Femmes", "Immersion Libre Hommes"]
 HEADINGS = ["Résultats Monopalme Femmes", "Résultats Monopalme Hommes",
-            "Résultats Monopalme JUNIORS"]
+            "Résultats Monopalme JUNIORS", "Résultats Bipalme Femmes",
+            "Résultats Bipalme Hommes", "Résultats Sans Palmes Femmes",
+            "Résultats Sans Palmes Hommes", "Résultats Immersion Libre Femmes",
+            "Résultats Immersion Libre Hommes"]
+COUNTS = [2, 8, 1, 4, 7, 6, 12, 7, 9]
+DISCIPLINES = ["CWT-MONO"] * 3 + ["CWT-BI"] * 2 + ["CNF"] * 2 + ["FIM"] * 2
+CATEGORIES = ["Femmes", "Hommes", "Hommes Juniors", "Femmes", "Hommes",
+              "Femmes", "Hommes", "Femmes", "Hommes"]
 
 
 def pdf(title, count):
@@ -62,14 +77,14 @@ def fixture(tmp_path):
                    "review_status text)")
         for i, (url, title) in enumerate(zip(URLS, HEADINGS)):
             source = tmp_path / f"source-{i}.pdf"
-            source.write_bytes(pdf(title, (2, 8, 1)[i]))
+            source.write_bytes(pdf(title, COUNTS[i]))
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             sources.append({"id": "sha256:" + digest, "sha256": digest,
                             "bytes": source.stat().st_size, "source_path": str(source),
                             "classification": "eligible", "content_type": "application/pdf",
                             "receipt": {"final_url": url, "discovery_url": "https://apnee.ffessm.fr/resultats-2025",
                                         "retrieved_at": "2026-09-26T18:00:00Z"}})
-            for j in range((2, 8, 1)[i]):
+            for j in range(COUNTS[i]):
                 printed = f"{j+1} PERSON {j+1}"
                 raw = {"id": f"source-position:{i}-{j}", "coordinates": {"page": 1, "line": j + 8,
                        "column-start": 1, "column-end": len(printed)+1},
@@ -85,7 +100,7 @@ def fixture(tmp_path):
                            ("baseline", "positions", "candidate_position", f"positions[{i}-{j}]",
                             "sha256:" + digest, json.dumps(raw["locator"]),
                             json.dumps(raw["raw_fields"]), json.dumps(raw),
-                            ("Femmes", "Hommes", "Hommes Juniors")[i], "CWT-MONO", "unreviewed"))
+                            CATEGORIES[i], DISCIPLINES[i], "unreviewed"))
     inventory.write_text(json.dumps({"sources": sources}))
     return index, inventory, snapshot
 
@@ -98,22 +113,24 @@ def run(tmp_path, index, inventory, snapshot):
     return result, output
 
 
-def test_packet_cites_three_originals_and_snapshot_rows(tmp_path):
+def test_packet_cites_nine_originals_and_snapshot_rows(tmp_path):
     index, inventory, snapshot = fixture(tmp_path)
     result, output = run(tmp_path, index, inventory, snapshot)
     assert result.returncode == 0, result.stderr
     first = output.read_bytes()
     packet = json.loads(first)
     assert packet["schema"] == "ffessm-2025-rankings/v1"
-    assert packet["counts"] == {"source_objects": 3, "source_positions": 11,
-                                 "existing_observation_versions": 11,
+    assert packet["counts"] == {"source_objects": 9, "source_positions": 56,
+                                 "existing_observation_versions": 56,
                                  "confirmed_distinct_attempts": None}
     assert [s["index_label"] for s in packet["sources"]] == LABELS
     assert [s["url"] for s in packet["sources"]] == URLS
     assert [s["heading"] for s in packet["sources"]] == HEADINGS
+    assert [s["discipline"] for s in packet["sources"]] == DISCIPLINES
+    assert [s["source_positions"] for s in packet["sources"]] == COUNTS
     assert all(s["source_type"] == "aggregate_ranking" for s in packet["sources"])
     assert all(s["event_year"] == 2025 and s["event_date"] is None for s in packet["sources"])
-    assert len(packet["relationship_candidates"]) == 6
+    assert len(packet["relationship_candidates"]) == 18
     assert {(r["ranking_url"], r["daily_url"]) for r in packet["relationship_candidates"]} == {
         (url, daily) for url in URLS for daily in ("https://example.org/day1.pdf", "https://example.org/day2.pdf")}
     assert all(r["status"] == "unknown" and r["same_attempt"] is None

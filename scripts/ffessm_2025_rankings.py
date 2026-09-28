@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay three archived FFESSM 2025 ranking sources into a private query packet."""
+"""Replay nine archived FFESSM 2025 ranking sources into a private query packet."""
 
 import argparse
 import hashlib
@@ -18,11 +18,23 @@ INDEX_URL = "https://apnee.ffessm.fr/resultats-2025"
 BASE = "https://apnee.ffessm.fr"
 SOURCES = (
     ("https://apnee.ffessm.fr/uploads/media/default/0001/13/b81f1b021ed2ee18c7b84aa77ed5a9b1dd1f9e81.pdf",
-     "Monopalme Femmes", "Résultats Monopalme Femmes", 2),
+     "Monopalme Femmes", "Résultats Monopalme Femmes", 2, "CWT-MONO"),
     ("https://apnee.ffessm.fr/uploads/media/default/0001/13/a1d6b065d17c907e07cb9311010a65c4921bcdb3.pdf",
-     "Monopalme Hommes", "Résultats Monopalme Hommes", 8),
+     "Monopalme Hommes", "Résultats Monopalme Hommes", 8, "CWT-MONO"),
     ("https://apnee.ffessm.fr/uploads/media/default/0001/13/fe9c48ac711c081e9f1b098c4564dc8285748163.pdf",
-     "Monopalme Hommes Juniors", "Résultats Monopalme JUNIORS", 1),
+     "Monopalme Hommes Juniors", "Résultats Monopalme JUNIORS", 1, "CWT-MONO"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/9e1c31c82820eb05495eef8d9a11b2a05ea73aff.pdf",
+     "Bi-palmes Femmes", "Résultats Bipalme Femmes", 4, "CWT-BI"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/a93ad9a3a528fd57641588db683e92942a5ab725.pdf",
+     "Bi-palmes Hommes", "Résultats Bipalme Hommes", 7, "CWT-BI"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/cbc45b63e8c11d5feffc7f7aa60dd06227033ae9.pdf",
+     "Sans palmes Femmes", "Résultats Sans Palmes Femmes", 6, "CNF"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/211dc3fd42841e867d7fa513971699745b497dd0.pdf",
+     "Sans palmes Hommes", "Résultats Sans Palmes Hommes", 12, "CNF"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/4ce0aaa231a74fdc48e8905e2889f52c03086d90.pdf",
+     "Immersion Libre Femmes", "Résultats Immersion Libre Femmes", 7, "FIM"),
+    ("https://apnee.ffessm.fr/uploads/media/default/0001/13/14733a89f0ca3dcaab4d4881eaf20f0fd032961b.pdf",
+     "Immersion Libre Hommes", "Résultats Immersion Libre Hommes", 9, "FIM"),
 )
 SCHEMA = "ffessm-2025-rankings/v1"
 DAILY_LABELS = ("Jour 1 - Vendredi 27 juin 2025", "Jour 2 - Samedi 28 juin 2025")
@@ -66,7 +78,7 @@ class Links(HTMLParser):
 def index_links(index_bytes):
     parser = Links()
     parser.feed(index_bytes.decode("utf-8"))
-    for url, label, _, _ in SOURCES:
+    for url, label, _, _, _ in SOURCES:
         found = [item for item in parser.links if item[0] == url]
         require(len(found) == 1, f"index link missing or duplicated: {url}")
         require(found[0][1] == label, f"index label mismatch: {url}")
@@ -100,7 +112,7 @@ def archived_sources(inventory):
         extracted = subprocess.run(["pdftotext", "-layout", str(source_path), "-"],
                                    capture_output=True, text=True, check=True).stdout
         found[url] = (item, extracted)
-    require(len(found) == len(SOURCES), "three inventory ranking sources required")
+    require(len(found) == len(SOURCES), "nine inventory ranking sources required")
     return found
 
 
@@ -175,7 +187,7 @@ def build(index_path, inventory_path, snapshot_path):
     index_citations = {url: {"url": INDEX_URL, "sha256": sha(index_bytes),
                              "line": next(line for found_url, _, line in links if found_url == url),
                              "href": url, "label": label}
-                       for url, label, _, _ in SOURCES}
+                       for url, label, _, _, _ in SOURCES}
     daily_context = [{"url": url, "label": label, "index_line": line}
                      for url, label, line in links
                      if label in DAILY_LABELS]
@@ -185,7 +197,7 @@ def build(index_path, inventory_path, snapshot_path):
     all_positions = []
     relationships = []
     with sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True) as db:
-        for url, label, title, expected_positions in SOURCES:
+        for url, label, title, expected_positions, expected_discipline in SOURCES:
             source, extracted = archive[url]
             cited = positions(db, source, extracted)
             require(len(cited) == expected_positions,
@@ -193,7 +205,7 @@ def build(index_path, inventory_path, snapshot_path):
             categories = {row["category"] for row in cited}
             disciplines = {row["discipline"] for row in cited}
             require(len(categories) == 1 and None not in categories
-                    and disciplines == {"CWT-MONO"},
+                    and disciplines == {expected_discipline},
                     f"snapshot category or discipline conflict: {url}")
             sources.append({"id": source["id"], "url": url, "sha256": source["sha256"],
                             "bytes": source["bytes"], "receipt": source["receipt"],
@@ -201,7 +213,7 @@ def build(index_path, inventory_path, snapshot_path):
                             "index_label": label, "heading": heading(extracted, title),
                             "index_citation": index_citations[url],
                             "category": next(iter(categories)),
-                            "discipline": "CWT-MONO",
+                            "discipline": expected_discipline,
                             "event_year": 2025, "event_date": None,
                             "date_from": None, "date_to": None, "session": None,
                             "http_status": None, "response_headers": None,
