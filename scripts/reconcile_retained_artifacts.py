@@ -7,6 +7,7 @@ the number of physical source positions or claiming distinct sporting attempts.
 
 import argparse
 from collections import Counter
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -15,10 +16,20 @@ import sys
 
 try:
     from scripts.census_contract import validate
-    from scripts.project_worker_positions import ARTIFACT_TO_JSON, EDN_TO_JSON, edn_json_lines
+    from scripts.project_worker_positions import EDN_TO_JSON, edn_json_lines
 except ModuleNotFoundError:
     from census_contract import validate
-    from project_worker_positions import ARTIFACT_TO_JSON, EDN_TO_JSON, edn_json_lines
+    from project_worker_positions import EDN_TO_JSON, edn_json_lines
+
+ARTIFACT_TO_JSON = '''(require '[clojure.edn :as edn] '[cheshire.core :as json])
+(with-open [r (clojure.java.io/reader *in*)]
+  (doseq [line (line-seq r)]
+    (let [d (edn/read-string (slurp line))]
+      (println (json/generate-string
+        (select-keys d [:job-id :source-sha256 :parser-version :publication
+                        :acquisitions :source-context :source-url :status
+                        :reconciliation :schema-version :tool :processed-at
+                        :config :candidates]))))))'''
 
 
 def sha(data):
@@ -95,6 +106,17 @@ def build_supplement(projection, artifacts, payload, index_bytes, projection_byt
         need(isinstance(candidates, list) and len(candidates) == entry['candidate_count'],
              f'candidate count differs: {job_id}')
         source_hash = artifact['source-sha256']
+        config = artifact.get('config')
+        need(isinstance(config, dict), f'artifact lacks event config: {job_id}')
+        event_name = config.get('event')
+        source_dates = config.get('source-dates')
+        need(isinstance(event_name, str) and bool(event_name.strip()),
+             f'artifact lacks event name: {job_id}')
+        need(isinstance(source_dates, list) and bool(source_dates),
+             f'artifact lacks source dates: {job_id}')
+        for source_date in source_dates:
+            need(isinstance(source_date, str) and date.fromisoformat(source_date).isoformat() == source_date,
+                 f'artifact source date invalid: {job_id}')
         source_id = 'sha256:' + source_hash
         source = sources.get(source_id)
         need(source is not None and source['original_sha256'] == source_hash,
@@ -117,6 +139,10 @@ def build_supplement(projection, artifacts, payload, index_bytes, projection_byt
                                  'source_id': source_id, 'source_sha256': source_hash,
                                  'parser_version': artifact['parser-version'],
                                  'candidate_count': len(candidates),
+                                 'config': config,
+                                 'event_name': event_name,
+                                 'event_name_basis': 'artifact_config',
+                                 'source_dates_context': source_dates,
                                  'derivation_receipt': {'path': receipt_path,
                                                         'sha256': receipt_hash,
                                                         'content': receipt},
@@ -150,6 +176,9 @@ def build_supplement(projection, artifacts, payload, index_bytes, projection_byt
                 'source_lines_equal': candidate.get('source-lines') == position.get('source_lines'),
                 'imported_observation_refs': refs,
                 'event_date': parsed.get('event-date'),
+                'event_name': event_name,
+                'event_name_basis': 'artifact_config',
+                'source_dates_context': source_dates,
                 'session': parsed.get('session'),
                 'discipline': parsed.get('discipline'),
                 'category': parsed.get('category'),

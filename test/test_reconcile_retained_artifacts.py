@@ -57,6 +57,8 @@ class RetainedArtifactSupplementTest(unittest.TestCase):
                           'distinct_attempts': None}
             artifact = {'job-id': 'old-job', 'source-sha256': source_hash,
                         'parser-version': 'parser/1', 'candidates': [candidate],
+                        'config': {'event': 'Example Invitational 2025',
+                                   'source-dates': ['2025-07-01', '2025-07-11']},
                         'acquisitions': [{'acquisition-id': 'acq', 'manifest': {
                             'sha256': source_hash, 'discovery-url': acquisition['discovery_url'],
                             'final-url': acquisition['final_url'],
@@ -92,6 +94,11 @@ class RetainedArtifactSupplementTest(unittest.TestCase):
             self.assertEqual(sha(receipt_bytes), result['artifacts'][0]['derivation_receipt']['sha256'])
             self.assertEqual('2025-07-01', result['candidate_versions'][0]['event_date'])
             self.assertEqual('FIM', result['candidate_versions'][0]['discipline'])
+            self.assertEqual('Example Invitational 2025', result['candidate_versions'][0]['event_name'])
+            self.assertEqual('artifact_config', result['candidate_versions'][0]['event_name_basis'])
+            self.assertEqual(['2025-07-01', '2025-07-11'],
+                             result['artifacts'][0]['source_dates_context'])
+            self.assertEqual('2025-07-01', result['candidate_versions'][0]['event_date'])
             self.assertIsNone(result['distinct_attempts'])
             self.assertEqual(result, build_supplement(projection, [(artifact_hash, artifact)], payload,
                                                       index_bytes, b'projection fixture'))
