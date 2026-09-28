@@ -28,6 +28,57 @@ def _filter(value, label, allowed=None):
 
 
 class RouteRosterQuery:
+    @classmethod
+    def from_snapshot(cls, snapshot):
+        """Read a roster embedded as v3 records in the verified immutable snapshot."""
+        source = snapshot.manifest['inputs'].get('route-roster-v3')
+        if source is None or source.get('source_schema') != 'issue55-route-roster/v3':
+            raise ValueError('snapshot has no supported embedded route roster')
+        rows = snapshot.db.execute(
+            "SELECT collection, raw_json FROM records WHERE source_name='route-roster-v3' "
+            "AND collection IN ('routes','leads') ORDER BY record_path")
+        entries = {'routes': [], 'leads': []}
+        for row in rows:
+            entries[row['collection']].append(json.loads(row['raw_json']))
+        routes, leads = entries['routes'], entries['leads']
+        if (len(routes) != source['collections'].get('routes')
+                or len(leads) != source['collections'].get('leads')
+                or len({r['id'] for r in routes}) != len(routes)
+                or len({l['id'] for l in leads}) != len(leads)):
+            raise ValueError('embedded roster counts do not match manifest')
+        route_ids = {route['id'] for route in routes}
+        if any(lead['route_id'] not in route_ids for lead in leads):
+            raise ValueError('embedded roster has unknown route')
+        years = ('2025', '2026', 'unknown')
+        def year_of(lead):
+            return str(lead['competition_year']) if lead.get('competition_year') is not None else 'unknown'
+        summary = {'route_count': len(routes), 'lead_count': len(leads),
+                   'confirmed_distinct_attempts': snapshot.manifest['confirmed_distinct_attempts'],
+                   'routes_by_status': {s: sum(r['status'] == s for r in routes) for s in sorted(STATUSES)},
+                   'leads_by_status': {s: sum(l['status'] == s for l in leads) for s in sorted(STATUSES)},
+                   'leads_by_year': {y: sum(year_of(l) == y for l in leads) for y in years},
+                   'leads_by_route': {}}
+        for route_id in sorted(route_ids):
+            subset = [lead for lead in leads if lead['route_id'] == route_id]
+            summary['leads_by_route'][route_id] = {
+                'count': len(subset),
+                'by_status': {s: sum(l['status'] == s for l in subset) for s in sorted(STATUSES)},
+                'by_year': {y: sum(year_of(l) == y for l in subset) for y in years}}
+        metadata_row = snapshot.db.execute(
+            "SELECT metadata_json FROM source_metadata WHERE source_name='route-roster-v3'").fetchone()
+        if metadata_row is None:
+            raise ValueError('embedded roster metadata missing')
+        metadata = json.loads(metadata_row['metadata_json'])
+        if metadata.get('schema') != 'issue55-route-roster/v3' or metadata.get('summary') != summary:
+            raise ValueError('embedded roster summary does not match metadata')
+        self = cls.__new__(cls)
+        self.roster = {'cutoff': metadata['cutoff'], 'routes': routes, 'leads': leads,
+                       'summary': summary}
+        self.sha256 = source['sha256']
+        self.snapshot = snapshot
+        self.route_ids = route_ids
+        return self
+
     def __init__(self, directory, expected_sha256, snapshot=None, snapshot_sha256=None):
         if not isinstance(expected_sha256, str) or len(expected_sha256) != 64 or any(
                 c not in '0123456789abcdef' for c in expected_sha256):

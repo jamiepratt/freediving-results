@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
 from route_roster_query import RouteRosterQuery
+from owner_source_view import OriginalSourceView, SourceViewError
 
 
 ASSETS = {
@@ -28,19 +29,27 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 COMPARISON_PATH = re.compile(r'^/api/comparison/([a-f0-9]{64})$')
 ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
+SOURCE_VIEW_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})$')
+SOURCE_PAGE_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 
 
 class EvidenceServer(HTTPServer):
-    def __init__(self, snapshot_dir, password, roster_dir=None, roster_sha256=None):
+    def __init__(self, snapshot_dir, password, roster_dir=None, roster_sha256=None,
+                 source_bundle_dir=None, source_bundle_sha256=None):
         if not password:
             raise ValueError('password is required')
         if bool(roster_dir) != bool(roster_sha256):
             raise ValueError('route roster configuration incomplete')
+        if bool(source_bundle_dir) != bool(source_bundle_sha256):
+            raise ValueError('source bundle configuration incomplete')
         self.snapshot_dir = snapshot_dir
         self.query = None
         self.roster = None
         self.roster_dir = roster_dir
         self.roster_sha256 = roster_sha256
+        self.source_bundle_dir = source_bundle_dir
+        self.source_bundle_sha256 = source_bundle_sha256
+        self.source_view = None
         self.password = password
         self.sessions = {}
         self.login_attempts = deque()
@@ -66,6 +75,12 @@ class EvidenceServer(HTTPServer):
             try:
                 if self.roster_dir:
                     self.roster = RouteRosterQuery(self.roster_dir, self.roster_sha256, self.query)
+                elif 'route-roster-v3' in self.query.manifest['inputs']:
+                    self.roster = RouteRosterQuery.from_snapshot(self.query)
+                if self.source_bundle_dir:
+                    self.source_view = OriginalSourceView(self.source_bundle_dir,
+                                                          self.source_bundle_sha256,
+                                                          self.query.manifest['snapshot_sha256'])
             except Exception:
                 self.query.close()
                 self.query = None
@@ -235,7 +250,33 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                 result = self.server.snapshot().comparison(COMPARISON_PATH.fullmatch(path).group(1))
                 if result is not None:
                     for side in result['sides']:
-                        side['source_view'] = {'status': 'unavailable', 'reason': 'Local viewer has no original source bundle'}
+                        viewer = self.server.source_view
+                        item = viewer.item_for(side['source_object_id']) if viewer else None
+                        if item is None:
+                            side['source_view'] = {'status': 'unavailable', 'reason': 'Original source is absent from this private bundle'}
+                        elif item.get('status') == 'restricted':
+                            side['source_view'] = {'status': 'restricted', 'reason': item.get('reason') or 'Original access restricted',
+                                                   'safe_derivative': bool(item.get('derivative'))}
+                        elif item.get('status') != 'included':
+                            side['source_view'] = {'status': 'unavailable', 'reason': item.get('reason') or 'Original unavailable'}
+                        elif side['collection'] == 'candidate_versions':
+                            side['source_view'] = {'status': 'unavailable', 'reason': 'Open the linked imported row for citation replay'}
+                        else:
+                            side['source_view'] = {'status': 'present', 'reason': 'Verified private bundle citation replay is available'}
+            elif SOURCE_PAGE_PATH.fullmatch(path) and not parsed.query:
+                if self.server.source_view is None:
+                    self.server.snapshot()
+                if self.server.source_view is None:
+                    return self._reply(503)
+                record_id, page = SOURCE_PAGE_PATH.fullmatch(path).groups()
+                image = self.server.source_view.page(self.server.snapshot().detail(record_id), int(page))
+                return self._reply(200, image, 'image/png')
+            elif SOURCE_VIEW_PATH.fullmatch(path) and not parsed.query:
+                self.server.snapshot()
+                if self.server.source_view is None:
+                    return self._reply(503)
+                result = self.server.source_view.inspect(
+                    self.server.snapshot().detail(SOURCE_VIEW_PATH.fullmatch(path).group(1)))
             elif path in ('/api/gaps', '/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = self.server.snapshot().browse(**self._filters(parsed.query, fixed_kind=kind))
@@ -243,6 +284,8 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                 result = self.server.snapshot().detail(path.removeprefix('/api/detail/'))
             else:
                 return self._reply(404)
+        except SourceViewError as exc:
+            return self._reply(exc.status)
         except (ValueError, KeyError):
             return self._reply(400)
         if result is None:
@@ -297,8 +340,10 @@ class EvidenceHandler(BaseHTTPRequestHandler):
     do_DELETE = do_PUT
 
 
-def make_server(snapshot_dir, password, roster_dir=None, roster_sha256=None):
-    return EvidenceServer(snapshot_dir, password, roster_dir, roster_sha256)
+def make_server(snapshot_dir, password, roster_dir=None, roster_sha256=None,
+                source_bundle_dir=None, source_bundle_sha256=None):
+    return EvidenceServer(snapshot_dir, password, roster_dir, roster_sha256,
+                          source_bundle_dir, source_bundle_sha256)
 
 
 def main():
@@ -306,9 +351,12 @@ def main():
     parser.add_argument('--snapshot-dir', required=True)
     parser.add_argument('--roster-dir')
     parser.add_argument('--roster-sha256')
+    parser.add_argument('--source-bundle-dir')
+    parser.add_argument('--source-bundle-sha256')
     args = parser.parse_args()
     password = getpass.getpass('Local evidence password: ')
-    with make_server(args.snapshot_dir, password, args.roster_dir, args.roster_sha256) as server:
+    with make_server(args.snapshot_dir, password, args.roster_dir, args.roster_sha256,
+                     args.source_bundle_dir, args.source_bundle_sha256) as server:
         print(f'Open http://127.0.0.1:{server.server_port}/login', flush=True)
         try:
             server.serve_forever()

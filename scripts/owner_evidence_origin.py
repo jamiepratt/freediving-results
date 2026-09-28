@@ -39,7 +39,7 @@ STATIC = {
 def _source_availability(source_view, side):
     if source_view is None:
         return {'status': 'unavailable', 'reason': 'Private source bundle is not configured'}
-    item = source_view.items.get(side['source_object_id'])
+    item = source_view.item_for(side['source_object_id'])
     if item is None:
         return {'status': 'unavailable', 'reason': 'Original source is absent from this private bundle'}
     if item.get('status') == 'restricted':
@@ -121,7 +121,9 @@ class PrivateOrigin(HTTPServer):
             roster_sha = env.get('OWNER_EVIDENCE_ROSTER_SHA256')
             if bool(roster_dir) != bool(roster_sha):
                 raise ValueError('route roster configuration incomplete')
-            self.roster = RouteRosterQuery(roster_dir, roster_sha, self.query) if roster_dir else None
+            self.roster = (RouteRosterQuery(roster_dir, roster_sha, self.query) if roster_dir else
+                           RouteRosterQuery.from_snapshot(self.query)
+                           if 'route-roster-v3' in self.query.manifest['inputs'] else None)
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()

@@ -13,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from owner_evidence_origin import make_server
+from owner_evidence_web import make_server as make_local_server
 from owner_source_view import OriginalSourceView, SourceViewError
 from unified_evidence_query import SnapshotQuery
 from private_source_bundle import build
@@ -23,6 +24,64 @@ SECRET = 'a-private-gateway-secret-for-tests'
 EMAIL = 'owner@example.com'
 ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snapshot-20260928/snapshot')
 ROATAN_BUNDLE = Path('/Users/jamiep/Documents/ChatGPT/freediving-results/data/owner-evidence-source-bundle-20260928-roatan-v5/bundle-validated')
+V7_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-snapshot-20260928-v7/snapshot')
+V7_BUNDLE = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-bundle-20260928/bundle-validated')
+
+
+@unittest.skipUnless(V7_SNAPSHOT.exists() and V7_BUNDLE.exists(), 'private v7 evidence unavailable')
+class V7SourceViewTest(unittest.TestCase):
+    def test_local_bundle_route_requires_login_and_replays_packet(self):
+        with make_local_server(V7_SNAPSHOT, 'local secret', source_bundle_dir=V7_BUNDLE,
+                               source_bundle_sha256='faf181e28d6ed3c39072ba96bbe20df295f4b801321490e9818ba0ca77a533eb') as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            host = f'127.0.0.1:{server.server_port}'
+            with SnapshotQuery(V7_SNAPSHOT) as query:
+                record_id = query.browse(source_name='aida-4408-2025-08-30', limit=1)['records'][0]['record_id']
+            def request(path, method='GET', headers=None, body=None):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+                conn.request(method, path, body=body, headers={'Host': host, **(headers or {})})
+                response = conn.getresponse()
+                value = response.status, dict(response.getheaders()), response.read()
+                conn.close()
+                return value
+            try:
+                url = '/api/source-view/' + record_id
+                self.assertEqual(request(url)[0], 401)
+                status, headers, _ = request('/login', 'POST',
+                    {'Origin': 'http://' + host, 'Content-Type': 'application/x-www-form-urlencoded'},
+                    b'password=local+secret')
+                self.assertEqual(status, 303)
+                cookie = {'Cookie': headers['Set-Cookie'].split(';', 1)[0]}
+                status, _, body = request(url, headers=cookie)
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['format'], 'cited_html_packet')
+                self.assertEqual(request(url, method='PUT', headers=cookie)[0], 405)
+            finally:
+                server.shutdown()
+                worker.join(timeout=2)
+
+    def test_selected_html_packet_and_eindhoven_json_replay_exact_citations(self):
+        with SnapshotQuery(V7_SNAPSHOT) as query:
+            viewer = OriginalSourceView(V7_BUNDLE,
+                'faf181e28d6ed3c39072ba96bbe20df295f4b801321490e9818ba0ca77a533eb',
+                query.manifest['snapshot_sha256'])
+            aida = query.detail(query.browse(source_name='aida-4408-2025-08-30', limit=1)['records'][0]['record_id'])
+            shown = viewer.inspect(aida)
+            self.assertEqual(shown['format'], 'cited_html_packet')
+            self.assertEqual(shown['original_replay'], 'restricted_original_required')
+            self.assertEqual(shown['source_value']['Diver']['value'], aida['raw_fields']['Diver']['value'])
+            with self.assertRaises(SourceViewError) as raised:
+                viewer.inspect(dict(aida, citation=dict(aida['citation'], tbody_row=2)))
+            self.assertEqual(raised.exception.status, 422)
+            result = query.detail(query.browse(source_name='eindhoven-noxy5', collection='result_rows', limit=1)['records'][0]['record_id'])
+            exact = viewer.inspect(result)
+            self.assertEqual(exact['format'], 'json')
+            self.assertEqual(exact['source_value'], result['raw_fields'])
+            self.assertEqual(exact['locator'], result['citation']['json_pointer'])
+            with self.assertRaises(SourceViewError) as raised:
+                viewer.inspect(dict(result, citation=dict(result['citation'], json_pointer='/rows/0')))
+            self.assertEqual(raised.exception.status, 422)
 
 
 @unittest.skipUnless(ROATAN_SNAPSHOT.exists() and ROATAN_BUNDLE.exists(), 'private Roatan evidence unavailable')

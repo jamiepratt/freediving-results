@@ -48,17 +48,24 @@ class OriginalSourceView:
             raise ValueError('source bundle manifest mismatch')
         manifest = verify(self.bundle)
         self.items = {item['id']: item for item in manifest['sources']}
+        self.items_by_sha256 = {item['sha256']: item for item in manifest['sources']
+                                if item.get('sha256') and item.get('status') in ('included', 'restricted')}
         if not any(item.get('status') == 'included' and item['sha256'] == snapshot_sha256
                    and item.get('content_type') == 'application/vnd.sqlite3'
                    for item in self.items.values()):
             raise ValueError('source bundle does not contain the selected snapshot')
 
+    def item_for(self, source_object_id):
+        if not isinstance(source_object_id, str):
+            return None
+        return self.items.get(source_object_id) or (
+            self.items_by_sha256.get(source_object_id[7:])
+            if source_object_id.startswith('sha256:') else None)
+
     def _source(self, detail):
         if detail is None:
             raise SourceViewError(404)
-        if detail.get('kind') != 'candidate_position':
-            raise SourceViewError(422)
-        item = self.items.get(detail.get('source_object_id'))
+        item = self.item_for(detail.get('source_object_id'))
         if item is None:
             raise SourceViewError(404)
         if item.get('status') != 'included':
@@ -84,7 +91,9 @@ class OriginalSourceView:
     def inspect(self, detail):
         if detail is None:
             raise SourceViewError(404)
-        item = self.items.get(detail.get('source_object_id'))
+        item = self.item_for(detail.get('source_object_id'))
+        if detail.get('source_schema') == 'aida-selected-html-packet/v1':
+            return self._aida_packet(detail, item)
         if item is not None and item.get('status') == 'restricted' and item.get('derivative'):
             return self._safe_html_derivative(detail, item)
         item, content_type, data = self._source(detail)
@@ -99,6 +108,7 @@ class OriginalSourceView:
             citation = detail.get('citation')
             match = ROW.fullmatch(citation) if isinstance(citation, str) else None
             roatan = detail.get('source_schema') == 'roatan-2026-cwt-men-private-census/v1'
+            eindhoven = detail.get('source_schema') == 'eindhoven-2026-noxy-private-accounting/v1'
             if roatan:
                 raw = detail.get('raw') or {}
                 index = citation.get('row-index-zero-based') if isinstance(citation, dict) else None
@@ -109,6 +119,16 @@ class OriginalSourceView:
                         or raw.get('json_index_zero_based') != index
                         or detail.get('source_object_id') != 'sha256:' + item['sha256']):
                     raise SourceViewError(422)
+            elif eindhoven:
+                pointer = citation.get('json_pointer') if isinstance(citation, dict) else None
+                source_hash = citation.get('source_sha256') if isinstance(citation, dict) else None
+                if (not isinstance(pointer, str) or not re.fullmatch(r'/(?:rows/)?(?:0|[1-9][0-9]{0,5})', pointer)
+                        or source_hash != item['sha256']
+                        or detail.get('source_object_id') != 'sha256:' + item['sha256']
+                        or detail.get('raw', {}).get('citation') != citation
+                        or detail.get('raw', {}).get('json_index_zero_based') != int(pointer.rsplit('/', 1)[-1])):
+                    raise SourceViewError(422)
+                index = int(pointer.rsplit('/', 1)[-1])
             elif match:
                 index = int(match.group(1))
             else:
@@ -117,19 +137,58 @@ class OriginalSourceView:
                 source = json.loads(data)
             except (UnicodeError, ValueError) as exc:
                 raise SourceViewError(503) from exc
-            rows = source if roatan and isinstance(source, list) else source.get('data') if isinstance(source, dict) and not roatan else None
+            rows = (source if (roatan or eindhoven and not pointer.startswith('/rows/')) and isinstance(source, list)
+                    else source.get('rows') if eindhoven and isinstance(source, dict) and pointer.startswith('/rows/')
+                    else source.get('data') if isinstance(source, dict) and not roatan and not eindhoven else None)
             if not isinstance(rows, list) or index >= len(rows) or rows[index] != detail['raw_fields']:
                 raise SourceViewError(422)
             row = rows[index]
             if len(json.dumps(row, ensure_ascii=False).encode('utf-8')) > MAX_JSON_ROW:
                 raise SourceViewError(413)
-            return {**base, 'format': 'json', 'locator': f'[{index}]' if roatan else f'data[{index}]', 'source_value': row}
+            locator = pointer if eindhoven else f'[{index}]' if roatan else f'data[{index}]'
+            return {**base, 'format': 'json', 'locator': locator, 'source_value': row}
         citation = detail.get('citation')
         page = citation.get('page') if isinstance(citation, dict) else None
         if type(page) is not int or not 1 <= page <= 500 or page != detail.get('page'):
             raise SourceViewError(422)
         return {**base, 'format': 'pdf', 'page': page,
                 'region': citation.get('region')}
+
+    def _aida_packet(self, detail, original):
+        if detail.get('kind') != 'candidate_position' or original is None or original.get('status') != 'restricted':
+            raise SourceViewError(422)
+        relation = original.get('derivative')
+        packet_item = self.items.get(relation)
+        if not isinstance(relation, str) or packet_item is None or packet_item.get('status') != 'included':
+            raise SourceViewError(503)
+        path = self.bundle / 'objects' / packet_item['sha256']
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != packet_item['bytes']:
+                raise SourceViewError(503)
+            data = path.read_bytes()
+        except OSError as exc:
+            raise SourceViewError(503) from exc
+        if hashlib.sha256(data).hexdigest() != packet_item['sha256']:
+            raise SourceViewError(503)
+        try:
+            packet = json.loads(data)
+            index = int(re.fullmatch(r'positions\[(0|[1-9][0-9]{0,5})\]', detail['record_path']).group(1))
+            position = packet['positions'][index]
+            citation = detail['citation']
+            if (packet.get('schema') != 'aida-selected-html-packet/v1'
+                    or packet['source']['sha256'] != original['sha256']
+                    or detail['source_object_id'] != 'sha256:' + original['sha256']
+                    or position['position'] != citation
+                    or position['cells'] != detail['raw_fields']
+                    or citation['date'] != packet['source']['selected_date']):
+                raise SourceViewError(422)
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            raise SourceViewError(422) from exc
+        return {'format': 'cited_html_packet', 'source_sha256': original['sha256'],
+                'derivative_sha256': packet_item['sha256'], 'citation': citation,
+                'source_value': position['cells'], 'raw_fields': detail['raw_fields'],
+                'parsed_fields': detail['parsed_fields'], 'snapshot_sha256': detail['snapshot_sha256'],
+                'original_replay': 'restricted_original_required'}
 
     def _safe_html_derivative(self, detail, original):
         if detail.get('kind') != 'candidate_position':

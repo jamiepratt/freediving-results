@@ -17,6 +17,21 @@ ROSTER = Path('/Users/jamiep/.codex/private-corpora/issue55-route-roster-2026092
 SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/cmas-issue55-snapshot-20260928/snapshot')
 ROSTER_SHA = '5865e082eb929d8995a2d42a24dab3b3765b4df65fdbbaf341a10f9dc33d24bd'
 SNAPSHOT_SHA = '0285cd65ebf9f63a422c3ed7122aa6f59b97f06ac69e42d810e986b02579a9e6'
+V7_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-snapshot-20260928-v7/snapshot')
+
+
+@unittest.skipUnless(V7_SNAPSHOT.exists(), 'private v7 evidence unavailable')
+class V7RouteRosterTest(unittest.TestCase):
+    def test_snapshot_coverage_uses_pinned_roster_records(self):
+        from unified_evidence_query import SnapshotQuery
+        with SnapshotQuery(V7_SNAPSHOT) as snapshot:
+            roster = RouteRosterQuery.from_snapshot(snapshot)
+            self.assertEqual(roster.routes()['total'], 15)
+            self.assertEqual(roster.leads()['total'], 83)
+            self.assertEqual(roster.leads()['summary']['leads_by_status'],
+                             {'checked': 34, 'acquired': 29, 'unchecked': 20,
+                              'missing': 0, 'inaccessible': 0})
+            self.assertEqual(roster.routes(status='inaccessible')['total'], 1)
 
 
 @unittest.skipUnless(ROSTER.exists() and SNAPSHOT.exists(), 'private route corpus unavailable')
