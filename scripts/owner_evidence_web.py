@@ -96,21 +96,23 @@ class EvidenceHandler(BaseHTTPRequestHandler):
         # URLs, cookies and credentials never enter access logs.
         pass
 
-    def _headers(self, status, content_type='text/plain; charset=utf-8', extra=None):
+    def _headers(self, status, content_type='text/plain; charset=utf-8', extra=None,
+                 referrer_policy='no-referrer'):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Security-Policy', CSP)
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Referrer-Policy', referrer_policy)
         self.send_header('X-Frame-Options', 'DENY')
         if extra:
             for key, value in extra.items():
                 self.send_header(key, value)
         self.end_headers()
 
-    def _reply(self, status, body=b'', content_type='text/plain; charset=utf-8', extra=None):
-        self._headers(status, content_type, extra)
+    def _reply(self, status, body=b'', content_type='text/plain; charset=utf-8', extra=None,
+               referrer_policy='no-referrer'):
+        self._headers(status, content_type, extra, referrer_policy)
         self.wfile.write(body)
 
     def _json(self, value):
@@ -194,7 +196,7 @@ class EvidenceHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == '/login' and not parsed.query:
             page = b'<!doctype html><meta charset="utf-8"><title>Private evidence login</title><form action="/login" method="post"><label>Password <input name="password" type="password" required autofocus></label><button>Unlock</button></form>'
-            return self._reply(200, page, 'text/html; charset=utf-8')
+            return self._reply(200, page, 'text/html; charset=utf-8', referrer_policy='same-origin')
         if not self._authenticated():
             return self._reply(401)
         if path in ASSETS and not parsed.query:

@@ -79,6 +79,13 @@ class WorkspaceTest(unittest.TestCase):
             with self.subTest(headers=headers):
                 self.assertNotEqual(self.request('POST', '/login', body, headers)[0], 303)
 
+    def test_login_page_allows_same_origin_form_submission(self):
+        status, headers, body = self.request('GET', '/login')
+        self.assertEqual(status, 200)
+        self.assertIn(b'<form action="/login" method="post">', body)
+        self.assertEqual(headers['Referrer-Policy'], 'same-origin')
+        self.assertEqual(self.request('GET', '/api/overview')[1]['Referrer-Policy'], 'no-referrer')
+
     def test_authenticated_browse_detail_and_read_only_surface(self):
         cookie = self.login()
         headers = {'Cookie': cookie}
