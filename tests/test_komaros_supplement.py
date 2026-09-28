@@ -82,6 +82,15 @@ class KomarosSupplementTest(unittest.TestCase):
                                           "imported_observation_versions": 0,
                                           "unresolved_positions": 1, "unresolved_fields": 1,
                                           "confirmed_distinct_attempts": None})
+        self.assertEqual(doc["gap_reconciliation"], {
+            "status": "visual_positions_reconciled",
+            "prior_disposition": "unsupported_image_results",
+            "accounted_source_positions": 47,
+            "unresolved_positions": 1,
+            "unresolved_fields": 1,
+            "imported_observation_versions": 0,
+            "owner_review_status": "unreviewed",
+        })
         self.assertEqual(len(doc["pages"]), 13)
         self.assertEqual(doc["event_date_calendar"], "2026-04-12")
         self.assertEqual(doc["event_id_calendar"], 9678)
