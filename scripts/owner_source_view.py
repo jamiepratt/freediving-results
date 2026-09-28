@@ -1,4 +1,4 @@
-"""Bounded, record-bound access to verified private PDF and JSON originals."""
+"""Bounded, record-bound access to verified private PDF, JPEG and JSON originals."""
 import hashlib
 import json
 from pathlib import Path
@@ -15,7 +15,9 @@ from vestico_safe_derivative import (HEADERS as VESTICO_HEADERS, PARSER_VERSION 
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 ROW = re.compile(r'row index zero based ([0-9]{1,6})\Z')
 HTML_ROW = re.compile(r'table ([12]) row ([1-9][0-9]{0,3})\Z')
+FFESSM_LINE = re.compile(r'page ([1-9][0-9]{0,2}) line ([1-9][0-9]{0,3})(?: column start ([1-9][0-9]{0,3}) column end ([1-9][0-9]{0,3}))?\Z')
 MAX_SOURCE = 100 * 1024 * 1024
+MAX_JPEG = 2 * 1024 * 1024
 MAX_JSON_ROW = 128 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
 RECEIPT_FIELDS = ('discovery_url', 'final_url', 'retrieved_at', 'selected_view')
@@ -71,9 +73,13 @@ class OriginalSourceView:
         if item.get('status') != 'included':
             raise SourceViewError(403)
         content_type = item.get('content_type', '').split(';', 1)[0].lower()
-        if content_type not in ('application/pdf', 'application/json'):
+        if content_type == 'application/octet-stream' and detail.get('source_schema') == 'ffessm-2025-daily/v1':
+            content_type = 'application/pdf'
+        if content_type not in ('application/pdf', 'application/json', 'image/jpeg'):
             raise SourceViewError(415)
         if item.get('bytes', MAX_SOURCE + 1) > MAX_SOURCE:
+            raise SourceViewError(413)
+        if content_type == 'image/jpeg' and item['bytes'] >= MAX_JPEG:
             raise SourceViewError(413)
         path = self.bundle / 'objects' / item['sha256']
         if path.is_symlink():
@@ -86,6 +92,10 @@ class OriginalSourceView:
             raise SourceViewError(503) from exc
         if len(data) != item['bytes'] or hashlib.sha256(data).hexdigest() != item['sha256']:
             raise SourceViewError(503)
+        if content_type == 'application/pdf' and not data.startswith(b'%PDF-'):
+            raise SourceViewError(422)
+        if content_type == 'image/jpeg' and (not data.startswith(b'\xff\xd8\xff') or not data.endswith(b'\xff\xd9')):
+            raise SourceViewError(422)
         return item, content_type, data
 
     def inspect(self, detail):
@@ -147,12 +157,45 @@ class OriginalSourceView:
                 raise SourceViewError(413)
             locator = pointer if eindhoven else f'[{index}]' if roatan else f'data[{index}]'
             return {**base, 'format': 'json', 'locator': locator, 'source_value': row}
+        if content_type == 'image/jpeg':
+            citation = detail.get('citation')
+            raw = detail.get('raw') or {}
+            bbox = citation.get('bbox') if isinstance(citation, dict) else None
+            if (detail.get('source_schema') != 'san-mauro-jpg-supplement/v1'
+                    or detail.get('kind') not in ('candidate_position', 'aggregate')
+                    or detail.get('source_object_id') != 'sha256:' + item['sha256']
+                    or not isinstance(citation, dict)
+                    or citation.get('source_sha256') != item['sha256']
+                    or raw.get('citation') != citation
+                    or not isinstance(bbox, list) or len(bbox) != 4
+                    or any(type(v) is not int or not 0 <= v <= 20000 for v in bbox)
+                    or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]
+                    or type(citation.get('printed_row')) is not int
+                    or not 1 <= citation['printed_row'] <= 1000
+                    or not isinstance(citation.get('region_id'), str)
+                    or not 1 <= len(citation['region_id']) <= 32):
+                raise SourceViewError(422)
+            return {**base, 'format': 'jpeg', 'original_replay': 'verified_original'}
         citation = detail.get('citation')
-        page = citation.get('page') if isinstance(citation, dict) else None
+        if detail.get('source_schema') in ('ffessm-2025-rankings/v1', 'ffessm-2025-daily/v1'):
+            raw = detail.get('raw') or {}
+            match = FFESSM_LINE.fullmatch(citation) if isinstance(citation, str) else None
+            coords = raw.get('coordinates') or {}
+            if (not match or raw.get('citation') != citation
+                    or raw.get('source_object_id', detail.get('source_object_id')) != detail.get('source_object_id')
+                    or detail.get('source_object_id') != 'sha256:' + item['sha256']
+                    or coords.get('page') != int(match.group(1))
+                    or coords.get('line') != int(match.group(2))
+                    or (match.group(3) is not None and (coords.get('column-start') != int(match.group(3))
+                        or coords.get('column-end') != int(match.group(4))))):
+                raise SourceViewError(422)
+            page = int(match.group(1))
+        else:
+            page = citation.get('page') if isinstance(citation, dict) else None
         if type(page) is not int or not 1 <= page <= 500 or page != detail.get('page'):
             raise SourceViewError(422)
         return {**base, 'format': 'pdf', 'page': page,
-                'region': citation.get('region')}
+                'region': citation.get('region') if isinstance(citation, dict) else citation}
 
     def _aida_packet(self, detail, original):
         if detail.get('kind') != 'candidate_position' or original is None or original.get('status') != 'restricted':
@@ -276,3 +319,8 @@ class OriginalSourceView:
         if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
             raise SourceViewError(422)
         return image
+
+    def image(self, detail):
+        if self.inspect(detail)['format'] != 'jpeg':
+            raise SourceViewError(404)
+        return self._source(detail)[2]

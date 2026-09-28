@@ -26,11 +26,12 @@ ASSETS = {
 }
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
            'session', 'discipline', 'category', 'limit', 'offset'}
-CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 COMPARISON_PATH = re.compile(r'^/api/comparison/([a-f0-9]{64})$')
 ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 SOURCE_VIEW_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})$')
 SOURCE_PAGE_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
+SOURCE_IMAGE_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})/image$')
 
 
 class EvidenceServer(HTTPServer):
@@ -75,7 +76,7 @@ class EvidenceServer(HTTPServer):
             try:
                 if self.roster_dir:
                     self.roster = RouteRosterQuery(self.roster_dir, self.roster_sha256, self.query)
-                elif 'route-roster-v3' in self.query.manifest['inputs']:
+                elif any(name in self.query.manifest['inputs'] for name in ('route-roster-v4', 'route-roster-v3')):
                     self.roster = RouteRosterQuery.from_snapshot(self.query)
                 if self.source_bundle_dir:
                     self.source_view = OriginalSourceView(self.source_bundle_dir,
@@ -271,6 +272,13 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                 record_id, page = SOURCE_PAGE_PATH.fullmatch(path).groups()
                 image = self.server.source_view.page(self.server.snapshot().detail(record_id), int(page))
                 return self._reply(200, image, 'image/png')
+            elif SOURCE_IMAGE_PATH.fullmatch(path) and not parsed.query:
+                self.server.snapshot()
+                if self.server.source_view is None:
+                    return self._reply(503)
+                record_id = SOURCE_IMAGE_PATH.fullmatch(path).group(1)
+                image = self.server.source_view.image(self.server.snapshot().detail(record_id))
+                return self._reply(200, image, 'image/jpeg')
             elif SOURCE_VIEW_PATH.fullmatch(path) and not parsed.query:
                 self.server.snapshot()
                 if self.server.source_view is None:

@@ -26,6 +26,7 @@ SOURCE_VIEW_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})$
 COMPARISON_PATH = re.compile(r'^/owner-evidence/api/comparison/([a-f0-9]{64})$')
 ROATAN_PATH = re.compile(r'^/owner-evidence/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 SOURCE_PAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
+SOURCE_IMAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/image$')
 HOST_PATTERN = re.compile(r'^[a-z0-9-]+\.alphacompose\.com$')
 EMAIL_PATTERN = re.compile(r'^[^\s,@]+@[^\s,@]+\.[^\s,@]+$')
 STATIC = {
@@ -123,7 +124,7 @@ class PrivateOrigin(HTTPServer):
                 raise ValueError('route roster configuration incomplete')
             self.roster = (RouteRosterQuery(roster_dir, roster_sha, self.query) if roster_dir else
                            RouteRosterQuery.from_snapshot(self.query)
-                           if 'route-roster-v3' in self.query.manifest['inputs'] else None)
+                           if any(name in self.query.manifest['inputs'] for name in ('route-roster-v4', 'route-roster-v3')) else None)
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()
@@ -296,6 +297,12 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 record_id, page = SOURCE_PAGE_PATH.fullmatch(path).groups()
                 image = self.server.source_view.page(query.detail(record_id), int(page))
                 return self._reply(200, image, 'image/png')
+            elif SOURCE_IMAGE_PATH.fullmatch(path) and not parsed.query:
+                if self.server.source_view is None:
+                    return self._reply(503)
+                record_id = SOURCE_IMAGE_PATH.fullmatch(path).group(1)
+                image = self.server.source_view.image(query.detail(record_id))
+                return self._reply(200, image, 'image/jpeg')
             elif SOURCE_VIEW_PATH.fullmatch(path) and not parsed.query:
                 if self.server.source_view is None:
                     return self._reply(503)

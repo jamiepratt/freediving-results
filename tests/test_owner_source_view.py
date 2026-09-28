@@ -26,6 +26,107 @@ ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snap
 ROATAN_BUNDLE = Path('/Users/jamiep/Documents/ChatGPT/freediving-results/data/owner-evidence-source-bundle-20260928-roatan-v5/bundle-validated')
 V7_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-snapshot-20260928-v7/snapshot')
 V7_BUNDLE = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-bundle-20260928/bundle-validated')
+V8_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-unified-snapshot-20260928-v8/snapshot')
+V8_BUNDLE = Path('/Users/jamiep/.codex/private-corpora/issue55-v8-bundle-20260928/bundle-validated')
+V8_BUNDLE_SHA = 'ec7ce579e525a54f4920f5e4c615848c4562099266f15191f1b5c5f58df07431'
+
+
+@unittest.skipUnless(V8_SNAPSHOT.exists() and V8_BUNDLE.exists(), 'private v8 evidence unavailable')
+class V8SourceViewTest(unittest.TestCase):
+    def test_loopback_jpeg_route_requires_login_and_exact_record(self):
+        with make_local_server(V8_SNAPSHOT, 'local secret', source_bundle_dir=V8_BUNDLE,
+                               source_bundle_sha256=V8_BUNDLE_SHA) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host = f'127.0.0.1:{server.server_port}'
+            def request(path, method='GET', headers=None, body=None):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+                conn.request(method, path, body=body, headers={'Host': host, **(headers or {})})
+                response = conn.getresponse()
+                result = response.status, dict(response.getheaders()), response.read()
+                conn.close()
+                return result
+            try:
+                with SnapshotQuery(V8_SNAPSHOT) as query:
+                    record_id = query.browse(source_name='san-mauro-jpg', collection='positions', limit=1)['records'][0]['record_id']
+                    source_sha = query.detail(record_id)['source_object_id'].removeprefix('sha256:')
+                url = '/api/source-view/' + record_id + '/image'
+                self.assertEqual(request(url)[0], 401)
+                status, headers, _ = request('/login', 'POST',
+                    {'Origin': 'http://' + host, 'Content-Type': 'application/x-www-form-urlencoded'},
+                    b'password=local+secret')
+                self.assertEqual(status, 303)
+                cookie = {'Cookie': headers['Set-Cookie'].split(';', 1)[0]}
+                status, headers, data = request(url, headers=cookie)
+                self.assertEqual((status, headers['Content-Type']), (200, 'image/jpeg'))
+                self.assertEqual(sha(data), source_sha)
+                self.assertEqual(request('/api/source-view/' + source_sha + '/image', headers=cookie)[0], 404)
+                self.assertEqual(request(url, method='PUT', headers=cookie)[0], 405)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_citation_tampering_rejects_ffessm_and_jpeg(self):
+        with SnapshotQuery(V8_SNAPSHOT) as query:
+            viewer = OriginalSourceView(V8_BUNDLE, V8_BUNDLE_SHA, query.manifest['snapshot_sha256'])
+            pdf = query.detail(query.browse(source_name='ffessm-rankings', collection='positions', limit=1)['records'][0]['record_id'])
+            jpg = query.detail(query.browse(source_name='san-mauro-jpg', collection='positions', limit=1)['records'][0]['record_id'])
+            observation = query.detail(query.browse(source_name='san-mauro-jpg', collection='observation_versions', limit=1)['records'][0]['record_id'])
+            for changed in (dict(pdf, citation='page 2 line 9 column start 1 column end 119'),
+                            dict(jpg, citation=dict(jpg['citation'], printed_row=2))):
+                with self.assertRaises(SourceViewError) as raised:
+                    viewer.inspect(changed)
+                self.assertEqual(raised.exception.status, 422)
+            with self.assertRaises(SourceViewError) as raised:
+                viewer.inspect(observation)
+            self.assertEqual(raised.exception.status, 422)
+
+    def test_private_origin_replays_cited_ffessm_pdf_and_san_mauro_jpg(self):
+        env = {'OWNER_EVIDENCE_GATEWAY_SECRET': SECRET, 'OWNER_EVIDENCE_ORIGIN_HOST': HOST,
+               'OWNER_EVIDENCE_EMAILS': EMAIL,
+               'OWNER_EVIDENCE_SNAPSHOT_SHA256': '40997d52fc409647f4ab3cbacb8e926abcd5920401aa224f5c73195a1ff89fb3',
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_DIR': str(V8_BUNDLE),
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256': V8_BUNDLE_SHA}
+        with make_server(V8_SNAPSHOT, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            def request(path, method='GET', authorized=True):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                headers = {'Host': HOST}
+                if authorized:
+                    headers.update({'X-Freediving-Owner-Gateway': SECRET, 'X-Freediving-Owner-Email': EMAIL})
+                conn.request(method, path, headers=headers)
+                response = conn.getresponse()
+                result = response.status, dict(response.getheaders()), response.read()
+                conn.close()
+                return result
+            try:
+                with SnapshotQuery(V8_SNAPSHOT) as query:
+                    pdf_id = query.browse(source_name='ffessm-rankings', collection='positions', limit=1)['records'][0]['record_id']
+                    daily_id = query.browse(source_name='ffessm-daily', collection='observations', limit=1)['records'][0]['record_id']
+                    jpg_id = query.browse(source_name='san-mauro-jpg', collection='positions', limit=1)['records'][0]['record_id']
+                    aggregate_id = query.browse(source_name='san-mauro-jpg', collection='positions', offset=150, limit=1)['records'][0]['record_id']
+                    aida_id = query.browse(source_name='mabini-4545-2025-05-01', limit=1)['records'][0]['record_id']
+                pdf = '/owner-evidence/api/source-view/' + pdf_id
+                jpg = '/owner-evidence/api/source-view/' + jpg_id
+                self.assertEqual(json.loads(request(pdf)[2])['format'], 'pdf')
+                self.assertEqual(request(pdf + '/page/1')[1]['Content-Type'], 'image/png')
+                daily = '/owner-evidence/api/source-view/' + daily_id
+                self.assertEqual(json.loads(request(daily)[2])['format'], 'pdf')
+                self.assertEqual(request(daily + '/page/1')[1]['Content-Type'], 'image/png')
+                self.assertEqual(json.loads(request(jpg)[2])['format'], 'jpeg')
+                self.assertEqual(json.loads(request('/owner-evidence/api/source-view/' + aggregate_id)[2])['format'], 'jpeg')
+                status, headers, body = request(jpg + '/image')
+                self.assertEqual((status, headers['Content-Type']), (200, 'image/jpeg'))
+                self.assertTrue(body.startswith(b'\xff\xd8\xff'))
+                self.assertEqual(request(jpg + '/image', authorized=False)[0], 403)
+                self.assertEqual(request(jpg + '/image', method='POST')[0], 405)
+                self.assertEqual(request('/owner-evidence/api/source-view/' + aida_id + '/image')[0], 404)
+                self.assertEqual(json.loads(request('/owner-evidence/api/source-view/' + aida_id)[2])['original_replay'],
+                                 'restricted_original_required')
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
 
 
 @unittest.skipUnless(V7_SNAPSHOT.exists() and V7_BUNDLE.exists(), 'private v7 evidence unavailable')

@@ -61,6 +61,8 @@ def _queue_group(row, raw):
         return None
     if row['collection'] == 'unparsed_rows':
         return 'extraction_source_semantics'
+    if row['source_name'] == 'ffessm-correspondences' and row['collection'] == 'unmatched_daily':
+        return 'same_attempt_relationship'
     if row['collection'] == 'source_relationship_gaps':
         return 'event_publication'
     if row['collection'] == 'retained_only_artifacts':
@@ -152,7 +154,28 @@ class SnapshotQuery:
         for row in rows:
             item = _queue_item(row, self.manifest['inputs'][row['source_name']])
             if item['group'] is not None:
+                if row['source_name'] == 'ffessm-correspondences' and row['collection'] == 'unmatched_daily':
+                    item['trigger'] = 'Daily position has no matched ranking row; same attempt unknown'
+                    item['unknown'] = ['Same attempt with a ranking row is unassessed',
+                                       'No owner resolution recorded in this snapshot']
                 items.append(item)
+        aggregate_groups = {
+            ('apnea-file-reconciliation', 'gia_team.rows'): 'club ranking aggregates',
+            ('apnea-file-reconciliation', 'san_mauro.rows'): 'team ranking aggregates',
+            ('san-mauro-jpg', 'positions'): 'combined ranking aggregates',
+        }
+        for (aggregate_source, collection), label in aggregate_groups.items():
+            rows = self.db.execute(
+                "SELECT * FROM records WHERE source_name=? AND collection=? AND kind='aggregate' "
+                'ORDER BY record_path, record_id', (aggregate_source, collection)).fetchall()
+            if not rows:
+                continue
+            item = _queue_item(rows[0], self.manifest['inputs'][aggregate_source])
+            item['group'] = 'extraction_source_semantics'
+            item['trigger'] = f'{len(rows)} {label}; not individual attempts'
+            item['supporting_evidence'] = ['Snapshot classifies these source rows as aggregates']
+            item['unknown'] = ['Attempt-level equivalence is not recorded for these aggregate rows']
+            items.append(item)
         aggregate_parents = set()
         for row in self.db.execute("SELECT * FROM records WHERE kind='aggregate' AND collection='sheets.rows' ORDER BY source_name, record_path"):
             raw = json.loads(row['raw_json'])
@@ -349,7 +372,7 @@ class SnapshotQuery:
                 label = 'Retained artifact versus imported position'
                 status = 'candidate_link'
             else:
-                label = str(raw.get('relationship_type') or 'Explicit relationship candidate')
+                label = str(raw.get('relationship_type') or raw.get('kind') or 'Explicit relationship candidate')
                 status = str(raw.get('status') or raw.get('state') or 'unknown')
             items.append({'id': row['record_id'], 'source_name': row['source_name'],
                           'collection': row['collection'], 'record_path': row['record_path'],
@@ -388,6 +411,16 @@ class SnapshotQuery:
         side['source_sha256'] = source_id.removeprefix('sha256:') if source_id and source_id.startswith('sha256:') else side['source_sha256']
         return side
 
+    def _cited_ffessm_position(self, citation, source_name, collection):
+        if not isinstance(citation, dict) or not citation.get('id') or not citation.get('source_id'):
+            return None
+        rows = self.db.execute(
+            'SELECT record_id FROM records WHERE source_name=? AND collection=? '
+            'AND kind=? AND source_id=? AND source_object_id=?',
+            (source_name, collection, 'candidate_position', citation['id'], citation['source_id'])
+        ).fetchmany(2)
+        return self.detail(rows[0]['record_id']) if len(rows) == 1 else None
+
     def comparison(self, record_id):
         """Compare two cited rows only where one explicit snapshot link names both."""
         _record_id(record_id)
@@ -396,13 +429,24 @@ class SnapshotQuery:
             return None
         raw = record['raw']
         if record['kind'] == 'relationship':
-            relationship = {'type': raw.get('relationship_type'),
+            relationship = {'type': raw.get('relationship_type') or raw.get('kind'),
                             'status': raw.get('status') or raw.get('state') or 'unknown',
                             'basis': raw.get('basis'), 'supporting_evidence': raw.get('evidence'),
                             'contrary_evidence': raw.get('contrary_evidence'),
-                            'unknown': raw.get('cross_source_equivalence') or 'unassessed'}
+                            'unknown': raw.get('cross_source_equivalence') or 'unassessed',
+                            'same_attempt': raw.get('same_attempt'),
+                            'matched_daily_date': raw.get('matched_daily_date'),
+                            'ranking_row_date': raw.get('ranking_row_date')}
             sides = []
             unavailable = 'No pair of cited row records is identified by this snapshot relationship'
+            if record['source_name'] == 'ffessm-correspondences' and raw.get('kind') == 'shared_printed_fields':
+                daily = self._cited_ffessm_position(raw.get('daily'), 'ffessm-daily', 'observations')
+                ranking = self._cited_ffessm_position(raw.get('ranking'), 'ffessm-rankings', 'positions')
+                if daily is not None and ranking is not None:
+                    sides = [self._comparison_provenance(_comparison_side(row)) for row in (daily, ranking)]
+                    unavailable = None
+                else:
+                    unavailable = 'Cited daily or ranking row is absent or ambiguous in this snapshot'
         elif record['source_name'] == 'retained' and record['collection'] == 'candidate_versions':
             imported_id = raw.get('imported_position_id')
             if not isinstance(imported_id, str) or not imported_id:
@@ -425,7 +469,8 @@ class SnapshotQuery:
             return None
         differences = {}
         raw_differences = {}
-        if len(sides) == 2:
+        if len(sides) == 2 and not (record['source_name'] == 'ffessm-correspondences'
+                                    and raw.get('kind') == 'shared_printed_fields'):
             left, right = sides
             for key in sorted(set(left['parsed_fields']) | set(right['parsed_fields'])):
                 pair = [left['parsed_fields'].get(key), right['parsed_fields'].get(key)]
@@ -436,6 +481,7 @@ class SnapshotQuery:
                 if pair[0] != pair[1]:
                     raw_differences[key] = pair
         return {'id': record_id, 'relationship': relationship, 'sides': sides,
+                'field_correspondences': raw.get('field_correspondences') or {},
                 'field_differences': differences, 'raw_field_differences': raw_differences,
                 'unavailable': unavailable,
                 'snapshot_sha256': self.manifest['snapshot_sha256'],

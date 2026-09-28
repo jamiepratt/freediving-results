@@ -67,6 +67,12 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertNotIn(b'Sample meet', data)
         self.assertEqual(self.request('GET', '/login')[0], 200)
 
+    def test_authenticated_page_allows_same_origin_source_images(self):
+        cookie = self.login()
+        status, headers, _ = self.request('GET', '/', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertIn("img-src 'self'", headers['Content-Security-Policy'])
+
     def test_login_requires_exact_origin_and_host(self):
         body = b'password=local+secret'
         for headers in ({}, {'Origin': 'http://evil.example'}, {'Origin': f'http://{self.host}', 'Host': 'localhost:8000'}):

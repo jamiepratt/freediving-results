@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from unified_evidence_query import SnapshotQuery
 
 ROATAN_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/roatan-issue55-snapshot-20260928/snapshot')
+V8_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-unified-snapshot-20260928-v8/snapshot')
 
 
 def snapshot(tmp_path):
@@ -39,6 +40,48 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    @unittest.skipUnless(V8_SNAPSHOT.exists(), 'private v8 snapshot unavailable')
+    def test_ffessm_printed_field_link_resolves_only_cited_rows(self):
+        with SnapshotQuery(V8_SNAPSHOT) as query:
+            row = query.browse(source_name='ffessm-correspondences',
+                               collection='relationships', limit=1)['records'][0]
+            comparison = query.comparison(row['record_id'])
+            listed = next(item for offset in range(0, query.comparisons()['total'], 100)
+                          for item in query.comparisons(limit=100, offset=offset)['items']
+                          if item['id'] == row['record_id'])
+        self.assertEqual(listed['label'], 'shared_printed_fields')
+        self.assertEqual(comparison['relationship']['type'], 'shared_printed_fields')
+        self.assertIsNone(comparison['relationship']['same_attempt'])
+        self.assertIsNone(comparison['relationship']['ranking_row_date'])
+        self.assertEqual(comparison['relationship']['matched_daily_date'], '2025-06-28')
+        self.assertEqual([side['source_name'] for side in comparison['sides']],
+                         ['ffessm-daily', 'ffessm-rankings'])
+        self.assertEqual(comparison['sides'][0]['record_id'],
+                         '6b703d146a7866700a24f87e5772419e6e4f976c0cda12c183db8268d7126b9a')
+        self.assertEqual(comparison['sides'][1]['record_id'],
+                         'f2d0dc5c9ce947ba2e54f94fb3ae9233dde5fda3a98e70ab5d67285c272f3248')
+        self.assertEqual(comparison['field_correspondences']['announced_depth_m'],
+                         {'daily_citation': 'page 1 line 16', 'daily_printed': 75,
+                          'ranking_citation': 'page 1 line 9 column start 1 column end 119',
+                          'ranking_printed': '75 m', 'value': 75})
+        self.assertEqual(comparison['raw_field_differences'], {})
+        self.assertIsNone(comparison['unavailable'])
+
+    @unittest.skipUnless(V8_SNAPSHOT.exists(), 'private v8 snapshot unavailable')
+    def test_v8_queue_keeps_unmatched_attempts_and_aggregates_separate(self):
+        with SnapshotQuery(V8_SNAPSHOT) as query:
+            ffessm = query.queue(source_name='ffessm-correspondences', limit=100)
+            apnea = query.queue(source_name='apnea-file-reconciliation', limit=100)
+            san_mauro = query.queue(source_name='san-mauro-jpg', limit=100)
+        self.assertEqual(len([item for item in ffessm['items']
+                              if item['group'] == 'same_attempt_relationship']), 15)
+        self.assertEqual({item['citation']['collection'] for item in apnea['items']
+                          if item['group'] == 'extraction_source_semantics'},
+                         {'gia_team.rows', 'san_mauro.rows'})
+        self.assertTrue(any(item['citation']['collection'] == 'positions'
+                            and item['group'] == 'extraction_source_semantics'
+                            for item in san_mauro['items']))
+
     @unittest.skipUnless(ROATAN_SNAPSHOT.exists(), 'private Roatan snapshot unavailable')
     def test_roatan_versions_keep_historical_extraction_scope(self):
         with SnapshotQuery(ROATAN_SNAPSHOT) as query:
