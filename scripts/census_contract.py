@@ -15,7 +15,7 @@ import sys
 
 SCHEMA = 'census-evidence/v1'
 SHA = re.compile(r'[0-9a-f]{64}\Z')
-AUTHORITIES = {'primary', 'mirror', 'ranking', 'community'}
+AUTHORITIES = {'primary', 'mirror', 'ranking', 'community', 'unknown'}
 MEDIA = {'pdf', 'html', 'json', 'other'}
 POSITION_STATUSES = {'parsed', 'quarantined', 'unparsed'}
 GAP_STATUSES = {'checked', 'missing', 'inaccessible', 'unchecked'}
