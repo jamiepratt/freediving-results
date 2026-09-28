@@ -4,6 +4,8 @@
 
 Prefer supported official AIDA attempt HTML for new acquisitions. Keep rankings supplemental and CMAS on its document path. This is an operator-selected source preference, not an automatic crawler or fallback policy.
 
+The live partial release of 28 September 2026 uses PDF policy 1, including four owner-validated CMAS Novi Sad rows. It does not publish the private AIDA HTML corpus or activate HTML policy 2. The measured AIDA acquisition and review checks below are dated historical checkpoints; remaining coverage and genuine row reviews are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
 ```clojure
 (require '[freediving.aida-html :as html]
          '[freediving.observations :as observations])

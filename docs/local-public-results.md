@@ -2,6 +2,8 @@
 
 The public interface reads only sanitized, eligible projections through a restricted PostgreSQL reader. It provides source-name search, visible-data filters, pagination, persistent result pages and histories containing only active approved identity links. This is local readiness for [issue #1](https://github.com/jamiepratt/freediving-results/issues/1). No real pilot observation is approved by creating the synthetic demo.
 
+The [live public site](https://poc.alphacompose.com) showed 81 records on 28 September 2026. This partial pilot includes four separately validated 2026 CMAS Novi Sad DYN-BF junior-men rows from the official PDF's page 10, lines 9-12. The other 77 existing result IDs and both approved history links were retained. The four new rows have unresolved athlete identities; distinct attempts, other sessions, publisher revisions and possible overlap remain unverified. The visible count comes from the API and does not establish a complete ranking. Remaining championship coverage is tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
+
 ## Run the synthetic demo
 
 Requires Java 17+, Clojure CLI and PostgreSQL 17 tools on PATH. From the repository:
@@ -35,7 +37,7 @@ The read-only configuration receives only `FREEDIVING_PUBLIC_DATABASE_URL`; opti
 
 Each data request reads the restricted public view. There is no application response cache; responses use `no-store`. Changes to review or publication decisions invalidate the whole projection snapshot immediately at the database boundary. Ineligible, revoked and absent records share the same unavailable response. A trusted reviewer must revalidate affected rows when needed and refresh projections separately. See [publication policy](publication-policy.md). A page already displayed is not a live subscription; navigation and reload read current eligibility.
 
-The bounded pilot is read into memory for search and filtering. Stable result IDs identify exact immutable observations, not a guarantee of permanent visibility. Source evidence coordinates refer to extracted text lines, not PDF bounding boxes. Local PostgreSQL trust authentication allows other local processes to impersonate roles; this setup is for a trusted development machine. Keep both listeners on loopback and do not tunnel them. Production authentication, hosting and genuine corpus approval remain separate checkpoints in issue #1.
+The bounded pilot is read into memory for search and filtering. Stable result IDs identify exact immutable observations, not a guarantee of permanent visibility. Source evidence coordinates refer to extracted text lines, not PDF bounding boxes. Local PostgreSQL trust authentication allows other local processes to impersonate roles; this synthetic setup is for a trusted development machine. Keep both local listeners on loopback and do not tunnel them. Production hosting uses separate deployment configuration; remaining corpus review and coverage are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 ## Verification
 
