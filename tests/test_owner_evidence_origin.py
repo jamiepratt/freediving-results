@@ -121,7 +121,7 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(json.loads(body)['raw_fields'], {'Name': 'Ada'})
         status, _, body = self.request('/owner-evidence/api/queue?group=event_publication&limit=1')
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)['total'], 1)
+        self.assertEqual(json.loads(body)['total'], 0)
         self.assertEqual(self.request('/owner-evidence/api/queue?limit=101')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/queue?group=athlete_identity&group=athlete_identity')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/queue', method='POST')[0], 405)

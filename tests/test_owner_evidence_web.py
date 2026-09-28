@@ -74,8 +74,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(json.loads(self.request('GET', '/api/relationships', headers=headers)[2])['total'], 1)
         self.assertEqual(json.loads(self.request('GET', '/api/sources', headers=headers)[2])[0]['status'], 'excluded')
         queue = json.loads(self.request('GET', '/api/queue?group=event_publication&limit=1', headers=headers)[2])
-        self.assertEqual(queue['total'], 1)
-        self.assertEqual(queue['items'][0]['citation']['source_name'], 'visual')
+        self.assertEqual(queue['total'], 0)
         for method, path in (('POST', '/api/browse'), ('PUT', '/api/detail/' + record_id), ('DELETE', '/api/detail/' + record_id)):
             self.assertIn(self.request(method, path, headers=headers)[0], (403, 405))
         self.assertIn(self.request('POST', '/api/queue', headers=headers)[0], (403, 405))
@@ -92,6 +91,20 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'textContent', body)
         self.assertNotIn(b'innerHTML', body)
+
+    def test_queue_ui_keeps_private_text_as_text_and_shows_version_context(self):
+        status, _, body = self.request('GET', '/api/queue')
+        self.assertEqual(status, 401)
+        self.assertNotIn(b'Sample meet', body)
+        cookie = self.login()
+        status, _, script = self.request('GET', '/assets/app.js', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        queue_script = script.decode().split('async function loadQueue()', 1)[1].split('function run(', 1)[0]
+        for field in ('source_object_id', 'observation_version', 'source_sha256', 'input_sha256'):
+            self.assertIn(field, queue_script)
+        self.assertIn('makeRow(', queue_script)
+        self.assertNotIn('innerHTML', script.decode())
+        self.assertIn('n.textContent=text', script.decode())
 
 
 REAL_SNAPSHOT = Path('/Users/jamiep/.codex/worktrees/1ad1/freediving-results/data/issue55-unified-snapshot-20260928')
@@ -113,7 +126,7 @@ class RealSnapshotSmokeTest(unittest.TestCase):
         self.assertEqual(queue['group_counts'], {
             'extraction_source_semantics': 392, 'source_revision_same_result': 3,
             'same_attempt_relationship': 0, 'athlete_identity': 2,
-            'coverage_finality': 19, 'event_publication': 7})
+            'coverage_finality': 19, 'event_publication': 1})
         self.assertEqual(sum(item['citation']['collection'] == 'unparsed_rows' for item in b45['items']), 4)
         self.assertEqual(identity['total'], 2)
         self.assertEqual(same_attempt['total'], 0)

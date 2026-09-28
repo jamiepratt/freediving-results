@@ -16,7 +16,12 @@ QUEUE_GROUPS = (
 
 def _queue_group(row, raw):
     if row['kind'] == 'relationship':
-        return 'event_publication' if raw.get('relationship_type') == 'calendar_event_link' else 'source_revision_same_result'
+        relationship = raw.get('relationship_type')
+        if relationship in ('source_revision', 'publisher_revision', 'same_result'):
+            return 'source_revision_same_result'
+        if relationship == 'same_attempt':
+            return 'same_attempt_relationship'
+        return None
     if row['collection'] == 'unparsed_rows':
         return 'extraction_source_semantics'
     if row['collection'] == 'source_relationship_gaps':
@@ -106,7 +111,11 @@ class SnapshotQuery:
         if type(offset) is not int or not 0 <= offset <= 100000:
             raise ValueError('offset must be an integer from 0 to 100000')
         rows = self.db.execute("SELECT * FROM records WHERE kind IN ('gap','relationship') ORDER BY source_name, collection, record_path, record_id")
-        items = [_queue_item(row, self.manifest['inputs'][row['source_name']]) for row in rows]
+        items = []
+        for row in rows:
+            item = _queue_item(row, self.manifest['inputs'][row['source_name']])
+            if item['group'] is not None:
+                items.append(item)
         aggregate_parents = set()
         for row in self.db.execute("SELECT * FROM records WHERE kind='aggregate' AND collection='sheets.rows' ORDER BY source_name, record_path"):
             raw = json.loads(row['raw_json'])

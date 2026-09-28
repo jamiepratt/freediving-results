@@ -47,11 +47,9 @@ class QueryContractTest(unittest.TestCase):
         self.assertEqual(queue['coverage'], 'dated partial census')
         self.assertEqual(queue['denominators']['candidate_positions'], 2)
         self.assertIsNone(queue['denominators']['confirmed_distinct_attempts'])
-        self.assertEqual(queue['total'], 3)  # gap, relationship, excluded source
+        self.assertEqual(queue['total'], 2)  # gap and excluded source; calendar link is browsable separately
         self.assertNotEqual(queue['items'][0]['id'], next_page['items'][0]['id'])
-        self.assertEqual(relationship['total'], 1)
-        self.assertEqual(relationship['items'][0]['citation']['record_path'], 'source_relationship_candidates[0]')
-        self.assertIn('unknown', relationship['items'][0])
+        self.assertEqual(relationship['total'], 0)
 
     def test_overview_keeps_namespaces_and_distinct_attempts_unknown(self):
         with tempfile.TemporaryDirectory() as d:
