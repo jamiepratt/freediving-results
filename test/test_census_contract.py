@@ -32,7 +32,8 @@ def fixture():
         'gaps': [{'id': 'lead-1', 'scope': 'event', 'ref': 'event-1',
                   'status': 'unchecked', 'reason': 'organizer index not searched'}],
         'relationships': [{'id': 'rel-1', 'left': 'row-1', 'right': 'row-1',
-                           'kind': 'unknown', 'basis': 'No distinct-attempt assertion'}],
+                           'kind': 'unknown', 'status': 'unknown',
+                           'basis': 'No distinct-attempt assertion'}],
     }
 
 
@@ -81,6 +82,23 @@ class CensusContractTest(unittest.TestCase):
         full = self.run_cli(data, 'query')
         self.assertEqual('unknown', full['relationships'][0]['kind'])
         self.assertEqual(2, self.run_cli(data, 'validate')['counts']['positions'])
+
+    def test_relationship_status_distinguishes_exact_from_unknown(self):
+        data = fixture()
+        data['positions'].append(dict(data['positions'][0], id='row-2',
+                                      locator='page 1 line 11'))
+        data['relationships'][0].update(right='row-2')
+        data['relationships'].append({'id': 'rel-2', 'left': 'row-1', 'right': 'row-2',
+                                      'kind': 'supporting-result', 'status': 'exact',
+                                      'basis': 'Printed row citation'})
+        result = self.run_cli(data, 'query')
+        self.assertEqual({'unknown', 'exact'},
+                         {item['status'] for item in result['relationships']})
+        data['relationships'][0]['status'] = 'exact'
+        self.assertIn('unknown relationship', self.run_cli(data, 'validate', ok=False))
+        data['relationships'][0]['status'] = 'unknown'
+        del data['relationships'][1]['status']
+        self.assertIn('relationship status', self.run_cli(data, 'validate', ok=False))
 
     def test_requires_reason_for_null_source_provenance(self):
         data = fixture()

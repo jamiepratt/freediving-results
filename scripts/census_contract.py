@@ -157,6 +157,9 @@ def validate(document):
         string(gap.get('reason'), 'gap reason')
     for relation in relationships.values():
         need(relation.get('kind') in RELATIONSHIP_KINDS, 'invalid relationship kind')
+        need(relation.get('status') in {'exact', 'unknown'}, 'invalid relationship status')
+        need(relation['kind'] != 'unknown' or relation['status'] == 'unknown',
+             'unknown relationship kind requires unknown status')
         need(relation.get('left') in positions and relation.get('right') in positions,
              'relationship has unknown position')
         string(relation.get('basis'), 'relationship basis')
