@@ -21,3 +21,19 @@ Activation requires these manual Cloudflare and origin settings, with real value
 3. Provision a hardened production owner service at that dedicated origin. It must reject requests lacking its private gateway secret, avoid public caching and sensitive logging, and serve only approved owner data. Test direct origin denial, Access policy coverage, expired and foreign identity tokens, and private response headers on the custom domain before loading data.
 
 `deploy/publish-edge.py` currently installs only the public `GATEWAY_SECRET`. It does not set any private bindings or create Access policy or origin resources. A normal Worker release can therefore install the code while this path stays closed with 503. No deployment or private data publication is part of this gateway change.
+
+### Candidate private origin service
+
+`scripts/owner_evidence_origin.py` is a separate read-only service for a dedicated private HTTPS origin. It is not the local password/session demo above. It binds only `127.0.0.1`, defaults to port 8081, and must sit behind an HTTPS reverse proxy for the exact configured private host. The proxy must restrict its upstream to the loopback listener, preserve the Worker-generated owner gateway and email headers unchanged, reject client-supplied copies, disable caching and access logs containing URLs or headers, and never expose the loopback listener directly. Network controls must allow only the trusted Worker path to the proxy. Run it with a private read-only mounted snapshot directory:
+
+```
+OWNER_EVIDENCE_ORIGIN_HOST=<dedicated-private-host>.alphacompose.com \
+OWNER_EVIDENCE_EMAILS=<lowercase-owner-address> \
+OWNER_EVIDENCE_GATEWAY_SECRET=<unique-random-secret> \
+OWNER_EVIDENCE_SNAPSHOT_SHA256=<verified-64-digit-hex-sha256> \
+python3 scripts/owner_evidence_origin.py --snapshot-dir <private-snapshot-dir> --port 8081
+```
+
+The gateway secret must match the Worker's `OWNER_EVIDENCE_GATEWAY_SECRET`; the host must match `OWNER_EVIDENCE_UPSTREAM`. The pinned SHA-256 must match both the manifest and snapshot bytes. Missing or invalid configuration, manifest or snapshot prevents startup. The service verifies the snapshot hash, then queries SQLite with `mode=ro&immutable=1`. Keep the snapshot mount read-only and replace it only by stopping the process and starting it with a newly verified digest. The service requires an exact private Host, constant-time gateway secret comparison, and an exact allowlisted owner email on every request. It rejects duplicate security headers, request bodies, other methods, foreign Origin, arbitrary paths, login/session/write routes, and requests without the Worker-generated headers. Responses carry `no-store`, a restrictive CSP and other browser security headers; details and filters have bounded routes and responses. It suppresses access logs. The UI is served under `/owner-evidence`, with fixed asset and API paths under the same prefix.
+
+This code has no deployed origin, private host, Access policy, secrets, owner identity, proxy or snapshot mount configured. Before activation, provision and test those boundaries, then verify direct-origin denial, Worker authentication and identity behavior, response headers, and the actual private host end to end. Do not tunnel `scripts/owner_evidence_web.py` or mount its session routes at this origin.
