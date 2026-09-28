@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,59 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    def test_comparison_uses_only_explicit_retained_position_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            baseline = root / 'baseline.json'
+            retained = root / 'retained.json'
+            baseline.write_text(json.dumps({'positions': [{
+                'id': 'source-position:one', 'source_id': 'sha256:' + 'a' * 64,
+                'locator': 'page 1 line 2', 'raw_fields': {'name': 'Ada', 'result': '100'},
+                'parsed_fields': {'name': 'Ada', 'result': '100'},
+                'observation_refs': [{'parser_version': 'parser/2', 'candidate_id': 'observation-2'}]}]}))
+            retained.write_text(json.dumps({'candidate_versions': [{
+                'id': 'retained:one', 'imported_position_id': 'source-position:one',
+                'source_id': 'sha256:' + 'a' * 64, 'artifact_sha256': 'b' * 64,
+                'match_basis': 'exact_raw_evidence', 'parser_version': 'parser/1',
+                'candidate': {'raw': {'fields': {'name': 'Ada', 'result': '100'}},
+                              'parsed': {'name': 'Ada', 'result': '99'}}}]}))
+            out = root / 'out'
+            subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-09-28T12:00:00Z',
+                            '--input', f'baseline={baseline}', '--input', f'retained={retained}',
+                            '--output-dir', str(out)], check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                listed = query.comparisons(limit=10)
+                compared = query.comparison(listed['items'][0]['id'])
+                unrelated = query.comparison(query.browse(source_name='baseline')['records'][0]['record_id'])
+        self.assertEqual(listed['total'], 1)
+        self.assertEqual(compared['relationship']['basis'], 'exact_raw_evidence')
+        self.assertEqual(compared['sides'][0]['parsed_fields']['result'], '99')
+        self.assertEqual(compared['sides'][1]['parsed_fields']['result'], '100')
+        self.assertEqual(compared['field_differences']['result'], ['99', '100'])
+        self.assertIsNone(compared['confirmed_distinct_attempts'])
+        self.assertIsNone(unrelated)
+
+    def test_duplicate_imported_position_id_is_explicitly_unavailable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            baseline = root / 'baseline.json'
+            retained = root / 'retained.json'
+            baseline.write_text(json.dumps({'positions': [
+                {'id': 'source-position:duplicate', 'raw_fields': {'result': '10'}},
+                {'id': 'source-position:duplicate', 'raw_fields': {'result': '20'}}]}))
+            retained.write_text(json.dumps({'candidate_versions': [{
+                'id': 'retained:one', 'imported_position_id': 'source-position:duplicate',
+                'candidate': {'raw': {'fields': {'result': '10'}}, 'parsed': {'result': '10'}}}]}))
+            out = root / 'out'
+            subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-09-28T12:00:00Z',
+                            '--input', f'baseline={baseline}', '--input', f'retained={retained}',
+                            '--output-dir', str(out)], check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                result = query.comparison(query.comparisons()['items'][0]['id'])
+        self.assertEqual(len(result['sides']), 1)
+        self.assertIn('duplicated', result['unavailable'])
+        self.assertEqual(result['field_differences'], {})
+
     def test_exception_queue_groups_explicit_evidence_without_decisions(self):
         with tempfile.TemporaryDirectory() as d:
             with SnapshotQuery(snapshot(Path(d))) as query:
@@ -173,6 +227,34 @@ class QueryContractTest(unittest.TestCase):
         self.assertIsNone(hit['records'][0]['event_date'])
         self.assertEqual(miss['total'], 0)
 
+
+
+REAL_SNAPSHOT = Path(os.environ['OWNER_EVIDENCE_TEST_SNAPSHOT_DIR']) if os.environ.get('OWNER_EVIDENCE_TEST_SNAPSHOT_DIR') else None
+
+
+@unittest.skipUnless(REAL_SNAPSHOT and REAL_SNAPSHOT.is_dir(), 'private retained snapshot unavailable')
+class RetainedComparisonTest(unittest.TestCase):
+    def test_explicit_links_do_not_inflate_attempts_or_guess_calendar_pairs(self):
+        with SnapshotQuery(REAL_SNAPSHOT) as query:
+            first = query.comparisons(limit=100)
+            second = query.comparisons(limit=100, offset=100)
+            items = first['items'] + second['items']
+            retained = [x for x in items if x['collection'] == 'candidate_versions']
+            calendar = next(x for x in items if x['collection'] == 'source_relationship_candidates')
+            pair = query.comparison('20c15ebfc7ea36cc2a582a869db19032f8db9c8511f3319a2e11b77aa90a586a')
+            absent = query.comparison(calendar['id'])
+        self.assertEqual(first['total'], 142)
+        self.assertEqual(len(retained), 136)
+        self.assertEqual(len(pair['sides']), 2)
+        self.assertEqual(pair['sides'][1]['record_id'],
+                         '2346e3c756ad505699f08078c0f2ae6d3cafb1bf89b7328115809f5eb6baecff')
+        self.assertEqual([s['parser_version'] for s in pair['sides']],
+                         ['belgrade-freediving-open-2026/1', 'belgrade-freediving-open-2026/2'])
+        self.assertEqual(pair['sides'][0]['source_sha256'], pair['sides'][1]['source_sha256'])
+        self.assertEqual(pair['field_differences'], {})
+        self.assertIsNone(pair['confirmed_distinct_attempts'])
+        self.assertEqual(absent['sides'], [])
+        self.assertIsNotNone(absent['unavailable'])
 
 
 if __name__ == '__main__':

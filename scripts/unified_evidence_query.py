@@ -14,6 +14,43 @@ QUEUE_GROUPS = (
 )
 
 
+def _page(limit, offset):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('limit must be an integer from 1 to 100')
+    if type(offset) is not int or not 0 <= offset <= 100000:
+        raise ValueError('offset must be an integer from 0 to 100000')
+
+
+def _record_id(record_id):
+    if not isinstance(record_id, str) or len(record_id) != 64 or any(c not in '0123456789abcdef' for c in record_id):
+        raise ValueError('record_id must be a lowercase SHA256 hex string')
+
+
+def _comparison_side(detail):
+    raw = detail['raw']
+    if detail['collection'] == 'candidate_versions':
+        candidate = raw.get('candidate') or {}
+        raw_fields = (candidate.get('raw') or {}).get('fields') or {}
+        parsed_fields = candidate.get('parsed') or {}
+        versions = raw.get('imported_observation_refs') or []
+        citation = raw.get('citation') or candidate.get('coordinates')
+        artifact_sha256 = raw.get('artifact_sha256')
+    else:
+        raw_fields = detail['raw_fields']
+        parsed_fields = detail['parsed_fields']
+        versions = raw.get('observation_refs') or []
+        citation = detail['citation']
+        artifact_sha256 = None
+    return {key: detail[key] for key in (
+        'record_id', 'source_name', 'collection', 'record_path', 'source_id',
+        'source_object_id', 'acquisition_id', 'parser_version', 'observation_version',
+        'event_name', 'event_date', 'session', 'discipline', 'category', 'review_status',
+        'input_sha256', 'source_sha256', 'snapshot_sha256')} | {
+        'citation': citation, 'raw_fields': raw_fields, 'parsed_fields': parsed_fields,
+        'artifact_sha256': artifact_sha256, 'observation_refs': versions,
+    }
+
+
 def _queue_group(row, raw):
     if row['kind'] == 'relationship':
         relationship = raw.get('relationship_type')
@@ -208,8 +245,7 @@ class SnapshotQuery:
                 'records': [dict(row) for row in rows]}
 
     def detail(self, record_id):
-        if not isinstance(record_id, str) or len(record_id) != 64 or any(c not in '0123456789abcdef' for c in record_id):
-            raise ValueError('record_id must be a lowercase SHA256 hex string')
+        _record_id(record_id)
         row = self.db.execute('SELECT * FROM records WHERE record_id = ?', (record_id,)).fetchone()
         if row is None:
             return None
@@ -224,6 +260,114 @@ class SnapshotQuery:
         result['source_schema'] = source.get('source_schema')
         result['snapshot_sha256'] = self.manifest['snapshot_sha256']
         return result
+
+    def comparisons(self, *, limit=50, offset=0):
+        """List only candidate relationships explicitly retained in the snapshot."""
+        _page(limit, offset)
+        rows = self.db.execute(
+            "SELECT record_id, source_name, collection, record_path, raw_json FROM records "
+            "WHERE kind='relationship' OR (source_name='retained' AND collection='candidate_versions') "
+            "ORDER BY source_name, collection, record_path, record_id").fetchall()
+        items = []
+        for row in rows:
+            raw = json.loads(row['raw_json'])
+            if row['collection'] == 'candidate_versions':
+                if not raw.get('imported_position_id'):
+                    continue
+                label = 'Retained artifact versus imported position'
+                status = 'candidate_link'
+            else:
+                label = str(raw.get('relationship_type') or 'Explicit relationship candidate')
+                status = str(raw.get('status') or raw.get('state') or 'unknown')
+            items.append({'id': row['record_id'], 'source_name': row['source_name'],
+                          'collection': row['collection'], 'record_path': row['record_path'],
+                          'label': label, 'status': status})
+        return {'total': len(items), 'limit': limit, 'offset': offset,
+                'snapshot_sha256': self.manifest['snapshot_sha256'],
+                'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts'],
+                'items': items[offset:offset + limit]}
+
+    def _comparison_provenance(self, side):
+        source_id = side['source_object_id']
+        receipt = None
+        if source_id:
+            rows = self.db.execute(
+                "SELECT raw_json FROM records WHERE source_name=? AND kind='source' "
+                "AND (source_id=? OR source_object_id=?)",
+                (side['source_name'], source_id, source_id)).fetchall()
+            for row in rows:
+                raw = json.loads(row['raw_json'])
+                if side['source_name'] == 'retained':
+                    if raw.get('artifact_sha256') != side['artifact_sha256']:
+                        continue
+                    receipts = raw.get('acquisition_receipts') or []
+                    receipt = (receipts[0].get('manifest') if receipts else None) or {}
+                else:
+                    acquisitions = raw.get('acquisitions') or []
+                    receipt = acquisitions[0] if acquisitions else raw
+                break
+        side['source_receipt'] = {
+            'acquisition_id': (receipt or {}).get('acquisition_id') or (receipt or {}).get('acquisition-id'),
+            'retrieved_at': (receipt or {}).get('retrieved_at') or (receipt or {}).get('retrieved-at'),
+            'publisher': (receipt or {}).get('publisher'),
+            'final_url': (receipt or {}).get('final_url') or (receipt or {}).get('final-url'),
+            'acquisition_method': (receipt or {}).get('acquisition-method'),
+        }
+        side['source_sha256'] = source_id.removeprefix('sha256:') if source_id and source_id.startswith('sha256:') else side['source_sha256']
+        return side
+
+    def comparison(self, record_id):
+        """Compare two cited rows only where one explicit snapshot link names both."""
+        _record_id(record_id)
+        record = self.detail(record_id)
+        if record is None:
+            return None
+        raw = record['raw']
+        if record['kind'] == 'relationship':
+            relationship = {'type': raw.get('relationship_type'),
+                            'status': raw.get('status') or raw.get('state') or 'unknown',
+                            'basis': raw.get('basis'), 'supporting_evidence': raw.get('evidence'),
+                            'contrary_evidence': raw.get('contrary_evidence'),
+                            'unknown': raw.get('cross_source_equivalence') or 'unassessed'}
+            sides = []
+            unavailable = 'No pair of cited row records is identified by this snapshot relationship'
+        elif record['source_name'] == 'retained' and record['collection'] == 'candidate_versions':
+            imported_id = raw.get('imported_position_id')
+            if not isinstance(imported_id, str) or not imported_id:
+                return None
+            imported = self.db.execute(
+                "SELECT record_id FROM records WHERE source_name='baseline' AND collection='positions' AND source_id=?",
+                (imported_id,)).fetchmany(2)
+            sides = [self._comparison_provenance(_comparison_side(record))]
+            if len(imported) == 1:
+                sides.append(self._comparison_provenance(_comparison_side(self.detail(imported[0]['record_id']))))
+            relationship = {'type': 'retained_artifact_imported_position', 'status': 'candidate_link',
+                            'basis': raw.get('match_basis'),
+                            'supporting_evidence': raw.get('source_lines_equal'),
+                            'contrary_evidence': None,
+                            'unknown': 'Attempt equivalence and owner decision unassessed'}
+            unavailable = (None if len(imported) == 1 else
+                           'Linked imported position absent from this snapshot' if not imported else
+                           'Linked imported position ID is duplicated in this snapshot; comparison unavailable')
+        else:
+            return None
+        differences = {}
+        raw_differences = {}
+        if len(sides) == 2:
+            left, right = sides
+            for key in sorted(set(left['parsed_fields']) | set(right['parsed_fields'])):
+                pair = [left['parsed_fields'].get(key), right['parsed_fields'].get(key)]
+                if pair[0] != pair[1]:
+                    differences[key] = pair
+            for key in sorted(set(left['raw_fields']) | set(right['raw_fields'])):
+                pair = [left['raw_fields'].get(key), right['raw_fields'].get(key)]
+                if pair[0] != pair[1]:
+                    raw_differences[key] = pair
+        return {'id': record_id, 'relationship': relationship, 'sides': sides,
+                'field_differences': differences, 'raw_field_differences': raw_differences,
+                'unavailable': unavailable,
+                'snapshot_sha256': self.manifest['snapshot_sha256'],
+                'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts']}
 
     def gaps(self, **filters):
         if 'kind' in filters:

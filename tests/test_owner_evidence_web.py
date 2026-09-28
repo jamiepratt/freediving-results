@@ -78,6 +78,12 @@ class WorkspaceTest(unittest.TestCase):
         for method, path in (('POST', '/api/browse'), ('PUT', '/api/detail/' + record_id), ('DELETE', '/api/detail/' + record_id)):
             self.assertIn(self.request(method, path, headers=headers)[0], (403, 405))
         self.assertIn(self.request('POST', '/api/queue', headers=headers)[0], (403, 405))
+        listing = json.loads(self.request('GET', '/api/comparisons?limit=1', headers=headers)[2])
+        self.assertEqual(listing['total'], 1)
+        comparison = json.loads(self.request('GET', '/api/comparison/' + listing['items'][0]['id'], headers=headers)[2])
+        self.assertIsNotNone(comparison['unavailable'])
+        self.assertEqual(self.request('GET', '/api/comparisons?limit=101', headers=headers)[0], 400)
+        self.assertEqual(self.request('GET', '/api/comparisons')[0], 401)
 
     def test_query_bounds_and_asset_isolation(self):
         cookie = self.login()

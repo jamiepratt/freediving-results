@@ -22,6 +22,7 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
 MAX_RESPONSE = 2 * 1024 * 1024
 DETAIL_PATH = re.compile(r'^/owner-evidence/api/detail/([a-f0-9]{64})$')
 SOURCE_VIEW_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})$')
+COMPARISON_PATH = re.compile(r'^/owner-evidence/api/comparison/([a-f0-9]{64})$')
 SOURCE_PAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 HOST_PATTERN = re.compile(r'^[a-z0-9-]+\.alphacompose\.com$')
 EMAIL_PATTERN = re.compile(r'^[^\s,@]+@[^\s,@]+\.[^\s,@]+$')
@@ -31,6 +32,22 @@ STATIC = {
     '/owner-evidence/assets/app.js': ('js', 'text/javascript; charset=utf-8'),
     '/owner-evidence/assets/app.css': ('css', 'text/css; charset=utf-8'),
 }
+
+
+def _source_availability(source_view, side):
+    if source_view is None:
+        return {'status': 'unavailable', 'reason': 'Private source bundle is not configured'}
+    item = source_view.items.get(side['source_object_id'])
+    if item is None:
+        return {'status': 'unavailable', 'reason': 'Original source is absent from this private bundle'}
+    if item.get('status') == 'restricted':
+        return {'status': 'restricted', 'reason': item.get('reason') or 'Original access restricted',
+                'safe_derivative': bool(item.get('derivative'))}
+    if item.get('status') != 'included':
+        return {'status': 'unavailable', 'reason': item.get('reason') or 'Original unavailable'}
+    if side['collection'] == 'candidate_versions':
+        return {'status': 'unavailable', 'reason': 'Retained artifact citation cannot be replayed by the original source viewer; inspect the linked imported row'}
+    return {'status': 'present', 'reason': 'Original is in the verified private bundle; citation replay is checked when opened'}
 
 
 def _replace_exact(value, old, new):
@@ -187,6 +204,17 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result[key] = int(result[key])
         return result
 
+    def _comparison_filters(self, query):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+        if set(args) - {'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+            raise ValueError('invalid comparison filters')
+        result = {}
+        for key, value in args.items():
+            if not value[0].isdigit() or len(value[0]) > 6:
+                raise ValueError('invalid comparison paging')
+            result[key] = int(value[0])
+        return result
+
     def _json(self, value):
         self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
 
@@ -217,6 +245,13 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.browse(**self._filters(parsed.query))
             elif path == '/owner-evidence/api/queue':
                 result = query.queue(**self._queue_filters(parsed.query))
+            elif path == '/owner-evidence/api/comparisons':
+                result = query.comparisons(**self._comparison_filters(parsed.query))
+            elif COMPARISON_PATH.fullmatch(path) and not parsed.query:
+                result = query.comparison(COMPARISON_PATH.fullmatch(path).group(1))
+                if result is not None:
+                    for side in result['sides']:
+                        side['source_view'] = _source_availability(self.server.source_view, side)
             elif path in ('/owner-evidence/api/gaps', '/owner-evidence/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = query.browse(**self._filters(parsed.query, fixed_kind=kind))

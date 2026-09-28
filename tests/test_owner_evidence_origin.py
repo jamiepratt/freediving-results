@@ -131,6 +131,23 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, b'')
 
+    def test_comparison_api_is_bounded_authorized_and_read_only(self):
+        status, _, body = self.request('/owner-evidence/api/comparisons?limit=1')
+        self.assertEqual(status, 200)
+        listing = json.loads(body)
+        self.assertEqual(listing['total'], 1)
+        comparison_id = listing['items'][0]['id']
+        status, _, body = self.request('/owner-evidence/api/comparison/' + comparison_id)
+        self.assertEqual(status, 200)
+        self.assertIn('unavailable', json.loads(body))
+        self.assertEqual(self.request('/owner-evidence/api/comparisons?limit=101')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/comparisons?offset=-1')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/comparisons?limit=1&limit=1')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/comparison/' + comparison_id,
+                                      headers=[('Host', HOST)])[0], 403)
+        self.assertEqual(self.request('/owner-evidence/api/comparison/' + comparison_id,
+                                      method='POST')[0], 405)
+
     def test_missing_or_wrong_configuration_fails_before_listening(self):
         for absent in self.env:
             with self.subTest(absent=absent):

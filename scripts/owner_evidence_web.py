@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import getpass
 import json
 from pathlib import Path
+import re
 import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -24,6 +25,7 @@ ASSETS = {
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
            'session', 'discipline', 'category', 'limit', 'offset'}
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+COMPARISON_PATH = re.compile(r'^/api/comparison/([a-f0-9]{64})$')
 
 
 class EvidenceServer(HTTPServer):
@@ -178,6 +180,21 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                             raise ValueError('invalid paging')
                         options[key] = int(options[key])
                 result = self.server.snapshot().queue(**options)
+            elif path == '/api/comparisons':
+                args = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                if set(args) - {'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+                    raise ValueError('invalid comparison filters')
+                options = {}
+                for key, value in args.items():
+                    if not value[0].isdigit() or len(value[0]) > 6:
+                        raise ValueError('invalid comparison paging')
+                    options[key] = int(value[0])
+                result = self.server.snapshot().comparisons(**options)
+            elif COMPARISON_PATH.fullmatch(path) and not parsed.query:
+                result = self.server.snapshot().comparison(COMPARISON_PATH.fullmatch(path).group(1))
+                if result is not None:
+                    for side in result['sides']:
+                        side['source_view'] = {'status': 'unavailable', 'reason': 'Local viewer has no original source bundle'}
             elif path in ('/api/gaps', '/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = self.server.snapshot().browse(**self._filters(parsed.query, fixed_kind=kind))
