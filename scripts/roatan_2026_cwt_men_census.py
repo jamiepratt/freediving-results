@@ -53,6 +53,36 @@ def legacy_from_dump(path):
              **extraction[cells[0]], 'payload': value} for cells, value in zip(payloads, values)]
 
 
+def review_rows_from_dump(path):
+    sql = subprocess.run(['pg_restore', '-a', '-t', 'extraction_reviews', '-f', '-', str(path)],
+                         check=True, capture_output=True, text=True).stdout
+    rows = []
+    copying = False
+    for line in sql.splitlines():
+        if line.startswith('COPY freediving.extraction_reviews '):
+            copying = True
+        elif line == r'\.':
+            copying = False
+        elif copying:
+            cells = line.split('\t')
+            if len(cells) != 9:
+                raise ValueError('invalid extraction review COPY row')
+            rows.append({'id': cells[0], 'job_id': cells[1], 'ordinal': int(cells[2]),
+                         'revision': int(cells[3]), 'action': cells[4],
+                         'event_id': None if cells[5] == r'\N' else cells[5],
+                         'body_edn': cells[6], 'db_role': cells[7], 'recorded_at': cells[8],
+                         'row_sha256': digest(line.encode('utf-8'))})
+    code = '(require (quote [clojure.edn :as edn]) (quote [cheshire.core :as json])) (doseq [line (line-seq (java.io.BufferedReader. *in*))] (println (json/generate-string (edn/read-string line))))'
+    converted = subprocess.run(['bb', '-e', code], input='\n'.join(r['body_edn'] for r in rows) + '\n',
+                               capture_output=True, text=True, check=True).stdout
+    bodies = [json.loads(line) for line in converted.splitlines()]
+    if len(bodies) != len(rows):
+        raise ValueError('review body count mismatch')
+    for row, body in zip(rows, bodies):
+        row['body'] = body
+    return rows
+
+
 def build(args):
     corrected_path = Path(args.corrected_packet)
     corrected_bytes = corrected_path.read_bytes()
@@ -61,6 +91,8 @@ def build(args):
     receipt_bytes = receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
     stage = Path(args.stage)
+    review_rows = (json.loads(Path(args.review_rows).read_text()) if args.review_rows
+                   else review_rows_from_dump(stage / 'post-accept-3551.dump'))
     legacy = (json.loads(Path(args.legacy_observations).read_text()) if args.legacy_observations
               else legacy_from_dump(stage / 'post-accept-3551.dump'))
     units = corrected['units']
@@ -89,6 +121,25 @@ def build(args):
     receipt_rows = {(x['json_index_zero_based'], receipt['version']['job_id']): x for x in receipt['rows']}
     if receipt['version']['parser_version'] != 'cmas-2026-roatan-json/2':
         raise ValueError('owner receipt does not name parser v2')
+    review_index = {(r['ordinal'], r['job_id']): r for r in review_rows}
+    if len(review_index) != len(review_rows) or set(review_index) != set(receipt_rows):
+        raise ValueError('database review scope mismatch')
+    for key, receipt_row in receipt_rows.items():
+        review = review_index[key]
+        evidence = review['body']['evidence']
+        if (review['id'] != receipt_row['event_id'] or review['action'] != 'accept'
+                or review['revision'] != 1 or review['db_role'] != 'reviews_owner'
+                or review['body'].get('id') != review['id']
+                or review['body'].get('job-id') != review['job_id']
+                or review['body'].get('ordinal') != review['ordinal']
+                or review['body'].get('action') != 'accept'
+                or evidence.get('candidate-id') != receipt_row['candidate_id']
+                or evidence.get('job-id') != review['job_id']
+                or evidence.get('row-index-zero-based') != key[0]
+                or evidence.get('source-sha256') != receipt['version']['source_sha256']
+                or evidence.get('parser-version') != receipt['version']['parser_version']
+                or evidence.get('artifact-sha256') != receipt['version'].get('artifact_sha256', evidence.get('artifact-sha256'))):
+            raise ValueError(f'database review mismatch: {key}')
     positions = []
     versions = []
     version_diffs = []
@@ -161,9 +212,12 @@ def build(args):
     result = {'schema': 'roatan-2026-cwt-men-private-census/v1', 'issue_namespace': '#8',
               'corrected_packet_sha256': digest(corrected_bytes), 'corrected_packet_path': str(corrected_path.resolve()),
               'owner_receipt_sha256': digest(receipt_bytes), 'owner_receipt_path': str(receipt_path.resolve()),
+              'post_accept_dump_sha256': (digest((stage / 'post-accept-3551.dump').read_bytes())
+                                          if not args.review_rows else None),
               'source_objects': source_objects, 'acquisitions': acquisitions,
               'artifact_objects': artifacts, 'review_event_objects': review_event_objects,
               'acceptance_objects': acceptance_objects,
+              'database_extraction_reviews': sorted(review_rows, key=lambda x: (x['job_id'], x['ordinal'])),
               'positions': positions, 'observation_versions': versions, 'version_diffs': version_diffs,
               'historical_extraction_decisions': [
                   {'unit': 3551, 'json_index_zero_based': x['json_index_zero_based'],
@@ -172,6 +226,7 @@ def build(args):
                   for x in receipt['rows']],
               'counts': {'source_objects': len(source_objects), 'source_positions': len(positions),
                          'observation_versions': len(versions), 'historical_extraction_acceptances': len(receipt_rows),
+                         'database_extraction_review_rows': len(review_rows),
                          'confirmed_distinct_attempts': None},
               'confirmed_distinct_attempts': None,
               'uncertainties': ['cross-source overlap unassessed', 'event finality unassessed',
@@ -190,6 +245,7 @@ def main():
     parser.add_argument('--stage', required=True)
     parser.add_argument('--legacy-observations')
     parser.add_argument('--owner-receipt', required=True)
+    parser.add_argument('--review-rows', help='JSON fixture for testing; default reads isolated dump')
     parser.add_argument('--output', required=True)
     build(parser.parse_args())
 

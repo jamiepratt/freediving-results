@@ -50,13 +50,26 @@ def test_roatan_packet_keeps_versions_and_scoped_decisions(tmp_path):
                          'source_sha256': digest, 'parser_version': 'cmas-2026-roatan-json/2'}}
     receipt_path = tmp_path / 'receipt.json'
     receipt_path.write_text(json.dumps(receipt))
+    reviews = [{'id': 'accept-0', 'job_id': 'v2', 'ordinal': 0, 'revision': 1,
+                'action': 'accept', 'db_role': 'reviews_owner', 'recorded_at': '2026-09-28 12:56:34+02',
+                'body_edn': '{:action :accept}', 'row_sha256': hashlib.sha256(b'review-row').hexdigest(),
+                'body': {'id': 'accept-0', 'job-id': 'v2', 'ordinal': 0, 'action': 'accept',
+                         'evidence': {'job-id': 'v2', 'candidate-id': 'candidate', 'source-sha256': digest,
+                                      'artifact-sha256': v2_artifact,
+                                      'parser-version': 'cmas-2026-roatan-json/2',
+                                      'row-index-zero-based': 0}}}]
+    reviews_path = tmp_path / 'reviews.json'
+    reviews_path.write_text(json.dumps(reviews))
     out = tmp_path / 'out.json'
-    subprocess.run([sys.executable, str(SCRIPT), 'build', '--corrected-packet', str(packet_path),
-                    '--stage', str(stage), '--legacy-observations', str(legacy_path),
-                    '--owner-receipt', str(receipt_path), '--output', str(out)], check=True)
+    command = [sys.executable, str(SCRIPT), 'build', '--corrected-packet', str(packet_path),
+               '--stage', str(stage), '--legacy-observations', str(legacy_path),
+               '--owner-receipt', str(receipt_path), '--review-rows', str(reviews_path),
+               '--output', str(out)]
+    subprocess.run(command, check=True)
     result = json.loads(out.read_text())
     assert result['counts'] == {'source_objects': 1, 'source_positions': 1,
                                 'observation_versions': 2, 'historical_extraction_acceptances': 1,
+                                'database_extraction_review_rows': 1,
                                 'confirmed_distinct_attempts': None}
     assert len(result['observation_versions']) == 2
     assert result['positions'][0]['depths'] == {'declared': '95', 'raw': '65',
@@ -71,9 +84,17 @@ def test_roatan_packet_keeps_versions_and_scoped_decisions(tmp_path):
     assert result['positions'][0]['source_id'] == f'sha256:{digest}'
     assert result['positions'][0]['parser_version'] == 'cmas-2026-roatan-json/2'
     assert all(v['source_id'] == f'sha256:{digest}' for v in result['observation_versions'])
+    assert len(result['database_extraction_reviews']) == 1
+    assert result['database_extraction_reviews'][0]['row_sha256'] == reviews[0]['row_sha256']
+    assert result['database_extraction_reviews'][0]['id'] == 'accept-0'
     assert result['observation_versions'][0]['review_status'] == 'unreviewed'
     assert result['observation_versions'][1]['review_status'] == 'extraction_accepted'
     assert result['confirmed_distinct_attempts'] is None
+    reviews[0]['action'] = 'reject'
+    reviews_path.write_text(json.dumps(reviews))
+    bad = subprocess.run(command, capture_output=True, text=True)
+    assert bad.returncode != 0
+    assert 'database review mismatch' in bad.stderr
 
 
 class RoatanCensusTest(unittest.TestCase):
