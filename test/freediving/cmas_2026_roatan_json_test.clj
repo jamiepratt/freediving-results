@@ -30,6 +30,38 @@
   {"SENM" [213 "Seniors"] "M1M" [214 "Masters M1"]
    "M2M" [215 "Masters M2"] "M3M" [216 "Masters M3"]})
 
+(deftest roatan-candidates-distinguish-achieved-final-and-notes
+  (doseq [[unit overrides expected]
+          [[3551 {"ParPrintName" "LU San-Jen" "ResResult" "65" "ResResultFinal" "34"
+                  "ResPenality" "31" "ResNotePenality" "EARLY TURN, NO MARKER"
+                  "ResReasonCode" "PEN"}
+            {:achieved-depth-token "65" :publisher-final-depth-token "34"
+             :penalty-token "31" :source-note-token nil :record-token nil
+             :penalty-note-token "EARLY TURN, NO MARKER" :reason-token "PEN"}]
+           [3551 {"ParPrintName" "USAI Michele" "ResResult" "48" "ResResultFinal" nil
+                  "ResPenality" "48" "ResNotePenality" "EARLY TURN, NO MARKER"
+                  "ResReasonCode" "PEN"}
+            {:achieved-depth-token "48" :publisher-final-depth-token nil
+             :penalty-token "48" :source-note-token nil :record-token nil
+             :penalty-note-token "EARLY TURN, NO MARKER" :reason-token "PEN"}]
+           [3551 {"ParPrintName" "KUSAKIN Alexander" "ResResult" "49" "ResResultFinal" "49"
+                  "ResNote" "WR" "ResRecord" "WRFFS1"}
+            {:achieved-depth-token "49" :publisher-final-depth-token "49"
+             :penalty-token nil :source-note-token "WR" :record-token "WRFFS1"
+             :penalty-note-token nil :reason-token nil}]
+           [3559 {"ParPrintName" "MCCAHILL Harry" "ResResult" "75" "ResResultFinal" nil
+                  "ResPenality" "27" "ResNotePenality" "SP NO OK, EARLY TURN, NO MARKER"
+                  "ResReasonCode" "DSQ" "ResResultType" "IRM"}
+            {:achieved-depth-token "75" :publisher-final-depth-token nil
+             :penalty-token "27" :source-note-token nil :record-token nil
+             :penalty-note-token "SP NO OK, EARLY TURN, NO MARKER" :reason-token "DSQ"}]]]
+    (let [candidate (-> (roatan/parse-result (source [(merge (row unit) overrides)])
+                                             (select-keys (routes unit) [:view-url :json-url]))
+                        :candidates first)]
+      (is (= "cmas-2026-roatan-json/2" roatan/parser-version))
+      (is (= expected (select-keys (:parsed candidate) (keys expected))))
+      (is (= overrides (select-keys (:raw candidate) (keys overrides)))))))
+
 (deftest roatan-cwt-men-source-census
   (doseq [[unit row-count category-counts] [[3551 7 {"SENM" 7}]
                                             [3559 24 {"SENM" 16 "M1M" 5 "M2M" 1 "M3M" 2}]]]
@@ -112,6 +144,27 @@
     (is (thrown? Exception (roatan/validate-artifact! root (assoc-in artifact [:candidates 0 :citation :visible-tuple :name] "Other name"))))
     (is (thrown? Exception (roatan/extract! root sha (assoc options :citation-evidence-sha256 (apply str (repeat 64 "0"))))))
     (is (thrown? Exception (roatan/extract! root sha (dissoc options :citation-evidence-sha256))))))
+
+(deftest archived-v1-roatan-extractions-remain-replayable
+  (let [dir (fixture/workspace) root (str dir "/archive")
+        rows [(assoc (row 3551) "ResResult" "65" "ResResultFinal" "34"
+                     "ResPenality" "31" "ResNotePenality" "EARLY TURN, NO MARKER"
+                     "ResReasonCode" "PEN")]
+        sha (registered-source root 3551 rows)
+        evidence (:sha256 (archive/retain-evidence! root
+                                                    (.getBytes (json/write-str (visible-evidence 3551 rows sha)) "UTF-8")))
+        current (edn/read-string (slurp (:artifact-path
+                                         (roatan/extract! root sha {:actor "synthetic" :config {}
+                                                                    :citation-evidence-sha256 evidence}))))
+        old (-> current
+                (assoc :parser-version "cmas-2026-roatan-json/1")
+                (update :candidates #(mapv (fn [candidate]
+                                             (update candidate :parsed dissoc
+                                                     :achieved-depth-token :publisher-final-depth-token
+                                                     :source-note-token :record-token :penalty-note-token)) %)))]
+    (is (= "65" (get-in old [:candidates 0 :parsed :result-token])))
+    (is (= "34" (get-in old [:candidates 0 :parsed :final-result-token])))
+    (is (= old (roatan/validate-artifact! root old)))))
 
 (deftest changed-json-bytes-retain-both-unreviewed-versions
   (let [dir (fixture/workspace) root (str dir "/archive") rows [(row 3559)]

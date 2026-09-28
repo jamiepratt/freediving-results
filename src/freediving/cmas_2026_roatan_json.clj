@@ -8,7 +8,11 @@
            [java.security MessageDigest]
            [java.util HexFormat]))
 
-(def parser-version "cmas-2026-roatan-json/1")
+(def parser-version "cmas-2026-roatan-json/2")
+(def ^:private legacy-parser-version "cmas-2026-roatan-json/1")
+(def ^:private v2-fields
+  [:achieved-depth-token :publisher-final-depth-token
+   :source-note-token :record-token :penalty-note-token])
 
 (def ^:private units
   {3551 {:event 661 :phase 594 :date "2026-08-17T00:00:00.000Z"}
@@ -85,7 +89,12 @@
             :declared-depth-token (get row "DECLLEN_STR")
             :result-token (get row "ResResult")
             :final-result-token (get row "ResResultFinal")
+            :achieved-depth-token (get row "ResResult")
+            :publisher-final-depth-token (get row "ResResultFinal")
             :penalty-token (get row "ResPenality")
+            :source-note-token (get row "ResNote")
+            :record-token (get row "ResRecord")
+            :penalty-note-token (get row "ResNotePenality")
             :reason-token (get row "ResReasonCode")
             :result-type-token (get row "ResResultType")}
    :parse-status :parsed :review-status :unreviewed :selection-status :blocked
@@ -171,7 +180,7 @@
                      :representation (get raw "ParOrgCode")
                      :birth-year (get raw "ParYearBirthDate")}}))
 
-(defn- replay [root source-sha evidence-sha]
+(defn- replay [root source-sha evidence-sha version]
   (let [{:keys [bytes view-url json-url]} (registered-source root source-sha)
         parsed (parse-result bytes {:view-url view-url :json-url json-url})
         browser (visible-evidence root evidence-sha source-sha view-url json-url parsed)]
@@ -179,20 +188,30 @@
                       (count (:candidates parsed)))
                    (empty? (:unparsed-rows parsed)))
       (fail! "Roatan visible rows include unsupported source positions"))
-    (update parsed :candidates
-            (fn [candidates]
-              (mapv #(assoc % :citation (cite source-sha json-url view-url browser %)) candidates)))))
+    (let [parsed (if (= legacy-parser-version version)
+                   (-> parsed
+                       (assoc :parser-version legacy-parser-version)
+                       (update :candidates
+                               #(mapv (fn [candidate]
+                                        (update candidate :parsed (fn [parsed-row]
+                                                                    (apply dissoc parsed-row v2-fields)))) %)))
+                   parsed)]
+      (update parsed :candidates
+              (fn [candidates]
+                (mapv #(assoc % :citation (cite source-sha json-url view-url browser %)) candidates))))))
 
 (defn validate-artifact!
   "Replay every unreviewed visible-row citation from archived JSON and retained packet evidence."
   [root artifact]
   (when-not (and (= 5 (:schema-version artifact))
-                 (= parser-version (:parser-version artifact)) (= tool (:tool artifact))
+                 (#{parser-version legacy-parser-version} (:parser-version artifact))
+                 (= tool (:tool artifact))
                  (= (:citation-evidence-sha256 artifact)
                     (get-in artifact [:config :citation-evidence-sha256])))
     (fail! "Unsupported Roatan JSON extraction contract"))
   (let [source (archive/inspect root (:source-sha256 artifact))
-        expected (replay root (:source-sha256 artifact) (:citation-evidence-sha256 artifact))]
+        expected (replay root (:source-sha256 artifact) (:citation-evidence-sha256 artifact)
+                         (:parser-version artifact))]
     (when-not (and (vector? (:acquisitions artifact)) (seq (:acquisitions artifact))
                    (= (count (:acquisitions artifact))
                       (count (set (map :acquisition-id (:acquisitions artifact)))))
@@ -209,7 +228,7 @@
                  (populated? actor) (map? config))
     (fail! "Expected actor, config and visible-row evidence SHA-256"))
   (let [{:keys [source]} (registered-source root sha256)
-        parsed (replay root sha256 citation-evidence-sha256)
+        parsed (replay root sha256 citation-evidence-sha256 parser-version)
         identity {:source-sha256 sha256 :acquisitions (:acquisitions source)
                   :evidence-sha256 (archive/extraction-evidence root)
                   :actor actor :config (assoc config :citation-evidence-sha256 citation-evidence-sha256)
