@@ -28,9 +28,12 @@ ROATAN_BUNDLE = Path('/Users/jamiep/Documents/ChatGPT/freediving-results/data/ow
 @unittest.skipUnless(ROATAN_SNAPSHOT.exists() and ROATAN_BUNDLE.exists(), 'private Roatan evidence unavailable')
 class RoatanOriginalViewTest(unittest.TestCase):
     def test_owner_routes_are_authenticated_bounded_and_read_only(self):
+        original_snapshot_sha = sha((ROATAN_SNAPSHOT / 'snapshot.sqlite').read_bytes())
         env = {'OWNER_EVIDENCE_GATEWAY_SECRET': SECRET, 'OWNER_EVIDENCE_ORIGIN_HOST': HOST,
                'OWNER_EVIDENCE_EMAILS': EMAIL,
-               'OWNER_EVIDENCE_SNAPSHOT_SHA256': '30910ab400071613c902a23e3312072cf48abf6130928efad6ec0a6a1a76fefb'}
+               'OWNER_EVIDENCE_SNAPSHOT_SHA256': '30910ab400071613c902a23e3312072cf48abf6130928efad6ec0a6a1a76fefb',
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_DIR': str(ROATAN_BUNDLE),
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256': '07be5bbf08b604f7b53e38c3f90525ca5ee94ac5b2047ae54a20328141fd256d'}
         with make_server(ROATAN_SNAPSHOT, env) as server:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -50,13 +53,21 @@ class RoatanOriginalViewTest(unittest.TestCase):
                 self.assertEqual(json.loads(body)['total'], 31)
                 status, body = request('/owner-evidence/api/roatan/3551/5')
                 self.assertEqual(status, 200)
-                self.assertEqual(json.loads(body)['final_depth'], '34')
+                position = json.loads(body)
+                self.assertEqual(position['final_depth'], '34')
+                source_path = '/owner-evidence/api/source-view/' + position['position_record_id']
+                status, body = request(source_path)
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['source_value']['ParPrintName'], 'LU San-Jen')
+                self.assertEqual(request(source_path, authorized=False)[0], 403)
+                self.assertEqual(request(source_path, method='POST')[0], 405)
                 self.assertEqual(request('/owner-evidence/api/roatan/3551/5', authorized=False)[0], 403)
                 self.assertEqual(request('/owner-evidence/api/roatan/3551/999')[0], 404)
                 self.assertEqual(request('/owner-evidence/api/roatan/3551/5', method='POST')[0], 405)
             finally:
                 server.shutdown()
                 thread.join()
+        self.assertEqual(sha((ROATAN_SNAPSHOT / 'snapshot.sqlite').read_bytes()), original_snapshot_sha)
 
     def test_exact_top_level_array_row_and_citation(self):
         with SnapshotQuery(ROATAN_SNAPSHOT) as query:
@@ -156,6 +167,34 @@ def fixture(root, *, original_bytes=None, content_type='application/json', posit
 
 
 class SourceViewTest(unittest.TestCase):
+    def test_portable_roatan_array_requires_exact_citation_and_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, bundle, env = fixture(
+                root, original_bytes=json.dumps([{'Name': 'Ada'}, {'Name': 'Bea'}]).encode(),
+                positions=[{'fields': {'Name': 'Ada'}, 'locator': 'row index zero based 0'}])
+            with SnapshotQuery(snapshot) as query:
+                record = query.browse(kind='candidate_position')['records'][0]
+                detail = query.detail(record['record_id'])
+                original_hash = detail['source_object_id'].removeprefix('sha256:')
+                detail.update(source_schema='roatan-2026-cwt-men-private-census/v1',
+                              raw={'unit': 3551, 'json_index_zero_based': 0,
+                                   'source_sha256': original_hash},
+                              citation={'unit': 3551, 'row-index-zero-based': 0,
+                                        'source-sha256': original_hash})
+                viewer = OriginalSourceView(bundle, env['OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256'],
+                                            env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
+                shown = viewer.inspect(detail)
+                self.assertEqual(shown['source_value'], {'Name': 'Ada'})
+                self.assertEqual(shown['locator'], '[0]')
+                for changed in (dict(detail, citation=dict(detail['citation'], **{'row-index-zero-based': 1})),
+                                dict(detail, citation=dict(detail['citation'], **{'source-sha256': '0' * 64})),
+                                dict(detail, raw_fields={'Name': 'Bea'})):
+                    with self.subTest(changed=changed):
+                        with self.assertRaises(SourceViewError) as raised:
+                            viewer.inspect(changed)
+                        self.assertEqual(raised.exception.status, 422)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
