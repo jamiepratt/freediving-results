@@ -47,6 +47,16 @@ def required_input(spec):
 def classify(collection, obj, parent=None):
     parent = parent or {}
     c = collection.lower()
+    if c == 'result_rows':
+        return 'candidate_position'
+    if c == 'overall_rows':
+        return 'aggregate'
+    if c == 'endpoint_records':
+        return 'observation_version'
+    if c == 'routes':
+        return 'discovery_route'
+    if c == 'leads':
+        return 'discovery_lead'
     if c == 'candidate_result_appearances':
         return 'relationship'
     if c == 'pages.rows':
@@ -88,7 +98,7 @@ def field(obj, *names):
 
 
 def normalize(obj, parent, root, kind):
-    raw_fields = obj.get('fields_raw') or obj.get('raw_fields') or obj.get('fields') or {}
+    raw_fields = obj.get('fields_raw') or obj.get('raw_fields') or obj.get('fields') or obj.get('cells') or {}
     parsed = obj.get('parsed_fields') or {}
     if isinstance(parsed, dict) and any(isinstance(v, dict) and 'value' in v for v in parsed.values()):
         parsed = {k: v.get('value') if isinstance(v, dict) else v for k, v in parsed.items()}
@@ -107,7 +117,7 @@ def normalize(obj, parent, root, kind):
     root_source = root.get('source') if isinstance(root.get('source'), dict) else {}
     root_source_hash = root.get('source_sha256') or root_source.get('sha256')
     source_object_id = value(obj.get('source_id'), obj.get('source_sha256'),
-                             parent.get('source_id'), root_source.get('id'),
+                             citation_obj.get('source_sha256'), parent.get('source_id'), root_source.get('id'),
                              'sha256:' + root_source_hash if root_source_hash else None)
     if source_object_id and len(source_object_id) == 64 and all(c in '0123456789abcdef' for c in source_object_id):
         source_object_id = 'sha256:' + source_object_id
@@ -118,13 +128,16 @@ def normalize(obj, parent, root, kind):
         'parser_version': value(obj.get('parser_version'), observations[0].get('parser_version') if observations else None),
         'observation_version': value(obj.get('observation_version'), obj.get('job_id'), observations[0].get('candidate_id') if observations else None),
         'event_name': value(obj.get('event_name'), obj.get('name') if kind == 'event' else None, root.get('event_title_calendar')),
-        'event_date': value(obj.get('event_date'), exact_date, parent.get('event_date'), root.get('event_date_calendar')),
+        'event_date': value(obj.get('event_date'), (obj.get('position') or {}).get('date'), exact_date,
+                            parent.get('event_date'), root.get('event_date_calendar')),
         'date_from': date_from, 'date_to': date_to, 'date_scope_json': canon(date_scope),
         'session': value(obj.get('session'), parent.get('session')),
         'category': value(obj.get('category'), obj.get('category_raw'), parent.get('category_raw'), parsed.get('category')),
-        'discipline': value(obj.get('discipline'), obj.get('discipline_raw'), parent.get('discipline_raw'), parsed.get('discipline')),
+        'discipline': value(obj.get('discipline'), obj.get('discipline_raw'),
+                            (obj.get('cells') or {}).get('Discipline', {}).get('value'),
+                            parent.get('discipline_raw'), parsed.get('discipline')),
         'page': page,
-        'citation': value(obj.get('citation'), obj.get('locator'), obj.get('source_lines')),
+        'citation': value(obj.get('citation'), obj.get('position'), obj.get('locator'), obj.get('source_lines')),
         'review_status': value(obj.get('review_status'), root.get('owner_review_status'), 'unreviewed' if kind == 'candidate_position' else None),
         'raw_fields_json': canon(raw_fields),
         'parsed_fields_json': canon(parsed),
@@ -174,6 +187,45 @@ def create_db(path):
     return db
 
 
+def validate_extension_packet(name, root):
+    schema = root.get('schema')
+    if schema == 'aida-selected-html-packet/v1':
+        positions = root.get('positions')
+        source = root.get('source') or {}
+        if not isinstance(positions, list) or len(positions) != root.get('summary', {}).get('source_positions'):
+            raise ValueError(f'AIDA source position count mismatch: {name}')
+        locators = [canon(row.get('position')) for row in positions]
+        if len(set(locators)) != len(locators) or any(row.get('position', {}).get('date') != source.get('selected_date') for row in positions):
+            raise ValueError(f'AIDA source position locator mismatch: {name}')
+    elif schema == 'eindhoven-2026-noxy-private-accounting/v1':
+        counts = root.get('counts') or {}
+        for key in ('result_rows', 'overall_rows', 'endpoint_records'):
+            if not isinstance(root.get(key), list) or len(root[key]) != counts.get(key):
+                raise ValueError(f'Eindhoven {key} count mismatch: {name}')
+        results = root['result_rows']
+        endpoints = root['endpoint_records']
+        relationships = root.get('relationships') or []
+        result_ids = [row.get('attempt_id') for row in results]
+        endpoint_ids = [row.get('attempt_id') for row in endpoints]
+        if (None in result_ids or len(set(result_ids)) != len(result_ids)
+                or None in endpoint_ids or len(set(endpoint_ids)) != len(endpoint_ids)
+                or len(relationships) != counts.get('linked_result_endpoint_records')
+                or set(result_ids) != {row.get('attempt_id') for row in relationships}
+                or not set(result_ids).issubset(endpoint_ids)
+                or len(endpoints) - len(results) != counts.get('endpoint_only_records')
+                or any(row.get('disposition') != 'aggregate_not_attempt' for row in root['overall_rows'])):
+            raise ValueError(f'Eindhoven view relationship mismatch: {name}')
+    elif schema == 'issue55-route-roster/v3':
+        summary = root.get('summary') or {}
+        if any(not isinstance(root.get(key), list) or len(root[key]) != summary.get(count_key)
+               for key, count_key in (('routes', 'route_count'), ('leads', 'lead_count'))):
+            raise ValueError(f'route roster count mismatch: {name}')
+    elif schema not in ('roatan-2026-cwt-men-private-census/v1',
+                        'cmas-worldcup-2026-visual-evidence/v1',
+                        'italian-open-2025-visual-evidence/v3'):
+        raise ValueError(f'unsupported extension packet: {name}')
+
+
 def extend(args):
     """Append required namespaces to a verified historical database."""
     base = Path(args.base_dir)
@@ -200,11 +252,10 @@ def extend(args):
         if sha(data) != required[name]:
             raise ValueError(f'required input hash mismatch: {name}')
         root = json.loads(data)
+        if not isinstance(root, dict):
+            raise ValueError(f'{name} must be a JSON object')
         schema = root.get('schema') if isinstance(root, dict) else None
-        if schema not in ('roatan-2026-cwt-men-private-census/v1',
-                          'cmas-worldcup-2026-visual-evidence/v1',
-                          'italian-open-2025-visual-evidence/v3'):
-            raise ValueError(f'unsupported extension packet: {name}')
+        validate_extension_packet(name, root)
         if schema == 'roatan-2026-cwt-men-private-census/v1' and root.get('issue_namespace') != '#8':
             raise ValueError('expected #8 Roatan census packet')
         if root.get('confirmed_distinct_attempts') is not None or (root.get('counts') or {}).get('confirmed_distinct_attempts') is not None:

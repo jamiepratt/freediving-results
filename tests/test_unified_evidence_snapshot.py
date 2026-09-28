@@ -229,6 +229,76 @@ def test_extend_adds_two_visual_packets_without_promoting_non_results(tmp_path):
     assert hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest() == original_sha
 
 
+def test_extend_keeps_aida_positions_noxy_views_and_route_leads_separate(tmp_path):
+    args, *_ = build(tmp_path)
+    subprocess.run(args, check=True)
+    base = tmp_path / 'out'
+    aida = write(tmp_path / 'aida.json', {
+        'schema': 'aida-selected-html-packet/v1',
+        'source': {'sha256': 'a' * 64, 'selected_date': '2025-08-30',
+                   'selector': 'day_1', 'url': 'https://example.test/results'},
+        'summary': {'source_positions': 1, 'confirmed_distinct_attempts': None},
+        'positions': [{'position': {'date': '2025-08-30', 'row': 2, 'tbody_row': 1},
+                       'cells': {'Discipline': {'value': 'CWTB'}, 'Diver': {'value': 'Ada'}},
+                       'source_html': '<tr><td>Ada</td></tr>', 'review_status': 'unreviewed'}]})
+    noxy = write(tmp_path / 'noxy.json', {
+        'schema': 'eindhoven-2026-noxy-private-accounting/v1',
+        'confirmed_distinct_attempts': None,
+        'counts': {'result_rows': 1, 'overall_rows': 1, 'endpoint_records': 2,
+                   'linked_result_endpoint_records': 1, 'endpoint_only_records': 1,
+                   'confirmed_distinct_attempts': None},
+        'result_rows': [{'attempt_id': 10, 'event_date': '2026-05-09', 'discipline': 'DYN',
+                         'citation': {'source_sha256': 'b' * 64, 'json_pointer': '/rows/1'},
+                         'raw_fields': {'athlete': 'Ada'}}],
+        'overall_rows': [{'event_date': '2026-05-09', 'discipline': 'OVERALL',
+                          'disposition': 'aggregate_not_attempt',
+                          'citation': {'source_sha256': 'b' * 64, 'json_pointer': '/rows/0'}}],
+        'endpoint_records': [{'attempt_id': 10, 'disposition': 'linked_by_attempt_id',
+                              'citation': {'source_sha256': 'c' * 64, 'json_pointer': '/0'}},
+                             {'attempt_id': 11, 'disposition': 'endpoint_only',
+                              'citation': {'source_sha256': 'c' * 64, 'json_pointer': '/1'}}],
+        'relationships': [{'attempt_id': 10, 'result_pointer': '/rows/1', 'endpoint_pointer': '/0'}]})
+    roster = write(tmp_path / 'roster.json', {
+        'schema': 'issue55-route-roster/v3', 'cutoff': '2026-09-28T18:30:05Z',
+        'summary': {'route_count': 1, 'lead_count': 2, 'confirmed_distinct_attempts': None},
+        'routes': [{'id': 'aida', 'status': 'checked'}],
+        'leads': [{'id': 'aida:1', 'status': 'checked'},
+                  {'id': 'aida:2', 'status': 'unchecked'}]})
+    inputs = {'aida-day': aida, 'eindhoven': noxy, 'route-roster': roster}
+    out = tmp_path / 'extended'
+    command = [sys.executable, str(SCRIPT), 'extend', '--base-dir', str(base),
+               '--cutoff', '2026-09-28T19:00:00Z']
+    for name, path in inputs.items():
+        command += ['--input', f'{name}={path}', '--required-input',
+                    f'{name}={hashlib.sha256(path.read_bytes()).hexdigest()}']
+    command += ['--output-dir', str(out)]
+    subprocess.run(command, check=True)
+    manifest = json.loads((out / 'manifest.json').read_text())
+    assert manifest['confirmed_distinct_attempts'] is None
+    assert manifest['inputs']['aida-day']['collections'] == {'positions': 1}
+    assert manifest['inputs']['eindhoven']['collections']['result_rows'] == 1
+    with sqlite3.connect(out / 'snapshot.sqlite') as db:
+        assert db.execute('select kind,event_date,discipline,source_object_id,citation_json from records '
+                          'where source_name="aida-day"').fetchone() == (
+                              'candidate_position', '2025-08-30', 'CWTB', 'sha256:' + 'a' * 64,
+                              json.dumps({'date': '2025-08-30', 'row': 2, 'tbody_row': 1}, sort_keys=True,
+                                         separators=(',', ':')))
+        assert db.execute('select collection,kind from records where source_name="eindhoven" '
+                          'order by collection').fetchall() == [
+                              ('endpoint_records', 'observation_version'),
+                              ('endpoint_records', 'observation_version'),
+                              ('overall_rows', 'aggregate'),
+                              ('relationships', 'relationship'),
+                              ('result_rows', 'candidate_position')]
+        assert db.execute('select collection,kind from records where source_name="route-roster" '
+                          'order by collection').fetchall() == [
+                              ('leads', 'discovery_lead'), ('leads', 'discovery_lead'),
+                              ('routes', 'discovery_route')]
+    first = hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest()
+    subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)], check=True)
+    assert hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest() == first
+
+
 class SnapshotContractTest(unittest.TestCase):
     def test_records(self):
         with tempfile.TemporaryDirectory() as d:
