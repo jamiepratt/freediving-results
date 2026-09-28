@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Private evidence workspace</title><link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js" defer></script></head>
+<body><header><div><h1>Private evidence workspace</h1><p>Dated partial census of retained packets. Candidate positions are not confirmed distinct attempts. Original source bytes are not served. No owner decision or publication is made here.</p></div><form action="/logout" method="post"><button>Log out</button></form></header>
+<main><section><h2>Snapshot</h2><div id="overview"></div><h3>Source counts</h3><div id="counts"></div></section>
+<section><h2>Browse evidence</h2><form id="filters">
+<label>Source <select name="source_name" id="source"><option value="">All sources</option></select></label><button type="button" id="show-source">Show source details</button>
+<label>Kind <select name="kind"><option value="">All kinds</option><option>candidate_position</option><option>gap</option><option>relationship</option><option>aggregate</option><option>other</option></select></label>
+<label>Collection <input name="collection" maxlength="200"></label><label>Event <input name="event_name" maxlength="200"></label>
+<label>From <input type="date" name="date_from"></label><label>To <input type="date" name="date_to"></label>
+<label>Session <input name="session" maxlength="200"></label><label>Discipline <input name="discipline" maxlength="200"></label><label>Category <input name="category" maxlength="200"></label>
+<label>Page size <select name="limit"><option>25</option><option>50</option><option>100</option></select></label><button>Apply</button></form>
+<nav><button id="candidates">Candidate positions</button><button id="gaps">Gaps and exceptions</button><button id="relationships">Unknown relationships</button></nav>
+<p id="summary"></p><div id="results"></div><nav><button id="previous">Previous</button><button id="next">Next</button></nav></section>
+<section><h2>Source disposition</h2><div id="source-detail">Select a source to inspect its status, retained input receipt, and metadata.</div></section>
+<section><h2>Record detail</h2><div id="detail">Select a record.</div></section></main></body></html>

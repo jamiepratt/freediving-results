@@ -1,0 +1,7 @@
+# Local owner evidence workspace
+
+Run `python3 scripts/owner_evidence_web.py --snapshot-dir PATH` with a verified private unified snapshot directory. Enter a local password at the terminal prompt, then open the printed loopback login URL. The process binds only to `127.0.0.1` on an ephemeral port. Stop it with Ctrl-C.
+
+The workspace reads the immutable SQLite snapshot through `SnapshotQuery`. It provides source counts and dispositions, filters for source, collection, kind, event, printed date span, session, discipline and category, plus paged candidate, gap and relationship views. Detail shows retained packet raw and parsed fields, citation and source hashes. The interface labels normalized federation unavailable, and never treats candidate rows as confirmed distinct attempts. Original source bytes, owner review, mutation and publication are outside this process.
+
+Authentication protects the workspace assets and all private API responses. The login uses an exact loopback Host and Origin, a random HTTP-only session cookie, and a terminal-entered password. Responses use `no-store` and restrictive security headers. Login is limited to five attempts per minute and all requests to 120 per minute. Request URLs, bodies and filters have size limits. The server suppresses access logs to avoid recording tokens or source data. Use only on a trusted local machine; HTTP loopback traffic is not encrypted.
