@@ -12,7 +12,7 @@
 (def ^:private legacy-parser-version "cmas-2026-roatan-json/1")
 (def ^:private v2-fields
   [:achieved-depth-token :publisher-final-depth-token
-   :source-note-token :record-token :penalty-note-token])
+   :source-note-token :record-token :start-note-token :penalty-note-token])
 
 (def ^:private units
   {3551 {:event 661 :phase 594 :date "2026-08-17T00:00:00.000Z"}
@@ -94,6 +94,7 @@
             :penalty-token (get row "ResPenality")
             :source-note-token (get row "ResNote")
             :record-token (get row "ResRecord")
+            :start-note-token (get row "ResStartNote")
             :penalty-note-token (get row "ResNotePenality")
             :reason-token (get row "ResReasonCode")
             :result-type-token (get row "ResResultType")}

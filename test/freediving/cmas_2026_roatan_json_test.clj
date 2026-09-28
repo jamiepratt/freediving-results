@@ -45,16 +45,17 @@
              :penalty-token "48" :source-note-token nil :record-token nil
              :penalty-note-token "EARLY TURN, NO MARKER" :reason-token "PEN"}]
            [3551 {"ParPrintName" "KUSAKIN Alexander" "ResResult" "49" "ResResultFinal" "49"
-                  "ResNote" "WR" "ResRecord" "WRFFS1"}
+                  "ResNote" "WR" "ResRecord" "WRFFS1" "ResStartNote" "START NOTE"}
             {:achieved-depth-token "49" :publisher-final-depth-token "49"
              :penalty-token nil :source-note-token "WR" :record-token "WRFFS1"
-             :penalty-note-token nil :reason-token nil}]
+             :start-note-token "START NOTE" :penalty-note-token nil :reason-token nil}]
            [3559 {"ParPrintName" "MCCAHILL Harry" "ResResult" "75" "ResResultFinal" nil
                   "ResPenality" "27" "ResNotePenality" "SP NO OK, EARLY TURN, NO MARKER"
                   "ResReasonCode" "DSQ" "ResResultType" "IRM"}
             {:achieved-depth-token "75" :publisher-final-depth-token nil
              :penalty-token "27" :source-note-token nil :record-token nil
-             :penalty-note-token "SP NO OK, EARLY TURN, NO MARKER" :reason-token "DSQ"}]]]
+             :start-note-token nil :penalty-note-token "SP NO OK, EARLY TURN, NO MARKER"
+             :reason-token "DSQ"}]]]
     (let [candidate (-> (roatan/parse-result (source [(merge (row unit) overrides)])
                                              (select-keys (routes unit) [:view-url :json-url]))
                         :candidates first)]
@@ -161,7 +162,8 @@
                 (update :candidates #(mapv (fn [candidate]
                                              (update candidate :parsed dissoc
                                                      :achieved-depth-token :publisher-final-depth-token
-                                                     :source-note-token :record-token :penalty-note-token)) %)))]
+                                                     :source-note-token :record-token :start-note-token
+                                                     :penalty-note-token)) %)))]
     (is (= "65" (get-in old [:candidates 0 :parsed :result-token])))
     (is (= "34" (get-in old [:candidates 0 :parsed :final-result-token])))
     (is (= old (roatan/validate-artifact! root old)))))
