@@ -12,9 +12,11 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/issue55_aida_selected_html.py'
 HEADERS = ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline', 'OT',
            'AP', 'RP', 'Card', 'Points', 'Remarks')
+LEGACY_HEADERS = ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline', 'Line',
+                  'Official Top', 'AP', 'RP', 'Card', 'Points', 'Remarks')
 
 
-def sample_html(rows=None, active='2025-08-30', selector='day_1'):
+def sample_html(rows=None, active='2025-08-30', selector='day_1', headers=HEADERS):
     rows = rows if rows is not None else [
         '<tr><td>1</td><td><a href="/Athletes/Profile-example">Ada &amp; Eve</a></td>'
         '<td>GER</td><td>F</td><td>CWTB</td><td>09:40</td><td>25 m</td>'
@@ -22,7 +24,7 @@ def sample_html(rows=None, active='2025-08-30', selector='day_1'):
     return (f'<html><li class="active"><a class="days" id="{selector}">{active}</a></li>'
             '<li><a class="days" id="day_2">2025-08-31</a></li>'
             '<table id="table_ajax"><thead><tr>'
-            + ''.join(f'<th>{x}</th>' for x in HEADERS)
+            + ''.join(f'<th>{x}</th>' for x in headers)
             + '</tr></thead><tbody id="body_ajax">' + ''.join(rows)
             + '</tbody></table></html>')
 
@@ -84,6 +86,33 @@ class SelectedHtmlPacketTests(unittest.TestCase):
         self.assertEqual(row['cells']['Remarks']['value'], 'Depth penalty')
         self.assertIsNone(row['penalty'])
         self.assertIsNone(row['category'])
+
+    def test_cites_legacy_event_results_selected_date_and_twelve_cells(self):
+        rows = ['<tr><td>1</td><td>Eva &amp; Max</td><td>GER</td><td>F</td>'
+                '<td>CWT</td><td>Blue</td><td>30 m</td><td>29 m</td>'
+                '<td>28 m</td><td>WHITE</td><td>25</td><td>Clean</td></tr>']
+        url = 'https://www.aidainternational.org/Events/EventResults-4464'
+
+        def legacy_receipt(receipt):
+            receipt['requested_url'] = url
+            receipt['final_url'] = url
+            receipt['source_citation']['url'] = url
+
+        result, packet = self.run_packet(
+            html=sample_html(rows=rows, headers=LEGACY_HEADERS),
+            receipt_change=legacy_receipt)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(packet['source']['url'], url)
+        self.assertEqual(packet['summary']['source_positions'], 1)
+        self.assertEqual(packet['summary']['parsed'], 1)
+        self.assertEqual(packet['summary']['observation_versions'], 0)
+        self.assertIsNone(packet['summary']['confirmed_distinct_attempts'])
+        position = packet['positions'][0]
+        self.assertEqual(position['position']['date'], '2025-08-30')
+        self.assertEqual(position['cells']['Line']['value'], 'Blue')
+        self.assertEqual(position['cells']['Official Top']['value'], '30 m')
+        self.assertEqual(position['cells']['Remarks']['value'], 'Clean')
+        self.assertIn('Eva &amp; Max', position['cells']['Diver']['source_html'])
 
     def test_rejects_receipt_hash_mismatch(self):
         result, packet = self.run_packet(receipt_change=lambda x: x['body'].update(sha256='0' * 64))

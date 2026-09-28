@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 SCHEMA = 'aida-selected-html-packet/v1'
 HEADERS = ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline', 'OT',
            'AP', 'RP', 'Card', 'Points', 'Remarks')
+LEGACY_HEADERS = ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline', 'Line',
+                  'Official Top', 'AP', 'RP', 'Card', 'Points', 'Remarks')
 TAG = re.compile(r'<[^>]*>', re.S)
 
 
@@ -122,8 +124,10 @@ def validate_receipt(receipt, source_path, source_bytes):
     require((receipt.get('content_type') or '').lower().startswith('text/html'), 'receipt content type must be HTML')
     for field in ('requested_url', 'final_url'):
         parts = urlsplit(receipt.get(field) or '')
+        supported_path = (parts.path.startswith('/EventPage/') or
+                          re.fullmatch(r'/Events/EventResults-[0-9]+', parts.path) is not None)
         require(parts.scheme == 'https' and parts.netloc == 'www.aidainternational.org'
-                and parts.path.startswith('/EventPage/'), f'invalid {field}')
+                and supported_path, f'invalid {field}')
     require(receipt['final_url'] == receipt['source_citation']['url'], 'source citation URL mismatch')
     require(receipt['selected_view']['date'] == receipt['source_citation']['selected_date'],
             'source citation date mismatch')
@@ -160,7 +164,7 @@ def build(source_path, receipt_path):
     tbody, _ = one_element(table, 'tbody', 'body_ajax')
     headers = re.findall(r'<th\b[^>]*>(.*?)</th\s*>', table[:table.index(tbody)], re.I | re.S)
     names = tuple(' '.join(html.unescape(TAG.sub('', item)).split()) for item in headers)
-    require(names == HEADERS, 'unsupported table header/width')
+    require(names in (HEADERS, LEGACY_HEADERS), 'unsupported table header/width')
     rows = chunks(tbody, 'tr')
     require(rows, 'selected table has no data rows')
     positions = []
@@ -170,14 +174,14 @@ def build(source_path, receipt_path):
                     'tbody': 'body_ajax', 'row': ordinal + 1, 'tbody_row': ordinal,
                     'selector': selected['selector'], 'date': selected['date']}
         item = {'position': position, 'source_html': row,
-                'disposition': 'parsed' if len(cells) == len(HEADERS) else 'unresolved',
+                'disposition': 'parsed' if len(cells) == len(names) else 'unresolved',
                 'review_status': 'unreviewed',
                 'source_cells': cells,
-                'cells': {name: cell(fragment) for name, fragment in zip(HEADERS, cells)}
-                if len(cells) == len(HEADERS) else None,
+                'cells': {name: cell(fragment) for name, fragment in zip(names, cells)}
+                if len(cells) == len(names) else None,
                 'penalty': None, 'category': None}
-        if len(cells) != len(HEADERS):
-            item['reason'] = f'expected 11 cells, found {len(cells)}'
+        if len(cells) != len(names):
+            item['reason'] = f'expected {len(names)} cells, found {len(cells)}'
         positions.append(item)
     parsed = sum(row['disposition'] == 'parsed' for row in positions)
     return {'schema': SCHEMA, 'source': {'url': receipt['final_url'],
