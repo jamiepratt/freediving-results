@@ -12,14 +12,17 @@ import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
+from owner_source_view import OriginalSourceView, SourceViewError
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
-CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
            'session', 'discipline', 'category', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
 DETAIL_PATH = re.compile(r'^/owner-evidence/api/detail/([a-f0-9]{64})$')
+SOURCE_VIEW_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})$')
+SOURCE_PAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 HOST_PATTERN = re.compile(r'^[a-z0-9-]+\.alphacompose\.com$')
 EMAIL_PATTERN = re.compile(r'^[^\s,@]+@[^\s,@]+\.[^\s,@]+$')
 STATIC = {
@@ -90,6 +93,11 @@ class PrivateOrigin(HTTPServer):
             self.query.db = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1',
                                             uri=True, check_same_thread=False)
             self.query.db.row_factory = sqlite3.Row
+            bundle_dir = env.get('OWNER_EVIDENCE_SOURCE_BUNDLE_DIR')
+            bundle_sha = env.get('OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256')
+            if bool(bundle_dir) != bool(bundle_sha):
+                raise ValueError('source bundle configuration incomplete')
+            self.source_view = OriginalSourceView(bundle_dir, bundle_sha, expected_digest) if bundle_dir else None
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()
@@ -198,10 +206,22 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             elif path in ('/owner-evidence/api/gaps', '/owner-evidence/api/relationships'):
                 kind = 'gap' if path.endswith('gaps') else 'relationship'
                 result = query.browse(**self._filters(parsed.query, fixed_kind=kind))
+            elif SOURCE_PAGE_PATH.fullmatch(path) and not parsed.query:
+                if self.server.source_view is None:
+                    return self._reply(503)
+                record_id, page = SOURCE_PAGE_PATH.fullmatch(path).groups()
+                image = self.server.source_view.page(query.detail(record_id), int(page))
+                return self._reply(200, image, 'image/png')
+            elif SOURCE_VIEW_PATH.fullmatch(path) and not parsed.query:
+                if self.server.source_view is None:
+                    return self._reply(503)
+                result = self.server.source_view.inspect(query.detail(SOURCE_VIEW_PATH.fullmatch(path).group(1)))
             elif DETAIL_PATH.fullmatch(path) and not parsed.query:
                 result = query.detail(DETAIL_PATH.fullmatch(path).group(1))
             else:
                 return self._reply(404)
+        except SourceViewError as exc:
+            return self._reply(exc.status)
         except (ValueError, KeyError):
             return self._reply(400)
         except (sqlite3.Error, OSError):
