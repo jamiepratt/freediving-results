@@ -80,6 +80,47 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (peer/compare-peers {:geography :national} [base])))))
 
+(deftest represented-country-scopes-keep-only-source-matched-peers
+  (let [pol (attempt "pol" 100M international-listing international-sanction)
+        arm (assoc (attempt "arm" 90M international-listing international-sanction)
+                   :represented-country "ARM")
+        usa (assoc (attempt "usa" 80M international-listing international-sanction)
+                   :represented-country "USA")
+        unknown (assoc (attempt "team" 120M international-listing international-sanction)
+                       :represented-country "CMAS1")
+        rows [pol arm usa unknown]
+        national (peer/compare-peers {:geography :national
+                                      :anchor-represented-country "POL"} rows)
+        continental (peer/compare-peers {:geography :continental
+                                         :anchor-represented-country "POL"} rows)]
+    (is (= ["pol"] (:peer-list national)))
+    (is (= ["pol" "arm"] (:peer-list continental)))
+    (is (= 1 (get-in national [:coverage :denominator])))
+    (is (= 2 (get-in continental [:coverage :denominator])))
+    (is (nil? (:rank (by-id continental "team"))))
+    (is (= :geography (:peer-status (by-id continental "team"))))
+    (is (= "POL" (get-in continental [:descriptor :anchor-represented-country])))
+    (is (keyword? (get-in continental [:descriptor :represented-geography-policy])))))
+
+(deftest unknown-anchor-and-recomparison-withhold-geographic-rank
+  (let [row (attempt "row" 100M international-listing international-sanction)
+        international-row (-> (peer/compare-peers {} [row]) :rows first)
+        continental (peer/compare-peers {:geography :continental
+                                         :anchor-represented-country "USA"}
+                                        [international-row])
+        unknown-anchor (peer/compare-peers {:geography :national
+                                            :anchor-represented-country "CMAS1"}
+                                           [row])]
+    (is (= 1 (:rank international-row)))
+    (is (= :geography (:peer-status (by-id continental "row"))))
+    (is (nil? (:rank (by-id continental "row"))))
+    (is (nil? (:rank-descriptor (by-id continental "row"))))
+    (is (= [] (:peer-list unknown-anchor)))
+    (is (= 0 (get-in unknown-anchor [:coverage :denominator])))
+    (is (nil? (get-in unknown-anchor [:descriptor :anchor-sports-continent])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (peer/compare-peers {:geography :continental} [row])))))
+
 (deftest international-listing-wins-over-local-and-needs-citation
   (let [both (attempt "both" 100M (into international-listing local-listing) international-sanction)
         uncited (attempt "uncited" 90M [{:publisher :AIDA :kind :archive}] [])
