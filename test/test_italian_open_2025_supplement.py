@@ -158,6 +158,8 @@ class ItalianOpenPacketTest(unittest.TestCase):
             packet = json.loads(output.read_bytes())
             self.assertEqual(packet["counts"]["relationship_candidate_links"], 1)
             self.assertEqual(packet["counts"]["duplicate_rendered_rows"], 0)
+            self.assertEqual(packet["gap_reconciliation"]["status"], "visual_census_incomplete")
+            self.assertEqual(packet["counts"]["rows_missing_region"], 1)
             self.assertEqual(packet["pages"][0]["rows"][0]["relationship_candidate_of"],
                              {"page": 2, "row": 1})
             self.assertNotIn("duplicate_of", packet["pages"][0]["rows"][0])
@@ -174,6 +176,25 @@ class ItalianOpenPacketTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("unsupported inferred", result.stderr)
             self.assertFalse(output.exists())
+
+    def test_free_text_relationship_note_is_not_a_row_link(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf, digest, parts = fixture(root)
+            first = json.loads(parts[0].read_text())
+            first["pages"][0]["rows"][0].update(
+                duplicate_of="page 2, alternate ranking view; values may differ",
+                duplicate_evidence="Same name; no attempt identity established")
+            parts[0].write_text(json.dumps(first))
+            result, output = run(root, pdf, digest, parts)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            packet = json.loads(output.read_bytes())
+            row = packet["pages"][0]["rows"][0]
+            self.assertEqual(row["relationship_candidate_note"],
+                             "page 2, alternate ranking view; values may differ")
+            self.assertNotIn("relationship_candidate_of", row)
+            self.assertEqual(packet["counts"]["relationship_candidate_notes"], 1)
+            self.assertEqual(packet["counts"]["relationship_candidate_links"], 0)
 
 
 if __name__ == "__main__":

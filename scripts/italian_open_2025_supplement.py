@@ -17,6 +17,7 @@ import sys
 SOURCE_SHA256 = "e8ca68825e29d44a1b13127ab2cab55f6db534b15ae26ff005f13a1ca8ec9d44"
 SOURCE_BYTES = 13755700
 SOURCE_URL = "https://www.cmas.org/document/2025,-italian-open-outdoor-freediving-championship/download.html"
+REGION_UNCERTAINTY = "Exact row region not bounded in page render"
 PAGE_COUNT = 35
 PAGE_DISPOSITIONS = {"result_table", "aggregate", "summary", "blank", "unresolved"}
 ROW_DISPOSITIONS = {"candidate_result", "aggregate", "summary", "duplicate_render", "unresolved"}
@@ -109,7 +110,7 @@ def checked_rows(page, render, source_hash):
                 f"page {number} row {ordinal}: uncertainties required")
         bbox = row.get("bbox")
         if bbox is None:
-            uncertainties = uncertainties + ["Exact row region not bounded in page render"]
+            uncertainties = uncertainties + [REGION_UNCERTAINTY]
             region = None
         else:
             require(isinstance(bbox, list) and len(bbox) == 4 and
@@ -216,18 +217,26 @@ def checked_pages(paths, source_hash):
                 if candidate is not None:
                     if isinstance(candidate, str):
                         match = re.fullmatch(r"page (\d+) row (\d+)", candidate)
-                        candidate = ({"page": int(match.group(1)),
-                                      "row": int(match.group(2))} if match else None)
-                    require(isinstance(candidate, dict) and
-                            set(candidate) == {"page", "row"} and
-                            all(type(candidate[key]) is int and candidate[key] > 0
-                                for key in ("page", "row")) and
-                            (candidate["page"], candidate["row"]) in by_position and
-                            (candidate["page"], candidate["row"]) !=
-                            (page["page"], row["row"]) and
-                            isinstance(evidence, str) and bool(evidence.strip()),
-                            f"page {page['page']} row {row['row']}: relationship candidate invalid")
-                    row["relationship_candidate_of"] = candidate
+                        if match:
+                            candidate = {"page": int(match.group(1)),
+                                         "row": int(match.group(2))}
+                        else:
+                            require(candidate.strip() and isinstance(evidence, str) and
+                                    evidence.strip(),
+                                    f"page {page['page']} row {row['row']}: relationship note invalid")
+                            row["relationship_candidate_note"] = candidate
+                            candidate = None
+                    if candidate is not None:
+                        require(isinstance(candidate, dict) and
+                                set(candidate) == {"page", "row"} and
+                                all(type(candidate[key]) is int and candidate[key] > 0
+                                    for key in ("page", "row")) and
+                                (candidate["page"], candidate["row"]) in by_position and
+                                (candidate["page"], candidate["row"]) !=
+                                (page["page"], row["row"]) and
+                                isinstance(evidence, str) and bool(evidence.strip()),
+                                f"page {page['page']} row {row['row']}: relationship candidate invalid")
+                        row["relationship_candidate_of"] = candidate
                     row["relationship_evidence"] = evidence
                     row.pop("duplicate_of", None)
                     row.pop("duplicate_evidence", None)
@@ -267,13 +276,21 @@ def build(pdf, paths, expected):
               "summary_rows_excluded": sum(r["disposition"] == "summary" for r in rows),
               "duplicate_rendered_rows": sum(r["disposition"] == "duplicate_render" for r in rows),
               "relationship_candidate_links": sum("relationship_candidate_of" in r for r in rows),
+              "relationship_candidate_notes": sum("relationship_candidate_note" in r for r in rows),
               "unresolved_positions": sum(r["disposition"] == "unresolved" for r in rows),
               "unresolved_pages": sum(p["disposition"] == "unresolved" for p in pages),
+              "rows_with_uncertainties": sum(bool(r["uncertainties"]) for r in rows),
+              "rows_with_field_uncertainties": sum(
+                  any(note != REGION_UNCERTAINTY for note in r["uncertainties"])
+                  for r in rows),
+              "unresolved_field_notes": sum(
+                  note != REGION_UNCERTAINTY for r in rows for note in r["uncertainties"]),
               "rows_missing_region": sum(r["citation"]["region"] is None for r in rows),
               "imported_observation_versions": 0,
               "confirmed_distinct_attempts": None}
-    incomplete = counts["unresolved_pages"] or counts["unresolved_positions"] or any(
-        page["visual_row_count"] is None for page in pages)
+    incomplete = (counts["unresolved_pages"] or counts["unresolved_positions"] or
+                  counts["rows_missing_region"] or
+                  any(page["visual_row_count"] is None for page in pages))
     return {"schema": "italian-open-2025-visual-evidence/v1",
             "source_sha256": expected, "source_bytes": source_bytes,
             "source_url": SOURCE_URL,
