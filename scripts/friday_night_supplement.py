@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a private visual evidence packet for the 2026 2nd Friday Night Dive PDF.
 
-Example: python3 scripts/asti_blu_supplement.py --pdf ORIGINAL.pdf --gap GAP.json \
+Example: python3 scripts/friday_night_supplement.py --pdf ORIGINAL.pdf --gap GAP.json \
   --part PAGES-01-07.json --part PAGES-08-14.json --part PAGES-15-21.json --card-ledger CARDS.json \
   --output PRIVATE/packet.json
 
