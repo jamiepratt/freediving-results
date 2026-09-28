@@ -22,7 +22,7 @@ class ActivationTests(unittest.TestCase):
         self.bundle = root / 'bundle'
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
-        for name in ('owner_evidence_origin.py', 'unified_evidence_query.py'):
+        for name in ('owner_evidence_origin.py', 'unified_evidence_query.py', 'route_roster_query.py'):
             (self.bundle / 'scripts' / name).write_text('print("test")\n')
         for name in ('evidence_workspace.html', 'evidence_workspace.js', 'evidence_workspace.css'):
             (self.bundle / 'resources' / name).write_text('test')
@@ -42,6 +42,14 @@ class ActivationTests(unittest.TestCase):
         self.config.chmod(0o600)
         self.layout = Layout(root / 'opt', root / 'var', root / 'units', self.config)
         self.calls = []
+        self.roster = root / 'roster'
+        self.roster.mkdir()
+        roster_bytes = json.dumps({'schema': 'issue55-route-roster/v1', 'routes': [], 'leads': []}).encode()
+        self.roster_digest = hashlib.sha256(roster_bytes).hexdigest()
+        (self.roster / 'roster.json').write_bytes(roster_bytes)
+        (self.roster / 'manifest.json').write_text(json.dumps({
+            'schema': 'issue55-route-receipts/v1', 'roster_sha256': self.roster_digest,
+            'snapshot_sqlite_sha256': self.digest}))
 
     def command(self, *args):
         self.calls.append(args)
@@ -65,6 +73,27 @@ class ActivationTests(unittest.TestCase):
         self.calls.clear()
         self.run_activation()
         self.assertNotIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), self.calls)
+
+    def test_stages_pinned_roster_with_snapshot_binding(self):
+        activate(self.bundle, self.source, self.digest, self.layout,
+                 roster_source=self.roster, expected_roster_sha256=self.roster_digest,
+                 command=self.command, health=lambda: None,
+                 owner_uid=os.getuid(), owner_gid=os.getgid())
+        staged = self.layout.state / 'rosters' / self.roster_digest
+        self.assertEqual((staged / 'roster.json').read_bytes(), (self.roster / 'roster.json').read_bytes())
+        self.assertEqual(staged.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((staged / 'roster.json').stat().st_mode & 0o777, 0o600)
+        active_env = (self.layout.state / 'active.env').read_text()
+        self.assertIn('OWNER_EVIDENCE_ROSTER_DIR=' + str(staged), active_env)
+        self.assertIn('OWNER_EVIDENCE_ROSTER_SHA256=' + self.roster_digest, active_env)
+        (self.roster / 'roster.json').write_bytes(b'tampered')
+        self.calls.clear()
+        with self.assertRaises(ValueError):
+            activate(self.bundle, self.source, self.digest, self.layout,
+                     roster_source=self.roster, expected_roster_sha256=self.roster_digest,
+                     command=self.command, health=lambda: None,
+                     owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(self.calls, [])
 
     def test_missing_or_tampered_prerequisite_refuses_without_service_change(self):
         self.config.unlink()
@@ -140,6 +169,25 @@ class ActivationTests(unittest.TestCase):
                         side_effect=lambda *_args, **_kwargs: Response(json.dumps({'snapshot_sha256': self.digest}).encode())):
             with self.assertRaises(RuntimeError):
                 _health(values, self.digest)
+
+    def test_local_health_checks_pinned_route_roster(self):
+        values = {'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-origin.alphacompose.com',
+                  'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',
+                  'OWNER_EVIDENCE_EMAILS': 'owner@example.com'}
+        class Response(io.BytesIO):
+            status = 200
+        def response(request, timeout):
+            headers = {key.lower(): value for key, value in request.header_items()}
+            if headers['host'] != values['OWNER_EVIDENCE_ORIGIN_HOST'] or headers['x-freediving-owner-gateway'] != values['OWNER_EVIDENCE_GATEWAY_SECRET'] or headers['x-freediving-owner-email'] != values['OWNER_EVIDENCE_EMAILS']:
+                raise urllib.error.HTTPError(request.full_url, 403, 'denied', {}, None)
+            if request.full_url.endswith('/routes'):
+                return Response(json.dumps({'roster_sha256': self.roster_digest}).encode())
+            return Response(json.dumps({'snapshot_sha256': self.digest}).encode())
+        with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=response):
+            _health(values, self.digest, self.roster_digest)
+        with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=lambda *_a, **_k: Response(b'{}')):
+            with self.assertRaises(RuntimeError):
+                _health(values, self.digest, self.roster_digest)
 
 
 if __name__ == '__main__':
