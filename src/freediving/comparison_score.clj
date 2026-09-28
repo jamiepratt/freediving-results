@@ -82,8 +82,10 @@
   (let [attempts (vec attempts)
         duplicates (->> attempts (group-by :id) (filter (fn [[_ rows]] (> (count rows) 1)))
                         (map key) set)
-        classified (mapv (fn [row]
-                           (let [why (cond-> (reasons row)
+        classified (mapv (fn [input]
+                           (let [row (dissoc input :comparison-score :comparison-rank
+                                             :discipline-rank :comparison-status :reasons)
+                                 why (cond-> (reasons row)
                                        (nil? (:id row)) (conj :missing-id)
                                        (contains? duplicates (:id row)) (conj :duplicate-id))]
                              (cond

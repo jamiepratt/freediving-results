@@ -91,8 +91,9 @@
     (throw (ex-info "Expected exact 2026 women DNF pool comparison scope" {})))
   (let [observations (vec observations)
         duplicates (->> observations (group-by observation-key) (filter (fn [[_ xs]] (> (count xs) 1))) (map key) set)
-        classified (mapv (fn [row]
-                           (let [why (cond-> (reasons request row)
+        classified (mapv (fn [input]
+                           (let [row (dissoc input :rank :comparison-status :reasons)
+                                 why (cond-> (reasons request row)
                                        (contains? duplicates (observation-key row)) (conj :duplicate-reference))]
                              (assoc row :reasons why
                                     :comparison-status (cond

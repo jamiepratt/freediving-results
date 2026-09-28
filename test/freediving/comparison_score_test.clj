@@ -97,6 +97,24 @@
     (is (every? nil? (map :discipline-rank (:rows result))))
     (is (every? #(some #{:mixed-final-units} (:reasons %)) (:rows result)))))
 
+(deftest stale-computed-keys-never-survive-recomparison
+  (let [stale {:comparison-score 999M :comparison-rank 1 :discipline-rank 1
+               :comparison-status :ranked :reasons []}
+        eligible (merge (attempt "eligible" :dynamic 100M :m 0) stale)
+        unreviewed (assoc (merge (attempt "unreviewed" :dynamic 120M :m 0) stale)
+                          :review :unreviewed)
+        dq (assoc (merge (attempt "dq" :dynamic 130M :m 0) stale)
+                  :status :disqualified)
+        result (score/compare-verified [eligible unreviewed dq])]
+    (is (= 50M (:comparison-score (by-id result "eligible"))))
+    (is (= 1 (:comparison-rank (by-id result "eligible"))))
+    (is (every? #(not (contains? % :comparison-score))
+                [(by-id result "unreviewed") (by-id result "dq")]))
+    (is (every? #(not (contains? % :comparison-rank))
+                [(by-id result "unreviewed") (by-id result "dq")]))
+    (is (every? #(not (contains? % :discipline-rank))
+                [(by-id result "unreviewed") (by-id result "dq")]))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.comparison-score-test)]
     (shutdown-agents)

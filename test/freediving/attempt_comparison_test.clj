@@ -85,6 +85,14 @@
     (is (some #{:unverified-final-conversion}
               (:reasons (first (filter #(= "conversion" (get-in % [:reference :candidate-id])) (:rows result))))))))
 
+(deftest stale-rank-never-survives-unreviewed-row
+  (let [unreviewed (assoc (row "stale" "CMAS" 90M) :rank 1
+                          :comparison-status :ranked :reasons [])
+        result (comparison/compare-attempts request [(assoc-in unreviewed [:evidence :review] :unreviewed)])
+        output (first (:rows result))]
+    (is (= :withheld (:comparison-status output)))
+    (is (not (contains? output :rank)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.attempt-comparison-test)]
     (shutdown-agents)
