@@ -26,7 +26,8 @@ def test_roatan_packet_keeps_versions_and_scoped_decisions(tmp_path):
             'row-index-zero-based': 0, 'view-url': 'https://example.test/result'},
            'raw': {'ParPrintName': 'LU San-Jen', 'DECLLEN_STR': '95', 'ResResult': '65',
                    'ResResultFinal': '34', 'ResPenality': '31', 'ResReasonCode': 'PEN',
-                   'ResNotePenality': 'EARLY TURN, NO MARKER'},
+                   'ResNotePenality': 'EARLY TURN, NO MARKER', 'ResNote': 'other note',
+                   'ResStartNote': 'start note', 'ResRecord': 'record token'},
            'parsed': {'category': 'SENM', 'declared-depth-token': '95', 'achieved-depth-token': '65',
                       'publisher-final-depth-token': '34', 'penalty-token': '31'},
            'visible_display': {'declared_depth': '95', 'depth': '65', 'final_depth': '34',
@@ -62,6 +63,14 @@ def test_roatan_packet_keeps_versions_and_scoped_decisions(tmp_path):
                                                 'publisher_final': '34'}
     assert result['positions'][0]['penalty'] == '31'
     assert result['positions'][0]['notes'] == 'EARLY TURN, NO MARKER'
+    assert result['positions'][0]['source_notes'] == {
+        'result_note': 'other note', 'penalty_note': 'EARLY TURN, NO MARKER',
+        'start_note': 'start note', 'record_token': 'record token'}
+    assert result['positions'][0]['visible_status'] == 'PEN'
+    assert result['positions'][0]['visible_notes'] == 'EARLY TURN, NO MARKER'
+    assert result['positions'][0]['source_id'] == f'sha256:{digest}'
+    assert result['positions'][0]['parser_version'] == 'cmas-2026-roatan-json/2'
+    assert all(v['source_id'] == f'sha256:{digest}' for v in result['observation_versions'])
     assert result['observation_versions'][0]['review_status'] == 'unreviewed'
     assert result['observation_versions'][1]['review_status'] == 'extraction_accepted'
     assert result['confirmed_distinct_attempts'] is None

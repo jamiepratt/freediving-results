@@ -138,20 +138,30 @@ def test_extend_preserves_historical_snapshot_and_requires_roatan_packet(tmp_pat
                    'historical_extraction_acceptances': 0, 'confirmed_distinct_attempts': None},
         'positions': [{'unit': 3551, 'json_index_zero_based': 0, 'event_date': '2026-08-17',
                        'discipline': 'CWT', 'category': 'SENM', 'citation': {'row-index-zero-based': 0},
+                       'source_id': 'sha256:' + 'a' * 64,
                        'raw_fields': {'ResResult': '65'}, 'parsed_fields': {'achieved-depth-token': '65'}}],
         'observation_versions': [{'unit': 3551, 'parser_version': 'p/1'},
                                  {'unit': 3551, 'parser_version': 'p/2'}]})
     packet_hash = hashlib.sha256(packet.read_bytes()).hexdigest()
     dest = tmp_path / 'extended'
+    early = subprocess.run([sys.executable, str(SCRIPT), 'extend', '--base-dir', str(base),
+                    '--cutoff', '2026-09-28T11:00:00Z',
+                    '--input', f'roatan-issue8={packet}', '--required-input',
+                    f'roatan-issue8={packet_hash}', '--output-dir', str(dest)], capture_output=True, text=True)
+    assert early.returncode != 0
+    assert 'cutoff precedes base snapshot' in early.stderr
     subprocess.run([sys.executable, str(SCRIPT), 'extend', '--base-dir', str(base),
+                    '--cutoff', '2026-09-28T13:00:00Z',
                     '--input', f'roatan-issue8={packet}', '--required-input',
                     f'roatan-issue8={packet_hash}', '--output-dir', str(dest)], check=True)
     manifest = json.loads((dest / 'manifest.json').read_text())
     assert manifest['base_snapshot_sha256'] == old_db
+    assert manifest['cutoff'] == '2026-09-28T13:00:00Z'
     assert manifest['confirmed_distinct_attempts'] is None
     assert manifest['inputs']['roatan-issue8']['collections'] == {'observation_versions': 2, 'positions': 1}
     with sqlite3.connect(dest / 'snapshot.sqlite') as db:
         assert db.execute('select count(*) from records where source_name="roatan-issue8" and kind="candidate_position"').fetchone()[0] == 3
+        assert db.execute('select source_object_id from records where source_name="roatan-issue8" and collection="positions"').fetchone()[0] == 'sha256:' + 'a' * 64
     assert hashlib.sha256((base / 'snapshot.sqlite').read_bytes()).hexdigest() == old_db
     first = hashlib.sha256((dest / 'snapshot.sqlite').read_bytes()).hexdigest()
     subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(dest)], check=True)

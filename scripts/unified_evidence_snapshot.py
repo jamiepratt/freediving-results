@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = 'unified-evidence-snapshot/v1'
@@ -161,6 +162,12 @@ def extend(args):
     base = Path(args.base_dir)
     base_manifest_bytes = (base / 'manifest.json').read_bytes()
     base_manifest = json.loads(base_manifest_bytes)
+    if not args.cutoff.endswith('Z'):
+        raise ValueError('cutoff must be UTC Z time')
+    cutoff = datetime.fromisoformat(args.cutoff.replace('Z', '+00:00'))
+    base_cutoff = datetime.fromisoformat(base_manifest['cutoff'].replace('Z', '+00:00'))
+    if cutoff.tzinfo != timezone.utc or cutoff < base_cutoff:
+        raise ValueError('cutoff precedes base snapshot or is not UTC')
     base_db = base / 'snapshot.sqlite'
     if sha(base_db.read_bytes()) != base_manifest['snapshot_sha256']:
         raise ValueError('base snapshot hash mismatch')
@@ -208,6 +215,7 @@ def extend(args):
                                     'record_count': sum(counts.values()), 'metadata_table': 'source_metadata',
                                     'top_level_list_lengths': {k: len(v) for k, v in sorted(root.items()) if isinstance(v, list)}}
         manifest['base_snapshot_path'] = str(base.resolve())
+        manifest['cutoff'] = args.cutoff
         manifest['base_snapshot_sha256'] = base_manifest['snapshot_sha256']
         manifest['base_manifest_sha256'] = sha(base_manifest_bytes)
         manifest['extension_namespace'] = name
@@ -324,7 +332,7 @@ def replay(args):
             raise ValueError('base manifest hash mismatch')
         name = manifest['extension_namespace']
         item = manifest['inputs'][name]
-        extend(argparse.Namespace(base_dir=str(base), input=f"{name}={item['path']}",
+        extend(argparse.Namespace(base_dir=str(base), cutoff=manifest['cutoff'], input=f"{name}={item['path']}",
                                   required_input=f"{name}={item['sha256']}", output_dir=str(out)))
         new = json.loads((out / 'manifest.json').read_text())
         if new['snapshot_sha256'] != manifest['snapshot_sha256']:
@@ -361,6 +369,7 @@ def main():
     b.add_argument('--output-dir', required=True)
     e = sub.add_parser('extend')
     e.add_argument('--base-dir', required=True)
+    e.add_argument('--cutoff', required=True)
     e.add_argument('--input', required=True, metavar='NAME=PATH')
     e.add_argument('--required-input', required=True, metavar='NAME=SHA256')
     e.add_argument('--output-dir', required=True)

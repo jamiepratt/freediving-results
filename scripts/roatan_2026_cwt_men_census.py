@@ -70,7 +70,7 @@ def build(args):
     acquisitions = []
     artifacts = []
     for unit in units:
-        source_objects.append({'unit': unit['unit'], **verified_object(
+        source_objects.append({'unit': unit['unit'], 'source_id': f"sha256:{unit['source_sha256']}", **verified_object(
             stage / 'archive' / 'objects' / unit['source_sha256'], unit['source_sha256']),
             'view_url': unit['view_url'], 'api_url': unit['api_url']})
     acq_dir = stage / 'archive' / 'acquisitions'
@@ -110,17 +110,28 @@ def build(args):
             positions.append({'unit': unit['unit'], 'json_index_zero_based': index,
                               'event_date': unit['session_date'], 'discipline': 'CWT',
                               'category': row['parsed']['category'], 'name': raw['ParPrintName'],
-                              'source_sha256': unit['source_sha256'], 'view_url': unit['view_url'],
+                              'source_sha256': unit['source_sha256'],
+                              'source_id': f"sha256:{unit['source_sha256']}",
+                              'parser_version': unit['parser_version'], 'view_url': unit['view_url'],
                               'citation': row['citation'], 'raw_fields': raw,
                               'parsed_fields': row['parsed'], 'visible_display': row['visible_display'],
                               'depths': {'declared': raw.get('DECLLEN_STR'), 'raw': raw.get('ResResult'),
                                          'publisher_final': raw.get('ResResultFinal')},
                               'penalty': raw.get('ResPenality'), 'status': raw.get('ResReasonCode'),
-                              'notes': raw.get('ResNotePenality'), 'selection_status': 'blocked'})
+                              'notes': raw.get('ResNotePenality'),
+                              'source_notes': {'result_note': raw.get('ResNote'),
+                                               'penalty_note': raw.get('ResNotePenality'),
+                                               'start_note': raw.get('ResStartNote'),
+                                               'record_token': raw.get('ResRecord')},
+                              'visible_status': row['visible_display'].get('status'),
+                              'visible_notes': row['visible_display'].get('notes'),
+                              'selection_status': 'blocked'})
             versions.append({'unit': unit['unit'], 'json_index_zero_based': index,
                              'job_id': old['job_id'], 'candidate_id': old['candidate_id'],
                              'parser_version': old['parser_version'], 'artifact_sha256': old['artifact_sha256'],
-                             'source_sha256': old['source_sha256'], 'citation': old['payload'].get('citation'),
+                             'source_sha256': old['source_sha256'],
+                             'source_id': f"sha256:{old['source_sha256']}",
+                             'citation': old['payload'].get('citation'),
                              'raw_fields': old['payload'].get('raw'), 'parsed_fields': old['payload'].get('parsed'),
                              'review_status': 'unreviewed', 'historical': True})
             accepted = receipt_rows.get((index, unit['job_id'])) if unit['unit'] == 3551 else None
@@ -129,7 +140,9 @@ def build(args):
             versions.append({'unit': unit['unit'], 'json_index_zero_based': index,
                              'job_id': unit['job_id'], 'candidate_id': old['candidate_id'],
                              'parser_version': unit['parser_version'], 'artifact_sha256': unit['artifact_sha256'],
-                             'source_sha256': unit['source_sha256'], 'citation': row['citation'],
+                             'source_sha256': unit['source_sha256'],
+                             'source_id': f"sha256:{unit['source_sha256']}",
+                             'citation': row['citation'],
                              'raw_fields': raw, 'parsed_fields': row['parsed'],
                              'review_status': 'extraction_accepted' if accepted else 'unreviewed',
                              'historical_review_event_id': accepted['event_id'] if accepted else None})
