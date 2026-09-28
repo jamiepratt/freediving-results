@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from owner_evidence_origin import make_server
 from private_source_bundle import build
+from vestico_safe_derivative import canonical_bytes, derive
 
 HOST = 'owner-private.alphacompose.com'
 SECRET = 'a-private-gateway-secret-for-tests'
@@ -42,7 +43,7 @@ def pdf_bytes():
 
 
 def fixture(root, *, original_bytes=None, content_type='application/json', positions=None,
-            classification='eligible'):
+            classification='eligible', safe_derivative=False):
     original = root / ('original.pdf' if content_type == 'application/pdf' else 'original.json')
     original.write_bytes(original_bytes if original_bytes is not None else
                          json.dumps({'data': [{'Name': 'Ada'}, {'Name': 'Bea'}]}).encode())
@@ -64,14 +65,29 @@ def fixture(root, *, original_bytes=None, content_type='application/json', posit
     snapshot_digest = sha(snapshot_file.read_bytes())
     original_entry = {'id': 'sha256:' + digest, 'sha256': digest,
         'bytes': original.stat().st_size, 'content_type': content_type, 'source_path': str(original),
-        'receipt': {'discovery_url': 'https://example.test/results?token=private',
+        'receipt': {'acquisition_id': '1' * 64,
+                    'discovery_url': 'https://example.test/results?token=private',
                     'final_url': 'https://example.test/final?secret=private',
                     'retrieved_at': '2026-09-28T12:00:00Z', 'selected_view': 'results'},
         'classification': classification, 'metadata': {}}
     if classification != 'eligible':
         original_entry['reason'] = 'restricted test original'
+    derivative_entry = None
+    if safe_derivative:
+        source_id = original_entry['id']
+        derivative = root / 'safe-derivative.json'
+        derivative.write_bytes(canonical_bytes(derive(original.read_bytes(), source_id=source_id,
+                                                     acquisition_id='1' * 64)))
+        derivative_digest = sha(derivative.read_bytes())
+        original_entry['derivative'] = {'id': 'safe-derivative:' + digest,
+                                        'sha256': derivative_digest,
+                                        'schema': 'vestico-safe-result-tables/v1'}
+        derivative_entry = {'id': 'safe-derivative:' + digest, 'sha256': derivative_digest,
+            'bytes': derivative.stat().st_size, 'content_type': 'application/json',
+            'source_path': str(derivative), 'receipt': {}, 'classification': 'eligible',
+            'metadata': {}}
     inventory = root / 'inventory.json'
-    inventory.write_text(json.dumps({'sources': [original_entry,
+    inventory.write_text(json.dumps({'sources': [original_entry, *([derivative_entry] if derivative_entry else []),
         {'id': 'sha256:' + snapshot_digest, 'sha256': snapshot_digest,
          'bytes': snapshot_file.stat().st_size, 'content_type': 'application/vnd.sqlite3',
          'source_path': str(snapshot_file), 'receipt': {}, 'classification': 'eligible', 'metadata': {}}]}))
@@ -155,6 +171,43 @@ class SourceViewTest(unittest.TestCase):
                 record = server.query.browse(kind='candidate_position')['records'][0]['record_id']
                 self.assertEqual(self.request('/owner-evidence/api/source-view/' + record,
                                               server=server)[0], 403)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_restricted_html_is_served_only_as_cited_safe_text(self):
+        root = Path(self.tmp.name) / 'html-safe'
+        root.mkdir()
+        source = (ROOT / 'test/resources/fixtures/vestico-2025/results.html').read_bytes()
+        columns = ['Rank', 'OT', 'Lane', 'Competitor', 'M/F', 'Club', 'Result', 'Card', 'IRM']
+        row = derive(source, source_id='sha256:' + sha(source),
+                     acquisition_id='1' * 64)['tables'][0]['rows'][0]
+        fields = dict(zip(columns, row['cells']))
+        snapshot, bundle, env = fixture(root, original_bytes=source, content_type='text/html',
+            classification='restricted', safe_derivative=True,
+            positions=[{'fields': fields, 'locator': 'table 1 row 2'},
+                       {'fields': {'Competitor': 'Wrong'}, 'locator': 'table 1 row 2'}])
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                records = server.query.browse(kind='candidate_position')['records']
+                good = next(r for r in records if server.query.detail(r['record_id'])['raw_fields'] == fields)
+                bad = next(r for r in records if r['record_id'] != good['record_id'])
+                path = '/owner-evidence/api/source-view/' + good['record_id']
+                self.assertEqual(self.request(path, authorized=False, server=server)[0], 403)
+                status, headers, body = self.request(path, server=server)
+                self.assertEqual(status, 200)
+                view = json.loads(body)
+                self.assertEqual(view['format'], 'safe_html_derivative')
+                self.assertEqual(view['source_value'], fields)
+                self.assertEqual(view['citation'], 'table 1 row 2')
+                self.assertEqual(view['original_replay'], 'restricted_original_required')
+                self.assertNotIn(b'<tr', body)
+                self.assertEqual(self.request('/owner-evidence/api/source-view/' + bad['record_id'],
+                                              server=server)[0], 422)
+                self.assertEqual(self.request(path + '/page/1', server=server)[0], 404)
+                self.assertEqual(headers['Cache-Control'], 'no-store')
             finally:
                 server.shutdown()
                 thread.join(timeout=2)

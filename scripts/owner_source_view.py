@@ -9,9 +9,12 @@ import sys
 import tempfile
 
 from private_source_bundle import verify
+from vestico_safe_derivative import (HEADERS as VESTICO_HEADERS, PARSER_VERSION as VESTICO_PARSER,
+                                     SCHEMA as VESTICO_SCHEMA, VIEWS as VESTICO_VIEWS)
 
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 ROW = re.compile(r'row index zero based ([0-9]{1,6})\Z')
+HTML_ROW = re.compile(r'table ([12]) row ([1-9][0-9]{0,3})\Z')
 MAX_SOURCE = 100 * 1024 * 1024
 MAX_JSON_ROW = 128 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
@@ -79,6 +82,11 @@ class OriginalSourceView:
         return item, content_type, data
 
     def inspect(self, detail):
+        if detail is None:
+            raise SourceViewError(404)
+        item = self.items.get(detail.get('source_object_id'))
+        if item is not None and item.get('status') == 'restricted' and item.get('derivative'):
+            return self._safe_html_derivative(detail, item)
         item, content_type, data = self._source(detail)
         receipt = item.get('receipt') or {}
         safe_receipt = {key: receipt[key] for key in RECEIPT_FIELDS
@@ -110,6 +118,71 @@ class OriginalSourceView:
             raise SourceViewError(422)
         return {**base, 'format': 'pdf', 'page': page,
                 'region': citation.get('region')}
+
+    def _safe_html_derivative(self, detail, original):
+        if detail.get('kind') != 'candidate_position':
+            raise SourceViewError(422)
+        citation = detail.get('citation')
+        match = HTML_ROW.fullmatch(citation) if isinstance(citation, str) else None
+        if not match:
+            raise SourceViewError(422)
+        relation = original['derivative']
+        expected_id = 'safe-derivative:' + original['sha256']
+        if not isinstance(relation, dict) or relation.get('schema') != VESTICO_SCHEMA or relation.get('id') != expected_id:
+            raise SourceViewError(503)
+        derivative = self.items.get(expected_id)
+        if (derivative is None or derivative.get('status') != 'included'
+                or derivative.get('content_type') != 'application/json'
+                or derivative.get('sha256') != relation.get('sha256')
+                or not HEX.fullmatch(derivative.get('sha256', ''))
+                or type(derivative.get('bytes')) is not int or derivative['bytes'] > MAX_SOURCE):
+            raise SourceViewError(503)
+        path = self.bundle / 'objects' / derivative['sha256']
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != derivative['bytes']:
+                raise SourceViewError(503)
+            data = path.read_bytes()
+        except OSError as exc:
+            raise SourceViewError(503) from exc
+        if hashlib.sha256(data).hexdigest() != derivative['sha256']:
+            raise SourceViewError(503)
+        try:
+            safe = json.loads(data)
+            tables = safe['tables']
+            table = tables[int(match.group(1)) - 1]
+            row = next(x for x in table['rows'] if x.get('citation') ==
+                       {'table': int(match.group(1)), 'row': int(match.group(2))})
+            cells = row['cells']
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError, StopIteration) as exc:
+            raise SourceViewError(422) from exc
+        expected_view = VESTICO_VIEWS.get(original['sha256'])
+        if (not isinstance(safe, dict) or safe.get('schema') != VESTICO_SCHEMA
+                or safe.get('parser_version') != VESTICO_PARSER
+                or expected_view is None
+                or safe.get('selected_view') != {'discipline': expected_view[0], 'label': expected_view[2],
+                                                 'basis': 'source_hash_and_page_marker'}
+                or safe.get('source_sha256') != original['sha256']
+                or safe.get('source_object_id') != original['id']
+                or safe.get('acquisition_id') != (original.get('receipt') or {}).get('acquisition_id')
+                or not isinstance(tables, list) or len(tables) != 2
+                or table.get('table') != int(match.group(1))
+                or table.get('headers') != VESTICO_HEADERS
+                or not isinstance(cells, list) or len(cells) != len(VESTICO_HEADERS)
+                or not all(isinstance(cell, str) and len(cell) <= 4096 for cell in cells)
+                or not isinstance(detail.get('raw_fields'), dict)
+                or dict(zip(VESTICO_HEADERS, cells)) != {
+                    key: ' '.join(value.split()) if isinstance(value, str) else value
+                    for key, value in detail['raw_fields'].items()}
+                or (detail.get('source_sha256') and detail['source_sha256'] != original['sha256'])):
+            raise SourceViewError(422)
+        return {'format': 'safe_html_derivative', 'source_sha256': original['sha256'],
+                'derivative_sha256': derivative['sha256'], 'parser_version': safe.get('parser_version'),
+                'selected_view': safe.get('selected_view'), 'heading': table.get('heading'),
+                'category': table.get('category'), 'citation': citation,
+                'source_value': dict(zip(VESTICO_HEADERS, cells)),
+                'raw_fields': detail['raw_fields'], 'parsed_fields': detail['parsed_fields'],
+                'snapshot_sha256': detail['snapshot_sha256'],
+                'original_replay': 'restricted_original_required'}
 
     def page(self, detail, requested_page):
         info = self.inspect(detail)
