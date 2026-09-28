@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
 const script = readFileSync(new URL('../resources/evidence_workspace.js', import.meta.url), 'utf8');
+const html = readFileSync(new URL('../resources/evidence_workspace.html', import.meta.url), 'utf8');
 
 class Element {
   constructor(tag = 'div') {
@@ -64,4 +65,8 @@ test('route leads preserve exact and candidate source link separation', () => {
   assert.match(page.get('route-lead-results').allText, /Candidate source record/);
   assert.equal(page.get('route-previous').disabled, true);
   assert.equal(page.get('route-next').disabled, false);
+});
+
+test('route role filter offers the roster corroboration value', () => {
+  assert.match(html, /<select name="relationship">[\s\S]*?<option>primary<\/option><option>corroboration<\/option>/);
 });
