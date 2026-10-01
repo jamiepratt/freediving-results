@@ -153,8 +153,11 @@ Activation requires a Cloudflare Access self-hosted application for exactly
 `poc.alphacompose.com/owner-evidence*`, one Allow policy with only the exact owner
 email selector(s), its audience and issuer, and a token with `Access: Apps and
 Policies Read`. The current `alphacompose` Wrangler token returned HTTP 403 for
-Access application reads on 28 September 2026. An operator must grant a suitably
-scoped read token and configure the Access app/policy before activation. Access
+Access application reads on 28 September 2026. An operator must supply a separate
+account token with `Access: Apps and Policies Read` and configure the Access
+app/policy before activation. Pass that token only on stdin with
+`--access-token-stdin`; the helper continues to use the `alphacompose` Wrangler
+profile for tunnel and Worker changes. Access
 must protect both `/owner-evidence` and child paths. The Worker independently
 checks the signed assertion, audience, issuer and owner allowlist. No private
 binding is set by a normal public release.
@@ -202,8 +205,12 @@ private service has no public database credentials.
 From the same checkout, read-check Access policy, private origin positive and
 negative responses, tunnel drift, and DNS before any Cloudflare write:
 
+Feed the separate Access read token from a secure store into stdin. The example
+uses the `Shell Access` 1Password item after `op` authentication. Do not put the
+token in a command argument, shell history or a repository file.
+
 ```sh
-python3 deploy/owner_evidence_cloudflare.py --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER"
+op read 'op://Shell Access/freediving-owner-evidence-access-read/credential' | python3 deploy/owner_evidence_cloudflare.py --access-token-stdin --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER"
 ```
 
 A 403, wrong policy, owner mismatch, origin failure, tunnel drift or DNS conflict
@@ -212,7 +219,7 @@ activation command adds the private tunnel ingress and proxied CNAME, then sets
 all five private Worker bindings in one secret bulk deployment:
 
 ```sh
-python3 deploy/owner_evidence_cloudflare.py --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER" --activate
+op read 'op://Shell Access/freediving-owner-evidence-access-read/credential' | python3 deploy/owner_evidence_cloudflare.py --access-token-stdin --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER" --activate
 python3 deploy/verify.py
 ```
 

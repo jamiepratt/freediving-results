@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 
 from cloudflare import (ACCOUNT, ZONE, PRIVATE_HOST, PRIVATE_INGRESS, PUBLIC_INGRESS,
                         FALLBACK, api, token_from_profile)
@@ -101,15 +102,16 @@ def check_worker_bindings():
     return names
 
 
-def preflight(app_id, issuer):
+def preflight(app_id, issuer, access_read_token=None):
     if not re.fullmatch(r'[0-9a-f-]{36}', app_id):
         raise ValueError('Access application ID must be a UUID')
     if not re.fullmatch(r'https://[a-z0-9-]+\.cloudflareaccess\.com', issuer):
         raise ValueError('Access issuer must be the verified Cloudflare team domain')
     auth = token_from_profile()
     # This read is intentionally first. A 403 must stop all Cloudflare mutation.
-    app = api(f'accounts/{ACCOUNT}/access/apps/{app_id}', auth)
-    policies = api(f'accounts/{ACCOUNT}/access/apps/{app_id}/policies', auth)
+    read_auth = access_read_token or auth
+    app = api(f'accounts/{ACCOUNT}/access/apps/{app_id}', read_auth)
+    policies = api(f'accounts/{ACCOUNT}/access/apps/{app_id}/policies', read_auth)
     content = subprocess.check_output(['ssh', 'bridge-vps', 'sudo -n cat /etc/freediving/owner-evidence.env'], text=True)
     values, emails = parse_origin_env(content)
     audience = check_access(app, policies, emails)
@@ -146,9 +148,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--access-app-id', required=True)
     parser.add_argument('--issuer', required=True)
+    parser.add_argument('--access-token-stdin', action='store_true',
+                        help='Read a separate Access Apps and Policies Read token from stdin')
     parser.add_argument('--activate', action='store_true', help='Apply after all read-only checks')
     args = parser.parse_args()
-    auth, dns_token, path, ingress, desired, dns_path, records, tunnel, bindings = preflight(args.access_app_id, args.issuer)
+    access_read_token = None
+    if args.access_token_stdin:
+        access_read_token = sys.stdin.readline().strip()
+        if not access_read_token or any(c.isspace() for c in access_read_token):
+            parser.error('Access read token must be one nonempty line')
+    auth, dns_token, path, ingress, desired, dns_path, records, tunnel, bindings = preflight(
+        args.access_app_id, args.issuer, access_read_token)
     if not args.activate:
         print('Preflight passed. No changes made. Re-run with --activate after review.')
         return
