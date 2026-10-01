@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -186,9 +187,18 @@ def _health(values, expected, roster_digest=None):
     }
     url = 'http://127.0.0.1:8081/owner-evidence/api/overview'
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
-            raise RuntimeError('private origin health check failed')
+    for attempt in range(20):
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
+                    raise RuntimeError('private origin health check failed')
+            break
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
     if roster_digest:
         route_request = urllib.request.Request(
             'http://127.0.0.1:8081/owner-evidence/api/routes', headers=headers)
