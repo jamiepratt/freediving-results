@@ -293,11 +293,40 @@ def validate_extension_packet(name, root):
         positions = root.get('positions') or []
         if (len(root.get('source_objects') or []) != counts.get('source_objects')
                 or len(positions) != counts.get('source_positions')
+                or sum(1 + len(row.get('alternate_citations') or []) for row in positions)
+                   != counts.get('transport_rows')
+                or counts.get('transport_rows') - len(positions) != counts.get('repeated_transport_rows')
                 or len(root.get('observation_versions') or []) != counts.get('observation_versions')
                 or len(root.get('relationships') or []) != counts.get('relationship_candidates')
                 or sum(row.get('kind') == 'aggregate' for row in positions) != counts.get('aggregate_positions')
                 or sum(row.get('kind') == 'individual' for row in positions) != counts.get('individual_positions')):
             raise ValueError(f'San Mauro JPG count mismatch: {name}')
+    elif schema == 'cmas-microplus-private-census/v1':
+        counts = root.get('counts') or {}
+        sources = root.get('sources') or []
+        positions = root.get('positions') or []
+        aggregates = root.get('aggregate_rows') or []
+        gaps = root.get('gaps') or []
+        source_ids = {item.get('id') for item in sources}
+        citations = [((row.get('citation') or {}).get('url'),
+                      (row.get('citation') or {}).get('json_pointer')) for row in positions]
+        if (root.get('issue_namespace') != '#55'
+                or (root.get('competition_scope') or {}).get('ids') != [28, 33, 34, 35]
+                or counts.get('competitions') != 4
+                or counts.get('units') != 92
+                or len(sources) != counts.get('source_objects')
+                or len(positions) != counts.get('source_positions')
+                or len(aggregates) != counts.get('aggregate_rows')
+                or len(gaps) != counts.get('gaps')
+                or sum(gap.get('id', '').endswith('-empty') for gap in gaps) != counts.get('empty_units')
+                or len(citations) != len(set(citations))
+                or any(row.get('source_object_id') not in source_ids
+                       or row.get('disposition') != 'api_transport_result_row'
+                       or row.get('review_status') != 'unreviewed' for row in positions)
+                or any(row.get('source_object_id') not in source_ids
+                       or row.get('disposition') != 'cumulative_ranking_not_attempt'
+                       for row in aggregates)):
+            raise ValueError(f'CMAS Microplus census mismatch: {name}')
     elif schema not in ('roatan-2026-cwt-men-private-census/v1',
                         'cmas-worldcup-2026-visual-evidence/v1',
                         'italian-open-2025-visual-evidence/v3'):
