@@ -176,28 +176,28 @@ Do not reuse the public gateway secret. The origin reads only the pinned private
 SQLite snapshot, not PostgreSQL or review credentials. Retain the verified source
 snapshot and its manifest in a separate private backup before activation. Check
 that `manifest.json` declares the same SHA-256 and that the code bundle and
-snapshot were not copied into the public release tar. Stage the six code files
-listed below, the snapshot, and the dated route roster on the VPS under root-only
+snapshot were not copied into the public release tar. Stage the code files,
+snapshot, and matching private source bundle on the VPS under root-only
 temporary directories outside `/opt/freediving/releases`:
 
 ```sh
-# Run from the matching repository checkout. Replace SNAPSHOT_DIR with the
-# private snapshot and roster directories with their independently checked digests.
+# Run from the matching repository checkout with independently checked digests.
 SNAPSHOT_DIR=/absolute/path/to/private/snapshot
-ROSTER_DIR=/absolute/path/to/private/route-roster
+SOURCE_BUNDLE_DIR=/absolute/path/to/private/source-bundle
 SHA256=$(shasum -a 256 "$SNAPSHOT_DIR/snapshot.sqlite" | awk '{print $1}')
-ROSTER_SHA256=$(shasum -a 256 "$ROSTER_DIR/roster.json" | awk '{print $1}')
-ssh bridge-vps 'sudo -n install -d -m 0700 /var/lib/freediving-owner-evidence/import/code /var/lib/freediving-owner-evidence/import/snapshot /var/lib/freediving-owner-evidence/import/roster'
-tar -cf - scripts/owner_evidence_origin.py scripts/unified_evidence_query.py scripts/route_roster_query.py resources/evidence_workspace.html resources/evidence_workspace.js resources/evidence_workspace.css | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
+SOURCE_MANIFEST_SHA256=$(shasum -a 256 "$SOURCE_BUNDLE_DIR/manifest.json" | awk '{print $1}')
+ssh bridge-vps 'sudo -n install -d -m 0700 /var/lib/freediving-owner-evidence/import/code /var/lib/freediving-owner-evidence/import/snapshot /var/lib/freediving-owner-evidence/import/source-bundle /var/lib/freediving-owner-evidence/import/source-bundle/objects'
+tar -cf - scripts/owner_evidence_origin.py scripts/unified_evidence_query.py scripts/route_roster_query.py scripts/owner_source_view.py scripts/private_source_bundle.py scripts/vestico_safe_derivative.py resources/evidence_workspace.html resources/evidence_workspace.js resources/evidence_workspace.css | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
 tar -C "$SNAPSHOT_DIR" -cf - manifest.json snapshot.sqlite | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/snapshot'
-tar -C "$ROSTER_DIR" -cf - manifest.json roster.json | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/roster'
+tar -C "$SOURCE_BUNDLE_DIR" -cf - manifest.json objects | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/source-bundle'
 tar -cf - deploy/owner_evidence_activate.py deploy/freediving-owner-evidence.service | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
-ssh bridge-vps "sudo -n python3 /var/lib/freediving-owner-evidence/import/code/deploy/owner_evidence_activate.py --bundle-dir /var/lib/freediving-owner-evidence/import/code --snapshot-source /var/lib/freediving-owner-evidence/import/snapshot --expected-sha256 '$SHA256' --roster-source /var/lib/freediving-owner-evidence/import/roster --expected-roster-sha256 '$ROSTER_SHA256'"
+ssh bridge-vps "sudo -n python3 /var/lib/freediving-owner-evidence/import/code/deploy/owner_evidence_activate.py --bundle-dir /var/lib/freediving-owner-evidence/import/code --snapshot-source /var/lib/freediving-owner-evidence/import/snapshot --expected-sha256 '$SHA256' --source-bundle /var/lib/freediving-owner-evidence/import/source-bundle --expected-source-manifest-sha256 '$SOURCE_MANIFEST_SHA256'"
 ```
 
 The host helper verifies the manifest, database hash, file type and root-only
-configuration before staging. It binds the roster to the selected snapshot and
-stages both with owner-only permissions. It starts a dedicated `freediving-evidence` service
+configuration before staging. It binds the source bundle to the selected snapshot,
+stages both with owner-only permissions, and reads the embedded route roster.
+It starts a dedicated `freediving-evidence` service
 on loopback port 8081, checks both pinned responses, and restores previous
 links/unit if restart fails. Re-running unchanged inputs is idempotent. The
 private service has no public database credentials.
