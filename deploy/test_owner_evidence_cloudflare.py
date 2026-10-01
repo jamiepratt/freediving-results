@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
-from owner_evidence_cloudflare import (check_access, check_worker_bindings,
+from owner_evidence_cloudflare import (check_access, check_worker_bindings, main,
                                        parse_origin_env, preflight, DOMAIN,
                                        WORKER_SECRETS)
 from cloudflare import ACCOUNT
@@ -61,6 +61,21 @@ class PrivateActivationChecks(unittest.TestCase):
         for names in ({'GATEWAY_SECRET', 'ACCESS_ISSUER'}, {'ACCESS_ISSUER'}):
             with self.subTest(names=names), self.assertRaises(ValueError):
                 check(names)
+
+    def test_activation_deploys_private_route_before_enabling_bindings(self):
+        app_id = 'a'*8 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*12
+        ingress = [{'service': 'http_status:404'}]
+        result = ('oauth', 'dns', 'tunnel/path', ingress, ingress,
+                  'dns/path', [{'id': 'existing'}], 'tunnel-id', {'ACCESS_ISSUER': 'issuer'})
+        with patch('owner_evidence_cloudflare.sys.argv', ['activate', '--access-app-id', app_id,
+             '--issuer', 'https://team.cloudflareaccess.com', '--activate']), \
+             patch('owner_evidence_cloudflare.preflight', return_value=result), \
+             patch('owner_evidence_cloudflare.api') as api, \
+             patch('owner_evidence_cloudflare.subprocess.run') as run:
+            main()
+        api.assert_not_called()
+        self.assertEqual([call.args[0][-2:] for call in run.call_args_list],
+                         [['deploy/wrangler.jsonc', 'deploy'], ['secret', 'bulk']])
 
 
 if __name__ == '__main__':

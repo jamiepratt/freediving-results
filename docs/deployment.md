@@ -215,8 +215,10 @@ op read 'op://Shell Access/freediving-owner-evidence-access-read/credential' | p
 
 A 403, wrong policy, owner mismatch, origin failure, tunnel drift or DNS conflict
 stops here. Once those checks pass and the public site is healthy, the explicit
-activation command adds the private tunnel ingress and proxied CNAME, then sets
-all five private Worker bindings in one secret bulk deployment:
+activation command adds the private tunnel ingress and proxied CNAME, deploys
+the prepared private-route Worker code with `wrangler --profile alphacompose`,
+then sets all five private Worker bindings in one secret bulk deployment. The
+new route fails closed until those bindings are present:
 
 ```sh
 op read 'op://Shell Access/freediving-owner-evidence-access-read/credential' | python3 deploy/owner_evidence_cloudflare.py --access-token-stdin --access-app-id "$ACCESS_APP_ID" --issuer "$ACCESS_ISSUER" --activate

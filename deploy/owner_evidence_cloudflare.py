@@ -167,11 +167,15 @@ def main():
     if not records:
         api(dns_path, dns_token, 'POST', {'type': 'CNAME', 'name': PRIVATE_HOST,
                                          'content': tunnel + '.cfargotunnel.com', 'proxied': True, 'ttl': 1})
-    # One Worker version, no secret file or shell expansion. Public binding stays present.
+    # Deploy the private-route code before its bindings. The route fails closed
+    # until the complete private binding set is submitted in one Worker version.
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(['wrangler', '--profile', 'alphacompose', '--config', 'deploy/wrangler.jsonc',
+                    'deploy'], check=True, cwd=root)
     subprocess.run(['wrangler', '--profile', 'alphacompose', '--config', 'deploy/wrangler.jsonc',
                     'secret', 'bulk'], input=json.dumps(bindings), text=True, check=True,
-                   cwd=Path(__file__).resolve().parents[1])
-    print('Private bindings submitted. Verify owner login and public route before declaring activation complete.')
+                   cwd=root)
+    print('Private Worker deployed with bindings. Verify owner login and public route before declaring activation complete.')
 
 
 if __name__ == '__main__':
