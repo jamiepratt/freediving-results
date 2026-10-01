@@ -16,13 +16,15 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
 
 SERVICE = 'freediving-owner-evidence.service'
 FILES = ('scripts/owner_evidence_origin.py', 'scripts/unified_evidence_query.py',
-         'scripts/route_roster_query.py',
+         'scripts/route_roster_query.py', 'scripts/owner_source_view.py',
+         'scripts/private_source_bundle.py', 'scripts/vestico_safe_derivative.py',
          'resources/evidence_workspace.html', 'resources/evidence_workspace.js',
          'resources/evidence_workspace.css')
 REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGIN_HOST',
@@ -105,6 +107,24 @@ def _roster_inputs(source, expected, snapshot_digest):
         raise ValueError('roster manifest or content differs from pinned snapshot')
 
 
+def _source_bundle_inputs(code, source, expected, snapshot_digest):
+    if not re.fullmatch(r'[a-f0-9]{64}', expected) or source.is_symlink():
+        raise ValueError('invalid source bundle input')
+    _regular(source / 'manifest.json')
+    if _sha(source / 'manifest.json') != expected:
+        raise ValueError('source bundle manifest differs from pinned hash')
+    subprocess.run(['python3', str(code / 'scripts/private_source_bundle.py'), 'verify',
+                    '--bundle-dir', str(source)], check=True, capture_output=True)
+    manifest = json.loads((source / 'manifest.json').read_text(encoding='utf-8'))
+    included = [item for item in manifest['sources'] if item.get('status') == 'included']
+    if not any(item.get('sha256') == snapshot_digest and
+               item.get('content_type') == 'application/vnd.sqlite3' for item in included):
+        raise ValueError('source bundle lacks selected snapshot')
+    return [('manifest.json', source / 'manifest.json')] + [
+        ('objects/' + item['sha256'], source / 'objects' / item['sha256'])
+        for item in included]
+
+
 def _atomic_link(link, target):
     link.parent.mkdir(parents=True, exist_ok=True)
     temporary = link.with_name(link.name + '.new')
@@ -167,9 +187,18 @@ def _health(values, expected, roster_digest=None):
     }
     url = 'http://127.0.0.1:8081/owner-evidence/api/overview'
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
-            raise RuntimeError('private origin health check failed')
+    for attempt in range(20):
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
+                    raise RuntimeError('private origin health check failed')
+            break
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
     if roster_digest:
         route_request = urllib.request.Request(
             'http://127.0.0.1:8081/owner-evidence/api/routes', headers=headers)
@@ -189,6 +218,7 @@ def _health(values, expected, roster_digest=None):
 
 
 def activate(bundle, source, expected, layout, *, roster_source=None, expected_roster_sha256=None,
+             source_bundle=None, expected_source_manifest_sha256=None,
              command=None, health=None,
              owner_uid=0, owner_gid=0):
     """Activate local inputs; raises with old links/unit restored on service failure."""
@@ -200,6 +230,13 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     if roster_source:
         roster_source = Path(roster_source)
         _roster_inputs(roster_source, expected_roster_sha256, expected)
+    if bool(source_bundle) != bool(expected_source_manifest_sha256):
+        raise ValueError('source bundle staging inputs incomplete')
+    source_files = None
+    if source_bundle:
+        source_bundle = Path(source_bundle)
+        source_files = _source_bundle_inputs(bundle, source_bundle,
+                                             expected_source_manifest_sha256, expected)
     unit_source = Path(__file__).with_name(SERVICE)
     _regular(unit_source)
     unit = unit_source.read_bytes()
@@ -213,6 +250,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     app_parent = layout.app / 'versions'
     snapshot_parent = layout.state / 'snapshots'
     roster_parent = layout.state / 'rosters'
+    source_parent = layout.state / 'sources'
     layout.app.parent.mkdir(parents=True, exist_ok=True)
     layout.app.parent.chmod(0o755)
     layout.app.mkdir(exist_ok=True)
@@ -236,6 +274,12 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
                                   owner_uid, owner_gid, 0o600)
         roster_parent.chmod(0o711)
         _roster_inputs(roster, expected_roster_sha256, expected)
+    staged_source = None
+    if source_files:
+        staged_source = _stage_directory(source_parent, expected_source_manifest_sha256,
+                                         source_files, owner_uid, owner_gid, 0o600)
+        source_parent.chmod(0o711)
+        _source_bundle_inputs(bundle, staged_source, expected_source_manifest_sha256, expected)
     _inputs(app, snapshot, expected)
     staged_code_hash = hashlib.sha256()
     for name in FILES:
@@ -246,6 +290,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     old_app = (layout.app / 'current').resolve() if (layout.app / 'current').exists() else None
     old_snapshot = (layout.state / 'current').resolve() if (layout.state / 'current').exists() else None
     old_roster = (layout.state / 'current-roster').resolve() if (layout.state / 'current-roster').exists() else None
+    old_source = (layout.state / 'current-source').resolve() if (layout.state / 'current-source').exists() else None
     unit_path = layout.units / SERVICE
     old_unit = unit_path.read_bytes() if unit_path.exists() else None
     active_env = layout.state / 'active.env'
@@ -254,8 +299,13 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     if roster:
         new_env += (f'OWNER_EVIDENCE_ROSTER_DIR={roster}\n'
                     f'OWNER_EVIDENCE_ROSTER_SHA256={expected_roster_sha256}\n').encode()
+    if staged_source:
+        new_env += (f'OWNER_EVIDENCE_SOURCE_BUNDLE_DIR={staged_source}\n'
+                    f'OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256={expected_source_manifest_sha256}\n').encode()
     if (old_app == app.resolve() and old_snapshot == snapshot.resolve() and
-            old_roster == (roster.resolve() if roster else None) and old_unit == unit and old_env == new_env):
+            old_roster == (roster.resolve() if roster else None) and
+            old_source == (staged_source.resolve() if staged_source else None) and
+            old_unit == unit and old_env == new_env):
         if not command('systemctl', 'is-active', '--quiet', SERVICE):
             raise RuntimeError('private origin service inactive')
         return 'unchanged'
@@ -267,6 +317,10 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
             _atomic_link(layout.state / 'current-roster', roster)
         else:
             (layout.state / 'current-roster').unlink(missing_ok=True)
+        if staged_source:
+            _atomic_link(layout.state / 'current-source', staged_source)
+        else:
+            (layout.state / 'current-source').unlink(missing_ok=True)
         _atomic_write(active_env, new_env, 0o600)
         _atomic_write(unit_path, unit, 0o644)
         command('systemctl', 'daemon-reload')
@@ -276,7 +330,8 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     except Exception:
         for link, previous in ((layout.app / 'current', old_app),
                                (layout.state / 'current', old_snapshot),
-                               (layout.state / 'current-roster', old_roster)):
+                               (layout.state / 'current-roster', old_roster),
+                               (layout.state / 'current-source', old_source)):
             if previous is None:
                 link.unlink(missing_ok=True)
             else:
@@ -303,8 +358,10 @@ def main():
     parser.add_argument('--bundle-dir', type=Path, required=True)
     parser.add_argument('--snapshot-source', type=Path, required=True)
     parser.add_argument('--expected-sha256', required=True)
-    parser.add_argument('--roster-source', type=Path, required=True)
-    parser.add_argument('--expected-roster-sha256', required=True)
+    parser.add_argument('--roster-source', type=Path)
+    parser.add_argument('--expected-roster-sha256')
+    parser.add_argument('--source-bundle', type=Path, required=True)
+    parser.add_argument('--expected-source-manifest-sha256', required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('root required')
@@ -314,8 +371,13 @@ def main():
     try:
         _config(layout.config, 0, args.expected_sha256)
         _inputs(args.bundle_dir, args.snapshot_source, args.expected_sha256)
-        _roster_inputs(args.roster_source, args.expected_roster_sha256, args.expected_sha256)
-    except (ValueError, OSError, KeyError, json.JSONDecodeError):
+        if bool(args.roster_source) != bool(args.expected_roster_sha256):
+            raise ValueError('roster staging inputs incomplete')
+        if args.roster_source:
+            _roster_inputs(args.roster_source, args.expected_roster_sha256, args.expected_sha256)
+        _source_bundle_inputs(args.bundle_dir, args.source_bundle,
+                              args.expected_source_manifest_sha256, args.expected_sha256)
+    except (ValueError, OSError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError):
         parser.exit(1, 'Private origin activation prerequisites missing or invalid\n')
     try:
         identity = pwd.getpwnam('freediving-evidence')
@@ -330,6 +392,8 @@ def main():
         result = activate(args.bundle_dir, args.snapshot_source, args.expected_sha256,
                           layout, roster_source=args.roster_source,
                           expected_roster_sha256=args.expected_roster_sha256,
+                          source_bundle=args.source_bundle,
+                          expected_source_manifest_sha256=args.expected_source_manifest_sha256,
                           owner_uid=identity.pw_uid, owner_gid=identity.pw_gid)
     except Exception as exc:
         parser.exit(1, f'Private origin activation refused or rolled back: {type(exc).__name__}\n')

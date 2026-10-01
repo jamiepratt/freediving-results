@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,8 +23,11 @@ class ActivationTests(unittest.TestCase):
         self.bundle = root / 'bundle'
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
-        for name in ('owner_evidence_origin.py', 'unified_evidence_query.py', 'route_roster_query.py'):
+        for name in ('owner_evidence_origin.py', 'unified_evidence_query.py', 'route_roster_query.py',
+                     'owner_source_view.py', 'vestico_safe_derivative.py'):
             (self.bundle / 'scripts' / name).write_text('print("test")\n')
+        (self.bundle / 'scripts/private_source_bundle.py').write_bytes(
+            (Path(__file__).resolve().parents[1] / 'scripts/private_source_bundle.py').read_bytes())
         for name in ('evidence_workspace.html', 'evidence_workspace.js', 'evidence_workspace.css'):
             (self.bundle / 'resources' / name).write_text('test')
         self.source = root / 'source'
@@ -94,6 +98,36 @@ class ActivationTests(unittest.TestCase):
                      command=self.command, health=lambda: None,
                      owner_uid=os.getuid(), owner_gid=os.getgid())
         self.assertEqual(self.calls, [])
+
+    def test_stages_verified_source_bundle_for_original_inspection(self):
+        private = Path(self.temp.name) / 'source-bundle'
+        private.mkdir(mode=0o700)
+        objects = private / 'objects'
+        objects.mkdir(mode=0o700)
+        (objects / self.digest).write_bytes(b'private snapshot bytes')
+        (objects / self.digest).chmod(0o600)
+        manifest = private / 'manifest.json'
+        manifest.write_text(json.dumps({'schema': 'private-source-bundle/v1', 'sources': [{
+            'id': 'sha256:' + self.digest, 'status': 'included', 'sha256': self.digest,
+            'bytes': len(b'private snapshot bytes'), 'content_type': 'application/vnd.sqlite3',
+            'object': 'objects/' + self.digest}]}))
+        manifest.chmod(0o600)
+        manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        activate(self.bundle, self.source, self.digest, self.layout,
+                 source_bundle=private, expected_source_manifest_sha256=manifest_digest,
+                 command=self.command, health=lambda: None,
+                 owner_uid=os.getuid(), owner_gid=os.getgid())
+        staged = self.layout.state / 'sources' / manifest_digest
+        self.assertEqual((staged / 'objects' / self.digest).read_bytes(), b'private snapshot bytes')
+        self.assertEqual((staged / 'objects' / self.digest).stat().st_mode & 0o777, 0o600)
+        self.assertIn(f'OWNER_EVIDENCE_SOURCE_BUNDLE_DIR={staged}',
+                      (self.layout.state / 'active.env').read_text())
+        (private / 'objects' / self.digest).write_bytes(b'tampered')
+        with self.assertRaises(subprocess.CalledProcessError):
+            activate(self.bundle, self.source, self.digest, self.layout,
+                     source_bundle=private, expected_source_manifest_sha256=manifest_digest,
+                     command=self.command, health=lambda: None,
+                     owner_uid=os.getuid(), owner_gid=os.getgid())
 
     def test_missing_or_tampered_prerequisite_refuses_without_service_change(self):
         self.config.unlink()
