@@ -4,6 +4,7 @@ from urllib.error import HTTPError
 from owner_evidence_cloudflare import (check_access, check_worker_bindings,
                                        parse_origin_env, preflight, DOMAIN,
                                        WORKER_SECRETS)
+from cloudflare import ACCOUNT
 
 
 class PrivateActivationChecks(unittest.TestCase):
@@ -32,6 +33,20 @@ class PrivateActivationChecks(unittest.TestCase):
                 preflight('a'*8 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*12,
                           'https://team.cloudflareaccess.com')
             self.assertEqual(api.call_count, 1)
+            process.check_output.assert_not_called()
+            process.run.assert_not_called()
+
+    def test_separate_access_read_token_does_not_replace_wrangler_auth(self):
+        app_id = 'a'*8 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*4 + '-' + 'a'*12
+        with patch('owner_evidence_cloudflare.token_from_profile', return_value='wrangler-oauth') as profile, \
+             patch('owner_evidence_cloudflare.api', side_effect=[{}, HTTPError('url', 403, 'Forbidden', {}, None)]) as api, \
+             patch('owner_evidence_cloudflare.subprocess') as process:
+            with self.assertRaises(HTTPError):
+                preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
+            profile.assert_called_once_with()
+            self.assertEqual([call.args for call in api.call_args_list], [
+                (f'accounts/{ACCOUNT}/access/apps/{app_id}', 'access-read-only'),
+                (f'accounts/{ACCOUNT}/access/apps/{app_id}/policies', 'access-read-only')])
             process.check_output.assert_not_called()
             process.run.assert_not_called()
 
