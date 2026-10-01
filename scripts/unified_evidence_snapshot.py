@@ -91,7 +91,7 @@ def classify(collection, obj, parent=None, schema=None):
         return 'gap'
     if 'relationship' in c:
         return 'relationship'
-    if c == 'candidate_versions' or 'candidate' in c or c in ('positions', 'observation_versions', 'pages.rows', 'pages.athlete_rows', 'athlete_appearances', 'sheets.rows'):
+    if c == 'candidate_versions' or 'candidate' in c or c in ('positions', 'pdf_positions', 'observation_versions', 'pages.rows', 'pages.athlete_rows', 'athlete_appearances', 'sheets.rows'):
         return 'candidate_position'
     if c == 'events':
         return 'event'
@@ -327,6 +327,39 @@ def validate_extension_packet(name, root):
                        or row.get('disposition') != 'cumulative_ranking_not_attempt'
                        for row in aggregates)):
             raise ValueError(f'CMAS Microplus census mismatch: {name}')
+    elif schema == 'cmas-microplus-private-census/v2':
+        counts = root.get('counts') or {}
+        api_rows = root.get('positions') or []
+        pdf_rows = root.get('pdf_positions') or []
+        relationships = root.get('relationships') or []
+        api_ids = {row.get('id') for row in api_rows}
+        nordic_api_ids = {row.get('id') for row in api_rows
+                          if (row.get('raw_fields') or {}).get('DCCmpID') == 33}
+        pdf_ids = {row.get('id') for row in pdf_rows}
+        linked_api = {rel.get('api_position_id') for rel in relationships}
+        linked_pdf = {rel.get('pdf_position_id') for rel in relationships}
+        gaps = root.get('gaps') or []
+        if (root.get('issue_namespace') != '#55'
+                or (root.get('competition_scope') or {}).get('ids') != [28, 33, 34, 35]
+                or len(root.get('sources') or []) != counts.get('source_objects')
+                or counts.get('source_objects') != 105
+                or len(root.get('aggregate_rows') or []) != counts.get('aggregate_rows')
+                or counts.get('aggregate_rows') != 88
+                or len(api_rows) != 279 or counts.get('api_positions') != 279
+                or len(pdf_rows) != 76 or counts.get('pdf_positions') != 76
+                or len(api_rows) + len(pdf_rows) != counts.get('source_positions')
+                or len(relationships) != 76 or counts.get('pdf_api_relationships') != 76
+                or linked_pdf != pdf_ids or len(linked_api) != 76
+                or not linked_api.issubset(nordic_api_ids)
+                or len(nordic_api_ids - linked_api) != 16
+                or counts.get('nordic_api_only_positions') != 16
+                or len(gaps) != 7 or counts.get('gaps') != 7
+                or counts.get('empty_units') != 7
+                or counts.get('transport_rows') != 490
+                or counts.get('repeated_transport_rows') != 211
+                or any(gap.get('id') == 'nordic-pdf-positions-unreconciled' for gap in gaps)
+                or root.get('confirmed_distinct_attempts') is not None):
+            raise ValueError(f'CMAS Microplus final census mismatch: {name}')
     elif schema not in ('roatan-2026-cwt-men-private-census/v1',
                         'cmas-worldcup-2026-visual-evidence/v1',
                         'italian-open-2025-visual-evidence/v3'):
