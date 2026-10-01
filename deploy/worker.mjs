@@ -39,7 +39,7 @@ async function verifiedOwner(token, config) {
         claims.type !== 'app' || typeof claims.email !== 'string' || !config.emails.has(claims.email) ||
         !Number.isInteger(claims.exp) || claims.exp <= now || !Number.isInteger(claims.nbf) || claims.nbf > now ||
         !Number.isInteger(claims.iat) || claims.iat > now) return null;
-    const keysResponse = await fetch(`${config.issuer}/cdn-cgi/access/certs`, {redirect:'error',signal:AbortSignal.timeout(5000),cf:{cacheTtl:0,cacheEverything:false}});
+    const keysResponse = await fetch(`${config.issuer}/cdn-cgi/access/certs`, {redirect:'manual',signal:AbortSignal.timeout(5000),cf:{cacheTtl:0,cacheEverything:false}});
     if (!keysResponse.ok) return null;
     const keys = (await keysResponse.json()).keys;
     if (!Array.isArray(keys)) return null;

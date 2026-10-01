@@ -57,7 +57,10 @@ async function withPrivateFetch(run, upstreamResponse=() => new Response('privat
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push([url,options]);
-    if (url === `${privateEnv.ACCESS_ISSUER}/cdn-cgi/access/certs`) return Response.json({keys:[jwk]});
+    if (url === `${privateEnv.ACCESS_ISSUER}/cdn-cgi/access/certs`) {
+      assert.equal(options.redirect,'manual');
+      return Response.json({keys:[jwk]});
+    }
     assert.equal(url,'https://owner-origin.alphacompose.com/owner-evidence/rows?q=one');
     assert.equal(options.headers.get('X-Freediving-Owner-Gateway'),'private-test-secret');
     assert.equal(options.headers.get('X-Freediving-Owner-Email'),'owner@example.com');
