@@ -84,7 +84,7 @@
                                                         :pages neckar-fixture/pages}))))))
 
 (deftest unsupported-format-families-remain-explicit-gaps
-  (doseq [format [:image :workbook]]
+  (doseq [format [:image]]
     (let [hash (apply str (repeat 64 "a"))
           document {:source-sha256 hash :format format
                     :positions [{:id "source:1" :citation (str "sha256:" hash "#source:1")}]}
@@ -93,6 +93,31 @@
       (is (= [format] (:unsupported-formats result)))
       (is (= [:unsupported]
              (mapv :status (:gaps (routing/route-document document (:claims result)))))))))
+
+(deftest image-packet-without-independent-verification-remains-unrouted
+  (let [hash (apply str (repeat 64 "a"))
+        document {:source-sha256 hash :format :image
+                  :positions [{:id "region=all&row=1"
+                               :citation (str "sha256:" hash "#region=all&row=1")}]}
+        result (adapters/claims-for-document
+                document {:packet {:schema "san-mauro-jpg-supplement/v1"
+                                   :observation_versions [{:parser_version "manual-jpg-census/1"}]}})]
+    (is (empty? (:claims result)))
+    (is (= [:missing-independent-scan-verification]
+           (:unsupported-reasons result)))
+    (is (= [:unsupported]
+           (mapv :status (:gaps (routing/route-document document (:claims result))))))))
+
+(deftest unverified-workbook-is-rejected-by-the-source-bound-adapter
+  (let [hash (apply str (repeat 64 "a"))
+        document {:source-sha256 hash :format :workbook
+                  :positions [{:id "sheet=Example&row=2&kind=standings"
+                               :citation (str "sha256:" hash
+                                              "#sheet=Example&row=2&kind=standings")}]}
+        result (adapters/claims-for-document document {:bytes (.getBytes "not an XLSX" "UTF-8")})]
+    (is (empty? (:claims result)))
+    (is (= [:source-or-receipt-mismatch] (:unsupported-reasons result)))
+    (is (= :failed (:source-verification result)))))
 
 (deftest retained-json-registers-through-the-shared-router
   (let [{:keys [document retained-input]} (json-fixture/fixture

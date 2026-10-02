@@ -110,12 +110,15 @@ snapshot is not the production observation database.
 PDF dispatch in `src/freediving/extraction.clj` uses `supported?` checks,
 ordered branches and source-specific hash guards. HTML, JSON, image and workbook
 routes also exist, often as separate modules/scripts. `parser-routing.clj`
-accounts for competing source-position claims; `parser-adapters.clj` registers a
-bounded PDF and HTML replay path. The PDF bridge requires upstream verification
-of source bytes and extracted pages; JSON, image and workbook bridges remain
-explicit gaps. `parser-batch.clj` routes retained inputs without acquisition or
-imports. Broad discovery of native-script name mappings and annual rankings is
-scope, not verified coverage.
+accounts for competing source-position claims; `parser-adapters.clj` registers
+bounded retained PDF, HTML, Microplus JSON and GIA individual workbook replay.
+The PDF bridge verifies archived bytes and derives local extracted pages. The
+workbook bridge checks the original XLSX, acquisition receipt and cited cells;
+its standings, combined scores and secondary scores remain aggregate evidence.
+The retained San Mauro JPG packet has no independent blind second pass or cited
+comparison, so image claims remain unsupported. `parser-batch.clj` routes
+retained inputs without acquisition or imports. Broad discovery of native-script
+name mappings and annual rankings is scope, not verified coverage.
 
 ## Working entry points
 

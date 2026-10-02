@@ -1,10 +1,11 @@
 (ns freediving.parser-adapters
   "Source-bound bridges from retained extractor inputs to parser-routing claims.
    The JSON bridge is limited to one receipt-bound Microplus result route.
-   Scan packets and workbooks remain explicit gaps."
+   Scan packets without independent verification remain explicit gaps."
   (:require [clojure.string :as str]
             [freediving.aida-html :as aida-html]
             [freediving.retained-json :as retained-json]
+            [freediving.retained-workbook :as retained-workbook]
             [freediving.vdst-neckar-2025 :as neckar]))
 
 (defn- sha256 [^String source]
@@ -61,12 +62,15 @@
    HTML input is {:html retained-UTF-8-source}; its bytes are SHA-256 checked.
    Inventory entries must have exact :id, :citation and :coordinates from the
    extractor. JSON requires original response bytes and its acquisition receipt.
-   Image scan packets and workbooks have no checked bridge to this router yet."
+   Image scan packets without independent verification have no checked bridge."
   [document retained-input]
   (let [{:keys [source-sha256 format]} document]
     (case format
       :json
       (retained-json/claims-for-document document retained-input)
+
+      :workbook
+      (retained-workbook/claims-for-document document retained-input)
 
       :html
       (if (and (string? (:html retained-input))
@@ -105,6 +109,10 @@
            :extraction extraction})
         {:claims [] :unsupported-reasons [:unsupported-or-unverified-pdf-source]
          :unsupported-formats [] :source-verification :unverified :extraction nil})
+
+      :image
+      {:claims [] :unsupported-reasons [:missing-independent-scan-verification]
+       :unsupported-formats [:image] :source-verification :unverified :extraction nil}
 
       {:claims [] :unsupported-reasons [(keyword (str "no-checked-" (name format) "-replay-bridge"))]
        :unsupported-formats [format] :source-verification :unverified :extraction nil})))
