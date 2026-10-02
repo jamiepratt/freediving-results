@@ -94,6 +94,117 @@
     (is (empty? (:candidates result)))
     (is (= 0 (get-in result [:counts-by-scope :observation :unknown])))))
 
+(def attempt-scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
+                    :discipline "FIM" :participant "publisher:42" :attempt "2"})
+
+(defn attempt-fixture []
+  (let [positions [{:id "p1" :source-id "official" :locator {:page 1 :line 2}}
+                   {:id "p2" :source-id "mirror" :locator {:row 3}}]
+        binding (fn [position-id]
+                  (let [position (first (filter #(= position-id (:id %)) positions))]
+                    {:source-id (:source-id position) :position-id position-id
+                     :citation (:locator position) :fields attempt-scope}))]
+    (relationships/empty-attempt-ledger
+     {:sources [{:id "official" :sha256 "aa"} {:id "mirror" :sha256 "bb"}]
+      :positions positions
+      :observation-versions [{:id "v1" :position-id "p1" :parser-version "1"
+                              :scope attempt-scope :scope-evidence (binding "p1")
+                              :values {:raw-performance "70m" :final-performance "69m"
+                                       :penalty "1m" :card "yellow" :notes "turn"}}
+                             {:id "v2" :position-id "p1" :parser-version "2"
+                              :scope attempt-scope :scope-evidence (binding "p1")
+                              :values {:raw-performance "70m" :final-performance "69m"}}
+                             {:id "v3" :position-id "p2" :parser-version "1"
+                              :scope attempt-scope :scope-evidence (binding "p2")
+                              :values {:raw-performance "70m" :final-performance "69m"}}]})))
+
+(deftest source-versions-and-mirror-positions-count-one-cited-attempt
+  (let [ledger (-> (attempt-fixture)
+                   (relationships/append-attempt-event
+                    {:id "mirror-link" :action :accept :type :source-dependent
+                     :pair ["official" "mirror"] :evidence {:kind :publisher-mirror}})
+                   (relationships/append-attempt-event
+                    {:id "attempt-link" :action :accept :type :same-attempt
+                     :pair ["v1" "v3"] :evidence {:kind :verified-scope}}))
+        result (relationships/project-attempts ledger)]
+    (is (= {:sources 2 :source-objects 2 :positions 2 :observation-versions 3
+            :accepted-attempts 1 :unresolved-observations 0} (:counts result)))
+    (is (= #{"v1" "v2" "v3"} (set (-> result :attempts first :observation-ids))))
+    (is (= #{"p1" "p2"} (set (-> result :attempts first :position-ids))))
+    (is (= "turn" (get-in ledger [:observation-versions "v1" :values :notes])))
+    (is (= result (relationships/project-attempts ledger)))))
+
+(deftest scope-contradictions-and-missing-scope-do-not-collapse-attempts
+  (let [base (attempt-fixture)
+        different-day (-> base
+                          (assoc-in [:observation-versions "v3" :scope :day] "2026-06-02")
+                          (assoc-in [:observation-versions "v3" :scope-evidence :fields :day] "2026-06-02"))
+        missing-session (update-in base [:observation-versions "v3" :scope] dissoc :session)]
+    (is (= 2 (get-in (relationships/project-attempts different-day) [:counts :accepted-attempts])))
+    (is (= 1 (get-in (relationships/project-attempts missing-session) [:counts :unresolved-observations])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event different-day
+                                                     {:id "bad" :action :accept :type :same-attempt
+                                                      :pair ["v1" "v3"] :evidence {:kind :verified-scope}})))))
+
+(deftest complete-but-uncited-scope-is-unresolved
+  (let [base (attempt-fixture)
+        unverified (update-in base [:observation-versions "v3"] dissoc :scope-evidence)]
+    (is (= 1 (get-in (relationships/project-attempts unverified)
+                     [:counts :unresolved-observations])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event unverified
+                                                     {:id "uncited" :action :accept :type :same-attempt
+                                                      :pair ["v1" "v3"] :evidence {:kind :verified-scope}})))))
+
+(deftest publisher-direction-and-reversal-recompute-without-deleting-evidence
+  (let [base (attempt-fixture)
+        revision {:id "rev" :action :accept :type :source-revision
+                  :pair ["official" "mirror"]
+                  :evidence {:kind :publisher-version :predecessor "official"
+                             :successor "mirror" :citation "publisher correction notice"}}
+        linked (-> base
+                   (relationships/append-attempt-event revision)
+                   (relationships/append-attempt-event
+                    {:id "attempt-link" :action :accept :type :same-attempt
+                     :pair ["v1" "v3"] :evidence {:kind :verified-scope}}))
+        reversed (relationships/append-attempt-event
+                  linked {:id "undo" :action :reverse :event-id "attempt-link"})]
+    (is (= 1 (get-in (relationships/project-attempts linked) [:counts :accepted-attempts])))
+    (is (= 2 (get-in (relationships/project-attempts reversed) [:counts :accepted-attempts])))
+    (is (= 3 (count (:events reversed))))
+    (is (= 3 (count (:observation-versions reversed))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event
+                  linked (assoc revision :id "reverse-rev"
+                                :evidence {:kind :publisher-version :predecessor "mirror"
+                                           :successor "official" :citation "conflict"}))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event
+                  base (dissoc revision :evidence))))))
+
+(deftest replacement-evidence-invalidates-only-dependent-links
+  (let [base (attempt-fixture)
+        linked (-> base
+                   (relationships/append-attempt-event
+                    {:id "dependent" :action :accept :type :source-dependent
+                     :pair ["official" "mirror"] :evidence {:kind :publisher-mirror}})
+                   (relationships/append-attempt-event
+                    {:id "dive" :action :accept :type :same-attempt
+                     :pair ["v1" "v3"] :evidence {:kind :verified-scope}}))
+        replacement {:sources (vals (:sources base))
+                     :positions (vals (:positions base))
+                     :observation-versions (mapv #(if (= "v3" (:id %))
+                                                    (-> %
+                                                        (assoc-in [:scope :day] "2026-06-02")
+                                                        (assoc-in [:scope-evidence :fields :day] "2026-06-02")) %)
+                                                 (vals (:observation-versions base)))}
+        rebased (relationships/rebase-attempt-ledger linked replacement)]
+    (is (= #{"dive"} (:invalidated-events rebased)))
+    (is (= 2 (get-in (relationships/project-attempts rebased) [:counts :accepted-attempts])))
+    (is (= 2 (count (:events rebased))))
+    (is (= 1 (count (:source-relationships (relationships/project-attempts rebased)))))))
+
 (defn -main []
   (let [result (run-tests 'freediving.source-relationships-test)]
     (System/exit (if (zero? (+ (:fail result) (:error result))) 0 1))))
