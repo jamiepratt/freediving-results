@@ -38,16 +38,24 @@ retain the competing claims and investigate, using LLM assistance where needed.
 Continue processing other documents. Resolve the ambiguity with a tested
 deterministic routing rule before retrying those rows. Automatically choosing
 by parser priority is rejected as the default: recognition mistakes could
-otherwise go unnoticed. Parsers covering disjoint sections are a separate
-composition decision.
+otherwise go unnoticed.
+
+Process supported sections without waiting for complete document support.
+Multiple parsers may cover disjoint source positions, retaining each parser's
+scope and citations. Unsupported or ambiguous rows remain explicit gaps; an
+unexamined section remains a coverage gap even when its row count is unknown.
+Overlapping claims still follow the ambiguity rule above. Holding the entire
+document until every section is supported is rejected as the default because it
+delays usable evidence. Partial extraction must not be reported as complete
+document coverage.
 
 For unusual scanned documents, permit direct LLM transcription as an exception
 to reusable parser development. Retain the transcription, exact source
 page/region citations and verification evidence as a replayable artifact; replay
 must not require another model call. A unique scan need not receive a bespoke
 parser. This exception does not make the transcription authoritative or approve
-identities or publication. Requiring a reusable parser for every scan is rejected because it can
-add work without producing a reusable extraction method.
+identities or publication. Requiring a reusable parser for every scan is rejected
+because it can add work without producing a reusable extraction method.
 
 Verify exceptional scan transcriptions with an independent second pass that
 does not see the first transcription. Compare the retained outputs
@@ -82,9 +90,9 @@ deferred. Record evidence needed for those decisions without making them.
   Requiring deterministic code to discover every unfamiliar source is also too
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
-  evidence, not yet a uniform cross-format registry. The recognizer API,
-  section composition, partial matches, refresh policy and
-  stopping rules remain unresolved in #62; this decision does not select their design.
+  evidence, not yet a uniform cross-format registry. The recognizer API, refresh
+  policy and stopping rules remain unresolved in #62; this decision does not
+  select their design.
 
 ## Evidence
 

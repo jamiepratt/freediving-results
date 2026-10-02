@@ -34,6 +34,9 @@ format families before the next sweep.
 If multiple parsers claim overlapping source rows, pause those rows and retain
 the competing claims for investigation. Continue other documents. Use LLM
 assistance where necessary, then encode a tested deterministic routing rule.
+Process supported sections of a partial document with parsers covering separate
+source positions. Retain explicit gaps for unsupported or ambiguous rows;
+partial extraction does not establish complete document coverage.
 
 For unusual scans, direct LLM transcription is an allowed exception. Retain the
 transcription, exact source page/region citations and verification evidence;
