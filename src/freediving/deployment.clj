@@ -7,7 +7,8 @@
             [freediving.publication :as publication]
             [freediving.public-results :as public]
             [freediving.corrections :as corrections]
-            [freediving.evaluation-labels :as labels]))
+            [freediving.evaluation-labels :as labels]
+            [freediving.batch-evidence-db :as batch-evidence]))
 (defn -main [& _]
   (let [url (System/getenv "FREEDIVING_MIGRATION_URL")]
     (when-not url (throw (ex-info "Migration URL required" {})))
@@ -20,4 +21,5 @@
     (revisions/migrate! url "observations_app" "reviews_owner")
     (public/migrate! url "reviews_owner" "reviews_public")
     (selections/migrate! url "reviews_owner")
-    (println "Applied migrations 1-16; no records published.")))
+    (batch-evidence/migrate! url "observations_app")
+    (println "Applied migrations 1-19; no records published.")))
