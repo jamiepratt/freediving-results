@@ -135,10 +135,13 @@ class PrivateOrigin(HTTPServer):
             decision_db = env.get('OWNER_EVIDENCE_DECISION_DB')
             self.decisions = None
             self.import_token = env.get('OWNER_EVIDENCE_IMPORT_TOKEN')
+            self.import_client_id = env.get('OWNER_EVIDENCE_IMPORT_CLIENT_ID')
             if self.import_token is not None and (len(self.import_token) < 24 or
                     len(self.import_token) > 256 or not self.import_token.isascii() or
                     any(char.isspace() for char in self.import_token)):
                 raise ValueError('invalid owner import token')
+            if self.import_client_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', self.import_client_id):
+                raise ValueError('invalid owner import client ID')
             if decision_db:
                 from owner_decision_store import DecisionStore
                 decision_path = Path(decision_db).resolve()
@@ -201,9 +204,17 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         if self.headers.get_all('Cookie', []) or self.headers.get_all('Authorization', []) or self.headers.get_all('Cf-Access-Jwt-Assertion', []):
             return False
         gateway = self._one('X-Freediving-Owner-Gateway')
-        email = self._one('X-Freediving-Owner-Email')
         if gateway is None or len(gateway) > 256 or not compare_digest(gateway, self.server.secret):
             return False
+        if urlsplit(self.path).path == '/owner-evidence/api/decision-events':
+            machine = self._one('X-Freediving-Owner-Machine')
+            token = self._one('X-Freediving-Import-Token')
+            return (not self.headers.get_all('X-Freediving-Owner-Email', []) and
+                    self.server.import_client_id is not None and machine is not None and
+                    compare_digest(machine, self.server.import_client_id) and
+                    self.server.import_token is not None and token is not None and
+                    compare_digest(token, self.server.import_token))
+        email = self._one('X-Freediving-Owner-Email')
         return email is not None and len(email) <= 254 and email in self.server.owners
 
     def _csrf(self):

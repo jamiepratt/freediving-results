@@ -92,7 +92,7 @@
               :proposal {:canonical_binding binding}}
         events [(assoc base :id "owner-store:3" :store_revision 3 :action "approve")
                 (assoc base :id "owner-store:4" :store_revision 4 :action "correct"
-                       :correction {:action "different-person"})]
+                       :correction {:action "different_person"})]
         opts {:import-token "private-import-token-for-test"
               :current-bindings {"identity" binding} :active-snapshot-sha256 sha}
         envelope (signed-feed (:import-token opts)
@@ -103,6 +103,40 @@
     (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
     (is (= :approved (get-in (flow/inspect imported [d]) ["identity" :status])))
     (is (= :different-person (get-in (flow/inspect imported [d]) ["identity" :action])))))
+
+(deftest machine-fetch-uses-service-credentials-on-exact-event-route
+  (let [server (com.sun.net.httpserver.HttpServer/create
+                (java.net.InetSocketAddress. "127.0.0.1" 0) 0)
+        seen (atom nil)
+        signed (signed-feed "private-import-token-for-test"
+                            {:events [] :store_revision 0 :next_revision 0})]
+    (.createContext server "/owner-evidence/api/decision-events"
+                    (reify com.sun.net.httpserver.HttpHandler
+                      (handle [_ exchange]
+                        (reset! seen {:path (str (.getRequestURI exchange))
+                                      :client-id (.getFirst (.getRequestHeaders exchange) "CF-Access-Client-Id")
+                                      :import-token (.getFirst (.getRequestHeaders exchange) "X-Freediving-Import-Token")})
+                        (let [bytes (.getBytes (json/write-str signed) "UTF-8")]
+                          (.sendResponseHeaders exchange 200 (alength bytes))
+                          (with-open [out (.getResponseBody exchange)] (.write out bytes))))))
+    (.start server)
+    (try
+      (let [url (str "http://127.0.0.1:" (.getPort (.getAddress server)))
+            result (application/fetch-owner-review-events
+                    url 0 {:access-client-id "machine.access"
+                           :access-client-secret "service-test-secret"
+                           :import-token "private-import-token-for-test"
+                           :allow-loopback-http? true})]
+        (is (= signed result))
+        (is (= {:path "/owner-evidence/api/decision-events?after_revision=0"
+                :client-id "machine.access" :import-token "private-import-token-for-test"}
+               @seen))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (application/fetch-owner-review-events
+                      url 0 {:access-client-id "machine.access"
+                             :access-client-secret "service-test-secret"
+                             :import-token "private-import-token-for-test"}))))
+      (finally (.stop server 0)))))
 
 (deftest approved-identity-routes-and-row-semantics-remains-unresolved
   (let [identity-decision (decision "identity" :identity

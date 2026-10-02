@@ -223,7 +223,9 @@ class PrivateOriginTest(unittest.TestCase):
         import hashlib
         import hmac
         token = 'separate-owner-import-token-for-tests'
+        client_id = 'abc12345.access'
         self.server.import_token = token
+        self.server.import_client_id = client_id
         class Decisions:
             def human_events(self, **kwargs):
                 self.args = kwargs
@@ -235,7 +237,10 @@ class PrivateOriginTest(unittest.TestCase):
         base = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
                 ('X-Freediving-Owner-Email', EMAIL)]
         self.assertEqual(self.request(path, headers=base + [('X-Freediving-Import-Token', 'wrong')])[0], 403)
-        status, _, body = self.request(path, headers=base + [('X-Freediving-Import-Token', token)])
+        self.assertEqual(self.request(path, headers=base + [('X-Freediving-Import-Token', token)])[0], 403)
+        machine = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                   ('X-Freediving-Owner-Machine', client_id), ('X-Freediving-Import-Token', token)]
+        status, _, body = self.request(path, headers=machine)
         self.assertEqual(status, 200)
         envelope = json.loads(body)
         self.assertEqual(self.server.decisions.args, {'after_revision': 1})
@@ -274,8 +279,10 @@ class PrivateOriginTest(unittest.TestCase):
         from test_owner_decision_store import proposal
         decision_path = Path(self.tmp.name) / 'durable-decisions' / 'ledger.sqlite'
         import_token = 'separate-owner-import-token-for-tests'
+        import_client_id = 'abc12345.access'
         server = make_server(self.snapshot_dir, {**self.env, 'OWNER_EVIDENCE_DECISION_DB': str(decision_path),
-                                                      'OWNER_EVIDENCE_IMPORT_TOKEN': import_token})
+                                                      'OWNER_EVIDENCE_IMPORT_TOKEN': import_token,
+                                                      'OWNER_EVIDENCE_IMPORT_CLIENT_ID': import_client_id})
         self.addCleanup(server.server_close)
         self.assertEqual(server.decisions.projection()['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
         self.assertTrue(decision_path.exists())
@@ -292,6 +299,8 @@ class PrivateOriginTest(unittest.TestCase):
             headers = {'Host': HOST, 'X-Freediving-Owner-Gateway': SECRET,
                        'X-Freediving-Owner-Email': EMAIL}
             if machine:
+                del headers['X-Freediving-Owner-Email']
+                headers['X-Freediving-Owner-Machine'] = import_client_id
                 headers['X-Freediving-Import-Token'] = import_token
             if method == 'POST':
                 headers.update({'Origin': 'https://poc.alphacompose.com',

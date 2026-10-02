@@ -190,6 +190,8 @@ test('decision event feed requires signed Access service identity and isolates m
     assert.equal(url,'https://owner-origin.alphacompose.com'+path);
     assert.equal(options.headers.get('X-Freediving-Import-Token'),importToken);
     assert.equal(options.headers.get('X-Freediving-Owner-Gateway'),'private-test-secret');
+    assert.equal(options.headers.get('X-Freediving-Owner-Machine'),machineId);
+    assert.equal(options.headers.get('X-Freediving-Owner-Email'),null);
     assert.equal(options.headers.get('Cf-Access-Jwt-Assertion'),null);
     return Response.json({payload_json:'{}',signature:'a'.repeat(64)});
   };

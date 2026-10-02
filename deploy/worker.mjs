@@ -53,7 +53,7 @@ async function verifiedOwner(token, config, machine=false) {
     if (!key) return null;
     const publicKey = await crypto.subtle.importKey('jwk',key,{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['verify']);
     const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5',publicKey,decodeSegment(parts[2]),new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
-    return valid ? (machine ? config.emails.values().next().value : claims.email) : null;
+    return valid ? (machine ? claims.common_name : claims.email) : null;
   } catch { return null; }
 }
 async function privateRequest(request, url, env) {
@@ -73,10 +73,13 @@ async function privateRequest(request, url, env) {
   if (machine && !config.importClientId) return failure(503);
   const importToken = request.headers.get('X-Freediving-Import-Token');
   if (machine && (typeof importToken !== 'string' || importToken.length < 24 || importToken.length > 256 || /\s/.test(importToken))) return failure(403);
-  const email = await verifiedOwner(request.headers.get('Cf-Access-Jwt-Assertion'),config,machine);
-  if (!email) return failure(403);
-  const headers = new Headers({'X-Freediving-Owner-Gateway':config.secret,'X-Freediving-Owner-Email':email});
-  if (machine) headers.set('X-Freediving-Import-Token',importToken);
+  const identity = await verifiedOwner(request.headers.get('Cf-Access-Jwt-Assertion'),config,machine);
+  if (!identity) return failure(403);
+  const headers = new Headers({'X-Freediving-Owner-Gateway':config.secret});
+  if (machine) {
+    headers.set('X-Freediving-Owner-Machine',identity);
+    headers.set('X-Freediving-Import-Token',importToken);
+  } else headers.set('X-Freediving-Owner-Email',identity);
   let body;
   if (action) {
     headers.set('Origin', ORIGIN);

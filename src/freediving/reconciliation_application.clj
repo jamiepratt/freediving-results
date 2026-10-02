@@ -2,11 +2,15 @@
   "Run private reconciliation and materialize supported decisions in canonical ledgers."
   (:refer-clojure :exclude [run!])
   (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [freediving.athlete-identity :as identity]
             [freediving.reconciliation-flow :as flow]
             [freediving.reviews :as reviews]
             [freediving.source-relationships :as relationships])
   (:import [java.security MessageDigest]
+           [java.net URI]
+           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
+           [java.time Duration]
            [java.util HexFormat]
            [javax.crypto Mac]
            [javax.crypto.spec SecretKeySpec]))
@@ -14,6 +18,41 @@
 (def ^:private model-origins #{:jev :cached-jev :retained})
 (def ^:private correction-statuses #{:rejected :reversed})
 (def ^:private satisfied-statuses #{:materialized :no-link})
+
+(defn fetch-owner-review-events
+  "Fetch the private signed feed through Access service identity. The caller
+   passes the returned envelope to import-remote-review-events for HMAC and
+   immutable-binding verification. HTTP is permitted only for local synthetic tests."
+  [base-url after-revision {:keys [access-client-id access-client-secret import-token
+                                   allow-loopback-http?]}]
+  (let [base (try (URI. base-url) (catch Exception _ nil))
+        scheme (some-> base .getScheme)
+        host (some-> base .getHost)
+        safe? (or (and (= scheme "https") (= host "poc.alphacompose.com"))
+                  (and allow-loopback-http? (= scheme "http") (= host "127.0.0.1")))]
+    (when-not (and safe? (nat-int? after-revision) (seq access-client-id)
+                   (seq access-client-secret) (seq import-token)
+                   (nil? (.getUserInfo base)) (nil? (.getQuery base))
+                   (nil? (.getFragment base)) (#{"" "/"} (.getPath base))
+                   (or (= host "127.0.0.1") (= -1 (.getPort base))))
+      (throw (ex-info "Invalid owner event transport configuration" {})))
+    (let [url (URI. (str (if (= "/" (.getPath base))
+                           (subs base-url 0 (dec (count base-url))) base-url)
+                         "/owner-evidence/api/decision-events?after_revision=" after-revision))
+          client (.build (.followRedirects (HttpClient/newBuilder) HttpClient$Redirect/NEVER))
+          request (.build (-> (HttpRequest/newBuilder url)
+                              (.timeout (Duration/ofSeconds 20))
+                              (.header "CF-Access-Client-Id" access-client-id)
+                              (.header "CF-Access-Client-Secret" access-client-secret)
+                              (.header "X-Freediving-Import-Token" import-token)
+                              (.header "Accept" "application/json")
+                              (.GET)))
+          response (.send client request (HttpResponse$BodyHandlers/ofByteArray))
+          bytes (.body response)]
+      (when-not (and (= 200 (.statusCode response)) (<= (alength bytes) 2097152))
+        (throw (ex-info "Owner event transport failed" {:status (.statusCode response)})))
+      (try (json/read-str (String. bytes "UTF-8") :key-fn keyword)
+           (catch Exception _ (throw (ex-info "Invalid owner event transport response" {})))))))
 
 (defn- authenticated-feed [envelope secret]
   (let [{:keys [payload_json signature]} envelope]
@@ -54,7 +93,7 @@
              status ({"approve" :approved "correct" :approved
                       "reject" :rejected "reverse" :reversed} action)
              selected-action (if (= action "correct")
-                               (some-> (:action correction) keyword)
+                               (some-> (:action correction) (str/replace "_" "-") keyword)
                                (:action decision))]
          (when-not (and (= id event-id) (string? decision_id) decision
                         (pos-int? store_revision) (pos-int? binding_revision)
