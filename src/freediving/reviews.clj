@@ -667,6 +667,7 @@
     (when-not (= "result-row" (:kind o)) (fail! "Dive field target must be a result-row"))
     {:job-id (:job-id t) :ordinal (:ordinal t)
      :source-position-id (:source-position-id t)
+     :candidate-id (:candidate_id o)
      :source-sha256 (:source_sha256 o) :artifact-sha256 (:artifact_sha256 o)
      :parser-version (:parser_version o) :payload payload}))
 
@@ -1152,6 +1153,91 @@
 
 (defn reverse-dive-decision! [url request] (human-decision! url request :reverse))
 (defn assert-dive-field! [url request] (human-decision! url request :assert))
+
+(defn import-owner-dive-field!
+  "Append an already authenticated owner event against the exact retained observation.
+   Human assertions and reversals share the field ledger's transactional projection."
+  [url {:keys [id owner-event binding target decision-type base-revision proposed event-id]
+        :as request}]
+  (let [remote-action (:action owner-event)
+        action (case remote-action
+                 ("approve" "correct") :assert
+                 ("reject" "reverse") :reverse
+                 nil)
+        expected-value (case remote-action
+                         "approve" (get-in owner-event [:proposal :proposed])
+                         "correct" (get-in owner-event [:correction :value])
+                         nil)]
+    (when-not (and (map? owner-event) (map? binding) (map? target)
+                   (#{:category :representation} decision-type)
+                   (nat-int? base-revision) (nonblank? id)
+                   (= id (:id owner-event))
+                   (= id (str "owner-store:" (:store_revision owner-event)))
+                   (= (:decision_id owner-event) (:decision_id binding))
+                   (= (:decision_id owner-event) (get-in owner-event [:proposal :id]))
+                   (= binding (get-in owner-event [:proposal :canonical_binding]))
+                   (nonblank? (:actor owner-event))
+                   (nonblank? (:reason owner-event))
+                   action
+                   (if (= action :assert)
+                     (= proposed expected-value)
+                     (and (nil? proposed) (nonblank? event-id))))
+      (fail! "Invalid imported owner field event"))
+    (transaction
+     url
+     (fn [c]
+       (let [subject (:source-position-id target)]
+         (when-not (nonblank? subject) (fail! "Source position ID required"))
+         (query c "SELECT pg_advisory_xact_lock(hashtext(?))" subject)
+         (let [row (field-row c target)
+               entries (:evidence_bindings binding)
+               ref (:observation_revision (first entries))
+               current {:job_id (:job-id row) :ordinal (:ordinal row)
+                        :candidate_id (:candidate-id row)
+                        :source_sha256 (:source-sha256 row)
+                        :artifact_sha256 (:artifact-sha256 row)
+                        :parser_version (:parser-version row)}
+               events (field-events c subject)
+               existing (first (filter #(= id (:id %)) events))
+               revision (or (:revision (last events)) 0)
+               current-field (field-state row events decision-type)]
+           (when-not (and (= 1 (count entries))
+                          (= (:snapshot-record-id target)
+                             (:snapshot_record_id (first entries)))
+                          (nonblank? (:snapshot-record-id target))
+                          (= current (select-keys ref (keys current))))
+             (fail! "Owner field observation binding changed"))
+           (if existing
+             (if (= request (:request existing)) existing
+                 (fail! "Conflicting imported owner field event"))
+             (do
+               (when-not (= base-revision revision)
+                 (fail! "Stale owner field revision"))
+               (when (and (= action :reverse)
+                          (not= event-id (:decision-id current-field)))
+                 (fail! "Owner reversal requires the active field assertion"))
+               (when (and (= action :assert)
+                          (not (if (= decision-type :category)
+                                 (and (vector? proposed) (seq proposed)
+                                      (every? nonblank? proposed))
+                                 (and (map? proposed)
+                                      (#{:country :federation :neutral :organization}
+                                       (:kind proposed))
+                                      (nonblank? (:code proposed))))))
+                 (fail! "Invalid owner field value"))
+               (append-field! c row
+                              {:id id :source-position-id subject
+                               :job-id (:job-id row) :ordinal (:ordinal row)
+                               :decision-type decision-type :revision (inc revision)
+                               :action action :actor-kind :human
+                               :actor (:actor owner-event) :reason (:reason owner-event)
+                               :event-id event-id
+                               :status (if (= action :assert) :accepted :reversed)
+                               :original (raw-field (:payload row) decision-type)
+                               :proposed proposed :source-position (citation row)
+                               :observation-version current
+                               :supporting-evidence [(citation row)]
+                               :remote-action remote-action :request request})))))))))
 
 (defn sync-human-jev-dive-field!
   "Materialize an explicit private owner rejection or reversal as a reviewer reversal."

@@ -37,6 +37,60 @@
                  :before {:outcome :unknown} :after {:outcome :matched :identity-id "synthetic-person-1"}
                  :evidence [{:page 1 :line 1}] :reason "Synthetic evidence" :actor "test-proposer"}))
 
+(deftest authenticated-owner-field-import-binds-current-observation
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "owner-field/1")
+        artifact (assoc-in artifact [:candidates 0 :raw :fields :category] "Women")
+        receipt (fixture/publish! (assoc source :artifact artifact))
+        job (:job-id artifact)
+        _ (observations/import! fixture/app root job)
+        candidate-id (get-in (observations/inspect fixture/app job) [:observations 0 :candidate_id])
+        target {:job-id job :ordinal 0 :source-position-id "synthetic:owner-field"
+                :snapshot-record-id "snapshot:owner-field"}
+        observation {:job_id job :ordinal 0 :candidate_id candidate-id
+                     :source_sha256 (:source-sha256 artifact)
+                     :artifact_sha256 (:artifact-sha256 receipt)
+                     :parser_version "owner-field/1"}
+        binding {:decision_id "field-1"
+                 :evidence_bindings [{:snapshot_record_id "snapshot:owner-field"
+                                      :observation_revision observation}]}
+        owner {:id "owner-store:10" :store_revision 10 :decision_id "field-1"
+               :action "approve" :actor "owner" :reason "reviewed label"
+               :proposal {:id "field-1" :canonical_binding binding :proposed ["women"]}}
+        request {:id "owner-store:10" :owner-event owner :binding binding
+                 :target target :decision-type :category :base-revision 0
+                 :proposed ["women"]}]
+    (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer request))))
+    (is (= ["women"] (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
+    (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer request))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (reviews/import-owner-dive-field!
+                  reviewer (assoc-in request [:binding :evidence_bindings 0
+                                              :observation_revision :parser_version] "changed"))))
+    (is (= 1 (:revision (reviews/dive-fields fixture/app target))))
+    (let [corrected (-> request
+                        (assoc :id "owner-store:11" :base-revision 1
+                               :proposed ["masters"])
+                        (assoc :owner-event
+                               (assoc owner :id "owner-store:11" :store_revision 11
+                                      :action "correct" :correction {:value ["masters"]})))
+          rejected (-> request
+                       (assoc :id "owner-store:12" :base-revision 2
+                              :proposed nil :event-id "owner-store:11")
+                       (assoc :owner-event
+                              (assoc owner :id "owner-store:12" :store_revision 12
+                                     :action "reject")))]
+      (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer corrected))))
+      (is (= ["masters"] (get-in (reviews/dive-fields fixture/app target)
+                                 [:category :accepted])))
+      (is (= :reversed (:status (reviews/import-owner-dive-field! reviewer rejected))))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (reviews/import-owner-dive-field!
+                    reviewer (assoc rejected :id "owner-store:13"
+                                    :owner-event (assoc (:owner-event rejected)
+                                                        :id "owner-store:13"
+                                                        :store_revision 13))))))))
+
 (deftest approved-jev-label-enters-canonical-dive-field-projection
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "jev-field/1")
         artifact (assoc-in artifact [:candidates 0 :raw :fields :category] "Women")
