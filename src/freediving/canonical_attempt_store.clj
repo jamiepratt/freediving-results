@@ -76,6 +76,72 @@
       (let [result (f connection)] (.commit connection) result)
       (catch Exception error (.rollback connection) (throw error)))))
 
+(defn- current-owner-binding? [ledger {:keys [event binding subject-snapshot]}]
+  (let [{:keys [type pair]} event
+        entries (:evidence_bindings binding)
+        versions (:observation-versions ledger)
+        source-of (fn [version]
+                    (get-in ledger [:positions (:position-id version) :source-id]))]
+    (and (= subject-snapshot (relationships/attempt-subjects ledger type pair))
+         (vector? entries) (= 2 (count entries))
+         (= (set pair) (set (map :evidence_id entries)))
+         (every?
+          (fn [{:keys [evidence_id observation_revision]}]
+            (and (map? observation_revision)
+                 (some (fn [version]
+                         (and (if (= type :same-attempt)
+                                (= evidence_id (:id version))
+                                (= evidence_id (source-of version)))
+                              (= observation_revision (:observation-revision version))
+                              (= (:source_sha256 observation_revision)
+                                 (get-in ledger [:sources (source-of version) :sha256]))))
+                       (vals versions))))
+          entries))))
+
+(defn record-owner-decision!
+  "CAS import one already authenticated owner approval or reversal, then project
+   in the same PostgreSQL transaction. Unsupported owner actions fail closed.
+   Exact retries return the existing projection; stale writes leave no event."
+  [url {:keys [event owner-event binding expected-revision] :as request}]
+  (transaction
+   url
+   (fn [connection]
+     (let [{:keys [state ledger]} (or (some-> (read-current connection) check-view!)
+                                      (fail! "Canonical attempt store is uninitialized"))
+           prior (some #(when (= (:id event) (:id %)) %) (:events ledger))
+           action (:action owner-event)
+           canonical-action (case action "approve" :accept "reverse" :reverse nil)]
+       (when-not (and (map? event) (map? owner-event) (map? binding)
+                      (= (:id event) (:id owner-event))
+                      (= (:id event) (str "owner-store:" (:store_revision owner-event)))
+                      (= (:decision_id owner-event) (:decision_id binding))
+                      (= binding (get-in owner-event [:proposal :canonical_binding]))
+                      (= canonical-action (:action event))
+                      (#{:same-attempt :source-revision} (:type event))
+                      (nat-int? expected-revision)
+                      (current-owner-binding? ledger request))
+         (fail! "Owner attempt event lacks exact current signed binding"))
+       (if prior
+         (do
+           (when-not (= request (:owner-request prior))
+             (fail! "Conflicting owner attempt event replay"))
+           (relationships/project-attempts ledger))
+         (do
+           (when-not (= expected-revision (count (:events ledger)))
+             (fail! "Stale owner attempt revision"))
+           (when (and (= :reverse canonical-action)
+                      (not= (:decision_id binding)
+                            (get-in (some #(when (= (:event-id event) (:id %)) %)
+                                          (:events ledger)) [:owner-request :binding :decision_id])))
+             (fail! "Owner reversal targets another decision"))
+           (let [updated (relationships/append-attempt-event
+                          ledger (assoc event :owner-request request))
+                 stored (last (:events updated))]
+             (execute! connection
+                       "INSERT INTO freediving.canonical_attempt_events(revision,id,body_edn) VALUES(?,?,?)"
+                       (count (:events updated)) (:id stored) (pr-str stored))
+             (write-view! connection updated (:evidence_digest state)))))))))
+
 (defn persist!
   "CAS append events or rebase retained evidence, then update private counts in one transaction.
    The first write must be an empty event ledger. Retry of the exact ledger is idempotent."

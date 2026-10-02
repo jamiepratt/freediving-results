@@ -221,6 +221,18 @@
                :source (get-in ledger [:sources (:source-id position)])})) pair)
     (mapv #((:sources ledger) %) pair)))
 
+(defn attempt-subjects
+  "Exact current canonical endpoint values for a proposed owner relationship."
+  [ledger type pair]
+  (when-not (and (#{:same-attempt :source-revision} type)
+                 (vector? pair) (= 2 (count pair))
+                 (every? string? pair) (not= (first pair) (second pair)))
+    (throw (ex-info "Unsupported owner relationship subjects" {:type type :pair pair})))
+  (let [subjects (event-subjects ledger type pair)]
+    (when-not (every? (if (= type :same-attempt) :version :id) subjects)
+      (throw (ex-info "Unknown owner relationship subjects" {:type type :pair pair})))
+    subjects))
+
 (defn- scope-of [ledger version-id]
   (get-in ledger [:observation-versions version-id :scope]))
 
