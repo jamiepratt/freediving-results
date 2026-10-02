@@ -4,6 +4,8 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [freediving.athlete-identity :as identity]
+            [freediving.canonical-attempt-store :as attempt-store]
+            [freediving.owner-identity-route :as owner-identity]
             [freediving.reconciliation-flow :as flow]
             [freediving.reviews :as reviews]
             [freediving.source-relationships :as relationships])
@@ -73,12 +75,14 @@
   "Import signed owner events only when exact exported evidence bindings still match.
    The returned ledger must be persisted before canonical routing."
   [ledger decisions envelope {:keys [import-token current-bindings active-snapshot-sha256
-                                     verified-snapshot-bindings]}]
+                                     active-binding-revision verified-snapshot-bindings]}]
   (when-not (and (vector? decisions) (map? current-bindings)
                  (string? active-snapshot-sha256)
+                 (pos-int? active-binding-revision)
                  (= flow/ledger-version (:version ledger)))
     (throw (ex-info "Authenticated remote review import required" {})))
-  (let [{:keys [events next_revision store_revision]} (authenticated-feed envelope import-token)
+  (let [{:keys [events next_revision store_revision] :as feed}
+        (authenticated-feed envelope import-token)
         by-id (into {} (map (juxt :id identity) decisions))]
     (when-not (and (vector? events) (nat-int? next_revision) (nat-int? store_revision)
                    (<= next_revision store_revision))
@@ -92,11 +96,18 @@
              last-revision (reduce max 0 (keep :remote-store-revision (:events current)))
              status ({"approve" :approved "correct" :approved
                       "reject" :rejected "reverse" :reversed} action)
-             selected-action (if (= action "correct")
-                               (some-> (:action correction) (str/replace "_" "-") keyword)
+             selected-action (case action
+                               "approve" (some-> (get proposal :selected_option)
+                                                 (str/replace "_" "-") keyword)
+                               "correct" (some-> (:action correction) (str/replace "_" "-") keyword)
+                               "reject" (if (= :identity (:family decision))
+                                          :different-person (:action decision))
                                (:action decision))]
          (when-not (and (= id event-id) (string? decision_id) decision
                         (pos-int? store_revision) (pos-int? binding_revision)
+                        (<= store_revision (:store_revision feed))
+                        (<= store_revision next_revision)
+                        (= active-binding-revision binding_revision)
                         (or (= snapshot_sha256 active-snapshot-sha256)
                             (= (get-in proposal [:canonical_binding])
                                (get-in verified-snapshot-bindings [snapshot_sha256 decision_id])))
@@ -105,6 +116,9 @@
                         (= decision_id (get-in proposal [:canonical_binding :decision_id]))
                         (= (get-in proposal [:canonical_binding])
                            (get current-bindings decision_id))
+                        (or (not= action "approve")
+                            (and (keyword? selected-action)
+                                 (contains? (set (:choices decision)) selected-action)))
                         (or (not= action "correct")
                             (and (map? correction) (keyword? selected-action)
                                  (contains? (set (:choices decision)) selected-action))))
@@ -140,8 +154,23 @@
   {:status :unresolved :reason reason})
 
 (defn- route-identity! [ledger decision view opts]
-  (let [id (:id decision)]
+  (let [id (:id decision)
+        human (last (filter #(and (= :human (:origin %))
+                                  (= id (:decision-id %))) (:events ledger)))]
     (cond
+      (and (= :human (:origin view))
+           (#{:approved :rejected :reversed} (:status view))
+           (:remote-event human))
+      (if (and (:reviewer-url opts)
+               (get-in opts [:current-bindings id])
+               (nat-int? (get-in opts [:identity-revisions id])))
+        {:status (if (= :reversed (:status view)) :reversed :materialized)
+         :projection (owner-identity/record-imported-decision!
+                      (:reviewer-url opts) ledger decision
+                      (get-in opts [:current-bindings id])
+                      (get-in opts [:identity-revisions id]))}
+        (unresolved :missing-owner-identity-target))
+
       (and (= :human (:origin view)) (correction-statuses (:status view)))
       (if-let [url (:reviewer-url opts)]
         {:status :reversed
@@ -177,6 +206,63 @@
                         :ledger attempt-ledger})]
     [(:ledger result) (select-keys result [:status :reason :event :events :projection])]))
 
+(defn- route-imported-attempt! [flow-ledger decision view opts]
+  (let [id (:id decision)
+        human (last (filter #(and (= :human (:origin %))
+                                  (= id (:decision-id %))) (:events flow-ledger)))
+        owner (:remote-event human)
+        prior (last (filter #(and (= :human (:origin %))
+                                  (= id (:decision-id %))
+                                  (not= (:id human) (:id %))) (:events flow-ledger)))
+        action (:action owner)
+        family (:family decision)
+        pair (:candidates decision)
+        choice (:action view)
+        evidence (case family
+                   :same-attempt (when (= :same-attempt choice)
+                                   {:kind :verified-scope})
+                   :source-revision (let [publisher (:publisher-evidence decision)
+                                          [left right] pair
+                                          direction (case choice
+                                                      :left-revises-right [right left]
+                                                      :right-revises-left [left right]
+                                                      nil)]
+                                      (when (and direction
+                                                 (#{:publisher-version :publisher-correction}
+                                                  (:kind publisher))
+                                                 (= direction [(:predecessor publisher)
+                                                               (:successor publisher)]))
+                                        publisher))
+                   nil)]
+    (if-not (and (#{"approve" "reverse"} action)
+                 (#{:same-attempt :source-revision} family)
+                 (vector? pair) (= 2 (count pair))
+                 (or (= action "reverse") evidence)
+                 (or (not= action "reverse")
+                     (and (= :approved (:status prior))
+                          (= "approve" (get-in prior [:remote-event :action]))
+                          (= (get-in prior [:remote-event :proposal :canonical_binding])
+                             (get-in owner [:proposal :canonical_binding]))))
+                 (:attempt-url opts)
+                 (nat-int? (get-in opts [:attempt-revisions id]))
+                 (= (get-in owner [:proposal :canonical_binding])
+                    (get-in opts [:current-bindings id])))
+      (unresolved :unsupported-or-stale-owner-attempt-decision)
+      (let [current (attempt-store/private-ledger (:attempt-url opts))
+            canonical-action (if (= action "reverse") :reverse :accept)
+            event (cond-> {:id (:id human) :action canonical-action
+                           :type family :pair pair}
+                    (= canonical-action :accept) (assoc :evidence evidence)
+                    (= canonical-action :reverse) (assoc :event-id (:id prior)))
+            request {:event event :owner-event owner
+                     :binding (get-in opts [:current-bindings id])
+                     :subject-snapshot (relationships/attempt-subjects
+                                        current family pair)
+                     :expected-revision (get-in opts [:attempt-revisions id])}]
+        {:status (if (= canonical-action :reverse) :reversed :materialized)
+         :projection (attempt-store/record-owner-decision!
+                      (:attempt-url opts) request)}))))
+
 (defn- field-target [opts decision]
   (get-in opts [:field-targets (:id decision)]))
 
@@ -211,9 +297,14 @@
   (case (:family decision)
     :identity [attempt-ledger (route-identity! flow-ledger decision view opts)]
     (:same-attempt :source-revision)
-    (if attempt-ledger
-      (route-attempt attempt-ledger flow-ledger decision view decisions opts)
-      [attempt-ledger (unresolved :missing-attempt-ledger)])
+    (if (and (= :human (:origin view)) (:remote-event
+                                        (last (filter #(and (= :human (:origin %))
+                                                            (= (:id decision) (:decision-id %)))
+                                                      (:events flow-ledger)))))
+      [attempt-ledger (route-imported-attempt! flow-ledger decision view opts)]
+      (if attempt-ledger
+        (route-attempt attempt-ledger flow-ledger decision view decisions opts)
+        [attempt-ledger (unresolved :missing-attempt-ledger)]))
     (:category :representation :category-representation)
     [attempt-ledger (route-field! flow-ledger decision view opts)]
     :row-semantics [attempt-ledger (unresolved :no-canonical-role-ledger)]
@@ -274,20 +365,23 @@
    A failed route remains explicit and can be retried with fresh revisions."
   [flow-ledger decisions {:keys [config policy persist-flow! persist-attempt!
                                  execute! checkpoint!
-                                 retained-answers deterministic-results attempt-ledger]
+                                 retained-answers deterministic-results attempt-ledger
+                                 imported-only?]
                           :as opts}]
   (when-not (and (vector? decisions) (map? config) (map? policy)
                  (fn? persist-flow!)
-                 (or (not-any? #(#{:same-attempt :source-revision} (:family %)) decisions)
+                 (or (:attempt-url opts)
+                     (not-any? #(#{:same-attempt :source-revision} (:family %)) decisions)
                      (fn? persist-attempt!)))
     (throw (ex-info "Versioned decisions, config, policy and private persistence required" {})))
-  (let [flow-ledger (flow/run! flow-ledger decisions
-                               {:config config :policy policy :execute! execute!
-                                :checkpoint! (fn [pending]
-                                               (persist-flow! pending)
-                                               (when checkpoint! (checkpoint! pending)))
-                                :retained-answers retained-answers
-                                :deterministic-results deterministic-results})
+  (let [flow-ledger (if imported-only? flow-ledger
+                        (flow/run! flow-ledger decisions
+                                   {:config config :policy policy :execute! execute!
+                                    :checkpoint! (fn [pending]
+                                                   (persist-flow! pending)
+                                                   (when checkpoint! (checkpoint! pending)))
+                                    :retained-answers retained-answers
+                                    :deterministic-results deterministic-results}))
         _ (persist-flow! flow-ledger)
         views (flow/inspect flow-ledger decisions config)]
     (reduce (fn [{:keys [attempt-ledger results] :as state} decision]
@@ -355,3 +449,13 @@
                                                      (.getMessage error))))))))))
             {:flow-ledger flow-ledger :attempt-ledger attempt-ledger :results {}}
             (dependency-order decisions))))
+
+(defn run-imported!
+  "Verify a signed owner feed, persist its flow, then apply supported canonical
+   decisions. Unroutable families remain explicit for later recovery."
+  [ledger decisions envelope {:keys [persist-flow!] :as opts}]
+  (when-not (fn? persist-flow!)
+    (throw (ex-info "Private flow persistence required" {})))
+  (let [imported (import-remote-review-events ledger decisions envelope opts)
+        _ (persist-flow! imported)]
+    (run! imported decisions (assoc opts :imported-only? true))))
