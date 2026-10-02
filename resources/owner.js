@@ -158,7 +158,21 @@
       }
     };
   }
-  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls,scoreSummary,queueCases,scoreRows,scorePresentation,probabilityColor}; return; }
+  function athletePresentation(data) {
+    const projection=data?.projection||{}, athletes=projection.athletes||{};
+    const rows=Object.values(athletes).map(a=>({
+      name:a['source-name']||'Unknown name', observation:a['observation-id'],
+      provisional:a['provisional-id'], group:a['group-id'],
+      status:a.origin==='accepted-link'?'Accepted link':'Provisional record',
+      origin:(a['decision-origin']||[]).join(', ')||'Source observation',
+      unresolved:(a['unresolved-candidates']||[]).length
+    })).sort((a,b)=>a.name.localeCompare(b.name)||a.observation.localeCompare(b.observation));
+    return {rows,accepted:projection['accepted-group-count']||0,
+      provisional:projection['provisional-record-count']||0,
+      unresolved:projection['unresolved-count']||0,
+      scope:projection.scope||'retained-observations',history:data?.history||[]};
+  }
+  if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls,scoreSummary,queueCases,scoreRows,scorePresentation,probabilityColor,athletePresentation}; return; }
   const $=id=>document.getElementById(id);
   let csrf=null, packets=[], detail=null, selected=null, pending=null, busy=false, generation=0, correctionOffset=0, canReview=false, hasViewer=false;
   function node(tag,text,cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls;return e; }
@@ -191,6 +205,29 @@
     try{await api(path,request);pending=null;if(path==='/api/corrections/triage')await loadCorrections();else {await loadDetail(selected);await loadCorrections();}status('Saved. Audit history and current revisions reloaded.');}
     catch(e){status(e.status===409?'Conflict: '+e.message+(path==='/api/corrections/triage'?'. Refresh requests before preparing a new triage action.':'. Reload this case before preparing a new action.'):e.message,true);$('retry').hidden=!!e.status;$('reload').hidden=path==='/api/corrections/triage';}
     finally{lock(false);}
+  }
+  async function loadAthletes(){
+    const sessionToken=csrf, view=athletePresentation(await api('/api/athletes'));
+    if(csrf!==sessionToken)return;
+    $('athletes-summary').textContent=`${view.accepted} accepted groups; ${view.provisional} stable provisional records; ${view.unresolved} observations with unresolved candidates. Scope: ${view.scope}. Showing ${Math.min(100,view.rows.length)} of ${view.rows.length} observations.`;
+    $('athletes').replaceChildren();
+    view.rows.slice(0,100).forEach(row=>{
+      const card=node('article',undefined,'event');
+      card.append(node('h3',row.name),node('p',`${row.status} · ${row.origin}`),
+        node('p',`Group ${row.group}; provisional ${row.provisional}`),
+        node('p',`${row.unresolved} unresolved candidates`),node('small',row.observation));
+      $('athletes').append(card);
+    });
+    if(!view.rows.length)$('athletes').append(node('p','No parsed athlete observations in this retained corpus.'));
+    $('athletes-history').replaceChildren();
+    view.history.slice(-20).reverse().forEach(event=>{
+      const card=node('article',undefined,'event');
+      card.append(node('strong',`${event.action} · ${event['actor-kind']} · ${event.id}`),
+        node('p',`Revision ${event.revision}; ${event.reason||event.decision?.reason||'No reason recorded'}`),
+        expandable('Cited identity evidence',event.evidence||{}));
+      $('athletes-history').append(card);
+    });
+    if(!view.history.length)$('athletes-history').append(node('p','No identity decisions recorded.'));
   }
   async function loadCorrections(){
     const sessionToken=csrf, pageOffset=correctionOffset, result=await api('/api/corrections?offset='+pageOffset), rows=result.requests;
@@ -313,8 +350,8 @@
   async function openCase(t){if(busy)return;pageView.clear();selected=t;renderList();detail=null;$('detail').hidden=true;pending=null;$('retry').hidden=true;status('Loading case...');try{if(!await loadDetail(t))return;status(canReview?'Inspect original evidence before proposing a change.':'Read-only: inspect the registered page and compare extracted values.');$('case-title').focus();}catch(e){$('detail').hidden=true;status(e.message,true);}}
   function fieldChanged(){const f=$('field').value,identity=f==='identity';$('scalar-fields').hidden=identity;$('identity-fields').hidden=!identity;if(!identity){const v=detail.effective.fields[f];$('value-type').value=v===null?'unknown':typeof v==='number'?'number':typeof v==='boolean'?'boolean':'text';$('value').value=v??'';}}
   async function decision(action,id){try{const f=common({reason:$('decision-reason').value});const request={...audit(f,crypto.randomUUID(),detail.effective.revision),action,[action==='reverse'?'event-id':'proposal-id']:id};await mutate('/api/decisions',request);}catch(e){status(e.message,true);}}
-  function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','jev-scores','candidates','audit','publication-history','rubric','corrections'].forEach(id=>$(id).replaceChildren());['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';$('score-sort').value='match-desc';}
-  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;canReview=reviewEnabled(s);hasViewer=s['source-viewer?']===true;document.querySelectorAll('[data-review-only]').forEach(e=>e.hidden=!canReview);$('inspection-mode').textContent=canReview?'Owner review enabled. Confident Jev spelling changes may be applied automatically and can be reversed in the audit.':'Read-only inspection. Proposals, decisions, triage and extraction validation are disabled.';$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');renderList();await loadCorrections();status('Select a comparison case to inspect its evidence.');}
+  function clearSession(){generation++;pageView.clear();canReview=false;hasViewer=false;csrf=null;correctionOffset=0;packets=[];detail=null;selected=null;pending=null;$('workspace').hidden=true;$('detail').hidden=true;$('logout').hidden=true;$('retry').hidden=true;$('reload').hidden=true;$('login-panel').hidden=false;['cases','comparison','evidence','uncertainties','jev-scores','candidates','audit','publication-history','rubric','corrections','athletes','athletes-history'].forEach(id=>$(id).replaceChildren());$('athletes-summary').textContent='';['proposal','publication-form'].forEach(id=>$(id).reset());$('decision-reason').value='';$('capability').value='';$('filter').value='';$('outcome-filter').value='';$('score-sort').value='match-desc';}
+  async function start(){const s=await api('/api/session');$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');if(!s.authenticated){clearSession();status('Owner login required. Paste this local server’s capability to continue.');return;}csrf=s.csrf;canReview=reviewEnabled(s);hasViewer=s['source-viewer?']===true;document.querySelectorAll('[data-review-only]').forEach(e=>e.hidden=!canReview);$('inspection-mode').textContent=canReview?'Owner review enabled. Confident Jev spelling changes may be applied automatically and can be reversed in the audit.':'Read-only inspection. Proposals, decisions, triage and extraction validation are disabled.';$('logout').hidden=false;$('login-panel').hidden=true;$('workspace').hidden=false;const result=await api('/api/candidates');packets=result.packets;$('rubric').replaceChildren(structure(result.rubric));$('mode').textContent=s.demo?'SYNTHETIC DEMO · Owner only':(canReview?'REAL CORPUS · Review enabled':'REAL CORPUS · Read-only');renderList();await Promise.all([loadCorrections(),loadAthletes()]);status('Select a comparison case to inspect its evidence.');}
   let sourceTarget=null, sourcePage=1, sourceCount=1, observationPage=1, sourceState='empty';
   function syncPageControls(){const controls=viewerControls({state:sourceState,page:sourcePage,count:sourceCount,observationPage,busy});['previous','next','go'].forEach(key=>$('source-'+key).disabled=controls[key]);if(hasViewer)$('visual').disabled=controls.visual;}
   const pageView=pageViewer(api, view=>{
@@ -343,6 +380,7 @@
   $('source-next').onclick=()=>{if(sourceTarget && sourcePage<sourceCount)pageView.load(sourceTarget,sourcePage+1);};
   $('source-zoom').onchange=()=>{const img=$('source-image').querySelector('img');if(img)img.style.width=$('source-zoom').value+'%';};
   $('corrections-refresh').onclick=()=>{if(!busy)loadCorrections().catch(e=>status(e.message,true));};
+  $('athletes-refresh').onclick=()=>{if(!busy)loadAthletes().catch(e=>status(e.message,true));};
   $('corrections-previous').onclick=()=>{if(busy)return;correctionOffset=Math.max(0,correctionOffset-100);loadCorrections().catch(e=>status(e.message,true));};
   $('corrections-next').onclick=()=>{if(busy)return;correctionOffset+=100;loadCorrections().catch(e=>status(e.message,true));};
   $('logout').onclick=async()=>{if(busy)return;lock(true);try{await api('/api/logout',{});clearSession();status('Signed out. Owner session revoked.');$('capability').focus();}catch(e){if(e.status===401){clearSession();status('Session expired. Log in again.');}else status('Sign out failed: '+e.message,true);}finally{lock(false);}};

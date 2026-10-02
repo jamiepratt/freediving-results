@@ -39,7 +39,7 @@ Grant only inspection access in the new database:
 psql -h 127.0.0.1 -p 55489 -d inspection_pilot -v ON_ERROR_STOP=1 \
   -c 'REVOKE CREATE ON DATABASE inspection_pilot FROM PUBLIC;' \
   -c 'GRANT USAGE ON SCHEMA freediving TO source_inspector;' \
-  -c 'GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector;' \
+  -c 'GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.extraction_reviews,freediving.pdf_extraction_reviews,freediving.dive_field_decisions,freediving.athlete_identity_events,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector;' \
   -c 'ALTER ROLE source_inspector SET default_transaction_read_only=on;'
 mkdir data/source-inspection/render-cache
 ```
