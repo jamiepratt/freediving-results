@@ -89,6 +89,13 @@ attempt decisions. See [the ingestion decision](docs/adr/0001-staged-evidence-in
 
 ## Implemented system
 
+Execution direction: discovery, fetching and parsing run locally. The owner can
+use a NordVPN obfuscated connection for source access. A normal ingestion run
+should produce a verified evidence snapshot and source bundle for presentation
+on the existing remote owner website. Fetching and remote transfer are separate
+phases because VPN routing can interfere with the VPS connection. The automated
+handoff is not yet implemented; see [issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
+
 Python scripts handle bounded discovery, paced acquisition, browser capture,
 evidence packets and a private SQLite evidence snapshot. Clojure implements the
 content-addressed archive, extraction, immutable PostgreSQL observations and

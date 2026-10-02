@@ -1,5 +1,25 @@
 # Source acquisition and row lineage
 
+## Execution default, 2 October 2026
+
+New discovery, acquisition and parsing runs execute locally, allowing the owner
+to use a NordVPN obfuscated connection for source access. This supersedes the
+remote-worker execution default below; older worker instructions and receipts
+remain historical evidence. Keep local archives private and observation imports
+isolated from the public database. VPN use does not turn an access failure into
+evidence of absent results; retain actual access outcomes and host pacing.
+
+A normal run should produce a verified evidence snapshot and matching private
+source bundle for the existing remote owner workspace. Acquisition and remote
+transfer are separate resumable phases: the October activation history records
+VPN interference with Tailscale SSH. The remote server serves the evidence;
+it is not the default acquisition or parsing worker. Existing manual deployment
+steps are in [deployment](deployment.md#owner-evidence-remote-activation-checkpoint).
+The repeatable run-to-presentation handoff is tracked in
+[issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
+
+## Existing routes and historical runs
+
 The [27 September isolated corpus relationship and status audit](corpus-relationship-status-audit-20260927.md) replays all 91 extraction jobs and gives bounded event-card, link, source-hash and imported-position counts at the b44 cutoff. It preserves supporting rankings and unknown relationships separately.
 
 Route baseline observed through 25 September 2026, with remote batch evidence through 26 September. This is a route and evidence guide, not a live availability check or a complete championship inventory. Start at the [CMAS results archive](https://www.cmas.org/freediving/results.html) or the AIDA event page, then retain what the route actually returns. Current source coverage and unresolved work live in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
