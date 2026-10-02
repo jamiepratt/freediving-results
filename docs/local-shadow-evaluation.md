@@ -2,6 +2,13 @@
 
 This bounded local harness compares identical held-out cases through deterministic rules, a Jev HTTP adapter and an OpenAI-compatible chat adapter. Outcomes are `:match`, `:no-match`, `:abstain` or `:error`. None has review, identity merge or publication authority. The [reviewed-label export](local-reviewed-labels.md) verifies explicit pair decisions against the local database before scoring. Genuine owner labels and live provider evaluation remain in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
 
+Policy follow-up: [ADR 0003](adr/0003-automatic-evidence-reconciliation.md)
+authorizes a separate automatic reconciliation path with later review and
+rollback. It does not change this historical evaluation harness's authority,
+relabel assistant judgments as human labels, or establish calibration. Reuse the
+versioned request builder and retained scores for
+[issue #67](https://github.com/jamiepratt/freediving-results/issues/67).
+
 ## Reproduce the synthetic run
 
 ```sh

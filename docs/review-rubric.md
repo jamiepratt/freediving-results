@@ -1,6 +1,19 @@
 # Private candidate review rubric
 
-Implementation guidance awaiting owner review. These are not owner labels, identity conclusions, calibrated confidence scores, or permission to publish. Retrieval never creates an approval. Remaining pilot work is tracked in [issue #1](https://github.com/jamiepratt/freediving-results/issues/1).
+The rubric below describes the existing explicit-review API. The accepted
+[automatic reconciliation policy](adr/0003-automatic-evidence-reconciliation.md)
+supersedes manual-review-first direction for the new reconciliation path, tracked
+in [issue #67](https://github.com/jamiepratt/freediving-results/issues/67). It uses
+deterministic rules first, Jev last, provisional automatic approval and later
+review/rollback without a mandatory new manual calibration batch. The general
+path is not implemented yet. Existing automatic spelling decisions are narrower;
+reviewer attestations must never be fabricated by an automatic actor.
+
+Candidate retrieval alone still grants no identity, extraction or publication
+approval. Provider confidence and measured accuracy are separate. Human decisions
+remain distinct from automatic approvals, and human corrections take precedence.
+
+## Existing explicit-review contract
 
 | Review category | Required evidence | Review API category |
 | --- | --- | --- |

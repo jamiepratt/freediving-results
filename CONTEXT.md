@@ -130,5 +130,25 @@ native-script name mappings and annual rankings is scope, not verified coverage.
   [owner workspace #54](https://github.com/jamiepratt/freediving-results/issues/54),
   [attempt comparison #27](https://github.com/jamiepratt/freediving-results/issues/27).
 
-Reconciliation policy is explicitly deferred to a separate discussion. Existing
-review contracts remain in force; this brief does not replace them.
+## Accepted reconciliation direction
+
+Reconcile automatically with minimal intervention: reuse retained work, apply
+deterministic rules, then use Jev only for unresolved judgments. Ordinary code
+builds versioned Jev requests from retained evidence; no LLM constructs each
+query. Qualifying decisions may be approved automatically from the first run
+under conservative provisional policies, with review and rollback afterward.
+A new manually labelled calibration batch is not a prerequisite. Confidence and
+full answer distributions remain distinct from measured accuracy.
+
+Keep category memberships and represented country/organization on each dive,
+with citations and unknowns. Preserve originals and reversible identity/attempt
+links. Human corrections survive reruns and remote snapshot replacement. Pending
+scored decisions sort from low to high confidence in the private owner workspace;
+automatic approvals remain inspectable. Reconciliation does not grant human
+review attestations or public publication authority.
+
+See [ADR 0003](docs/adr/0003-automatic-evidence-reconciliation.md) for the accepted
+policy and [issue #67](https://github.com/jamiepratt/freediving-results/issues/67)
+for implementation. Compact Jev request building, score storage and automatic
+spelling decisions exist; general automatic reconciliation and remote review
+writes are not yet implemented.
