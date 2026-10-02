@@ -141,6 +141,13 @@ also makes its origin unavailable. Private data remains on the VPS/local archive
 
 ## Owner evidence remote activation checkpoint
 
+Accepted workflow, 2 October 2026: verified local ingestion runs should
+automatically update the private owner presentation. Failed transfer or validation
+must preserve the last working presentation and a resumable local result. This
+does not grant public result publication or owner review approval. The activation
+helper below supplies part of this behavior; the complete local-to-remote handoff
+is not implemented yet and remains in #64.
+
 The [1 October 2026 activation report in #54](https://github.com/jamiepratt/freediving-results/issues/54)
 records successful owner HTML/API access using the v8 snapshot after PRs #58-#60.
 The instructions below describe fresh setup and guarded updates; the September
