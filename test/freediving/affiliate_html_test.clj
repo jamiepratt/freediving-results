@@ -25,6 +25,7 @@
     (is (= ["DYNB" "DYNB" "DNF"] (mapv :discipline (:roster-entries result))))
     (is (= [3 4 3] (mapv #(get-in % [:source-position :line]) assertions)))
     (is (= [1 1 2] (mapv #(get-in % [:source-position :paragraph]) assertions)))
+    (is (= [1 2 3] (mapv #(get-in % [:source-position :ordinal]) assertions)))
     (is (every? #(nil? (:publisher-romanization %)) assertions))
     (is (= [:unsupported :unsupported] (mapv :status (filter :position-id (get-in result [:routing :gaps])))))
     (is (= :unexamined (:status (last (get-in result [:routing :gaps])))))
@@ -70,6 +71,7 @@
                 {:html pzf-html :source-sha256 (sha pzf-html) :url pzf-url})]
     (is (= ["Ewa Żółć" "Łukasz Żuk"] (mapv :original-name (:name-assertions result))))
     (is (= ["100" "101"] (mapv #(get-in % [:person-id :value]) (:name-assertions result))))
+    (is (= [1 2] (mapv #(get-in % [:source-position :row]) (:name-assertions result))))
     (is (= ["#archive-container article.post-100 h2.entry-title a"
             "#archive-container article.post-101 h2.entry-title a"]
            (mapv #(get-in % [:source-position :selector]) (:name-assertions result))))
@@ -95,6 +97,37 @@
                  :additional-claims [overlap]})]
     (is (= ["Łukasz Żuk"] (mapv :original-name (:name-assertions result))))
     (is (= :ambiguous (:status (first (get-in result [:routing :gaps])))))))
+
+(def pzf-page2-url (str pzf-url "page/2/"))
+(def pzf-page2-html
+  (str "<html><head><link rel='canonical' href='" pzf-page2-url "'></head>"
+       "<body class='archive paged-2 term-kadra-basen-2025'>"
+       "<ul id='archive-container'>"
+       "<li><article class='team post-103 team_department-kadra-basen-2025'>"
+       "<h2 class='entry-title'><a href='https://pzf-sport.org/team/ania-zajac/'>Ania Zając</a></h2>"
+       "</article></li></ul>"
+       "<nav class='pagination'><a href='" pzf-url "'>1</a>"
+       "<span aria-current='page'>2</span></nav>"
+       "</body></html>"))
+
+(deftest pzf-second-page-is-cited-separately-from-first
+  (let [first-page (affiliate/parse-pzf-team-directory
+                    {:html pzf-html :source-sha256 (sha pzf-html) :url pzf-url})
+        second-page (affiliate/parse-pzf-team-directory
+                     {:html pzf-page2-html :source-sha256 (sha pzf-page2-html)
+                      :url pzf-page2-url})
+        all-sources (concat (:name-sources first-page) (:name-sources second-page))]
+    (is (= :pzf-2025-indoor-team-page2 (:source-id second-page)))
+    (is (= ["Ania Zając"] (mapv :original-name (:name-assertions second-page))))
+    (is (= [1] (mapv #(get-in % [:source-position :row]) (:name-assertions second-page))))
+    (is (= 3 (count (:name-assertions (names/import-name-evidence {} all-sources)))))
+    (is (= #{"100" "101" "103"}
+           (set (map #(get-in % [:person-id :value])
+                     (:name-assertions (names/import-name-evidence {} all-sources))))))
+    (is (some #(= "following-page" (:section-id %))
+              (get-in first-page [:routing :gaps])))
+    (is (not-any? #(= "following-page" (:section-id %))
+                  (get-in second-page [:routing :gaps])))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.affiliate-html-test)]

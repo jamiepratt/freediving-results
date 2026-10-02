@@ -19,6 +19,11 @@
    {:url "https://pzf-sport.org/team_department/kadra-basen-2025/"
     :publisher "Polski Związek Freedivingu"
     :parser-id "pzf-indoor-team-directory"
+    :parser-version "pzf-indoor-team-directory/1"}
+   :pzf-2025-indoor-team-page2
+   {:url "https://pzf-sport.org/team_department/kadra-basen-2025/page/2/"
+    :publisher "Polski Związek Freedivingu"
+    :parser-id "pzf-indoor-team-directory"
     :parser-version "pzf-indoor-team-directory/1"}})
 
 (defn- sha256 [source]
@@ -111,15 +116,16 @@
                                {:position-id id :paragraph paragraph :line line
                                 :roster-category category :discipline discipline
                                 :original-name value :printed-line raw})))
-          sources (mapv (fn [{:keys [paragraph line original-name]}]
+          sources (mapv (fn [ordinal {:keys [paragraph line original-name]}]
                           {:source-sha256 source-sha256
                            :parser-version parser-version
                            :source-position {:format :html :url url
                                              :selector "#post-6495 blockquote p"
-                                             :paragraph paragraph :line line}
+                                             :paragraph paragraph :line line
+                                             :ordinal (inc ordinal)}
                            :publisher publisher :source-family :national-team-roster
                            :original-name original-name})
-                        entries)]
+                        (range) entries)]
       {:source-id :japan-apnea-2025-team
        :source-sha256 source-sha256
        :parser-version parser-version
@@ -131,13 +137,16 @@
 (def pzf-parser-version "pzf-indoor-team-directory/1")
 
 (defn parse-pzf-team-directory
-  "Parse registered first page of the PZF 2025 indoor team directory.
-   Later pages and unreadable cards remain explicit gaps."
+  "Parse a registered PZF 2025 indoor team directory page.
+   Linked pages and unreadable cards remain explicit gaps."
   [{:keys [html source-sha256 url additional-claims]}]
   (when-not (and (string? html) (= source-sha256 (sha256 html)))
     (throw (ex-info "Source hash mismatch" {:reason :source-mismatch})))
-  (let [{registered-url :url :keys [publisher parser-id]}
-        (:pzf-2025-indoor-team source-registry)
+  (let [source-id (if (= url (get-in source-registry [:pzf-2025-indoor-team-page2 :url]))
+                    :pzf-2025-indoor-team-page2
+                    :pzf-2025-indoor-team)
+        {registered-url :url :keys [publisher parser-id]}
+        (get source-registry source-id)
         document (Jsoup/parse html)
         body (.body document)
         canonical (.selectFirst document "link[rel=canonical]")
@@ -145,6 +154,8 @@
     (when-not (and (= registered-url url)
                    canonical (= registered-url (.attr canonical "href"))
                    (.hasClass body "term-kadra-basen-2025")
+                   (= (= source-id :pzf-2025-indoor-team-page2)
+                      (.hasClass body "paged-2"))
                    container (seq (.select container "article.team")))
       (throw (ex-info "Incompatible PZF team directory" {:reason :incompatible-page})))
     (let [cards (map-indexed
@@ -188,20 +199,20 @@
                   (into [claim] additional-claims))
           accepted (set (map :position-id (:routed routed)))
           entries (->> cards (filter #(contains? accepted (:id %))) vec)
-          sources (mapv (fn [{:keys [post-id original-name profile-url]}]
+          sources (mapv (fn [{:keys [card post-id original-name profile-url]}]
                           {:source-sha256 source-sha256
                            :parser-version pzf-parser-version
                            :source-position {:format :html :url url
                                              :selector (str "#archive-container article.post-"
                                                             post-id " h2.entry-title a")
-                                             :profile-url profile-url}
+                                             :profile-url profile-url :row card}
                            :publisher publisher
                            :source-family :national-team-directory
                            :person-id {:authority publisher
                                        :kind :team-post-id :value post-id}
                            :original-name original-name})
                         entries)]
-      {:source-id :pzf-2025-indoor-team
+      {:source-id source-id
        :source-sha256 source-sha256
        :parser-version pzf-parser-version
        :routing routed
