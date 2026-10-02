@@ -52,7 +52,14 @@ class _DatedLinks(HTMLParser):
         if tag == "a":
             values = dict(attrs)
             if values.get("href") and values.get("data-date"):
-                self.links.append({"url": values["href"], "date": values["data-date"]})
+                link = {"url": values["href"], "date": values["data-date"]}
+                for name in ("publication_date", "period", "category", "rules_url", "script", "locator"):
+                    attribute = "data-" + name.replace("_", "-")
+                    if values.get(attribute):
+                        link[name] = values[attribute]
+                if values.get("data-provisional") in ("true", "false"):
+                    link["provisional"] = values["data-provisional"] == "true"
+                self.links.append(link)
 
 
 def _date(value):
@@ -94,7 +101,10 @@ def _candidates(source, body):
     document = json.loads(body)
     if not isinstance(document, dict) or not isinstance(document.get("results"), list):
         raise ValueError("JSON index needs a results array")
-    return [{"url": item["url"], "date": item["date"]} for item in document["results"]
+    optional = {"publication_date", "provisional", "period", "category", "rules_url", "script", "locator"}
+    return [{"url": item["url"], "date": item["date"],
+             **{key: value for key, value in item.items() if key in optional}}
+            for item in document["results"]
             if isinstance(item, dict) and item.get("representation") == source["candidate_representation"]
             and "url" in item and "date" in item]
 
