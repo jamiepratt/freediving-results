@@ -79,7 +79,8 @@
                  :expected-revision 0}]
     (store/persist! app base)
     (is (= 1 (:revision (store/record-owner-decision! app request))))
-    (is (= 1 (:revision (store/record-owner-decision! app request))))
+    (is (= 1 (:revision (store/record-owner-decision!
+                         app (assoc request :expected-revision 1)))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (store/record-owner-decision!
                   app (assoc request :owner-event (assoc owner :id "forged")))))

@@ -1208,14 +1208,19 @@
                           (= current (select-keys ref (keys current))))
              (fail! "Owner field observation binding changed"))
            (if existing
-             (if (= request (:request existing)) existing
+             (if (= (dissoc request :base-revision)
+                    (dissoc (:request existing) :base-revision)) existing
                  (fail! "Conflicting imported owner field event"))
              (do
                (when-not (= base-revision revision)
                  (fail! "Stale owner field revision"))
                (when (and (= action :reverse)
-                          (not= event-id (:decision-id current-field)))
-                 (fail! "Owner reversal requires the active field assertion"))
+                          (or (not= event-id (:decision-id current-field))
+                              (not= (:decision_id binding)
+                                    (let [prior (first (filter #(= event-id (:id %)) events))]
+                                      (or (:decision-id prior)
+                                          (get-in prior [:request :binding :decision_id]))))))
+                 (fail! "Owner reversal requires this decision's active field assertion"))
                (when (and (= action :assert)
                           (not (if (= decision-type :category)
                                  (and (vector? proposed) (seq proposed)

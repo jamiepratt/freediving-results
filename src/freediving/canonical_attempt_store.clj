@@ -123,7 +123,8 @@
          (fail! "Owner attempt event lacks exact current signed binding"))
        (if prior
          (do
-           (when-not (= request (:owner-request prior))
+           (when-not (= (dissoc request :expected-revision)
+                        (dissoc (:owner-request prior) :expected-revision))
              (fail! "Conflicting owner attempt event replay"))
            (relationships/project-attempts ledger))
          (do

@@ -61,7 +61,8 @@
                  :proposed ["women"]}]
     (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer request))))
     (is (= ["women"] (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
-    (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer request))))
+    (is (= :accepted (:status (reviews/import-owner-dive-field!
+                               reviewer (assoc request :base-revision 1)))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (reviews/import-owner-dive-field!
                   reviewer (assoc-in request [:binding :evidence_bindings 0
@@ -82,6 +83,15 @@
       (is (= :accepted (:status (reviews/import-owner-dive-field! reviewer corrected))))
       (is (= ["masters"] (get-in (reviews/dive-fields fixture/app target)
                                  [:category :accepted])))
+      (let [other-binding (assoc binding :decision_id "other-field")
+            other-owner (-> (:owner-event rejected)
+                            (assoc :decision_id "other-field")
+                            (assoc-in [:proposal :id] "other-field")
+                            (assoc-in [:proposal :canonical_binding] other-binding))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (reviews/import-owner-dive-field!
+                      reviewer (assoc rejected :binding other-binding
+                                      :owner-event other-owner)))))
       (is (= :reversed (:status (reviews/import-owner-dive-field! reviewer rejected))))
       (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
       (is (thrown? clojure.lang.ExceptionInfo
