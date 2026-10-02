@@ -46,8 +46,19 @@
                    (false? (:examined? position))))
             (:positions document)) :unexamined-position)))
 
-(defn- claim-key [{:keys [parser-id parser-version]}]
-  [(str parser-id) (str parser-version)])
+(defn- canonical-value [value]
+  (cond
+    (map? value) [:map (->> value
+                            (map (fn [[key item]] [(canonical-value key)
+                                                   (canonical-value item)]))
+                            (sort-by (comp pr-str first))
+                            vec)]
+    (set? value) [:set (->> value (map canonical-value) (sort-by pr-str) vec)]
+    (sequential? value) [:sequence (mapv canonical-value value)]
+    :else value))
+
+(defn- claim-key [{:keys [parser-id parser-version] :as claim}]
+  [(str parser-id) (str parser-version) (pr-str (canonical-value claim))])
 
 (defn route-document
   "Route an inventoried document using explicit recognizer claims.
@@ -62,7 +73,8 @@
    :supported-positions #{ids} :claimed-positions #{ids}}.
    A supported but unclaimed position is a gap. A claimed position with multiple
    contenders is ambiguous; no parser wins by input order. Rejected claims never
-   influence coverage. Output preserves inventory order and sorts contenders."
+   influence coverage. Output preserves inventory order, sorts contenders by
+   full EDN claim content and collapses exact duplicate claims."
   [document claims]
   (validate-document! document)
   (let [position-ids (set (map :id (:positions document)))
@@ -70,7 +82,8 @@
                            {:claim claim
                             :reason (rejection-reason document position-ids claim)})
                          claims)
-        accepted (->> classified (remove :reason) (map :claim) (sort-by claim-key) vec)
+        accepted (->> classified (remove :reason) (map :claim)
+                      (sort-by claim-key) distinct vec)
         rejected (->> classified
                       (filter :reason)
                       (map (fn [{:keys [claim reason]}]

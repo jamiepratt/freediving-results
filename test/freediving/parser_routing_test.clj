@@ -111,6 +111,22 @@
                   (catch clojure.lang.ExceptionInfo error
                     (:reason (ex-data error)))))))))
 
+(deftest same-parser-version-claims-have-stable-contender-order
+  (let [a (assoc (claim "shared" #{"article#names"} #{"article#names"})
+                 :match-reason "article title")
+        b (assoc a :match-reason "table heading")
+        forward (routing/route-document html-document [a b])
+        reverse (routing/route-document html-document [b a])]
+    (is (= forward reverse))
+    (is (= ["article title" "table heading"]
+           (mapv :match-reason (:contenders (second (:gaps forward))))))))
+
+(deftest duplicate-discovery-claim-does-not-create-ambiguity
+  (let [a (claim "article" #{"article#names"} #{"article#names"})
+        result (routing/route-document html-document [a a])]
+    (is (= ["article#names"] (mapv :position-id (:routed result))))
+    (is (not-any? #(= :ambiguous (:status %)) (:gaps result)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.parser-routing-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
