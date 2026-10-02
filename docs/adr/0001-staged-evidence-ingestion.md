@@ -33,6 +33,14 @@ with source-backed tests. Upfront generalization of all retained format families
 is not a prerequisite for further collection. This trades gradual coverage for
 lower risk of applying a source-specific parser to an incompatible document.
 
+When multiple parsers claim overlapping source rows, pause the affected rows,
+retain the competing claims and investigate, using LLM assistance where needed.
+Continue processing other documents. Resolve the ambiguity with a tested
+deterministic routing rule before retrying those rows. Automatically choosing
+by parser priority is rejected as the default: recognition mistakes could
+otherwise go unnoticed. Parsers covering disjoint sections are a separate
+composition decision.
+
 Discovery includes event calendars and lists, individual results, local and
 international federation/organizer evidence, native-script athlete names and
 explicit romanized-name correspondences, event and annual rankings, and points
@@ -58,7 +66,7 @@ deferred. Record evidence needed for those decisions without making them.
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
   evidence, not yet a uniform cross-format registry. The recognizer API,
-  ambiguous/partial matches, scan exceptions, refresh policy and stopping rules
+  section composition, partial matches, scan exceptions, refresh policy and stopping rules
   remain unresolved in #62; this decision does not select their design.
 
 ## Evidence

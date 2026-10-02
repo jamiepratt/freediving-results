@@ -31,6 +31,10 @@ another document demonstrates the same format. Broaden that parser and its
 recognizer with evidence and regression checks, rather than generalizing all
 format families before the next sweep.
 
+If multiple parsers claim overlapping source rows, pause those rows and retain
+the competing claims for investigation. Continue other documents. Use LLM
+assistance where necessary, then encode a tested deterministic routing rule.
+
 Preserve native-script names and publisher-stated correspondence to romanized
 names, including evidence from national affiliates and local organizations.
 Keep event rankings, annual rankings and printed dive points with their original
