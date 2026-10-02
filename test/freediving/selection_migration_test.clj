@@ -64,7 +64,7 @@
       (let [run (shell/sh "clojure" "-M" "-m" "freediving.deployment"
                           :env (assoc (into {} (System/getenv)) "FREEDIVING_MIGRATION_URL" fixture/admin))]
         (is (zero? (:exit run)) (:err run))
-        (is (re-find #"Applied migrations 1-13; no records published\." (:out run))))
+        (is (re-find #"Applied migrations 1-19; no records published\." (:out run))))
       (is (false? (fixture/sql! fixture/admin
                                 "DO $$ BEGIN IF (SELECT count(*) FROM freediving.schema_migrations WHERE version BETWEEN 1 AND 13) <> 13 THEN RAISE EXCEPTION 'Incomplete deployment migrations'; END IF; END $$")))
       (is (= ["Synthetic final-session gap"] (get-in (public/coverage reader-url) [:events 0 :gaps])))

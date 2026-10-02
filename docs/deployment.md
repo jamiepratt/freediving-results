@@ -38,7 +38,7 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all 13 checksummed
+JAR dependencies. It takes a private database backup, applies all 19 checksummed
 migrations without seeding data, switches the release, verifies readiness, provisions
 the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations
@@ -48,6 +48,12 @@ push automatically deploys this project.
 Migrations 12 and 13 add private JSON and PDF extraction reviews. The normal
 release installs them without accepting an extraction, validating publication,
 selecting an event or changing the active publication policy.
+
+Migration 19 adds a private, append-only store for verified batch position
+evidence. The normal release installs its schema and restricted ingestion grant.
+It does not import retained evidence or add records to the legacy observation
+tables. Import is a separate local operation against a verified archive using
+`freediving.batch-evidence-db/import!`; see [private batch evidence import](batch-evidence-import.md).
 
 ## HTML publication policy checkpoint
 
