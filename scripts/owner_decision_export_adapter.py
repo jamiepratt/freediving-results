@@ -87,6 +87,5 @@ def register_verified_export(store, snapshot_directory, envelope):
         _require(len(ids) == len(set(ids)), 'duplicate proposal ID')
         for proposal in proposals:
             _verify_proposal(snapshot, proposal, envelope.get('reconciliation_run_revision'))
-    return [store.register(envelope['snapshot_sha256'], proposal,
-                           idempotency_key='reconciliation-export:' + _digest(proposal))
-            for proposal in proposals]
+    return store.register_batch(envelope['snapshot_sha256'], proposals,
+                                idempotency_key='reconciliation-export:' + _digest(proposals))

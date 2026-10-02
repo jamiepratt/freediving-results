@@ -74,6 +74,8 @@ class DecisionStore:
                 event_revision INTEGER PRIMARY KEY REFERENCES events(revision),
                 binding_revision INTEGER NOT NULL, snapshot_sha256 TEXT NOT NULL);
         ''')
+        if 'observation_refs_json' not in [row[1] for row in self.db.execute('PRAGMA table_info(bindings)')]:
+            self.db.execute('ALTER TABLE bindings ADD COLUMN observation_refs_json TEXT')
 
     def close(self):
         self.db.close()
@@ -92,7 +94,9 @@ class DecisionStore:
         if row is None:
             return None
         return {'revision': row['revision'], 'snapshot_sha256': row['snapshot_sha256'],
-                'evidence_ids': set(json.loads(row['evidence_ids_json']))}
+                'evidence_ids': set(json.loads(row['evidence_ids_json'])),
+                'observation_refs': (json.loads(row['observation_refs_json'])
+                                     if row['observation_refs_json'] is not None else None)}
 
     def _begin(self, key, request, expected_revision=None):
         _text(key, 'idempotency_key')
@@ -119,20 +123,22 @@ class DecisionStore:
         self.db.execute('COMMIT')
         return result
 
-    def bind_snapshot(self, snapshot_sha256, available_evidence_ids, *, expected_revision, idempotency_key):
+    def bind_snapshot(self, snapshot_sha256, available_evidence_ids, *, expected_revision, idempotency_key,
+                      _observation_refs=None):
         """Bind a verified snapshot revision; decisions retain their original binding."""
         _sha(snapshot_sha256)
         evidence_ids = sorted(set(available_evidence_ids))
         if any(not isinstance(item, str) or not item or len(item) > 512 for item in evidence_ids):
             raise ValueError('invalid evidence ID')
-        request = ['bind_snapshot', snapshot_sha256, evidence_ids, expected_revision]
+        request = ['bind_snapshot', snapshot_sha256, evidence_ids, expected_revision, _observation_refs]
         old, fingerprint = self._begin(idempotency_key, request, expected_revision)
         if old is not None:
             return old
         try:
             revision = self._next_revision()
-            self.db.execute('INSERT INTO bindings VALUES (?,?,?)',
-                            (revision, snapshot_sha256, _json(evidence_ids)))
+            self.db.execute('INSERT INTO bindings(revision,snapshot_sha256,evidence_ids_json,observation_refs_json) VALUES (?,?,?,?)',
+                            (revision, snapshot_sha256, _json(evidence_ids),
+                             _json(_observation_refs) if _observation_refs is not None else None))
             return self._finish(idempotency_key, fingerprint,
                                 {'revision': revision, 'snapshot_sha256': snapshot_sha256,
                                  'evidence_count': len(evidence_ids)})
@@ -147,11 +153,25 @@ class DecisionStore:
         these exact record IDs. The private publisher has no access to this DB.
         """
         with SnapshotQuery(directory) as snapshot:
-            evidence_ids = [row['record_id'] for row in
-                            snapshot.db.execute('SELECT record_id FROM records ORDER BY record_id')]
+            columns = {row[1] for row in snapshot.db.execute('PRAGMA table_info(records)')}
+            selected = ['record_id'] + [column for column in
+                                        ('raw_json', 'source_sha256', 'source_object_id') if column in columns]
+            rows = snapshot.db.execute('SELECT ' + ','.join(selected) +
+                                       ' FROM records ORDER BY record_id').fetchall()
+            evidence_ids = [row['record_id'] for row in rows]
+            observation_refs = {}
+            for row in rows:
+                raw = json.loads(row['raw_json']) if 'raw_json' in columns else {}
+                observation_refs[row['record_id']] = {
+                    'source_sha256': (raw.get('source_sha256') or
+                                      (row['source_sha256'] if 'source_sha256' in columns else None) or
+                                      (row['source_object_id'].removeprefix('sha256:')
+                                       if 'source_object_id' in columns and row['source_object_id'] else None)),
+                    'refs': raw.get('observation_refs') or raw.get('imported_observation_refs') or []}
             digest = snapshot.manifest['snapshot_sha256']
         return self.bind_snapshot(digest, evidence_ids, expected_revision=expected_revision,
-                                  idempotency_key=idempotency_key)
+                                  idempotency_key=idempotency_key,
+                                  _observation_refs=observation_refs)
 
     def register(self, snapshot_sha256, proposal, *, idempotency_key):
         """Record an immutable proposal. Automatic approval is a distinct event."""
@@ -162,34 +182,80 @@ class DecisionStore:
         if old is not None:
             return old
         try:
-            binding = self._binding()
-            if binding is None or binding['snapshot_sha256'] != snapshot_sha256:
-                raise ConflictError('proposal is not bound to active snapshot')
-            if not {item['id'] for item in proposal['evidence']} <= binding['evidence_ids']:
-                raise ConflictError('proposal cites evidence absent from active snapshot')
-            if self.db.execute('SELECT 1 FROM proposals WHERE id=?', (proposal['id'],)).fetchone():
-                raise ConflictError('decision ID already registered')
-            for row in self.db.execute('SELECT id FROM proposals'):
-                existing = self.inspect(row['id'])
-                if (existing['type'], existing['subject_id']) == (proposal['type'], proposal['subject_id']) and existing['status'] == 'human_corrected':
-                    raise ConflictError('human correction prevents automatic reapplication')
-            for dependency in proposal['depends_on']:
-                if dependency == proposal['id'] or not self.db.execute('SELECT 1 FROM proposals WHERE id=?', (dependency,)).fetchone():
-                    raise ValueError('dependency must be an existing different decision')
-                if proposal['status'] == 'automatic_approved' and self.inspect(dependency)['effective_status'] not in ACCEPTED:
-                    raise ConflictError('automatic approval requires active prerequisites')
-            revision = self._next_revision()
-            self.db.execute('INSERT INTO proposals VALUES (?,?,?,?)',
-                            (proposal['id'], snapshot_sha256, revision, _json(proposal)))
-            self._event(revision, proposal['id'], 'register', 'system', '', None)
-            if proposal['status'] == 'automatic_approved':
-                revision = self._next_revision()
-                self._event(revision, proposal['id'], 'automatic_approve', 'system', '', None)
-            result = self.inspect(proposal['id'])
+            result = self._register_uncommitted(snapshot_sha256, proposal)
             return self._finish(idempotency_key, fingerprint, result)
         except Exception:
             self.db.execute('ROLLBACK')
             raise
+
+    def register_batch(self, snapshot_sha256, proposals, *, idempotency_key):
+        """Register a verified export as one ledger transaction, including retries."""
+        _sha(snapshot_sha256)
+        if not isinstance(proposals, list) or not proposals:
+            raise ValueError('batch requires proposals')
+        for proposal in proposals:
+            self._validate_proposal(proposal)
+        if len({p['id'] for p in proposals}) != len(proposals):
+            raise ValueError('duplicate decision ID')
+        old, fingerprint = self._begin(idempotency_key,
+                                       ['register_batch', snapshot_sha256, proposals])
+        if old is not None:
+            return old
+        try:
+            results = [self._register_uncommitted(snapshot_sha256, proposal)
+                       for proposal in proposals]
+            return self._finish(idempotency_key, fingerprint, results)
+        except Exception:
+            self.db.execute('ROLLBACK')
+            raise
+
+    def _register_uncommitted(self, snapshot_sha256, proposal):
+        binding = self._binding()
+        if binding is None or binding['snapshot_sha256'] != snapshot_sha256:
+            raise ConflictError('proposal is not bound to active snapshot')
+        if not {item['id'] for item in proposal['evidence']} <= binding['evidence_ids']:
+            raise ConflictError('proposal cites evidence absent from active snapshot')
+        if not self._revisions_current(proposal, binding):
+            raise ConflictError('proposal observation revisions absent from active snapshot')
+        if self.db.execute('SELECT 1 FROM proposals WHERE id=?', (proposal['id'],)).fetchone():
+            raise ConflictError('decision ID already registered')
+        for row in self.db.execute('SELECT id FROM proposals'):
+            existing = self.inspect(row['id'])
+            if (existing['type'], existing['subject_id']) == (proposal['type'], proposal['subject_id']) and existing['status'] == 'human_corrected':
+                raise ConflictError('human correction prevents automatic reapplication')
+        for dependency in proposal['depends_on']:
+            if dependency == proposal['id'] or not self.db.execute('SELECT 1 FROM proposals WHERE id=?', (dependency,)).fetchone():
+                raise ValueError('dependency must be an existing different decision')
+            if proposal['status'] == 'automatic_approved' and self.inspect(dependency)['effective_status'] not in ACCEPTED:
+                raise ConflictError('automatic approval requires active prerequisites')
+        revision = self._next_revision()
+        self.db.execute('INSERT INTO proposals VALUES (?,?,?,?)',
+                        (proposal['id'], snapshot_sha256, revision, _json(proposal)))
+        self._event(revision, proposal['id'], 'register', 'system', '', None)
+        if proposal['status'] == 'automatic_approved':
+            revision = self._next_revision()
+            self._event(revision, proposal['id'], 'automatic_approve', 'system', '', None)
+        return self.inspect(proposal['id'])
+
+    @staticmethod
+    def _revisions_current(proposal, binding):
+        refs = binding['observation_refs']
+        canonical = proposal.get('canonical_binding')
+        if refs is None or canonical is None:
+            return True
+        evidence_bindings = canonical.get('evidence_bindings')
+        if not isinstance(evidence_bindings, list) or len(evidence_bindings) != len(proposal['evidence']):
+            return False
+        for item, evidence in zip(proposal['evidence'], evidence_bindings):
+            revision = evidence.get('observation_revision')
+            source = refs.get(item['id'])
+            if (not isinstance(revision, dict) or evidence.get('snapshot_record_id') != item['id']
+                    or not source or source['source_sha256'] != revision.get('source_sha256')
+                    or not any(all(ref.get(key) == revision.get(key) for key in
+                                   ('job_id', 'ordinal', 'candidate_id', 'artifact_sha256', 'parser_version'))
+                               for ref in source['refs'])):
+                return False
+        return True
 
     @staticmethod
     def _validate_proposal(p):
@@ -276,7 +342,8 @@ class DecisionStore:
         missing = []
         if binding:
             missing = [item['id'] for item in p['evidence'] if item['id'] not in binding['evidence_ids']]
-        if p['status'] in ACCEPTED | {'pending'} and (binding is None or missing):
+        if p['status'] in ACCEPTED | {'pending'} and (binding is None or missing or
+                                                    not self._revisions_current(p, binding)):
             effective = 'invalidated'
         elif p['status'] in ACCEPTED:
             for dependency in p['depends_on']:
