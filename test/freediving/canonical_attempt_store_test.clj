@@ -39,6 +39,8 @@
       (is (= 1 (:revision (store/private-projection app))))
       (fixture/sql! app "UPDATE freediving.canonical_attempt_state SET projection_edn='{}'")
       (is (thrown? clojure.lang.ExceptionInfo (store/private-projection app)))
+      (is (thrown? clojure.lang.ExceptionInfo (store/private-ledger app)))
+      (is (thrown? clojure.lang.ExceptionInfo (store/persist! app linked)))
       (is (= (relationships/project-attempts linked) (store/rebuild! app)))
       (is (= (relationships/project-attempts linked) (store/private-projection app)))
       (let [automatic-id (get-in (store/private-projection app) [:automatic-links 0 :id])

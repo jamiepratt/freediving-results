@@ -49,7 +49,14 @@
                              (assoc base :events events) (evidence base)))]
       (when-not (= (:revision state) (count events))
         (fail! "Canonical attempt event revision mismatch"))
+      (when-not (= (:evidence_digest state) (digest (evidence ledger)))
+        (fail! "Canonical attempt evidence digest mismatch"))
       {:state state :ledger ledger})))
+(defn- check-view! [{:keys [state ledger] :as current}]
+  (when-not (= (relationships/project-attempts ledger)
+               (edn/read-string (:projection_edn state)))
+    (fail! "Canonical attempt view requires rebuild"))
+  current)
 (defn- write-view! [^Connection connection ledger evidence-digest]
   (let [projection (relationships/project-attempts ledger)]
     (execute! connection
@@ -77,7 +84,7 @@
    url
    (fn [connection]
      (let [candidate (normalize candidate)
-           current (read-current connection)
+           current (some-> (read-current connection) check-view!)
            previous (:ledger current)
            new-evidence (evidence candidate)
            evidence-digest (digest new-evidence)
@@ -115,18 +122,15 @@
 
 (defn private-ledger [url]
   (transaction url (fn [connection]
-                     (or (:ledger (read-current connection))
+                     (or (:ledger (some-> (read-current connection) check-view!))
                          (fail! "Canonical attempt store is uninitialized")))))
 (defn private-projection
   "Fail closed if the materialized private count or group view is stale or altered."
   [url]
   (transaction url (fn [connection]
-                     (let [{:keys [state ledger]} (or (read-current connection)
-                                                      (fail! "Canonical attempt store is uninitialized"))
+                     (let [{:keys [ledger]} (or (some-> (read-current connection) check-view!)
+                                                (fail! "Canonical attempt store is uninitialized"))
                            projection (relationships/project-attempts ledger)]
-                       (when-not (and (= (:evidence_digest state) (digest (evidence ledger)))
-                                      (= projection (edn/read-string (:projection_edn state))))
-                         (fail! "Canonical attempt view requires rebuild"))
                        projection))))
 (defn rebuild!
   "Recover a partial/stale private projection from immutable evidence and events."
