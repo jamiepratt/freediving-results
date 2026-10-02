@@ -40,6 +40,69 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    def test_dive_field_decisions_are_private_version_bound_and_replayable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            packet = root / 'packet.json'
+            packet.write_text(json.dumps({
+                'schema': 'synthetic/v1', 'source': {'sha256': 'a' * 64},
+                'positions': [{'id': 'pdf:1:2', 'source_sha256': 'a' * 64,
+                               'artifact_sha256': 'b' * 64, 'parser_version': 'pdf/1',
+                               'category_raw': 'Women + Masters', 'representation_raw': 'FRA',
+                               'citation': 'page 1 line 2', 'raw_fields': {'Country': 'FRA'},
+                               'observation_refs': [{'job_id': 'job-1', 'ordinal': 0,
+                                                     'artifact_sha256': 'b' * 64,
+                                                     'parser_version': 'pdf/1'}]}]}))
+            decision = {'schema': 'dive-field-decisions/v1', 'positions': [{
+                'source_position_id': 'pdf:1:2', 'job_id': 'job-1', 'ordinal': 0,
+                'source_sha256': 'a' * 64, 'artifact_sha256': 'b' * 64,
+                'parser_version': 'pdf/1', 'raw_category': 'Women + Masters',
+                'raw_representation': 'FRA', 'accepted_categories': ['women', 'masters'],
+                'accepted_representation': {'kind': 'country', 'code': 'FRA'},
+                'category_status': 'automatic', 'representation_status': 'human',
+                'decision_revision': 3, 'category_citation': 'page 1 line 2 heading',
+                'representation_citation': 'page 1 line 2 Country',
+                'category_decision_id': 'decision:category:1',
+                'representation_decision_id': 'decision:representation:1'}]}
+            decisions = root / 'decisions.json'
+            decisions.write_text(json.dumps(decision))
+            out = root / 'out'
+            args = [sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-10-02T00:00:00Z',
+                    '--input', f'pdf={packet}', '--decisions-file', str(decisions),
+                    '--output-dir', str(out)]
+            subprocess.run(args, check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                row = query.browse(kind='candidate_position')['records'][0]
+                detail = query.detail(row['record_id'])
+                self.assertEqual(row['dive_fields']['accepted_categories'], ['women', 'masters'])
+                self.assertEqual(detail['dive_fields']['raw_representation'], 'FRA')
+                self.assertEqual(detail['dive_fields']['representation_status'], 'human')
+                self.assertEqual(detail['dive_fields']['representation_citation'], 'page 1 line 2 Country')
+                self.assertEqual(detail['category'], 'Women + Masters')
+            first = hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest()
+            subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)],
+                           check=True, capture_output=True)
+            self.assertEqual(hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest(), first)
+            decision['positions'][0]['decision_revision'] = 4
+            decisions.write_text(json.dumps(decision))
+            stale = subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)],
+                                   capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn('decision export hash mismatch', stale.stderr)
+            self.assertEqual(hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest(), first)
+            decision['positions'][0]['parser_version'] = 'pdf/2'
+            decisions.write_text(json.dumps(decision))
+            rejected = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('version mismatch', rejected.stderr)
+            self.assertEqual(hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest(), first)
+            decision['positions'][0]['parser_version'] = 'pdf/1'
+            decision['positions'][0]['ordinal'] = 1
+            decisions.write_text(json.dumps(decision))
+            rejected = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('version mismatch', rejected.stderr)
+
     @unittest.skipUnless(V8_SNAPSHOT.exists(), 'private v8 snapshot unavailable')
     def test_ffessm_printed_field_link_resolves_only_cited_rows(self):
         with SnapshotQuery(V8_SNAPSHOT) as query:
