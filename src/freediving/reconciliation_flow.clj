@@ -104,31 +104,40 @@
      :policy-version (:policy-version assessment) :answer answer
      :result-hash (:result-hash answer) :receipt (:receipt answer)}))
 
-(defn- dispatch-batch [ledger decisions request config policy-config execute!]
-  (try
-    (let [response (execute! request)
-          _ (when (:error response)
-              (throw (ex-info "Reconciliation transport error" {:error (:error response)})))
-          parsed (jev/parse-batch request response)]
-      (reduce (fn [ledger decision]
-                (let [answer (get-in parsed [:answers (:id decision)])
-                      payload (if answer (classify-answer decision answer policy-config)
-                                  {:status :invalid-response :reason :missing-answer
-                                   :policy-version (:version policy-config)})]
-                  (append-result ledger decision config
-                                 (assoc payload :request-hash (:request-hash request)
-                                        :template-version (:template-version request)))))
-              ledger decisions))
-    (catch Exception error
-      (let [reason (or (:error (ex-data error)) :provider-error)
-            status (case reason :timeout :timeout :interrupted :interrupted :provider-error)]
+(defn- dispatch-batch [ledger decisions request config policy-config execute! checkpoint!]
+  (let [ledger (reduce (fn [ledger decision]
+                         (append-result ledger decision config
+                                        {:status :unknown-external-outcome
+                                         :reason :dispatch-started
+                                         :policy-version (:version policy-config)
+                                         :request-hash (:request-hash request)
+                                         :template-version (:template-version request)}))
+                       ledger decisions)
+        _ (when checkpoint! (checkpoint! ledger))]
+    (try
+      (let [response (execute! request)
+            _ (when (:error response)
+                (throw (ex-info "Reconciliation transport error" {:error (:error response)})))
+            parsed (jev/parse-batch request response)]
         (reduce (fn [ledger decision]
-                  (append-result ledger decision config
-                                 {:status status :reason reason
-                                  :policy-version (:version policy-config)
-                                  :request-hash (:request-hash request)
-                                  :template-version (:template-version request)}))
-                ledger decisions)))))
+                  (let [answer (get-in parsed [:answers (:id decision)])
+                        payload (if answer (classify-answer decision answer policy-config)
+                                    {:status :invalid-response :reason :missing-answer
+                                     :policy-version (:version policy-config)})]
+                    (append-result ledger decision config
+                                   (assoc payload :request-hash (:request-hash request)
+                                          :template-version (:template-version request)))))
+                ledger decisions))
+      (catch Exception error
+        (let [reason (or (:error (ex-data error)) :provider-error)
+              status (case reason :timeout :timeout :interrupted :interrupted :provider-error)]
+          (reduce (fn [ledger decision]
+                    (append-result ledger decision config
+                                   {:status status :reason reason
+                                    :policy-version (:version policy-config)
+                                    :request-hash (:request-hash request)
+                                    :template-version (:template-version request)}))
+                  ledger decisions))))))
 
 (defn- retained-valid? [answer decision config]
   (and (= (decision-key decision config) (:decision-key answer))
@@ -143,7 +152,7 @@
   "Resolve a bounded set of decisions. execute! is the only external boundary.
    Retained answers and deterministic outcomes bypass HTTP. Independent ready
    decisions batch together; dependencies advance only after acceptance."
-  [ledger decisions {:keys [config policy execute! retained-answers deterministic-results]}]
+  [ledger decisions {:keys [config policy execute! checkpoint! retained-answers deterministic-results]}]
   (when-not (and (= ledger-version (:version ledger)) (vector? decisions)
                  (= (count decisions) (count (set (map :id decisions))))
                  (every? (comp string? :id) decisions) (map? config) (map? policy))
@@ -202,7 +211,7 @@
                              (reduce (fn [ledger request]
                                        (let [ids (set (:decision-ids request))
                                              members (filterv #(ids (:id %)) pending)]
-                                         (dispatch-batch ledger members request config policy execute!)))
+                                         (dispatch-batch ledger members request config policy execute! checkpoint!)))
                                      ledger (jev/prepare-batches config pending))
                              ledger)
                     known (reduce (fn [known decision]
@@ -291,3 +300,12 @@
                                                           StandardCopyOption/REPLACE_EXISTING]))
               (finally (Files/deleteIfExists temp)))))))
     ledger))
+
+(defn run-file!
+  "Durable private run. Checkpoint each batch before dispatch, so interrupted
+   requests remain unknown and identical reruns never automatically resend."
+  [path decisions options]
+  (let [result (run! (load-ledger! path) decisions
+                     (assoc options :checkpoint! #(save-ledger! path %)))]
+    (save-ledger! path result)
+    result))

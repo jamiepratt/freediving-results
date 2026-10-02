@@ -39,7 +39,7 @@
         ledger (flow/run! (flow/empty-ledger) initial opts)
         rerun (flow/run! ledger changed opts)]
     (is (= 2 @calls))
-    (is (= 2 (count (:events rerun))))
+    (is (= 4 (count (:events rerun))))
     (is (= :approved (get-in (flow/inspect rerun changed) ["model" :status])))))
 
 (deftest dependency-and-human-override-control-dispatch
@@ -57,7 +57,7 @@
     (is (= :human (get-in (flow/inspect result decisions) ["first" :origin])))
     (is (= :dependency-blocked (get-in (flow/inspect result decisions) ["second" :status])))))
 
-(deftest timeout-is-explicit-and-retryable
+(deftest timeout-is-explicit-and-not-redispatched
   (let [calls (atom 0)
         execute! (fn [_] (swap! calls inc) (throw (ex-info "timeout" {:error :timeout})))
         opts {:config config :policy policy :execute! execute!}
@@ -191,6 +191,22 @@
     (flow/save-ledger! path ledger)
     (is (thrown? clojure.lang.ExceptionInfo
                  (flow/save-ledger! path (flow/empty-ledger))))))
+
+(deftest interrupted-dispatch-is-checkpointed-before-http
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-interrupt-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "ledger.edn")
+        decisions [(decision "a")]
+        calls (atom 0)
+        first-execute! (fn [_] (swap! calls inc) (throw (Error. "simulated process death")))
+        second-execute! (fn [_] (swap! calls inc) (throw (Error. "must not resend")))]
+    (is (thrown? Error
+                 (flow/run-file! path decisions
+                                 {:config config :policy policy :execute! first-execute!})))
+    (is (= :unknown-external-outcome
+           (get-in (flow/inspect (flow/load-ledger! path) decisions) ["a" :status])))
+    (flow/run-file! path decisions {:config config :policy policy :execute! second-execute!})
+    (is (= 1 @calls))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-flow-test)]
