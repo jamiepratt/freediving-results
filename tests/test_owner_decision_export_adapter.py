@@ -1,14 +1,18 @@
 import hashlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 import sqlite3
+from contextlib import redirect_stdout
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_decision_store import DecisionStore
-from owner_decision_export_adapter import register_verified_export
+from owner_decision_export_adapter import register_verified_export, deliver_verified_owner_events, main
 from unified_evidence_snapshot import create_db
 
 SHA = 'a' * 64
@@ -129,6 +133,92 @@ class ExportAdapterTest(unittest.TestCase):
         decision = self.store.inspect('decision-1')
         self.assertEqual('automatic_approved', decision['status'])
         self.assertEqual('invalidated', decision['effective_status'])
+
+    def test_trusted_delivery_checkpoints_each_target_and_recovers_after_commit(self):
+        register_verified_export(self.store, self.snapshot, self.envelope())
+        self.store.act('decision-1', action='correct', correction={'action': 'different_person'},
+                       expected_revision=self.store.revision, idempotency_key='owner-correction')
+        event = self.store.human_events()['events'][0]
+        config = self.root / 'delivery.edn'
+        config.write_text('{:synthetic true}')
+        config.chmod(0o600)
+        calls = []
+
+        def run(argv, **kwargs):
+            self.assertEqual(argv[:5], ['clojure', '-M', '-m', 'freediving.owner-event-delivery',
+                                        '--config'])
+            self.assertEqual(argv[5], str(config.resolve()))
+            self.assertEqual(argv[-2:], ['--event-id', event['id']])
+            target = argv[-3]
+            calls.append(target)
+            if target == 'postgresql' and calls.count(target) == 1:
+                raise subprocess.CalledProcessError(1, argv, stderr='synthetic crash')
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
+                'target': target, 'event_id': event['id'], 'receipt': target + ':committed'}))
+
+        with patch('owner_decision_export_adapter.subprocess.run', side_effect=run):
+            first = deliver_verified_owner_events(self.store, config)
+            self.assertEqual(first['status'], 'retry_required')
+            self.assertEqual(first['checkpoints']['flow-ledger'], event['store_revision'], first)
+            self.assertEqual(first['checkpoints']['postgresql'], 0)
+            self.store.close()
+            self.store = DecisionStore(self.root / 'decisions.sqlite')
+            second = deliver_verified_owner_events(self.store, config)
+        self.assertEqual(second['status'], 'complete')
+        self.assertEqual(calls, ['flow-ledger', 'postgresql', 'postgresql'])
+        self.assertEqual(second['checkpoints']['postgresql'], event['store_revision'])
+
+    def test_trusted_delivery_rejects_wrong_target_receipt(self):
+        register_verified_export(self.store, self.snapshot, self.envelope())
+        self.store.act('decision-1', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='owner-approval')
+        config = self.root / 'delivery.edn'
+        config.write_text('{:synthetic true}')
+        config.chmod(0o600)
+        bad = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            'target': 'postgresql', 'event_id': 'owner-store:999', 'receipt': 'false'}))
+        with patch('owner_decision_export_adapter.subprocess.run', return_value=bad):
+            result = deliver_verified_owner_events(self.store, config)
+        self.assertEqual(result['status'], 'retry_required')
+        self.assertEqual(result['failed_target'], 'flow-ledger')
+        self.assertEqual(result['checkpoints'], {'flow-ledger': 0, 'postgresql': 0})
+
+    def test_delivery_requires_private_regular_config(self):
+        config = self.root / 'delivery.edn'
+        config.write_text('{:synthetic true}')
+        config.chmod(0o644)
+        with self.assertRaises(ValueError):
+            deliver_verified_owner_events(self.store, config)
+        config.chmod(0o600)
+        link = self.root / 'delivery-link.edn'
+        link.symlink_to(config)
+        with self.assertRaises(ValueError):
+            deliver_verified_owner_events(self.store, link)
+        self.assertEqual(self.store.delivery_checkpoints(), {'flow-ledger': 0, 'postgresql': 0})
+
+    def test_private_cli_runs_delivery_without_printing_config(self):
+        register_verified_export(self.store, self.snapshot, self.envelope())
+        self.store.act('decision-1', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='owner-approval')
+        config = self.root / 'delivery.edn'
+        config.write_text('{:private "secret-for-test"}')
+        config.chmod(0o600)
+        event_id = self.store.human_events()['events'][0]['id']
+
+        def run(argv, **kwargs):
+            target = argv[-3]
+            self.assertEqual(kwargs['cwd'], Path(__file__).resolve().parents[1])
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
+                'target': target, 'event_id': event_id, 'receipt': 'committed'}))
+
+        self.store.close()
+        output = io.StringIO()
+        with patch('owner_decision_export_adapter.subprocess.run', side_effect=run), redirect_stdout(output):
+            self.assertEqual(0, main(['deliver', '--decision-db', str(self.root / 'decisions.sqlite'),
+                                      '--config', str(config)]))
+        self.store = DecisionStore(self.root / 'decisions.sqlite')
+        self.assertEqual('complete', json.loads(output.getvalue())['status'])
+        self.assertNotIn('secret-for-test', output.getvalue())
 
 
 if __name__ == '__main__':

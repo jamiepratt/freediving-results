@@ -20,6 +20,7 @@
 (def ^:private model-origins #{:jev :cached-jev :retained})
 (def ^:private correction-statuses #{:rejected :reversed})
 (def ^:private satisfied-statuses #{:materialized :no-link})
+(def ^:private delivered-statuses #{:materialized :no-link :reversed})
 
 (defn fetch-owner-review-events
   "Fetch the private signed feed through Access service identity. The caller
@@ -75,7 +76,8 @@
   "Import signed owner events only when exact exported evidence bindings still match.
    The returned ledger must be persisted before canonical routing."
   [ledger decisions envelope {:keys [import-token current-bindings active-snapshot-sha256
-                                     active-binding-revision verified-snapshot-bindings]}]
+                                     active-binding-revision verified-snapshot-bindings
+                                     through-event-id]}]
   (when-not (and (vector? decisions) (map? current-bindings)
                  (string? active-snapshot-sha256)
                  (pos-int? active-binding-revision)
@@ -83,7 +85,15 @@
     (throw (ex-info "Authenticated remote review import required" {})))
   (let [{:keys [events next_revision store_revision] :as feed}
         (authenticated-feed envelope import-token)
-        by-id (into {} (map (juxt :id identity) decisions))]
+        by-id (into {} (map (juxt :id identity) decisions))
+        selected (if through-event-id
+                   (let [prefix (vec (take-while #(not= through-event-id (:id %)) events))
+                         target (nth events (count prefix) nil)]
+                     (when-not (= through-event-id (:id target))
+                       (throw (ex-info "Requested owner event absent from signed feed"
+                                       {:event-id through-event-id})))
+                     (conj prefix target))
+                   events)]
     (when-not (and (vector? events) (nat-int? next_revision) (nat-int? store_revision)
                    (<= next_revision store_revision))
       (throw (ex-info "Invalid owner event feed" {})))
@@ -110,10 +120,13 @@
                         (pos-int? store_revision) (pos-int? binding_revision)
                         (<= store_revision (:store_revision feed))
                         (<= store_revision next_revision)
-                        (= active-binding-revision binding_revision)
-                        (or (= snapshot_sha256 active-snapshot-sha256)
-                            (= (get-in proposal [:canonical_binding])
-                               (get-in verified-snapshot-bindings [snapshot_sha256 decision_id])))
+                        (or (and (= active-binding-revision binding_revision)
+                                 (= snapshot_sha256 active-snapshot-sha256))
+                            (and (not= snapshot_sha256 active-snapshot-sha256)
+                                 (<= binding_revision active-binding-revision)
+                                 (= (get-in proposal [:canonical_binding])
+                                    (get-in verified-snapshot-bindings
+                                            [snapshot_sha256 decision_id]))))
                         (string? actor) (seq actor) (string? reason)
                         status (map? (get-in proposal [:canonical_binding]))
                         (= decision_id (get-in proposal [:canonical_binding :decision_id]))
@@ -143,7 +156,7 @@
                                        :remote-binding-revision binding_revision
                                        :remote-snapshot-sha256 snapshot_sha256
                                        :remote-event event})))))
-     ledger events)))
+     ledger selected)))
 
 (defn- dependency-order [decisions]
   (loop [remaining decisions done #{} ordered []]
@@ -301,11 +314,13 @@
         current (when (and (:reviewer-url opts) target
                            (#{"reject" "reverse"} action))
                   (reviews/dive-fields (:reviewer-url opts) target))
-        event-id (when current (get-in current [decision-type :decision-id]))
+        history (when current
+                  (reviews/dive-decision-history (:reviewer-url opts) target))
+        replay (some #(when (= (:id human) (:id %)) %) history)
+        event-id (or (get-in replay [:request :event-id])
+                     (when current (get-in current [decision-type :decision-id])))
         active-event (when event-id
-                       (first (filter #(= event-id (:id %))
-                                      (reviews/dive-decision-history
-                                       (:reviewer-url opts) target))))
+                       (first (filter #(= event-id (:id %)) history)))
         proposed (case action
                    "approve" (get-in owner [:proposal :proposed :value])
                    "correct" (get-in owner [:correction :value])
@@ -534,12 +549,110 @@
             {:flow-ledger flow-ledger :attempt-ledger attempt-ledger :results {}}
             (dependency-order decisions))))
 
+(declare live-target-revisions)
+
 (defn run-imported!
-  "Verify a signed owner feed, persist its flow, then apply supported canonical
-   decisions. Unroutable families remain explicit for later recovery."
+  "Verify a signed owner feed, persist and route each event in order.
+   Unroutable families remain explicit for later recovery."
   [ledger decisions envelope {:keys [persist-flow!] :as opts}]
   (when-not (fn? persist-flow!)
     (throw (ex-info "Private flow persistence required" {})))
-  (let [imported (import-remote-review-events ledger decisions envelope opts)
-        _ (persist-flow! imported)]
-    (run! imported decisions (assoc opts :imported-only? true))))
+  (let [events (:events (authenticated-feed envelope (:import-token opts)))
+        ids (if (seq events) (mapv :id events) [nil])]
+    (reduce (fn [{:keys [flow-ledger]} event-id]
+              (let [imported (import-remote-review-events
+                              flow-ledger decisions envelope
+                              (assoc opts :through-event-id event-id))
+                    _ (persist-flow! imported)
+                    decision-id (some #(when (= event-id (:id %)) (:decision-id %))
+                                      (:events imported))
+                    decision (some #(when (= decision-id (:id %)) %) decisions)
+                    route-opts (if decision
+                                 (live-target-revisions opts decision event-id)
+                                 opts)
+                    result (run! imported decisions
+                                 (assoc route-opts :imported-only? true))
+                    status (get-in result [:results decision-id :status])]
+                (if (and event-id (not (delivered-statuses status)))
+                  (reduced (assoc result :blocked-event-id event-id))
+                  result)))
+            {:flow-ledger ledger} ids)))
+
+(defn- live-target-revisions [opts decision event-id]
+  (let [id (:id decision)]
+    (case (:family decision)
+      :identity
+      (if-let [url (:reviewer-url opts)]
+        (let [existing (when event-id
+                         (some #(when (= event-id (:id %)) %)
+                               (identity/private-history url)))
+              binding (get-in opts [:current-bindings id])
+              stored-revision (when (and (= :human (:actor-kind existing))
+                                         (= binding (:owner-binding existing))
+                                         (= (parse-long (subs event-id (count "owner-store:")))
+                                            (:owner-event-revision existing)))
+                                (get-in existing [:request :base-revision]))]
+          (assoc-in opts [:identity-revisions id]
+                    (or stored-revision (:revision (identity/private-projection url)))))
+        opts)
+
+      (:same-attempt :source-revision)
+      (if-let [url (:attempt-url opts)]
+        (assoc-in opts [:attempt-revisions id]
+                  (count (:events (attempt-store/private-ledger url))))
+        opts)
+
+      (:category :representation :category-representation)
+      (if-let [{:keys [target] :as field} (field-target opts decision)]
+        (if (and (:reviewer-url opts) target)
+          (assoc-in opts [:field-targets id]
+                    (assoc field :base-revision
+                           (:revision (reviews/dive-fields (:reviewer-url opts) target))))
+          opts)
+        opts)
+
+      opts)))
+
+(defn deliver-owner-event!
+  "Complete one durable target of the owner event outbox. Flow delivery fetches
+   and verifies the signed feed. PostgreSQL delivery uses the persisted event and
+   returns a receipt only after its canonical projection succeeds."
+  [target event-id decisions {:keys [flow-path base-url] :as opts}]
+  (when-not (and (#{:flow-ledger :postgresql} target)
+                 (string? event-id) (re-matches #"owner-store:[1-9][0-9]*" event-id)
+                 flow-path (vector? decisions))
+    (throw (ex-info "Invalid owner event delivery request" {})))
+  (let [revision (parse-long (subs event-id (count "owner-store:")))
+        ledger (flow/load-ledger! flow-path)
+        existing (some #(when (= event-id (:id %)) %) (:events ledger))]
+    (case target
+      :flow-ledger
+      (do
+        (when-not existing
+          (let [envelope (fetch-owner-review-events base-url (dec revision) opts)
+                imported (import-remote-review-events
+                          ledger decisions envelope
+                          (assoc opts :through-event-id event-id))]
+            (flow/save-ledger! flow-path imported)))
+        (str "flow-ledger:" event-id))
+
+      :postgresql
+      (let [_ (when-not existing
+                (throw (ex-info "Owner event has no durable flow checkpoint"
+                                {:event-id event-id})))
+            index (.indexOf ^java.util.List (:events ledger) existing)
+            prefix (assoc ledger :events (subvec (:events ledger) 0 (inc index)))
+            decision (some #(when (= (:decision-id existing) (:id %)) %) decisions)
+            _ (when-not decision
+                (throw (ex-info "Owner event decision unavailable"
+                                {:event-id event-id})))
+            live-opts (live-target-revisions opts decision event-id)
+            result (run! prefix decisions
+                         (assoc live-opts :imported-only? true
+                                :persist-flow! (fn [_] (flow/save-ledger! flow-path ledger))))
+            status (get-in result [:results (:decision-id existing) :status])]
+        (when-not (delivered-statuses status)
+          (throw (ex-info "Owner event canonical projection incomplete"
+                          {:event-id event-id :status status
+                           :result (get-in result [:results (:decision-id existing)])})))
+        (str "postgresql:" event-id)))))
