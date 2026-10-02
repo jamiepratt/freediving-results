@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is run-tests]]
             [clojure.data.json :as json]
             [freediving.athlete-identity :as identity]
+            [freediving.owner-identity-route :as owner-identity]
+            [freediving.canonical-attempt-store :as attempt-store]
             [freediving.reconciliation-application :as application]
             [freediving.reconciliation-flow :as flow]
             [freediving.reconciliation-policy :as policy]
@@ -25,6 +27,210 @@
                :fact "Synthetic cited result"}]
    :evidence-adequate? true})
 
+(deftest signed-owner-import-persists-before-canonical-identity-route
+  (let [d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        binding {:decision_id "identity" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-1" :observation_revisions []
+                 :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        event {:id "owner-store:1" :decision_id "identity" :store_revision 1
+               :binding_revision 1 :action "approve" :actor "owner"
+               :reason "synthetic" :snapshot_sha256 sha
+               :proposal {:selected_option "same_person" :canonical_binding binding}}
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [event] :store_revision 1 :next_revision 1})
+        calls (atom [])]
+    (with-redefs [owner-identity/record-imported-decision!
+                  (fn [_ ledger decision current revision]
+                    (swap! calls conj [:canonical (:id decision) current revision
+                                       (count (:events ledger))])
+                    {:accepted-group-count 1})]
+      (let [result (application/run-imported!
+                    (flow/empty-ledger) [d] envelope
+                    {:config config :policy policy/default-policy
+                     :persist-flow! (fn [ledger]
+                                      (swap! calls conj [:persist (count (:events ledger))]))
+                     :import-token "private-import-token-for-test"
+                     :current-bindings {"identity" binding}
+                     :active-snapshot-sha256 sha
+                     :active-binding-revision 1
+                     :reviewer-url "synthetic-review"
+                     :identity-revisions {"identity" 0}})]
+        (is (= :materialized (get-in result [:results "identity" :status])))
+        (is (= [[:persist 1] [:persist 1]
+                [:canonical "identity" binding 0 1]] @calls))))))
+
+(deftest signed-owner-identity-rejection-materializes-explicit-negative
+  (let [d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        binding {:decision_id "identity" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-1" :observation_revisions []
+                 :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        event {:id "owner-store:2" :decision_id "identity" :store_revision 2
+               :binding_revision 1 :action "reject" :actor "owner"
+               :reason "different people" :snapshot_sha256 sha
+               :proposal {:selected_option "same_person" :canonical_binding binding}}
+        imported (application/import-remote-review-events
+                  (flow/empty-ledger) [d]
+                  (signed-feed "private-import-token-for-test"
+                               {:events [event] :store_revision 2 :next_revision 2})
+                  {:import-token "private-import-token-for-test"
+                   :current-bindings {"identity" binding}
+                   :active-snapshot-sha256 sha :active-binding-revision 1})
+        seen (atom nil)]
+    (is (= :different-person (get-in (flow/inspect imported [d]) ["identity" :action])))
+    (with-redefs [owner-identity/record-imported-decision!
+                  (fn [_ ledger _ _ _]
+                    (reset! seen (last (:events ledger)))
+                    {:negative-pairs [{:pair ["a" "b"]}]})]
+      (let [result (application/run! imported [d]
+                                     {:config config :policy policy/default-policy
+                                      :persist-flow! (fn [_] true)
+                                      :reviewer-url "synthetic-review"
+                                      :current-bindings {"identity" binding}
+                                      :identity-revisions {"identity" 0}
+                                      :imported-only? true})]
+        (is (= :materialized (get-in result [:results "identity" :status])))
+        (is (= :different-person (:action @seen)))))))
+
+(deftest signed-owner-attempt-approval-routes-to-transactional-store
+  (let [base (attempt-fixture/partial-ledger)
+        d (relationships/attempt-jev-decision base "attempt-1" :same-attempt
+                                              ["v1" "v3"] {})
+        binding {:decision_id "attempt-1" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-1" :observation_revisions []
+                 :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        event {:id "owner-store:8" :decision_id "attempt-1" :store_revision 8
+               :binding_revision 1 :action "approve" :actor "owner"
+               :reason "same dive" :snapshot_sha256 sha
+               :proposal {:selected_option "same_attempt" :canonical_binding binding}}
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [event] :store_revision 8 :next_revision 8})
+        seen (atom nil)]
+    (with-redefs [attempt-store/private-ledger (fn [_] base)
+                  attempt-store/record-owner-decision!
+                  (fn [_ request]
+                    (reset! seen request)
+                    {:revision 1 :counts {:accepted-attempts 1}})]
+      (let [result (application/run-imported!
+                    (flow/empty-ledger) [d] envelope
+                    {:config config :policy policy/default-policy
+                     :persist-flow! (fn [_] true)
+                     :import-token "private-import-token-for-test"
+                     :current-bindings {"attempt-1" binding}
+                     :active-snapshot-sha256 sha
+                     :active-binding-revision 1
+                     :attempt-url "synthetic-db"
+                     :attempt-revisions {"attempt-1" 0}})]
+        (is (= :materialized (get-in result [:results "attempt-1" :status])))
+        (is (= :accept (get-in @seen [:event :action])))
+        (is (= :same-attempt (get-in @seen [:event :type])))
+        (is (= ["v1" "v3"] (get-in @seen [:event :pair])))
+        (let [reverse-event (assoc event :id "owner-store:9" :store_revision 9
+                                   :action "reverse")
+              replay (application/run-imported!
+                      (:flow-ledger result) [d]
+                      (signed-feed "private-import-token-for-test"
+                                   {:events [reverse-event] :store_revision 9
+                                    :next_revision 9})
+                      {:config config :policy policy/default-policy
+                       :persist-flow! (fn [_] true)
+                       :import-token "private-import-token-for-test"
+                       :current-bindings {"attempt-1" binding}
+                       :active-snapshot-sha256 sha
+                       :active-binding-revision 1
+                       :attempt-url "synthetic-db"
+                       :attempt-revisions {"attempt-1" 1}})]
+          (is (= :reversed (get-in replay [:results "attempt-1" :status])))
+          (is (= :reverse (get-in @seen [:event :action])))
+          (is (= "owner-store:8" (get-in @seen [:event :event-id]))))))))
+
+(deftest signed-owner-field-approval-routes-to-transactional-review-store
+  (let [d (decision "field" :category-representation
+                    [:category :representation :both :neither :unknown]
+                    [{:field "category"}])
+        binding {:decision_id "field" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-1" :observation_revisions []
+                 :evidence_bindings []}
+        target {:job-id "synthetic-job" :ordinal 0
+                :source-position-id "synthetic-position"
+                :snapshot-record-id (apply str (repeat 64 "b"))}
+        sha (apply str (repeat 64 "a"))
+        event {:id "owner-store:10" :decision_id "field" :store_revision 10
+               :binding_revision 1 :action "approve" :actor "owner"
+               :reason "category column" :snapshot_sha256 sha
+               :proposal {:id "field" :selected_option "category" :proposed ["senior"]
+                          :canonical_binding binding}}
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [event] :store_revision 10 :next_revision 10})
+        seen (atom nil)
+        active-decision (atom "field")]
+    (with-redefs [reviews/dive-fields (fn [_ _]
+                                        {:revision 1 :category {:decision-id "owner-store:10"}})
+                  reviews/dive-decision-history
+                  (fn [_ _] [{:id "owner-store:10"
+                              :request {:binding {:decision_id @active-decision}}}])
+                  reviews/import-owner-dive-field!
+                  (fn [_ request]
+                    (reset! seen request)
+                    {:id (:id request) :status (if (:event-id request)
+                                                 :reversed :accepted)})]
+      (let [result (application/run-imported!
+                    (flow/empty-ledger) [d] envelope
+                    {:config config :policy policy/default-policy
+                     :persist-flow! (fn [_] true)
+                     :import-token "private-import-token-for-test"
+                     :current-bindings {"field" binding}
+                     :active-snapshot-sha256 sha
+                     :active-binding-revision 1
+                     :reviewer-url "synthetic-review"
+                     :field-targets {"field" {:target target
+                                              :decision-type :category
+                                              :base-revision 0}}})]
+        (is (= :materialized (get-in result [:results "field" :status])))
+        (is (= target (:target @seen)))
+        (is (= ["senior"] (:proposed @seen)))
+        (let [rejection (assoc event :id "owner-store:11" :store_revision 11
+                               :action "reject")
+              reversed (application/run-imported!
+                        (:flow-ledger result) [d]
+                        (signed-feed "private-import-token-for-test"
+                                     {:events [rejection] :store_revision 11
+                                      :next_revision 11})
+                        {:config config :policy policy/default-policy
+                         :persist-flow! (fn [_] true)
+                         :import-token "private-import-token-for-test"
+                         :current-bindings {"field" binding}
+                         :active-snapshot-sha256 sha
+                         :active-binding-revision 1
+                         :reviewer-url "synthetic-review"
+                         :field-targets {"field" {:target target
+                                                  :decision-type :category
+                                                  :base-revision 1}}})]
+          (is (= :reversed (get-in reversed [:results "field" :status])))
+          (is (= "owner-store:10" (:event-id @seen)))
+          (reset! active-decision "another-decision")
+          (is (= :unresolved
+                 (get-in (application/run-imported!
+                          (:flow-ledger result) [d]
+                          (signed-feed "private-import-token-for-test"
+                                       {:events [rejection] :store_revision 11
+                                        :next_revision 11})
+                          {:config config :policy policy/default-policy
+                           :persist-flow! (fn [_] true)
+                           :import-token "private-import-token-for-test"
+                           :current-bindings {"field" binding}
+                           :active-snapshot-sha256 sha
+                           :active-binding-revision 1
+                           :reviewer-url "synthetic-review"
+                           :field-targets {"field" {:target target
+                                                    :decision-type :category
+                                                    :base-revision 1}}})
+                         [:results "field" :status]))))))))
+
 (deftest remote-owner-corrections-require-proof-and-current-evidence
   (let [d (decision "identity" :identity
                     [:same-person :different-person :unknown] ["a" "b"])
@@ -35,25 +241,23 @@
         event {:id "owner-store:17" :decision_id "identity" :store_revision 17
                :binding_revision 2 :action "reverse" :actor "owner"
                :reason "different athlete" :snapshot_sha256 sha
-               :proposal {:canonical_binding binding}}
+               :proposal {:selected_option "same_person" :canonical_binding binding}}
         secret "private-import-token-for-test"
         feed (signed-feed secret {:events [event] :store_revision 17 :next_revision 17})
         opts {:import-token secret :current-bindings {"identity" binding}
-              :active-snapshot-sha256 sha}
+              :active-snapshot-sha256 sha :active-binding-revision 2}
         imported (application/import-remote-review-events
                   (flow/empty-ledger) [d] feed opts)]
     (is (= :reversed (get-in (flow/inspect imported [d]) ["identity" :status])))
     (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
     (is (= imported
            (application/import-remote-review-events imported [d] feed opts)))
-    (with-redefs [identity/sync-model-correction! (fn [_ _ _ _]
-                                                    {:accepted-group-count 0})]
-      (is (= :reversed
-             (get-in (application/run! imported [d]
-                                       {:config config :policy policy/default-policy
-                                        :persist-flow! (fn [_] true)
-                                        :reviewer-url "synthetic-review"})
-                     [:results "identity" :status]))))
+    (is (= :unresolved
+           (get-in (application/run! imported [d]
+                                     {:config config :policy policy/default-policy
+                                      :persist-flow! (fn [_] true)
+                                      :reviewer-url "synthetic-review"})
+                   [:results "identity" :status])))
     (is (thrown? clojure.lang.ExceptionInfo
                  (application/import-remote-review-events
                   (flow/empty-ledger) [d] feed {})))
@@ -65,6 +269,10 @@
                  (application/import-remote-review-events
                   (flow/empty-ledger) [d] feed
                   (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d] feed
+                  (assoc opts :active-binding-revision 3))))
     (is (= imported
            (application/import-remote-review-events
             (flow/empty-ledger) [d] feed
@@ -89,12 +297,13 @@
                  :evidence_bindings []}
         base {:decision_id "identity" :binding_revision 2 :snapshot_sha256 sha
               :actor "owner" :reason "source checked"
-              :proposal {:canonical_binding binding}}
+              :proposal {:selected_option "same_person" :canonical_binding binding}}
         events [(assoc base :id "owner-store:3" :store_revision 3 :action "approve")
                 (assoc base :id "owner-store:4" :store_revision 4 :action "correct"
                        :correction {:action "different_person"})]
         opts {:import-token "private-import-token-for-test"
-              :current-bindings {"identity" binding} :active-snapshot-sha256 sha}
+              :current-bindings {"identity" binding} :active-snapshot-sha256 sha
+              :active-binding-revision 2}
         envelope (signed-feed (:import-token opts)
                               {:events events :store_revision 4 :next_revision 4})
         imported (application/import-remote-review-events
@@ -102,7 +311,15 @@
     (is (= 2 (count (:events imported))))
     (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
     (is (= :approved (get-in (flow/inspect imported [d]) ["identity" :status])))
-    (is (= :different-person (get-in (flow/inspect imported [d]) ["identity" :action])))))
+    (is (= :different-person (get-in (flow/inspect imported [d]) ["identity" :action])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d]
+                  (signed-feed (:import-token opts)
+                               {:events [(assoc-in (first events)
+                                                   [:proposal :selected_option]
+                                                   "forged_choice")]
+                                :store_revision 3 :next_revision 3}) opts)))))
 
 (deftest machine-fetch-uses-service-credentials-on-exact-event-route
   (let [server (com.sun.net.httpserver.HttpServer/create

@@ -328,6 +328,20 @@
             (let [[a b] pair ga (get groups a) gb (get groups b) joined (set/union ga gb)]
               (reduce #(assoc %1 %2 joined) groups joined)))
           (into {} (map (fn [id] [id #{id}]) ids)) edges))
+(defn- negative-pairs [events]
+  (let [by-id (into {} (map (juxt :id identity) events))
+        superseded (set (keep :supersedes events))]
+    (->> events
+         (keep (fn [event]
+                 (when (and (= :human (:actor-kind event))
+                            (#{:reject :reverse} (:action event))
+                            (not (superseded (:id event))))
+                   (let [pair (if (= :reject (:action event))
+                                (:pair event) (:pair (by-id (:event-id event))))]
+                     (when pair
+                       {:pair pair :event-id (:id event) :actor-kind :human
+                        :reason (:reason event)})))))
+         (sort-by (juxt :pair :event-id)) vec)))
 (defn project [ledger]
   (let [rows (:rows ledger) edges (vec (active-edges (:events ledger) rows))
         groups (components (keys rows) edges)
@@ -344,6 +358,7 @@
                                  :source-name (:source-name (rows id)) :citation (:citation (rows id))}]) groups))]
     {:revision (count (:events ledger)) :athletes ids
      :groups (into {} (map (fn [members] [(group-id members) (vec (sort members))]) (distinct (vals groups))))
+     :negative-pairs (negative-pairs (:events ledger))
      :accepted-group-count (count (filter #(> (count %) 1) (distinct (vals groups))))
      :provisional-record-count (count rows)
      :unresolved-count (count (filter (comp seq :unresolved-candidates val) ids))
@@ -417,6 +432,11 @@
               (fail! "Model reversal lacks a current failed approval" {:id (:id event)}))))
         (when pair
           (when-not (every? rows pair) (fail! "Unknown observation" {:pair pair}))
+          (when (and (= :human (:actor-kind event)) (= :reject (:action event))
+                     (= (get-in (project ledger) [:athletes (first pair) :group-id])
+                        (get-in (project ledger) [:athletes (second pair) :group-id])))
+            (fail! "Human rejection requires reversing the active identity link first"
+                   {:pair pair}))
           (when (and (= :accept (:action event))
                      (not (and (= :model (:actor-kind event)) (:request event)
                                (not (model-current? rows event)))))

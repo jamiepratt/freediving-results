@@ -34,6 +34,12 @@
     (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (identity/record-event! reviewer
+                                         {:id "contradictory-reject" :action :reject
+                                          :actor-kind :human :pair [a b]
+                                          :reason "must split first"})))
+    (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! reviewer
                                          {:id "canonical-link" :action :reject :actor-kind :human
                                           :pair [a b] :reason "conflicting replay"})))
     (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
@@ -42,6 +48,11 @@
                                       {:id "canonical-reverse" :action :reverse :actor-kind :human
                                        :event-id "canonical-link" :reason "synthetic split"}))))
     (is (= 0 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (= [{:pair [a b] :event-id "canonical-reverse" :actor-kind :human
+             :reason "synthetic split"}]
+           (:negative-pairs (identity/private-canonical-view app))))
+    (is (= (:negative-pairs (identity/private-canonical-view app))
+           (:negative-pairs (identity/rebuild-private-canonical-view! reviewer))))
     (is (= #{a b} (set (keys (:athletes (identity/private-canonical-view app))))))
     (is (= #{"Éxample"}
            (set (map :source-name (vals (:athletes (identity/private-canonical-view app)))))))

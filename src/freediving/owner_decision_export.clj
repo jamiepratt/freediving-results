@@ -1,6 +1,7 @@
 (ns freediving.owner-decision-export
   "Fail-closed mapping from immutable observations and flow events to private owner proposals."
   (:require [clojure.string :as str]
+            [freediving.reconciliation-jev :as jev]
             [freediving.reconciliation-flow :as flow])
   (:import [java.sql DriverManager]))
 
@@ -62,38 +63,94 @@
                 {:evidence-id (:evidence-id evidence) :position position}))
     revision))
 
+(defn- metadata [decision selected records]
+  (let [sources (vec (distinct (map :source-name records)))
+        source-name (str/join " + " sources)
+        originals (case (:family decision)
+                    :identity (mapv :athlete-name records)
+                    (:same-attempt :source-revision :row-semantics
+                                   :category :representation :category-representation)
+                    (mapv :source-value records)
+                    nil)
+        original-key (if (= :identity (:family decision)) :athlete_names :source_values)]
+    (when-not (and (nonempty? source-name) (seq originals)
+                   (every? nonempty? originals) (keyword? selected))
+      (invalid! "Cannot derive proposal values from verified records"
+                {:decision-id (:id decision)}))
+    {:subject_id (or (get-in decision [:subject :id])
+                     (get-in decision [:subject :target-id]))
+     :source_name source-name
+     :source_names sources
+     :original {original-key originals}
+     :proposed {:action (str/replace (name selected) "-" "_")
+                :subject (select-keys (:subject decision) [:pair :target-id :source-positions])}
+     :competing_options (mapv #(str/replace (name %) "-" "_")
+                              (remove #{selected} (:choices decision)))
+     :supporting_evidence [] :conflicting_evidence []
+     :groups (vec (get-in decision [:subject :groups] []))}))
+
+(defn- identity-position [id]
+  (when-let [[_ job ordinal] (and (string? id)
+                                  (re-matches #"local-observation:([0-9a-f]{64}):([0-9]+)" id))]
+    [job (Long/parseLong ordinal)]))
+
+(defn- verify-identity-subject! [decision bound]
+  (when (= :identity (:family decision))
+    (let [subject (:subject decision)
+          pair (:pair subject)
+          versions (:observation-versions subject)]
+      (when-not (and (vector? pair) (= 2 (count pair))
+                     (= 2 (count (set pair)))
+                     (every? identity-position pair)
+                     (= (set (map identity-position pair))
+                        (set (map (fn [item]
+                                    (let [r (:observation-revision item)]
+                                      [(:job_id r) (:ordinal r)])) bound)))
+                     (every? (fn [id]
+                               (let [cited (get versions id)
+                                     revision (some (fn [item]
+                                                      (let [r (:observation-revision item)]
+                                                        (when (= (identity-position id)
+                                                                 [(:job_id r) (:ordinal r)]) r))) bound)]
+                                 (and (= (:source-sha256 cited) (:source_sha256 revision))
+                                      (= (:artifact-sha256 cited) (:artifact_sha256 revision)))))
+                             pair))
+        (invalid! "Identity subject differs from exact observation revisions"
+                  {:decision-id (:id decision)})))))
+
 (defn- proposal [decision event run-revision opts]
   (let [id (:id decision)
         evidence (:evidence decision)
-        names (set (keep :source-name evidence))
-        derived {:subject_id (get-in decision [:subject :id])
-                 :source_name (when (= 1 (count names)) (first names))
-                 :competing_options (when (vector? (:choices decision))
-                                      (mapv #(str/replace (name %) "-" "_")
-                                            (remove #{(:action event)} (:choices decision))))
-                 :supporting_evidence [] :conflicting_evidence []}
-        source (merge derived (:owner-proposal decision))
         mappings (:evidence-bindings opts)
-        verified (:verified-snapshot-record-ids opts)
+        verified (:verified-snapshot-records opts)
         bound (mapv (fn [item]
                       (let [evidence-id (:evidence-id item)
                             mapping (get mappings evidence-id)
                             record-id (:snapshot-record-id mapping)
-                            observation (observation-for item mapping (:observation-revisions opts))]
+                            observation (observation-for item mapping (:observation-revisions opts))
+                            record (get verified record-id)]
                         (when-not (and (nonempty? evidence-id) (= evidence-id (:evidence-id mapping))
-                                       (sha? record-id) (contains? verified record-id)
+                                       (sha? record-id) (= record-id (:record-id record))
+                                       (= (:job-id mapping) (:job-id record))
+                                       (= (:ordinal mapping) (:ordinal record))
+                                       (= (:candidate_id observation) (:candidate-id record))
+                                       (= (:source_sha256 observation) (:source-sha256 record))
+                                       (= (:artifact_sha256 observation) (:artifact-sha256 record))
+                                       (= (:parser_version observation) (:parser-version record))
                                        (or (string? (:citation item))
                                            (and (map? (:citation item)) (seq (:citation item)))))
                           (invalid! "Evidence is not bound to verified snapshot record"
                                     {:decision-id id :evidence-id evidence-id}))
                         {:evidence-id evidence-id :snapshot-record-id record-id
-                         :observation-revision observation :source item}))
+                         :observation-revision observation :record record :source item}))
                     evidence)
+        _ (verify-identity-subject! decision bound)
         answer (:answer event)
         selected (or (:action event) (:action decision))
+        source (metadata decision selected (mapv :record bound))
         model-origin? (#{:jev :retained :cached-jev :deterministic} (:origin event))
         approved? (= :approved (:status event))
-        rule-version (or (:rule-version event) (:rule_version source))]
+        rule-version (or (:rule-version event) (:template-version event))]
     (when-not (and (nonempty? id) (re-matches #"[A-Za-z0-9_-]{1,128}" id)
                    (= id (:decision-id event)) (= evidence (:evidence event))
                    (nonempty? (:id event)) (seq evidence)
@@ -107,7 +164,10 @@
                    (every? vector? (map source [:competing_options :supporting_evidence
                                                 :conflicting_evidence :groups]))
                    (contains? source :original) (contains? source :proposed)
-                   (keyword? selected) model-origin?)
+                   (keyword? selected) (some #{selected} (:choices decision)) model-origin?
+                   (not (:stale? decision))
+                   (or (= :deterministic (:origin event))
+                       (= jev/template-version (:template-version event))))
       (invalid! "Incomplete owner proposal provenance" {:decision-id id}))
     (let [bindings (mapv (fn [{:keys [evidence-id snapshot-record-id observation-revision]}]
                            {:evidence_id evidence-id :snapshot_record_id snapshot-record-id
@@ -120,6 +180,7 @@
         (invalid! "Invalid provider probability" {:decision-id id}))
       {:id id :type (str/replace (name (:family decision)) "-" "_") :subject_id (:subject_id source)
        :source_name (:source_name source) :original (:original source)
+       :source_names (:source_names source)
        :proposed (:proposed source) :selected_option (str/replace (name selected) "-" "_")
        :competing_options (:competing_options source)
        :evidence (mapv (fn [{:keys [evidence-id snapshot-record-id observation-revision source]}]
@@ -142,15 +203,16 @@
 
 (defn export-proposals
   "Export store-compatible proposals only with verified snapshot IDs and exact
-   PostgreSQL observation revisions. Caller supplies IDs read from a verified
-   SnapshotQuery and revisions read through load-observation-revisions!. Nothing
-   here binds a snapshot or mutates either decision store."
-  [ledger decisions {:keys [snapshot-sha256 binding-revision
-                            verified-snapshot-record-ids] :as opts}]
+   PostgreSQL observation revisions. Caller supplies records read from a verified
+   SnapshotQuery, including source values, and revisions read through
+   load-observation-revisions!. Nothing here verifies the snapshot itself or
+   mutates either decision store."
+  [ledger decisions {:keys [snapshot-sha256 binding-revision] :as opts}]
   (when-not (and (= flow/ledger-version (:version ledger)) (vector? (:events ledger))
                  (vector? decisions) (sha? snapshot-sha256)
-                 (pos-int? binding-revision) (set? verified-snapshot-record-ids)
+                 (pos-int? binding-revision)
                  (map? (:evidence-bindings opts)) (map? (:observation-revisions opts))
+                 (map? (:verified-snapshot-records opts))
                  (= (count decisions) (count (set (map :id decisions)))))
     (invalid! "Invalid verified export inputs" {}))
   (let [run-revision (count (:events ledger))]

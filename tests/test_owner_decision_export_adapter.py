@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -94,6 +95,40 @@ class ExportAdapterTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 register_verified_export(self.store, self.snapshot, envelope)
             self.assertEqual(self.revision, self.store.revision)
+
+    def test_later_conflict_rolls_back_entire_verified_export(self):
+        envelope = self.envelope()
+        other = self.envelope()['proposals'][0]
+        other['id'] = 'decision-2'
+        other['canonical_binding']['decision_id'] = 'decision-2'
+        envelope['proposals'].append(other)
+        self.store.register(self.digest, other, idempotency_key='prior-decision-2')
+        before = self.store.revision
+        with self.assertRaises(ValueError):
+            register_verified_export(self.store, self.snapshot, envelope)
+        self.assertEqual(before, self.store.revision)
+        with self.assertRaises(KeyError):
+            self.store.inspect('decision-1')
+
+    def test_changed_observation_invalidates_approval_even_when_record_id_repeats(self):
+        register_verified_export(self.store, self.snapshot, self.envelope())
+        db_path = self.snapshot / 'snapshot.sqlite'
+        db = sqlite3.connect(db_path)
+        raw = json.loads(db.execute('SELECT raw_json FROM records WHERE record_id=?',
+                                    (RECORD,)).fetchone()[0])
+        raw['observation_refs'][0]['parser_version'] = 'parser/2'
+        db.execute('UPDATE records SET raw_json=? WHERE record_id=?', (json.dumps(raw), RECORD))
+        db.commit()
+        db.close()
+        new_digest = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        manifest = json.loads((self.snapshot / 'manifest.json').read_text())
+        manifest['snapshot_sha256'] = new_digest
+        (self.snapshot / 'manifest.json').write_text(json.dumps(manifest))
+        self.store.bind_verified_snapshot(self.snapshot, expected_revision=self.store.revision,
+                                          idempotency_key='changed-observation-bind')
+        decision = self.store.inspect('decision-1')
+        self.assertEqual('automatic_approved', decision['status'])
+        self.assertEqual('invalidated', decision['effective_status'])
 
 
 if __name__ == '__main__':
