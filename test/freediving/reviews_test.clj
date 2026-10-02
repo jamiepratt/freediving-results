@@ -35,6 +35,96 @@
                  :before {:outcome :unknown} :after {:outcome :matched :identity-id "synthetic-person-1"}
                  :evidence [{:page 1 :line 1}] :reason "Synthetic evidence" :actor "test-proposer"}))
 
+(deftest deterministic-dive-fields-are-cited-reversible-and-idempotent
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-test/1")
+        artifact (-> artifact
+                     (assoc-in [:candidates 0 :raw :fields :category] "Women / Masters")
+                     (assoc-in [:candidates 0 :raw :fields :representation] "AIN"))
+        source (assoc source :artifact artifact)
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:page1:line1"}
+        dictionary {:version "test-dictionary/1" :federation "TEST" :event-id "event-1"
+                    :categories {"Women / Masters" ["women" "masters"]}
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}]
+    (fixture/publish! source)
+    (observations/import! fixture/app root (:job-id artifact))
+    (let [first-run (reviews/reconcile-dive-fields! fixture/app target dictionary)
+          again (reviews/reconcile-dive-fields! fixture/app target dictionary)
+          result (reviews/dive-fields fixture/app target)]
+      (is (= first-run again))
+      (is (= ["women" "masters"] (get-in result [:category :accepted])))
+      (is (= {:kind :neutral :code "AIN"} (get-in result [:representation :accepted])))
+      (is (= "Women / Masters" (get-in result [:category :raw])))
+      (is (= :automatic (get-in result [:category :actor-kind])))
+      (is (nil? (get-in first-run [:category :model-confidence])))
+      (is (= {:page 1 :line 1} (select-keys (get-in result [:category :citation]) [:page :line])))
+      (let [export (json/read-str (reviews/export-dive-fields fixture/app) :key-fn keyword)
+            position (first (:positions export))]
+        (is (= "dive-field-decisions/v1" (:schema export)))
+        (is (= "synthetic:page1:line1" (:source_position_id position)))
+        (is (= "automatic" (:category_status position)))
+        (is (= ["women" "masters"] (:accepted_categories position)))
+        (is (= "field-test/1" (:parser_version position)))
+        (is (= 1 (get-in position [:category_citation :page]))))
+      (is (thrown-with-msg? Exception #"Stale" (reviews/reverse-dive-decision!
+                                                reviewer {:id "reverse-stale" :event-id (get-in first-run [:category :id])
+                                                          :base-revision 0 :actor "owner" :reason "Correction"})))
+      (let [revision (:revision result)]
+        (reviews/reverse-dive-decision! reviewer {:id "reverse-category" :event-id (get-in first-run [:category :id])
+                                                  :base-revision revision :actor "owner" :reason "Correction"})
+        (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
+        (is (= {:kind :neutral :code "AIN"}
+               (get-in (reviews/dive-fields fixture/app target) [:representation :accepted])))))))
+
+(deftest conflicting-heading-remains-unresolved-and-human-correction-survives-replay
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-conflict/1")
+        artifact (-> artifact
+                     (assoc-in [:candidates 0 :raw :fields :category] "Women")
+                     (assoc-in [:candidates 0 :raw :fields :representation] "FRA"))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:conflict-row"}
+        dictionary {:version "test-dictionary/1" :federation "TEST" :event-id "event-1"
+                    :categories {"Women" ["women"] "Men" ["men"] "Open" ["open"]}
+                    :representations {"FRA" {:kind :country :code "FRA"}}
+                    :category-heading {:label "Men" :citation {:page 1 :line 9}}}]
+    (fixture/publish! (assoc source :artifact artifact))
+    (observations/import! fixture/app root (:job-id artifact))
+    (let [first-run (reviews/reconcile-dive-fields! fixture/app target dictionary)]
+      (is (= :unresolved (get-in first-run [:category :status])))
+      (is (= :row-heading-conflict (get-in first-run [:category :rule-evidence :rule])))
+      (is (= 1 (count (get-in first-run [:category :conflicting-evidence]))))
+      (is (thrown-with-msg? Exception #"role does not match" (reviews/reconcile-dive-fields!
+                                                              reviewer target (assoc dictionary :version "test-dictionary/2"))))
+      (is (= {:kind :country :code "FRA"}
+             (get-in (reviews/dive-fields fixture/app target) [:representation :accepted])))
+      (is (thrown-with-msg? Exception #"role does not match" (reviews/assert-dive-field!
+                                                              fixture/app (merge target {:id "forged-human" :decision-type :category
+                                                                                         :base-revision 2 :actor "owner" :reason "Forged"
+                                                                                         :proposed ["open"]}))))
+      (reviews/assert-dive-field! reviewer (merge target {:id "human-category" :decision-type :category
+                                                          :base-revision 2 :actor "owner" :reason "Reviewed source row"
+                                                          :proposed ["open"]}))
+      (let [next-artifact (-> artifact
+                              (assoc :parser-version "field-conflict/2")
+                              (assoc-in [:candidates 0 :raw :fields :category] "Open"))
+            next-artifact (assoc next-artifact :job-id
+                                 (fixture/hash-value (select-keys next-artifact observations/identity-keys)))
+            next-target (assoc target :job-id (:job-id next-artifact))]
+        (fixture/publish! (assoc source :artifact next-artifact))
+        (observations/import! fixture/app root (:job-id next-artifact))
+        (is (nil? (get-in (reviews/dive-fields fixture/app next-target) [:representation :accepted])))
+        (is (= ["open"] (get-in (reviews/dive-fields fixture/app next-target) [:category :accepted])))
+        (reviews/reconcile-dive-fields! fixture/app next-target (dissoc dictionary :category-heading))
+        (is (= ["open"] (get-in (reviews/dive-fields fixture/app next-target) [:category :accepted])))
+        (is (= :human (get-in (reviews/dive-fields fixture/app next-target) [:category :actor-kind])))
+        (is (= (:job-id next-target)
+               (-> (reviews/export-dive-fields fixture/app)
+                   (json/read-str :key-fn keyword) :positions first :job_id)))
+        (is (= 0 (count (filter #(and (= :category (:decision-type %))
+                                      (= :automatic (:actor-kind %))
+                                      (= :accepted (:status %)))
+                                (reviews/dive-decision-history fixture/app next-target)))))
+        (is (some #(and (= :category (:decision-type %)) (= :suppressed (:status %)))
+                  (reviews/dive-decision-history fixture/app next-target)))))))
+
 (defn- scored-fixture []
   (let [target (sample)
         candidate (assoc target :ordinal 1)
@@ -772,6 +862,31 @@
       (is (= :matched (get-in (reviews/effective reviewer target) [:identity :outcome])))
       (reviews/decide! reviewer {:id "reverse-html" :event-id "approve-html" :action :reverse :base-revision 1 :actor "owner" :reason "Undo"})
       (is (= {:outcome :unknown} (:identity (reviews/effective reviewer target)))))))
+
+(deftest deterministic-fields-read-retained-html-and-json-cells
+  (let [json-ref (json-observation)
+        json-target (assoc (select-keys json-ref [:job-id :ordinal])
+                           :source-position-id "packet:json:row0")
+        json-dictionary {:version "test-json/1" :federation "CMAS" :event-id "meet-json"
+                         :categories {"MASTERS M1" ["masters-m1"]}
+                         :representations {"GER" {:kind :country :code "GER"}}}
+        json-run (reviews/reconcile-dive-fields! fixture/app json-target json-dictionary)
+        dir (archive-fixture/workspace) root (str dir "/archive")
+        hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
+        job (:job-id (html/extract! root hash {:actor "synthetic" :config {}}))
+        html-target {:job-id job :ordinal 0 :source-position-id "packet:html:row0"}
+        html-dictionary {:version "test-html/1" :federation "AIDA" :event-id "meet-html"
+                         :categories {"Female" ["women"]}
+                         :representations {"AIN" {:kind :neutral :code "AIN"}}}]
+    (observations/import! fixture/app root job)
+    (is (= ["masters-m1"] (get-in json-run [:category :proposed])))
+    (is (= {:kind :country :code "GER"} (get-in json-run [:representation :proposed])))
+    (let [html-run (reviews/reconcile-dive-fields! fixture/app html-target html-dictionary)
+          projected (reviews/dive-fields fixture/app html-target)]
+      (is (= ["women"] (get-in html-run [:category :proposed])))
+      (is (= {:kind :neutral :code "AIN"} (get-in projected [:representation :accepted])))
+      (is (= 1 (get-in projected [:category :citation :table])))
+      (is (= 2 (get-in projected [:category :citation :row]))))))
 (deftest html-registered-identity-target-rejects-wrong-source-row-and-envelope
   (let [dir (archive-fixture/workspace) root (str dir "/archive")
         hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
@@ -791,3 +906,22 @@
     (is (thrown? Exception (reviews/decide! fixture/app {:id "forbidden" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Not authorized"})))
     (reviews/decide! reviewer {:id "approved-html-anchor" :proposal-id "html-anchor" :action :approve :base-revision 0 :actor "owner" :reason "Explicit review"})
     (is (= (:after p) (:identity (reviews/effective reviewer t))))))
+
+(deftest reviewed-scan-transcription-keeps-unknown-representation-visible
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "scan-transcription-test/1")
+        artifact (-> artifact
+                     (assoc-in [:candidates 0 :raw :transcription-method] :manual-image-review)
+                     (assoc-in [:candidates 0 :raw :fields :category] "Open")
+                     (assoc-in [:candidates 0 :raw :fields :representation] "Independent"))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "packet:scan:row0"}
+        dictionary {:version "scan-test/1" :federation "TEST" :event-id "scan-event"
+                    :categories {"Open" ["open"]} :representations {}}]
+    (fixture/publish! (assoc source :artifact artifact))
+    (observations/import! fixture/app root (:job-id artifact))
+    (let [run (reviews/reconcile-dive-fields! fixture/app target dictionary)
+          state (reviews/dive-fields fixture/app target)]
+      (is (= ["open"] (get-in state [:category :accepted])))
+      (is (nil? (get-in state [:representation :accepted])))
+      (is (= "Independent" (get-in state [:representation :raw])))
+      (is (= :unmapped-label (get-in run [:representation :rule-evidence :rule])))
+      (is (= :unresolved (get-in run [:representation :status]))))))
