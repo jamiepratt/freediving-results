@@ -24,14 +24,16 @@
               (.digest (MessageDigest/getInstance "SHA-256")
                        (.getBytes (pr-str (canonical value)) "UTF-8"))))
 
-(defn- source-input [{:keys [document retained-input archive-root]} root]
+(defn- source-input [{:keys [document retained-input]} root]
   (let [sha (:source-sha256 document)]
     (try
       (let [source (archive/inspect root sha)
+            _ (when-not (seq (:acquisitions source))
+                (throw (ex-info "Archived source has no verified acquisition" {})))
             bytes (archive/read-source-bytes (:artifact-path source))
             format (:format document)
             input (if (= :pdf format)
-                    (retained-pdf/verified-input (or archive-root root) document)
+                    (retained-pdf/verified-input root document)
                     retained-input)
             input-bytes (case format
                           :html (some-> (:html input) (.getBytes "UTF-8"))
@@ -179,13 +181,19 @@
                        (filter #(re-matches #"[0-9a-f]{64}\.edn" (.getName %)))
                        (map (fn [file]
                               (let [receipt (edn/read-string (slurp file :encoding "UTF-8"))
+                                    filename-job-id (subs (.getName file) 0 64)
+                                    _ (when-not (= filename-job-id (:job-id receipt))
+                                        (throw (ex-info "Replay receipt job ID mismatch" {})))
                                     artifact (io/file root "derived-objects" (:artifact-sha256 receipt))
                                     bytes (archive/read-source-bytes (str artifact))]
                                 (when-not (= (:artifact-sha256 receipt)
                                              (.formatHex (HexFormat/of)
                                                          (.digest (MessageDigest/getInstance "SHA-256") bytes)))
                                   (throw (ex-info "Replay artifact hash mismatch" {})))
-                                (edn/read-string (String. bytes "UTF-8")))))
+                                (let [record (edn/read-string (String. bytes "UTF-8"))]
+                                  (when-not (= filename-job-id (:job-id record))
+                                    (throw (ex-info "Replay artifact job ID mismatch" {})))
+                                  record))))
                        vec)
                   [])
         observations (->> records (filter #(= :batch-observation (:kind %)))

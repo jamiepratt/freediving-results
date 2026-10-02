@@ -1,5 +1,6 @@
 (ns freediving.parser-batch-import-test
-  (:require [clojure.test :refer [deftest is run-tests]]
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is run-tests]]
             [freediving.aida-html :as aida-html]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
@@ -79,6 +80,32 @@
     (is (some #(= :missing-or-invalid-archived-source (:reason %))
               (:unresolved-exceptions snapshot)))))
 
+(deftest archived-object-without-acquisition-cannot-be-imported
+  (let [root (store-root)
+        source (json-fixture/fixture [(json-fixture/result-row 101)])
+        entry (select-keys source [:document :retained-input])]
+    (register-source! root source)
+    (doseq [file (.listFiles (java.io.File. root "acquisitions"))]
+      (Files/delete (.toPath file)))
+    (is (empty? (:acquisitions (archive/inspect root (:hash source)))))
+    (let [result (batch-import/import-registered-batch! root [entry])]
+      (is (zero? (get-in result [:metrics :imported-observations])))
+      (is (empty? (:observations (batch-import/inspect root))))
+      (is (some #(= :missing-or-invalid-archived-source (:reason %))
+                (:unresolved-exceptions (batch-import/inspect root)))))))
+
+(deftest unexamined-position-remains-durable-exception
+  (let [root (store-root)
+        source (json-fixture/fixture [(json-fixture/result-row 101)])
+        entry (-> (select-keys source [:document :retained-input])
+                  (assoc-in [:document :positions 0 :examined?] false))]
+    (register-source! root source)
+    (let [result (batch-import/import-registered-batch! root [entry])
+          snapshot (batch-import/inspect root)]
+      (is (zero? (get-in result [:metrics :imported-observations])))
+      (is (empty? (:observations snapshot)))
+      (is (some #(= :unexamined (:status %)) (:unresolved-exceptions snapshot))))))
+
 (deftest html-replay-retains-native-name-and-exact-source-row
   (let [root (store-root)
         source (html-fixture/document html-fixture/cells)
@@ -154,6 +181,51 @@
     (is (empty? (:observations (batch-import/inspect root))))
     (is (some #(= :unsupported-or-unverified-pdf-source (:reason %))
               (:unresolved-exceptions (batch-import/inspect root))))))
+
+(deftest pdf-input-derives-from-import-archive
+  (let [{:keys [root hash]} (pdf-fixture/fixture)
+        _ (batch-import/import-registered-batch!
+           root [{:document {:source-sha256 hash :format :pdf :positions []}
+                  :archive-root "/definitely-missing-other-archive"}])]
+    (is (some #(= :unsupported-or-unverified-pdf-source (:reason %))
+              (:unresolved-exceptions (batch-import/inspect root))))
+    (is (not-any? #(= :missing-or-invalid-archived-source (:reason %))
+                  (:unresolved-exceptions (batch-import/inspect root))))))
+
+(defn- first-replay-receipt [root]
+  (first (filter #(re-matches #"[0-9a-f]{64}\.edn" (.getName %))
+                 (.listFiles (java.io.File. root "derivations")))))
+
+(deftest inspect-rejects-receipt-job-id-mismatch
+  (let [root (store-root)
+        source (json-fixture/fixture [(json-fixture/result-row 101)])]
+    (register-source! root source)
+    (batch-import/import-registered-batch!
+     root [(select-keys source [:document :retained-input])])
+    (let [receipt-file (first-replay-receipt root)
+          receipt (edn/read-string (slurp receipt-file))]
+      (spit receipt-file (pr-str (assoc receipt :job-id (apply str (repeat 64 "0")))))
+      (is (thrown? clojure.lang.ExceptionInfo (batch-import/inspect root))))))
+
+(deftest inspect-rejects-artifact-job-id-mismatch-even-with-valid-hash
+  (let [root (store-root)
+        source (json-fixture/fixture [(json-fixture/result-row 101)])]
+    (register-source! root source)
+    (batch-import/import-registered-batch!
+     root [(select-keys source [:document :retained-input])])
+    (let [receipt-file (first-replay-receipt root)
+          receipt (edn/read-string (slurp receipt-file))
+          old-artifact (java.io.File. root (str "derived-objects/" (:artifact-sha256 receipt)))
+          artifact (edn/read-string (slurp old-artifact))
+          bytes (.getBytes (pr-str (assoc artifact :job-id (apply str (repeat 64 "0")))) "UTF-8")
+          new-hash (sha256 bytes)
+          new-artifact (java.io.File. root (str "derived-objects/" new-hash))]
+      (Files/write (.toPath new-artifact) bytes (make-array java.nio.file.OpenOption 0))
+      (Files/setPosixFilePermissions (.toPath new-artifact)
+                                     (java.nio.file.attribute.PosixFilePermissions/fromString
+                                      "rw-------"))
+      (spit receipt-file (pr-str (assoc receipt :artifact-sha256 new-hash)))
+      (is (thrown? clojure.lang.ExceptionInfo (batch-import/inspect root))))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.parser-batch-import-test)]
