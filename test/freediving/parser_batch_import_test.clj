@@ -1,5 +1,6 @@
 (ns freediving.parser-batch-import-test
   (:require [clojure.test :refer [deftest is run-tests]]
+            [freediving.aida-html :as aida-html]
             [freediving.archive :as archive]
             [freediving.archive-test :as archive-fixture]
             [freediving.aida-html-test :as html-fixture]
@@ -93,6 +94,28 @@
     (is (= "ÉXAMPLE  & Person" (get-in observation [:candidate :parsed :source-name])))
     (is (= :result-row (:evidence-role observation)))
     (is (= (get-in document [:positions 0 :citation]) (:citation observation)))))
+
+(deftest html-ranking-remains-evidence-with-filter-context
+  (let [root (store-root)
+        source (str "<select id='discipline'><option selected>DYN</option></select>"
+                    "<select id='gender'><option selected>Male</option></select>"
+                    "<table><tr>" (apply str (map #(str "<th>" % "</th>")
+                                                  aida-html/ranking-headers))
+                    "</tr><tr><td></td><td>1</td><td>Synthetic Person</td><td>AIN</td>"
+                    "<td>100 m</td><td>90 m</td><td>50</td><td>0</td></tr></table>")
+        hash (register-html! root source)
+        id "table=1&row=2"
+        document {:source-sha256 hash :format :html
+                  :positions [{:id id :citation (str "sha256:" hash "#" id)
+                               :coordinates {:table 1 :row 2}}]}
+        result (batch-import/import-registered-batch!
+                root [{:document document :retained-input {:html source}}])
+        snapshot (batch-import/inspect root)]
+    (is (zero? (get-in result [:metrics :imported-observations])))
+    (is (= 1 (get-in result [:metrics :imported-evidence])))
+    (is (empty? (:observations snapshot)))
+    (is (= :event-ranking (:evidence-role (first (:evidence snapshot)))))
+    (is (= "DYN" (get-in snapshot [:evidence 0 :candidate :parsed :discipline])))))
 
 (deftest interrupted-position-derivation-resumes-without-duplicate
   (let [root (store-root)

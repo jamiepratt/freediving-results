@@ -120,20 +120,23 @@
                     (evidence-for (assoc route :source-sha256 sha :format (:format document))
                                   (map :adapter (get extractions sha)))]
              (let [claim (:claim route)
-                   record {:kind :batch-observation :source-sha256 sha
+                   role (or (get-in candidate [:coordinates :evidence-role])
+                            (case (:source-family candidate)
+                              :attempts :result-row
+                              :ranking :event-ranking
+                              :result-row))
+                   observation? (#{:result-row :individual-result} role)
+                   record {:kind (if observation? :batch-observation :batch-evidence)
+                           :source-sha256 sha
                            :format (:format document) :position-id (:position-id route)
                            :citation (:citation route) :coordinates (:coordinates route)
                            :parser-id (:parser-id claim) :parser-version (:parser-version claim)
                            :source-verification source-verification
-                           :evidence-role (or (get-in candidate [:coordinates :evidence-role])
-                                              (case (:source-family candidate)
-                                                :attempts :result-row
-                                                :ranking :event-ranking
-                                                :result-row))
+                           :evidence-role role
                            :candidate candidate :status :unreviewed}]
                (when (= :created (derive-record! root record on-progress))
                  (swap! imported-evidence inc)
-                 (when (#{:result-row :individual-result} (:evidence-role record))
+                 (when observation?
                    (swap! imported inc))))
              (when (= :created
                       (derive-record! root {:kind :batch-exception :source-sha256 sha
@@ -187,11 +190,14 @@
                   [])
         observations (->> records (filter #(= :batch-observation (:kind %)))
                           (sort-by (juxt :source-sha256 :position-id :parser-version)) vec)
+        evidence (->> records (filter #(= :batch-evidence (:kind %)))
+                      (sort-by (juxt :source-sha256 :position-id :parser-version)) vec)
         exceptions (->> records (filter #(= :batch-exception (:kind %)))
                         (sort-by (juxt :source-sha256 :position-id :status)) vec)
         resolved (set (map (juxt :source-sha256 :position-id :parser-id :parser-version)
                            observations))]
     {:observations observations
+     :evidence evidence
      :exceptions exceptions
      :unresolved-exceptions (->> exceptions
                                  (remove #(and (:position-id %) (:parser-version %)
