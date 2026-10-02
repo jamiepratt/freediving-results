@@ -9,6 +9,14 @@ sorting, automatic/human decision states and reversible writes. Those capabiliti
 are not enabled by this documentation update; the read-only origin and gateway
 contracts below continue to describe current behavior.
 
+The optional decision API now has a separate append-only SQLite store, verified
+snapshot binding, authenticated write routes, and review controls. Normal private
+origin activation leaves it disabled. Its current projections describe only
+decisions in that store; they do not update the canonical PostgreSQL athlete,
+attempt, or dive-field ledgers. See [issue #72](https://github.com/jamiepratt/freediving-results/issues/72)
+for the remaining integration and validation gates. Automatic decisions shown
+there are never human review attestations or public publication approval.
+
 Run `python3 scripts/owner_evidence_web.py --snapshot-dir PATH` with a verified private unified snapshot directory. Enter a local password at the terminal prompt, then open the printed loopback login URL. The process binds only to `127.0.0.1` on an ephemeral port. Stop it with Ctrl-C.
 
 The workspace reads the immutable SQLite snapshot through `SnapshotQuery`. It provides source counts and dispositions, filters for source, collection, kind, event, printed date span, session, discipline and category, plus paged candidate, gap and relationship views. The overview reports candidate source positions, observation version records, and accepted distinct attempts separately. Versions and candidate versions do not add positions; unresolved overlap or publisher revision direction leaves the accepted count unknown. Source row counts are not attempt totals. Detail shows retained packet raw and parsed fields, citation and source hashes. The interface labels normalized federation unavailable, and never treats candidate rows as confirmed distinct attempts. Pass `--source-bundle-dir` and `--source-bundle-sha256` together to enable record-bound original and safe-derivative inspection from a verified [private source bundle](private-source-bundle.md). Without those arguments, source viewing stays unavailable. Owner review, mutation and publication remain outside this process.
