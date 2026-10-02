@@ -1,21 +1,30 @@
 # Local owner evidence workspace
 
-The runbook below describes the implemented read-only workspace.
-[ADR 0003](adr/0003-automatic-evidence-reconciliation.md) now accepts automatic
-reconciliation with later review and rollback on the existing private website.
-[Issue #67](https://github.com/jamiepratt/freediving-results/issues/67) owns that
-next phase: persistent decisions independent of snapshot replacement, confidence
-sorting, automatic/human decision states and reversible writes. Those capabilities
-are not enabled by this documentation update; the read-only origin and gateway
-contracts below continue to describe current behavior.
+The runbook below describes the owner evidence workspace and its guarded
+decision API. [ADR 0003](adr/0003-automatic-evidence-reconciliation.md)
+accepts automatic reconciliation with later review and rollback.
+[Issue #72](https://github.com/jamiepratt/freediving-results/issues/72) tracks
+the remaining integration, corpus binding and activation gates.
 
-The optional decision API now has a separate append-only SQLite store, verified
+The optional decision API has a separate append-only SQLite store, verified
 snapshot binding, authenticated write routes, and review controls. Normal private
-origin activation leaves it disabled. Its current projections describe only
-decisions in that store; they do not update the canonical PostgreSQL athlete,
-attempt, or dive-field ledgers. See [issue #72](https://github.com/jamiepratt/freediving-results/issues/72)
-for the remaining integration and validation gates. Automatic decisions shown
-there are never human review attestations or public publication approval.
+origin activation leaves it disabled. A trusted local delivery command can send
+human events through the signed Access feed to a durable flow ledger and canonical
+PostgreSQL callbacks, with a checkpoint for each destination. The browser still
+reports canonical projection status as unavailable; its local overlay counts do
+not attest that PostgreSQL has caught up. Retained-corpus authority and production
+activation remain gated by issue #72. Automatic decisions shown here are never
+human review attestations or public publication approval.
+
+For a trusted local import, run
+`python3 scripts/owner_decision_export_adapter.py deliver --decision-db DB --config CONFIG`.
+`CONFIG` is a private, owner-owned EDN file with mode 0600 containing the pinned
+flow path, exported decisions and exact canonical bindings, Access service
+identity, import token and PostgreSQL reviewer connection. The command returns
+per-target checkpoints. A retry-required result exits with code 2; rerun with
+the same inputs after repairing its reported failed target. Keep this config,
+the flow ledger and decision database outside Git. The command does not enable
+the production decision API or establish retained-corpus authority.
 
 Run `python3 scripts/owner_evidence_web.py --snapshot-dir PATH` with a verified private unified snapshot directory. Enter a local password at the terminal prompt, then open the printed loopback login URL. The process binds only to `127.0.0.1` on an ephemeral port. Stop it with Ctrl-C.
 

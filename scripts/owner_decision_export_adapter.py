@@ -4,8 +4,13 @@ Only a trusted private caller can invoke this adapter. Publisher input cannot
 register decisions, and the snapshot is opened read-only with hash verification.
 """
 
+import argparse
 import hashlib
 import json
+import os
+import stat
+import subprocess
+from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
 
@@ -89,3 +94,67 @@ def register_verified_export(store, snapshot_directory, envelope):
             _verify_proposal(snapshot, proposal, envelope.get('reconciliation_run_revision'))
     return store.register_batch(envelope['snapshot_sha256'], proposals,
                                 idempotency_key='reconciliation-export:' + _digest(proposals))
+
+
+def deliver_verified_owner_events(store, config_path, *, limit=100):
+    """Run the private local importer, checkpointing each committed destination.
+
+    The Clojure command fetches and authenticates the signed event feed itself.
+    Its config is private local input; publisher bytes cannot select a command,
+    destination, or canonical database. A failed or mismatched receipt leaves
+    the corresponding SQLite outbox checkpoint unchanged for a safe retry.
+    """
+    config = Path(config_path)
+    config_stat = config.lstat()
+    if (not stat.S_ISREG(config_stat.st_mode) or config_stat.st_uid != os.getuid()
+            or config_stat.st_mode & 0o077):
+        raise ValueError('owner delivery config must be an owner-only regular file')
+    config = config.resolve(strict=True)
+
+    def callback(target):
+        def deliver(event):
+            args = ['clojure', '-M', '-m', 'freediving.owner-event-delivery',
+                    '--config', str(config), '--target', target, '--event-id', event['id']]
+            completed = subprocess.run(args, capture_output=True, text=True,
+                                       check=True, timeout=120,
+                                       cwd=Path(__file__).resolve().parents[1])
+            try:
+                result = json.loads(completed.stdout)
+            except (ValueError, TypeError) as exc:
+                raise ValueError('invalid owner delivery receipt') from exc
+            if (not isinstance(result, dict) or set(result) != {'target', 'event_id', 'receipt'}
+                    or result['target'] != target or result['event_id'] != event['id']
+                    or not isinstance(result['receipt'], str)
+                    or not 1 <= len(result['receipt']) <= 512
+                    or '\x00' in result['receipt']):
+                raise ValueError('invalid owner delivery receipt')
+            return result['receipt']
+        return deliver
+
+    return store.deliver_human_events([('flow-ledger', callback('flow-ledger')),
+                                       ('postgresql', callback('postgresql'))], limit=limit)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Private local owner event delivery')
+    subcommands = parser.add_subparsers(dest='command', required=True)
+    delivery = subcommands.add_parser('deliver')
+    delivery.add_argument('--decision-db', required=True)
+    delivery.add_argument('--config', required=True)
+    delivery.add_argument('--limit', type=int, default=100)
+    args = parser.parse_args(argv)
+    db_path = Path(args.decision_db)
+    if not stat.S_ISREG(db_path.lstat().st_mode):
+        raise ValueError('owner decision DB must be an existing regular file')
+    from owner_decision_store import DecisionStore
+    with_store = DecisionStore(db_path)
+    try:
+        result = deliver_verified_owner_events(with_store, args.config, limit=args.limit)
+    finally:
+        with_store.close()
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result['status'] == 'complete' else 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

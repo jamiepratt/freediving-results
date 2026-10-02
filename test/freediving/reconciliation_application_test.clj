@@ -27,6 +27,116 @@
                :fact "Synthetic cited result"}]
    :evidence-adequate? true})
 
+(deftest owner-delivery-checkpoints-each-target-and-retries-failed-projection
+  (let [root (java.nio.file.Files/createTempDirectory "owner-delivery-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "flow.edn")
+        d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        binding {:decision_id "identity" :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        owner {:id "owner-store:1" :decision_id "identity" :store_revision 1
+               :binding_revision 1 :action "approve" :actor "owner"
+               :reason "synthetic" :snapshot_sha256 sha
+               :proposal {:selected_option "same_person" :canonical_binding binding}}
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [owner] :store_revision 1 :next_revision 1})
+        projected (atom 0)
+        opts {:flow-path path :base-url "http://127.0.0.1:1234"
+              :access-client-id "synthetic" :access-client-secret "synthetic"
+              :allow-loopback-http? true
+              :config config :policy policy/default-policy
+              :import-token "private-import-token-for-test"
+              :current-bindings {"identity" binding}
+              :active-snapshot-sha256 sha :active-binding-revision 1
+              :reviewer-url "synthetic-review"
+              :identity-revisions {"identity" 0}}]
+    (with-redefs [application/fetch-owner-review-events (fn [_ _ _] envelope)
+                  identity/private-projection (fn [_] {:revision 0})
+                  identity/private-history (fn [_] [])
+                  owner-identity/record-imported-decision!
+                  (fn [& _]
+                    (if (= 1 (swap! projected inc))
+                      (throw (ex-info "temporary projection failure" {}))
+                      {:accepted-group-count 1}))]
+      (is (string? (application/deliver-owner-event! :flow-ledger
+                                                     "owner-store:1" [d] opts)))
+      (is (= 1 (count (:events (flow/load-ledger! path)))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (application/deliver-owner-event! :postgresql
+                                                     "owner-store:1" [d] opts)))
+      (is (= 1 (count (:events (flow/load-ledger! path)))))
+      (is (string? (application/deliver-owner-event! :postgresql
+                                                     "owner-store:1" [d] opts)))
+      (is (= 2 @projected))
+      (is (= 1 (count (:events (flow/load-ledger! path))))))))
+
+(deftest owner-delivery-replays-projections-in-event-order-after-flow-runs-ahead
+  (let [root (java.nio.file.Files/createTempDirectory "owner-delivery-order-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "flow.edn")
+        d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        binding {:decision_id "identity" :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        event (fn [revision action]
+                {:id (str "owner-store:" revision) :decision_id "identity"
+                 :store_revision revision :binding_revision 1 :action action
+                 :actor "owner" :reason "synthetic" :snapshot_sha256 sha
+                 :proposal {:selected_option "same_person"
+                            :canonical_binding binding}})
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [(event 1 "approve") (event 2 "reverse")]
+                               :store_revision 2 :next_revision 2})
+        seen (atom [])
+        revision (atom 0)
+        opts {:flow-path path :base-url "http://127.0.0.1:1234"
+              :access-client-id "synthetic" :access-client-secret "synthetic"
+              :allow-loopback-http? true :config config :policy policy/default-policy
+              :import-token "private-import-token-for-test"
+              :current-bindings {"identity" binding}
+              :active-snapshot-sha256 sha :active-binding-revision 1
+              :reviewer-url "synthetic-review" :identity-revisions {"identity" 0}}]
+    (with-redefs [application/fetch-owner-review-events (fn [_ _ _] envelope)
+                  identity/private-projection (fn [_] {:revision @revision})
+                  identity/private-history (fn [_] [])
+                  owner-identity/record-imported-decision!
+                  (fn [_ ledger _ _ _]
+                    (swap! seen conj (:id (last (:events ledger))))
+                    (swap! revision inc)
+                    {:accepted-group-count 1})]
+      (application/deliver-owner-event! :flow-ledger "owner-store:1" [d] opts)
+      (application/deliver-owner-event! :flow-ledger "owner-store:2" [d] opts)
+      (is (= 2 (count (:events (flow/load-ledger! path)))))
+      (is (string? (application/deliver-owner-event! :postgresql "owner-store:1" [d] opts)))
+      (is (string? (application/deliver-owner-event! :postgresql "owner-store:2" [d] opts)))
+      (is (= ["owner-store:1" "owner-store:2"] @seen)))))
+
+(deftest signed-page-stops-at-first-incomplete-canonical-projection
+  (let [d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        binding {:decision_id "identity" :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        event (fn [revision]
+                {:id (str "owner-store:" revision) :decision_id "identity"
+                 :store_revision revision :binding_revision 1 :action "approve"
+                 :actor "owner" :reason "synthetic" :snapshot_sha256 sha
+                 :proposal {:selected_option "same_person"
+                            :canonical_binding binding}})
+        envelope (signed-feed "private-import-token-for-test"
+                              {:events [(event 1) (event 2)]
+                               :store_revision 2 :next_revision 2})
+        result (application/run-imported!
+                (flow/empty-ledger) [d] envelope
+                {:config config :policy policy/default-policy
+                 :persist-flow! (fn [_] true)
+                 :import-token "private-import-token-for-test"
+                 :current-bindings {"identity" binding}
+                 :active-snapshot-sha256 sha :active-binding-revision 1})]
+    (is (= "owner-store:1" (:blocked-event-id result)))
+    (is (= ["owner-store:1"]
+           (mapv :id (get-in result [:flow-ledger :events]))))))
+
 (deftest signed-owner-import-persists-before-canonical-identity-route
   (let [d (decision "identity" :identity
                     [:same-person :different-person :unknown] ["a" "b"])
@@ -45,7 +155,9 @@
                   (fn [_ ledger decision current revision]
                     (swap! calls conj [:canonical (:id decision) current revision
                                        (count (:events ledger))])
-                    {:accepted-group-count 1})]
+                    {:accepted-group-count 1})
+                  identity/private-history (fn [_] [])
+                  identity/private-projection (fn [_] {:revision 0})]
       (let [result (application/run-imported!
                     (flow/empty-ledger) [d] envelope
                     {:config config :policy policy/default-policy
@@ -281,12 +393,20 @@
         envelope (signed-feed "private-import-token-for-test"
                               {:events [event] :store_revision 10 :next_revision 10})
         seen (atom nil)
-        active-decision (atom "field")]
+        active-decision (atom "field")
+        field-revision (atom 1)
+        active-field-id (atom "owner-store:10")
+        reversed-history (atom false)]
     (with-redefs [reviews/dive-fields (fn [_ _]
-                                        {:revision 1 :category {:decision-id "owner-store:10"}})
+                                        {:revision @field-revision
+                                         :category {:decision-id @active-field-id}})
                   reviews/dive-decision-history
-                  (fn [_ _] [{:id "owner-store:10"
-                              :request {:binding {:decision_id @active-decision}}}])
+                  (fn [_ _]
+                    (cond-> [{:id "owner-store:10"
+                              :request {:binding {:decision_id @active-decision}}}]
+                      @reversed-history
+                      (conj {:id "owner-store:11"
+                             :request {:event-id "owner-store:10"}})))
                   reviews/import-owner-dive-field!
                   (fn [_ request]
                     (reset! seen request)
@@ -325,6 +445,21 @@
                                                   :decision-type :category
                                                   :base-revision 1}}})]
           (is (= :reversed (get-in reversed [:results "field" :status])))
+          (is (= "owner-store:10" (:event-id @seen)))
+          (reset! field-revision 2)
+          (reset! active-field-id nil)
+          (reset! reversed-history true)
+          (is (= :reversed
+                 (get-in (application/run! (:flow-ledger reversed) [d]
+                                           {:config config :policy policy/default-policy
+                                            :persist-flow! (fn [_] true)
+                                            :imported-only? true
+                                            :current-bindings {"field" binding}
+                                            :reviewer-url "synthetic-review"
+                                            :field-targets {"field" {:target target
+                                                                     :decision-type :category
+                                                                     :base-revision 2}}})
+                         [:results "field" :status])))
           (is (= "owner-store:10" (:event-id @seen)))
           (reset! active-decision "another-decision")
           (is (= :unresolved
@@ -392,6 +527,19 @@
             (flow/empty-ledger) [d] feed
             (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))
                    :verified-snapshot-bindings {sha {"identity" binding}}))))
+    (is (= imported
+           (application/import-remote-review-events
+            (flow/empty-ledger) [d] feed
+            (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))
+                   :active-binding-revision 3
+                   :verified-snapshot-bindings {sha {"identity" binding}}))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d] feed
+                  (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))
+                         :active-binding-revision 3
+                         :current-bindings {"identity" (assoc binding :decision_id "changed")}
+                         :verified-snapshot-bindings {sha {"identity" binding}}))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (application/import-remote-review-events
                   imported [d] (signed-feed secret {:events [(assoc event :id "owner-store:16" :store_revision 16)]
