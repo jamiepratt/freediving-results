@@ -171,6 +171,27 @@ class DecisionStoreTest(unittest.TestCase):
                        idempotency_key='approve-child')
         self.assertEqual(self.store.inspect('child')['effective_status'], 'human_approved')
 
+    def test_human_event_feed_preserves_action_binding_and_idempotent_revision(self):
+        self.bind()
+        p = proposal('d1')
+        p['canonical_binding'] = {'decision_id': 'd1', 'reconciliation_run_revision': 3,
+                                  'reconciliation_event_id': 'flow-3',
+                                  'observation_revisions': [], 'evidence_bindings': []}
+        self.store.register(SNAP_A, p, idempotency_key='register-d1')
+        before = self.store.revision
+        self.store.act('d1', action='correct', correction={'athlete': 'person-2'},
+                       expected_revision=before, idempotency_key='correct-d1')
+        feed = self.store.human_events(after_revision=0)
+        self.assertEqual(len(feed['events']), 1)
+        event = feed['events'][0]
+        self.assertEqual(event['store_revision'], before + 1)
+        self.assertEqual(event['action'], 'correct')
+        self.assertEqual(event['correction'], {'athlete': 'person-2'})
+        self.assertEqual(event['binding_revision'], 1)
+        self.assertEqual(event['snapshot_sha256'], SNAP_A)
+        self.assertEqual(event['proposal'], p)
+        self.assertEqual(self.store.human_events(after_revision=before + 1)['events'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

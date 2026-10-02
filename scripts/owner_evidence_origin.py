@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 from unified_evidence_query import SnapshotQuery
 from owner_source_view import OriginalSourceView, SourceViewError
 from route_roster_query import RouteRosterQuery
+from owner_decision_store import ConflictError
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
@@ -133,6 +134,11 @@ class PrivateOrigin(HTTPServer):
                            if any(name in self.query.manifest['inputs'] for name in ('route-roster-v4', 'route-roster-v3')) else None)
             decision_db = env.get('OWNER_EVIDENCE_DECISION_DB')
             self.decisions = None
+            self.import_token = env.get('OWNER_EVIDENCE_IMPORT_TOKEN')
+            if self.import_token is not None and (len(self.import_token) < 24 or
+                    len(self.import_token) > 256 or not self.import_token.isascii() or
+                    any(char.isspace() for char in self.import_token)):
+                raise ValueError('invalid owner import token')
             if decision_db:
                 from owner_decision_store import DecisionStore
                 decision_path = Path(decision_db).resolve()
@@ -318,6 +324,20 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result['csrf_token'] = self._csrf()
                 result['active_snapshot_sha256'] = self.server.decisions.projection()['snapshot_sha256']
                 result['canonical_projection_status'] = 'unavailable'
+            elif path == '/owner-evidence/api/decision-events':
+                token = self._one('X-Freediving-Import-Token')
+                if self.server.import_token is None or token is None or len(token) > 256 or not compare_digest(token, self.server.import_token):
+                    return self._reply(403)
+                if self.server.decisions is None:
+                    return self._reply(503)
+                args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1)
+                if set(args) != {'after_revision'} or len(args['after_revision']) != 1 or not re.fullmatch(r'[0-9]{1,12}', args['after_revision'][0]):
+                    raise ValueError('invalid event cursor')
+                feed = self.server.decisions.human_events(after_revision=int(args['after_revision'][0]))
+                payload = json.dumps(feed, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+                result = {'payload_json': payload,
+                          'signature': hmac.new(self.server.import_token.encode('ascii'),
+                                                payload.encode('utf-8'), sha256).hexdigest()}
             elif path == '/owner-evidence/api/decisions/audit-sample':
                 if self.server.decisions is None:
                     return self._reply(503)
@@ -425,17 +445,27 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             return self._reply(400)
         try:
             body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict) or set(body) != {'action', 'expected_revision', 'idempotency_key', 'reason', 'csrf_token'}:
+            common = {'action', 'expected_revision', 'idempotency_key', 'reason', 'csrf_token'}
+            if not isinstance(body, dict) or set(body) != (common | ({'correction'} if body.get('action') == 'correct' else set())):
                 raise ValueError('invalid action')
             if not compare_digest(body['csrf_token'], self._csrf()):
                 return self._reply(403)
-            if body['action'] not in ('approve', 'reject', 'reverse'):
+            if body['action'] not in ('approve', 'reject', 'reverse', 'correct'):
                 raise ValueError('invalid action')
-            from owner_decision_store import ConflictError
+            correction = body.get('correction')
+            if body['action'] == 'correct':
+                current = self.server.decisions.inspect(match.group(1))
+                options = [current['selected_option'], *current['competing_options']]
+                current_option = (current.get('correction') or {}).get('action', current['selected_option'])
+                if (not isinstance(correction, dict) or set(correction) != {'action'} or
+                        not isinstance(correction['action'], str) or
+                        correction['action'] not in options or
+                        correction['action'] == current_option):
+                    raise ValueError('invalid correction option')
             result = self.server.decisions.act(match.group(1), action=body['action'],
                                                expected_revision=body['expected_revision'],
                                                idempotency_key=body['idempotency_key'], actor=self._one('X-Freediving-Owner-Email'),
-                                               reason=body['reason'])
+                                               reason=body['reason'], **({'correction': correction} if correction else {}))
         except KeyError:
             return self._reply(404)
         except ConflictError:

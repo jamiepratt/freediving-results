@@ -219,10 +219,63 @@ class PrivateOriginTest(unittest.TestCase):
                                            'actor': EMAIL, 'reason': 'owner correction'}))
         self.assertEqual(self.request('/owner-evidence/api/queue', method='POST', headers=base, body=payload)[0], 405)
 
+    def test_machine_event_feed_requires_separate_token_and_signs_exact_payload(self):
+        import hashlib
+        import hmac
+        token = 'separate-owner-import-token-for-tests'
+        self.server.import_token = token
+        class Decisions:
+            def human_events(self, **kwargs):
+                self.args = kwargs
+                return {'store_revision': 3, 'events': [{'store_revision': 3, 'action': 'reverse'}],
+                        'next_revision': 3}
+        self.server.decisions = Decisions()
+        path = '/owner-evidence/api/decision-events?after_revision=1'
+        self.assertEqual(self.request(path)[0], 403)
+        base = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                ('X-Freediving-Owner-Email', EMAIL)]
+        self.assertEqual(self.request(path, headers=base + [('X-Freediving-Import-Token', 'wrong')])[0], 403)
+        status, _, body = self.request(path, headers=base + [('X-Freediving-Import-Token', token)])
+        self.assertEqual(status, 200)
+        envelope = json.loads(body)
+        self.assertEqual(self.server.decisions.args, {'after_revision': 1})
+        self.assertEqual(envelope['signature'], hmac.new(token.encode(),
+                         envelope['payload_json'].encode(), hashlib.sha256).hexdigest())
+        self.assertEqual(json.loads(envelope['payload_json'])['events'][0]['action'], 'reverse')
+
+    def test_owner_correction_requires_explicit_option_and_same_csrf(self):
+        class Decisions:
+            def queue(self, **_): return {'revision': 3, 'items': [], 'total': 0,
+                                          'scoreless_items': [], 'scoreless_total': 0}
+            def projection(self): return {'snapshot_sha256': 'a' * 64}
+            def inspect(self, _): return {'selected_option': 'same-person',
+                                          'competing_options': ['different-person', 'unknown']}
+            def act(self, *args, **kwargs):
+                self.call = (args, kwargs)
+                return {'status': 'human_corrected'}
+        self.server.decisions = Decisions()
+        csrf = json.loads(self.request('/owner-evidence/api/decisions')[2])['csrf_token']
+        payload = json.dumps({'action': 'correct', 'expected_revision': 3,
+                              'idempotency_key': 'correct-1', 'reason': 'checked source',
+                              'csrf_token': csrf,
+                              'correction': {'action': 'different-person'}}).encode()
+        headers = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                   ('X-Freediving-Owner-Email', EMAIL), ('Origin', 'https://poc.alphacompose.com'),
+                   ('Content-Type', 'application/json'), ('X-Freediving-CSRF', csrf),
+                   ('Content-Length', str(len(payload)))]
+        path = '/owner-evidence/api/decisions/decision-1/actions'
+        self.assertEqual(self.request(path, method='POST', headers=headers, body=payload)[0], 200)
+        self.assertEqual(self.server.decisions.call[1]['correction'], {'action': 'different-person'})
+        bad = payload.replace(b'different-person', b'new-person')
+        headers[-1] = ('Content-Length', str(len(bad)))
+        self.assertEqual(self.request(path, method='POST', headers=headers, body=bad)[0], 400)
+
     def test_real_decision_store_is_bound_to_verified_snapshot(self):
         from test_owner_decision_store import proposal
         decision_path = Path(self.tmp.name) / 'durable-decisions' / 'ledger.sqlite'
-        server = make_server(self.snapshot_dir, {**self.env, 'OWNER_EVIDENCE_DECISION_DB': str(decision_path)})
+        import_token = 'separate-owner-import-token-for-tests'
+        server = make_server(self.snapshot_dir, {**self.env, 'OWNER_EVIDENCE_DECISION_DB': str(decision_path),
+                                                      'OWNER_EVIDENCE_IMPORT_TOKEN': import_token})
         self.addCleanup(server.server_close)
         self.assertEqual(server.decisions.projection()['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
         self.assertTrue(decision_path.exists())
@@ -234,10 +287,12 @@ class PrivateOriginTest(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
-        def request(path, method='GET', payload=None, csrf=None):
+        def request(path, method='GET', payload=None, csrf=None, machine=False):
             connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
             headers = {'Host': HOST, 'X-Freediving-Owner-Gateway': SECRET,
                        'X-Freediving-Owner-Email': EMAIL}
+            if machine:
+                headers['X-Freediving-Import-Token'] = import_token
             if method == 'POST':
                 headers.update({'Origin': 'https://poc.alphacompose.com',
                                 'Content-Type': 'application/json', 'X-Freediving-CSRF': csrf})
@@ -261,6 +316,14 @@ class PrivateOriginTest(unittest.TestCase):
                                method='POST', payload=payload, csrf=listing['csrf_token'])
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data)['effective_status'], 'reversed')
+        self.assertEqual(request('/owner-evidence/api/decision-events?after_revision=0')[0], 403)
+        event_status, event_bytes = request('/owner-evidence/api/decision-events?after_revision=0', machine=True)
+        self.assertEqual(event_status, 200)
+        envelope = json.loads(event_bytes)
+        event = json.loads(envelope['payload_json'])['events'][0]
+        self.assertEqual(event['action'], 'reverse')
+        self.assertEqual(event['proposal']['id'], 'decision-1')
+        self.assertEqual(event['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
         self.assertEqual(request('/owner-evidence/api/decisions/decision-1/actions',
                                  method='POST', payload=payload, csrf=listing['csrf_token'])[0], 200)
         stale = json.dumps({'action': 'approve', 'expected_revision': listing['revision'],

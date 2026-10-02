@@ -1,5 +1,6 @@
 (ns freediving.reconciliation-application-test
   (:require [clojure.test :refer [deftest is run-tests]]
+            [clojure.data.json :as json]
             [freediving.athlete-identity :as identity]
             [freediving.reconciliation-application :as application]
             [freediving.reconciliation-flow :as flow]
@@ -7,6 +8,13 @@
             [freediving.reviews :as reviews]
             [freediving.source-relationships :as relationships]
             [freediving.source-relationships-jev-test :as attempt-fixture]))
+
+(defn signed-feed [secret feed]
+  (let [payload (json/write-str feed)
+        mac (javax.crypto.Mac/getInstance "HmacSHA256")]
+    (.init mac (javax.crypto.spec.SecretKeySpec. (.getBytes secret "UTF-8") "HmacSHA256"))
+    {:payload_json payload :signature (.formatHex (java.util.HexFormat/of)
+                                                  (.doFinal mac (.getBytes payload "UTF-8")))}))
 
 (def config {:provider :jev :model "jev-test" :version "app-test/1"})
 (defn decision [id family choices candidates]
@@ -20,17 +28,24 @@
 (deftest remote-owner-corrections-require-proof-and-current-evidence
   (let [d (decision "identity" :identity
                     [:same-person :different-person :unknown] ["a" "b"])
-        event {:id "owner-event-17" :decision-id "identity" :store-revision 17
-               :action :reverse :actor "owner" :reason "different athlete"
-               :snapshot-sha256 (apply str (repeat 64 "a")) :decision d}
-        verify! (fn [candidate] (= event candidate))
+        sha (apply str (repeat 64 "a"))
+        binding {:decision_id "identity" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-event-1" :observation_revisions []
+                 :evidence_bindings []}
+        event {:id "owner-store:17" :decision_id "identity" :store_revision 17
+               :binding_revision 2 :action "reverse" :actor "owner"
+               :reason "different athlete" :snapshot_sha256 sha
+               :proposal {:canonical_binding binding}}
+        secret "private-import-token-for-test"
+        feed (signed-feed secret {:events [event] :store_revision 17 :next_revision 17})
+        opts {:import-token secret :current-bindings {"identity" binding}
+              :active-snapshot-sha256 sha}
         imported (application/import-remote-review-events
-                  (flow/empty-ledger) [d] [event] {:verify-event! verify!})]
+                  (flow/empty-ledger) [d] feed opts)]
     (is (= :reversed (get-in (flow/inspect imported [d]) ["identity" :status])))
     (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
     (is (= imported
-           (application/import-remote-review-events imported [d] [event]
-                                                    {:verify-event! verify!})))
+           (application/import-remote-review-events imported [d] feed opts)))
     (with-redefs [identity/sync-model-correction! (fn [_ _ _ _]
                                                     {:accepted-group-count 0})]
       (is (= :reversed
@@ -41,15 +56,53 @@
                      [:results "identity" :status]))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (application/import-remote-review-events
-                  (flow/empty-ledger) [d] [event] {})))
+                  (flow/empty-ledger) [d] feed {})))
     (is (thrown? clojure.lang.ExceptionInfo
                  (application/import-remote-review-events
-                  imported [d] [(assoc event :id "older" :store-revision 16)]
-                  {:verify-event! (constantly true)})))
+                  (flow/empty-ledger) [d]
+                  (assoc feed :payload_json (str (:payload_json feed) " ")) opts)))
     (is (thrown? clojure.lang.ExceptionInfo
                  (application/import-remote-review-events
-                  (flow/empty-ledger) [d] [(assoc event :decision (assoc d :candidates ["x" "y"]))]
-                  {:verify-event! (constantly true)})))))
+                  (flow/empty-ledger) [d] feed
+                  (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))))))
+    (is (= imported
+           (application/import-remote-review-events
+            (flow/empty-ledger) [d] feed
+            (assoc opts :active-snapshot-sha256 (apply str (repeat 64 "b"))
+                   :verified-snapshot-bindings {sha {"identity" binding}}))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  imported [d] (signed-feed secret {:events [(assoc event :id "owner-store:16" :store_revision 16)]
+                                                    :store_revision 17 :next_revision 16}) opts)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d]
+                  (signed-feed secret {:events [(assoc-in event [:proposal :canonical_binding :reconciliation_event_id] "wrong")]
+                                       :store_revision 17 :next_revision 17}) opts)))))
+
+(deftest remote-owner-approval-and-correction-preserve-human-action
+  (let [d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        sha (apply str (repeat 64 "a"))
+        binding {:decision_id "identity" :reconciliation_run_revision 1
+                 :reconciliation_event_id "flow-1" :observation_revisions []
+                 :evidence_bindings []}
+        base {:decision_id "identity" :binding_revision 2 :snapshot_sha256 sha
+              :actor "owner" :reason "source checked"
+              :proposal {:canonical_binding binding}}
+        events [(assoc base :id "owner-store:3" :store_revision 3 :action "approve")
+                (assoc base :id "owner-store:4" :store_revision 4 :action "correct"
+                       :correction {:action "different-person"})]
+        opts {:import-token "private-import-token-for-test"
+              :current-bindings {"identity" binding} :active-snapshot-sha256 sha}
+        envelope (signed-feed (:import-token opts)
+                              {:events events :store_revision 4 :next_revision 4})
+        imported (application/import-remote-review-events
+                  (flow/empty-ledger) [d] envelope opts)]
+    (is (= 2 (count (:events imported))))
+    (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
+    (is (= :approved (get-in (flow/inspect imported [d]) ["identity" :status])))
+    (is (= :different-person (get-in (flow/inspect imported [d]) ["identity" :action])))))
 
 (deftest approved-identity-routes-and-row-semantics-remains-unresolved
   (let [identity-decision (decision "identity" :identity

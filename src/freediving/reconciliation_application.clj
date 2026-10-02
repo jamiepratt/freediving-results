@@ -1,54 +1,91 @@
 (ns freediving.reconciliation-application
   "Run private reconciliation and materialize supported decisions in canonical ledgers."
   (:refer-clojure :exclude [run!])
-  (:require [freediving.athlete-identity :as identity]
+  (:require [clojure.data.json :as json]
+            [freediving.athlete-identity :as identity]
             [freediving.reconciliation-flow :as flow]
             [freediving.reviews :as reviews]
-            [freediving.source-relationships :as relationships]))
+            [freediving.source-relationships :as relationships])
+  (:import [java.security MessageDigest]
+           [java.util HexFormat]
+           [javax.crypto Mac]
+           [javax.crypto.spec SecretKeySpec]))
 
 (def ^:private model-origins #{:jev :cached-jev :retained})
 (def ^:private correction-statuses #{:rejected :reversed})
 (def ^:private satisfied-statuses #{:materialized :no-link})
 
+(defn- authenticated-feed [envelope secret]
+  (let [{:keys [payload_json signature]} envelope]
+    (when-not (and (string? secret) (<= 24 (count secret) 256)
+                   (string? payload_json) (<= (count payload_json) 2097152)
+                   (string? signature) (re-matches #"[0-9a-f]{64}" signature))
+      (throw (ex-info "Invalid owner transport envelope" {})))
+    (let [mac (Mac/getInstance "HmacSHA256")
+          _ (.init mac (SecretKeySpec. (.getBytes secret "UTF-8") "HmacSHA256"))
+          actual (.doFinal mac (.getBytes payload_json "UTF-8"))
+          expected (.parseHex (HexFormat/of) signature)]
+      (when-not (MessageDigest/isEqual actual expected)
+        (throw (ex-info "Owner transport authentication failed" {})))
+      (try (json/read-str payload_json :key-fn keyword)
+           (catch Exception _ (throw (ex-info "Invalid owner transport payload" {})))))))
+
 (defn import-remote-review-events
-  "Import authenticated owner rejections/reversals into the private flow ledger.
-   verify-event! must authenticate each complete event against the persistent
-   owner decision store. This function deliberately has no publisher-data path.
-   A caller must persist the returned ledger before running canonical routing."
-  [ledger decisions events {:keys [verify-event!]}]
-  (when-not (and (fn? verify-event!) (vector? decisions) (vector? events)
+  "Import signed owner events only when exact exported evidence bindings still match.
+   The returned ledger must be persisted before canonical routing."
+  [ledger decisions envelope {:keys [import-token current-bindings active-snapshot-sha256
+                                     verified-snapshot-bindings]}]
+  (when-not (and (vector? decisions) (map? current-bindings)
+                 (string? active-snapshot-sha256)
                  (= flow/ledger-version (:version ledger)))
     (throw (ex-info "Authenticated remote review import required" {})))
-  (let [by-id (into {} (map (juxt :id identity) decisions))]
+  (let [{:keys [events next_revision store_revision]} (authenticated-feed envelope import-token)
+        by-id (into {} (map (juxt :id identity) decisions))]
+    (when-not (and (vector? events) (nat-int? next_revision) (nat-int? store_revision)
+                   (<= next_revision store_revision))
+      (throw (ex-info "Invalid owner event feed" {})))
     (reduce
-     (fn [current {:keys [id decision-id store-revision snapshot-sha256
-                          action actor reason decision] :as event}]
-       (let [event-id (str "owner-store:" store-revision)
+     (fn [current {:keys [id decision_id store_revision snapshot_sha256
+                          binding_revision action actor reason proposal correction] :as event}]
+       (let [decision (get by-id decision_id)
+             event-id (str "owner-store:" store_revision)
              prior (some #(when (= event-id (:id %)) %) (:events current))
              last-revision (reduce max 0 (keep :remote-store-revision (:events current)))
-             status ({:reject :rejected :reverse :reversed} action)]
-         (when-not (and (string? id) (seq id) (string? decision-id)
-                        (pos-int? store-revision)
-                        (string? snapshot-sha256)
-                        (re-matches #"[0-9a-f]{64}" snapshot-sha256)
+             status ({"approve" :approved "correct" :approved
+                      "reject" :rejected "reverse" :reversed} action)
+             selected-action (if (= action "correct")
+                               (some-> (:action correction) keyword)
+                               (:action decision))]
+         (when-not (and (= id event-id) (string? decision_id) decision
+                        (pos-int? store_revision) (pos-int? binding_revision)
+                        (or (= snapshot_sha256 active-snapshot-sha256)
+                            (= (get-in proposal [:canonical_binding])
+                               (get-in verified-snapshot-bindings [snapshot_sha256 decision_id])))
                         (string? actor) (seq actor) (string? reason)
-                        status (= decision (get by-id decision-id))
-                        (true? (verify-event! event)))
+                        status (map? (get-in proposal [:canonical_binding]))
+                        (= decision_id (get-in proposal [:canonical_binding :decision_id]))
+                        (= (get-in proposal [:canonical_binding])
+                           (get current-bindings decision_id))
+                        (or (not= action "correct")
+                            (and (map? correction) (keyword? selected-action)
+                                 (contains? (set (:choices decision)) selected-action))))
            (throw (ex-info "Unverified or stale remote review event"
-                           {:decision-id decision-id :store-revision store-revision})))
+                           {:decision-id decision_id :store-revision store_revision})))
          (if prior
            (if (= event (:remote-event prior)) current
                (throw (ex-info "Conflicting remote review replay"
-                               {:store-revision store-revision})))
+                               {:store-revision store_revision})))
            (do
-             (when (<= store-revision last-revision)
+             (when (<= store_revision last-revision)
                (throw (ex-info "Out-of-order remote review event"
-                               {:store-revision store-revision :last-revision last-revision})))
+                               {:store-revision store_revision :last-revision last-revision})))
              (flow/append-human-event current
-                                      {:id event-id :decision-id decision-id
-                                       :status status :actor actor :reason reason
-                                       :remote-store-revision store-revision
-                                       :remote-snapshot-sha256 snapshot-sha256
+                                      {:id event-id :decision-id decision_id
+                                       :status status :action selected-action
+                                       :actor actor :reason reason :correction correction
+                                       :remote-store-revision store_revision
+                                       :remote-binding-revision binding_revision
+                                       :remote-snapshot-sha256 snapshot_sha256
                                        :remote-event event})))))
      ledger events)))
 

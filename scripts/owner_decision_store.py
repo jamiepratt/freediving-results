@@ -70,6 +70,9 @@ class DecisionStore:
             CREATE TABLE IF NOT EXISTS operations (
                 idempotency_key TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL,
                 response_json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS human_event_bindings (
+                event_revision INTEGER PRIMARY KEY REFERENCES events(revision),
+                binding_revision INTEGER NOT NULL, snapshot_sha256 TEXT NOT NULL);
         ''')
 
     def close(self):
@@ -222,6 +225,31 @@ class DecisionStore:
                          _json(correction) if correction is not None else None,
                          datetime.now(timezone.utc).isoformat()))
 
+    def human_events(self, *, after_revision=0, limit=100):
+        """Export durable owner actions with the exact proposal and action-time binding."""
+        if type(after_revision) is not int or after_revision < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('invalid event cursor')
+        rows = self.db.execute('''SELECT e.*, b.binding_revision, b.snapshot_sha256,
+                              p.payload_json FROM events e
+                              LEFT JOIN human_event_bindings b ON b.event_revision=e.revision
+                              JOIN proposals p ON p.id=e.decision_id
+                              WHERE e.revision>? AND e.action IN ('approve','correct','reject','reverse')
+                              ORDER BY e.revision LIMIT ?''', (after_revision, limit)).fetchall()
+        events = []
+        for row in rows:
+            if row['binding_revision'] is None:
+                raise ConflictError('owner event lacks immutable action binding')
+            proposal = json.loads(row['payload_json'])
+            events.append({'id': f"owner-store:{row['revision']}", 'store_revision': row['revision'],
+                           'decision_id': row['decision_id'], 'binding_revision': row['binding_revision'],
+                           'snapshot_sha256': row['snapshot_sha256'], 'action': row['action'],
+                           'actor': row['actor'], 'reason': row['reason'],
+                           'correction': json.loads(row['correction_json']) if row['correction_json'] else None,
+                           'created_at': row['created_at'], 'proposal': proposal,
+                           'proposal_sha256': _digest(proposal)})
+        return {'store_revision': self.revision, 'events': events,
+                'next_revision': events[-1]['store_revision'] if events else after_revision}
+
     def _base(self, decision_id):
         row = self.db.execute('SELECT * FROM proposals WHERE id=?', (decision_id,)).fetchone()
         if row is None:
@@ -372,6 +400,11 @@ class DecisionStore:
                 raise ConflictError('approval requires active prerequisites')
             revision = self._next_revision()
             self._event(revision, decision_id, action, actor, reason, correction)
+            binding = self._binding()
+            if binding is None:
+                raise ConflictError('no active snapshot binding')
+            self.db.execute('INSERT INTO human_event_bindings VALUES (?,?,?)',
+                            (revision, binding['revision'], binding['snapshot_sha256']))
             result = self.inspect(decision_id)
             return self._finish(idempotency_key, fingerprint, result)
         except Exception:
