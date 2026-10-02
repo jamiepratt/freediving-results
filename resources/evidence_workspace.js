@@ -253,10 +253,109 @@ function comparisonSide(side,index){const card=document.createElement('div');con
 async function showComparison(id){const item=await fetchJson('/api/comparison/'+id);const area=$('comparison-detail');area.replaceChildren();entries(area,{relationship_type:item.relationship.type,status:item.relationship.status,basis:item.relationship.basis,supporting_evidence:item.relationship.supporting_evidence,contrary_evidence:item.relationship.contrary_evidence,unknown:item.relationship.unknown,ranking_row_date:item.relationship.ranking_row_date,matched_daily_date:item.relationship.matched_daily_date,same_attempt:item.relationship.same_attempt,confirmed_distinct_attempts:item.confirmed_distinct_attempts,snapshot_sha256:item.snapshot_sha256});if(Object.keys(item.field_correspondences || {}).length){area.append(heading('Printed field correspondences'),jsonBlock(item.field_correspondences),cell('Ranking PDF is supplemental; matching printed fields leave attempt equality unknown.','p'));}if(item.unavailable){area.append(heading('Comparison unavailable'),cell(item.unavailable,'p'));}if(item.sides.length){const sides=document.createElement('div');sides.className='comparison-sides';item.sides.forEach((side,index)=>sides.append(comparisonSide(side,index)));area.append(sides);}area.append(heading('Parsed field differences'),jsonBlock(item.field_differences),heading('Raw field differences'),jsonBlock(item.raw_field_differences));}
 async function loadRoatan(){const result=await fetchJson('/api/roatan');entries($('roatan-summary'),{current_positions:result.total,v1_observations:result.v1_observations,v2_observations:result.v2_observations,source_objects:result.source_objects,source_object_details:result.source_object_details,historical_extraction_acceptances:result.historical_extraction_acceptances,confirmed_distinct_attempts:result.confirmed_distinct_attempts,snapshot_sha256:result.snapshot_sha256});const table=document.createElement('table');table.append(makeRow(['Unit','JSON row','Name','Current parser','Review'],'th'));for(const item of result.items){const tr=makeRow([item.unit,item.index,item.name,item.parser_version,item.review_status]);tr.tabIndex=0;const show=()=>run(()=>showRoatan(item.unit,item.index),'roatan-detail');tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show();});table.append(tr);}const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);$('roatan-list').replaceChildren(scroll);}
 async function showRoatan(unit,index){const item=await fetchJson('/api/roatan/'+unit+'/'+index);const area=$('roatan-detail');area.replaceChildren();entries(area,{unit:item.unit,json_row_zero_based:item.index,name:item.name,declared_depth:item.declared_depth,raw_DEPTH:item.raw_depth,FINAL_DEPTH:item.final_depth,penalty:item.penalty,status:item.status,notes:item.notes,current_position_review:item.position_review_status,source_object_id:item.source_object_id,source_sha256:item.source_sha256,same_attempt:item.same_attempt,athlete_identity:item.athlete_identity,overlap:item.overlap});area.append(heading('Exact current citation'),jsonBlock(item.citation));const button=document.createElement('button');button.textContent='Inspect exact original JSON row';const view=document.createElement('div');view.className='source-view';button.addEventListener('click',()=>{button.disabled=true;showSourceView(item.position_record_id,view).catch(e=>{view.textContent=`Source view unavailable: ${e.message}`;}).finally(()=>{button.disabled=false;});});area.append(button,view);const sides=document.createElement('div');sides.className='comparison-sides';for(const version of ['v1','v2']){const data=item.versions[version];if(!data)continue;const side=document.createElement('div');side.append(heading(`Parser ${version}`));entries(side,{parser_version:data.parser_version,observation_version:data.observation_version,review_status:data.review_status,source_object_id:data.source_object_id,source_sha256:data.source_sha256,record_id:data.record_id});side.append(heading('Citation'),jsonBlock(data.citation),heading('Publisher raw fields'),jsonBlock(data.raw_fields),heading('Parsed fields'),jsonBlock(data.parsed_fields));sides.append(side);}area.append(sides,heading('v1 to v2 parsed changes'),jsonBlock(item.parsed_field_changes),heading('Historical extraction acceptance'),jsonBlock(item.historical_extraction));}
+let decisionOffset=0, decisionTotal=0, decisionPageSize=25, decisionRevision=null, decisionCsrf=null, decisionPreview=null, decisionRetryKey=null;
+function decisionCard(item){
+  const card=document.createElement('article');card.className='decision-card';
+  const button=document.createElement('button');button.type='button';button.textContent=`Inspect ${item.id}`;
+  button.addEventListener('click',()=>run(()=>inspectDecision(item.id),'decision-detail'));
+  card.append(button);
+  entries(card,{type:item.type,source:item.source_name || item.source,status:item.status,provider_confidence:item.provider_confidence,proposed:item.proposed});
+  return card;
+}
+function renderDecisions(response){
+  decisionRevision=response.revision;decisionCsrf=response.csrf_token || null;
+  decisionTotal=response.total ?? response.items.length;
+  const scored=[],scoreless=[],other=[];
+  for(const [index,item] of response.items.entries()){
+    if(item.status==='pending' && Number.isFinite(item.provider_confidence))scored.push({item,index});
+    else if(item.status==='pending')scoreless.push(item);
+    else other.push(item);
+  }
+  for(const item of response.scoreless_items || []){
+    if(item.status==='pending')scoreless.push(item);
+    else other.push(item);
+  }
+  scored.sort((a,b)=>a.item.provider_confidence-b.item.provider_confidence || a.index-b.index);
+  for(const [id,items] of [['decision-scored',scored.map(x=>x.item)],['decision-scoreless',scoreless],['decision-automatic',other]]){
+    const area=$(id);area.replaceChildren();
+    if(!items.length)area.append(cell('No decisions in this group.', 'p'));
+    for(const item of items)area.append(decisionCard(item));
+  }
+  const snapshot=response.active_snapshot_sha256 || response.snapshot_sha256 || response.items[0]?.active_snapshot_sha256;
+  $('decision-summary').textContent=`${decisionTotal} decisions; ${response.scoreless_total ?? scoreless.length} scoreless decisions. ${response.score_note || 'Provider confidence is uncalibrated, not measured accuracy.'} Decision revision ${response.revision}; bound evidence snapshot ${snapshot || 'unknown'}.`;
+  $('decision-previous').disabled=decisionOffset===0;
+  $('decision-next').disabled=decisionOffset+decisionPageSize>=Math.max(decisionTotal-(response.scoreless_total || 0),response.scoreless_total || 0);
+}
+async function loadDecisions(){
+  const query=new URLSearchParams();
+  for(const [key,value] of new FormData($('decision-filters')))if(value)query.set(key,value);
+  if(!query.has('status'))query.set('status','');
+  if(!query.has('limit'))query.set('limit','25');
+  decisionPageSize=Number(query.get('limit'));
+  query.set('offset',String(decisionOffset));
+  const response=await fetchJson('/api/decisions?'+query);
+  renderDecisions(response);
+  $('decision-workspace').hidden=false;
+}
+async function loadDecisionAuditSample(){
+  const sample=await fetchJson('/api/decisions/audit-sample?limit=10');
+  const area=$('decision-audit');area.replaceChildren();
+  area.append(cell(`${sample.sample_size} of ${sample.population_size} automatic approvals in this nonblocking audit sample. ${sample.sampling_basis}.`, 'p'));
+  for(const item of sample.items)area.append(decisionCard(item));
+}
+function renderDecisionDetail(item){
+  decisionRevision=item.store_revision ?? item.revision ?? decisionRevision;
+  decisionPreview=null;decisionRetryKey=null;
+  const area=$('decision-detail');area.replaceChildren(heading(`Decision ${item.id}`));
+  entries(area,{type:item.type,subject_id:item.subject_id,source:item.source_name || item.source,status:item.status,effective_status:item.effective_status,provider_confidence:item.provider_confidence,rule_version:item.rule_version,model_version:item.model_version,policy_version:item.policy_version,snapshot_sha256:item.snapshot_sha256,active_snapshot_sha256:item.active_snapshot_sha256,binding_revision:item.binding_revision,store_revision:item.store_revision,canonical_projection_status:item.canonical_projection_status});
+  for(const [label,value] of [['Original evidence',item.original],['Proposed value',item.proposed],['Selected option',item.selected_option],['Competing options',item.competing_options],['Supporting and conflicting evidence',item.evidence],['Dependencies',item.depends_on],['Missing evidence',item.missing_evidence_ids],['Correction',item.correction],['Decision history',item.history]])area.append(heading(label),jsonBlock(value ?? null));
+  const actions=document.createElement('div');actions.className='decision-actions';
+  const effective=item.effective_status || item.status;
+  const available=effective==='pending'?['approve','reject']:['automatic_approved','human_approved','human_corrected'].includes(effective)?['reverse']:[];
+  for(const action of available){const button=document.createElement('button');button.type='button';button.textContent=`Preview ${action === 'reverse' ? 'Reverse' : action}`;button.addEventListener('click',()=>run(()=>previewDecisionAction(item.id,action),'decision-detail'));actions.append(button);}
+  const preview=document.createElement('div');preview.id='decision-preview';
+  area.append(actions,preview);
+}
+async function inspectDecision(id){renderDecisionDetail(await fetchJson('/api/decisions/'+encodeURIComponent(id)));}
+async function previewDecisionAction(id,action){
+  const result=await fetchJson('/api/decisions/'+encodeURIComponent(id)+'/preview?action='+encodeURIComponent(action));
+  decisionPreview={id,action,revision:result.revision};decisionRetryKey=null;
+  const area=$('decision-preview');area.replaceChildren(heading(`${action} impact preview`));
+  entries(area,{decision_id:result.decision_id,revision:result.revision,affected_decisions:result.affected_decisions,affected_groups:result.affected_groups,canonical_projection_status:result.canonical_projection_status});
+  area.append(heading('Before'),jsonBlock(result.before),heading('After'),jsonBlock(result.after));
+  const reason=document.createElement('input');reason.type='text';reason.maxLength=500;reason.placeholder='Reason for audit history';reason.setAttribute?.('aria-label','Reason for decision action');
+  const commit=document.createElement('button');commit.type='button';commit.textContent=`Confirm ${action}`;
+  commit.addEventListener('click',()=>run(()=>submitDecisionAction(id,action,reason.value),'decision-action-status'));
+  const status=document.createElement('p');status.id='decision-action-status';status.setAttribute?.('role','status');
+  area.append(reason,commit,status);
+}
+async function submitDecisionAction(id,action,reason){
+  if(!decisionPreview || decisionPreview.id!==id || decisionPreview.action!==action)throw new Error('Preview this action before confirming.');
+  if(!decisionCsrf)throw new Error('Reload decisions to obtain an authenticated write token.');
+  const key=decisionRetryKey || crypto.randomUUID();decisionRetryKey=key;
+  const result=await fetch('/api/decisions/'+encodeURIComponent(id)+'/actions',{
+    method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-Freediving-CSRF':decisionCsrf},
+    body:JSON.stringify({action,expected_revision:decisionPreview.revision,idempotency_key:key,reason,csrf_token:decisionCsrf}),
+  });
+  if(result.status===401){location.href='/login';return;}
+  if(!result.ok){
+    let message=result.status===403?'Owner access expired or denied. Refresh this private page after signing in.':`HTTP ${result.status}`;
+    if(result.status!==403)try{const body=await result.json();message=body.error || body.message || message;}catch{}
+    if(result.status===409){decisionPreview=null;message=`Revision changed. Reload and preview again. ${message}`;}
+    throw new Error(message);
+  }
+  renderDecisionDetail(await result.json());
+  await loadDecisions();
+}
 document.addEventListener('DOMContentLoaded',()=>{run(loadRoatan,'roatan-detail');run(loadOverview);run(browse);run(loadQueue,'queue-summary');run(loadComparisons,'comparison-summary');$('comparison-previous').addEventListener('click',()=>{comparisonOffset=Math.max(0,comparisonOffset-25);run(loadComparisons,'comparison-summary');});$('comparison-next').addEventListener('click',()=>{comparisonOffset+=25;run(loadComparisons,'comparison-summary');});$('filters').addEventListener('submit',e=>{e.preventDefault();offset=0;run(browse);});$('queue-filters').addEventListener('submit',e=>{e.preventDefault();queueOffset=0;run(loadQueue,'queue-summary');});$('queue-previous').addEventListener('click',()=>{queueOffset=Math.max(0,queueOffset-Number($('queue-filters').elements.limit.value));run(loadQueue,'queue-summary');});$('queue-next').addEventListener('click',()=>{queueOffset+=Number($('queue-filters').elements.limit.value);run(loadQueue,'queue-summary');});$('show-source').addEventListener('click',()=>run(sourceDetail));for(const name of ['candidates','gaps','relationships'])$(name).addEventListener('click',()=>{active=name==='candidates'?'browse':name;if(name==='candidates')document.querySelector('[name=kind]').value='candidate_position';offset=0;run(browse);});$('previous').addEventListener('click',()=>{offset=Math.max(0,offset-Number(document.querySelector('[name=limit]').value));run(browse);});$('next').addEventListener('click',()=>{offset+=Number(document.querySelector('[name=limit]').value);run(browse);});});
 document.addEventListener('DOMContentLoaded',()=>{
   run(async()=>{await loadRoutes();await loadRouteLeads();},'route-summary');
   run(loadAffiliateNames,'affiliate-summary');
+  loadDecisions().catch(()=>{$('decision-workspace').hidden=true;});
+  $('decision-filters').addEventListener('submit',event=>{event.preventDefault();decisionOffset=0;run(loadDecisions,'decision-summary');});
+  $('decision-previous').addEventListener('click',()=>{decisionOffset=Math.max(0,decisionOffset-decisionPageSize);run(loadDecisions,'decision-summary');});
+  $('decision-next').addEventListener('click',()=>{decisionOffset+=decisionPageSize;run(loadDecisions,'decision-summary');});
+  $('decision-audit-button').addEventListener('click',()=>run(loadDecisionAuditSample,'decision-audit'));
   $('route-filters').addEventListener('submit',event=>{event.preventDefault();routeOffset=0;run(loadRouteLeads,'route-lead-summary');});
   $('route-previous').addEventListener('click',()=>{routeOffset=Math.max(0,routeOffset-Number($('route-filters').elements.limit.value));run(loadRouteLeads,'route-lead-summary');});
   $('route-next').addEventListener('click',()=>{routeOffset+=Number($('route-filters').elements.limit.value);run(loadRouteLeads,'route-lead-summary');});

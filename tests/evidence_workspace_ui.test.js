@@ -4,24 +4,95 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 class Element {
-  constructor(tag = 'div') { this.tagName = tag; this.children = []; this.textContent = ''; this.value = ''; }
+  constructor(tag = 'div') { this.tagName = tag; this.children = []; this.textContent = ''; this.value = ''; this.listeners = {}; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = [...children]; this.textContent = ''; }
-  addEventListener() {}
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  click() { return this.listeners.click?.({preventDefault() {}}); }
   get visibleText() { return [this.textContent, ...this.children.map(x => x.visibleText ?? x.textContent ?? '')].join(' '); }
 }
 
 function workspace(responses = {}) {
   const nodes = new Map();
+  const requests = [];
+  const find = (element, id) => element.id === id ? element : element.children.map(child => find(child, id)).find(Boolean);
   const document = {
     createElement: tag => new Element(tag),
-    getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); },
+    getElementById: id => { const nested = [...nodes.values()].map(node => find(node, id)).find(Boolean); if(nested) return nested; if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); },
     addEventListener() {},
   };
-  const context = vm.createContext({document, fetch: async path => ({ok: true, status: 200, json: async () => responses[path]}), location: {}, URLSearchParams, FormData: class { *[Symbol.iterator]() {} }});
+  const context = vm.createContext({document, fetch: async (path, options) => { requests.push({path, options}); return {ok: true, status: 200, json: async () => responses[path]}; }, location: {origin: 'https://owner.example'}, crypto: {randomUUID: () => 'retry-key'}, URLSearchParams, FormData: class { *[Symbol.iterator]() {} }});
   vm.runInContext(fs.readFileSync('resources/evidence_workspace.js', 'utf8'), context);
-  return {context, node: document.getElementById};
+  return {context, node: document.getElementById, requests};
 }
+
+test('owner decision queue separates scoreless gaps and shows ascending provider confidence', async () => {
+  const {context, node} = workspace({'/api/decisions?status=&limit=25&offset=0': {
+    revision: 7, snapshot_sha256: 'snapshot-7', total: 4, scoreless_total: 1, items: [
+      {id: 'low', type: 'athlete_identity', source_name: 'AIDA', status: 'pending', provider_confidence: 0.41, proposed: 'one'},
+      {id: 'high', type: 'athlete_identity', source_name: 'AIDA', status: 'pending', provider_confidence: 0.88, proposed: 'two'},
+      {id: 'auto', type: 'athlete_identity', source_name: 'AIDA', status: 'automatic_approved', provider_confidence: 0.99, proposed: 'three'},
+    ], scoreless_items: [{id: 'gap', type: 'source_revision', source_name: 'CMAS', status: 'pending', provider_confidence: null, proposed: 'unknown'}],
+  }});
+  await vm.runInContext('loadDecisions()', context);
+  const scored = node('decision-scored').visibleText;
+  assert.ok(scored.indexOf('low') < scored.indexOf('high'));
+  assert.match(node('decision-scoreless').visibleText, /gap/);
+  assert.match(node('decision-automatic').visibleText, /auto/);
+  assert.match(node('decision-summary').visibleText, /uncalibrated/i);
+  assert.match(node('decision-summary').visibleText, /snapshot-7/);
+});
+
+test('decision inspection shows immutable evidence, alternatives, versions and history', async () => {
+  const {context, node} = workspace({'/api/decisions/d1': {
+    id: 'd1', store_revision: 8, type: 'athlete_identity', status: 'automatic_approved', original: {name: 'Source A'},
+    proposed: {name: 'Athlete B'}, selected_option: 'Athlete B', competing_options: ['Athlete C'],
+    evidence: [{citation: 'PDF page 2 row 9'}], depends_on: ['d0'], provider_confidence: 0.91,
+    rule_version: 'alias-rule-v3', model_version: 'jev-v2', policy_version: 'auto-v1',
+    history: [{action: 'approve', actor_kind: 'automatic', at: '2026-10-02T10:00:00Z'}],
+  }});
+  await vm.runInContext("inspectDecision('d1')", context);
+  const text = node('decision-detail').visibleText;
+  for(const phrase of ['Source A', 'Athlete B', 'Athlete C', 'PDF page 2 row 9', 'alias-rule-v3', 'jev-v2', 'auto-v1', 'automatic', 'd0']) assert.ok(text.includes(phrase), phrase);
+  assert.match(text, /Reverse/);
+});
+
+test('reversal previews dependent impact before writing with revision, CSRF and retry key', async () => {
+  const {context, node, requests} = workspace({
+    '/api/decisions/d1': {store_revision: 8, id: 'd1', status: 'automatic_approved', type: 'athlete_identity', evidence: [], history: []},
+    '/api/decisions/d1/preview?action=reverse': {revision: 8, decision_id: 'd1', action: 'reverse', affected_decisions: ['d2'], affected_groups: ['athlete-1'], before: {count: 2}, after: {count: 3}},
+    '/api/decisions/d1/actions': {store_revision: 9, id: 'd1', status: 'reversed', evidence: [], history: []},
+    '/api/decisions?status=&limit=25&offset=0': {revision: 9, csrf_token: 'csrf-9', total: 0, items: [], scoreless_items: [], scoreless_total: 0},
+  });
+  await vm.runInContext('loadDecisions()', context);
+  await vm.runInContext("inspectDecision('d1')", context);
+  await vm.runInContext("previewDecisionAction('d1','reverse')", context);
+  assert.match(node('decision-preview').visibleText, /d2/);
+  assert.match(node('decision-preview').visibleText, /athlete-1/);
+  assert.equal(requests.filter(r => r.options?.method === 'POST').length, 0);
+  await vm.runInContext("submitDecisionAction('d1','reverse','correction')", context);
+  const write=requests.find(r => r.options?.method === 'POST');
+  assert.equal(write.path, '/api/decisions/d1/actions');
+  assert.equal(write.options.headers['X-Freediving-CSRF'], 'csrf-9');
+  const body=JSON.parse(write.options.body);
+  assert.equal(body.action, 'reverse');
+  assert.equal(body.expected_revision, 8);
+  assert.equal(body.idempotency_key, 'retry-key');
+  assert.equal(body.reason, 'correction');
+  assert.equal(body.csrf_token, 'csrf-9');
+});
+
+test('automatic approval audit sample is inspectable and does not block review', async () => {
+  const {context, node} = workspace({'/api/decisions/audit-sample?limit=10': {
+    revision: 4, sample_size: 1, population_size: 7, sampling_basis: 'stable hash', blocking: false,
+    items: [{id: 'sample-1', type: 'athlete_identity', status: 'automatic_approved', provider_confidence: 0.94}],
+  }});
+  await vm.runInContext('loadDecisionAuditSample()', context);
+  const text=node('decision-audit').visibleText;
+  assert.match(text, /sample-1/);
+  assert.match(text, /1 of 7/);
+  assert.match(text, /nonblocking/i);
+});
 
 test('dated route coverage shows all v7 states and a verifiable receipt', () => {
   const {context, node} = workspace();
