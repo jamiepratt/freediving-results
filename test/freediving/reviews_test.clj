@@ -44,6 +44,8 @@
         target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-field"}
         dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
                     :categories {"Women" ["women"]}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        binding (:field-binding (reviews/build-dive-field-jev-decision fixture/app target dictionary :category))
         evidence {:evidence-id "source-row" :citation {:source-position-id (:source-position-id target)
                                                        :job-id (:job-id target) :ordinal 0
                                                        :source-sha256 (:source-sha256 artifact)
@@ -52,7 +54,7 @@
                   :exact-excerpt "Women" :source-meaning "printed category label"}
         decision {:id "jev-field-1" :family :category-representation :action :category
                   :subject "Women label" :candidates ["category"] :evidence [evidence]
-                  :evidence-adequate? true :dependencies []}
+                  :evidence-adequate? true :dependencies [] :field-binding binding}
         config {:version "config/1" :model "test-jev"}
         response (fn [_]
                    {:model "test-jev" :usage {:input_tokens 1 :output_tokens 1}
@@ -65,13 +67,12 @@
         request {:target target :decision-id "jev-field-1" :decision-type :category
                  :dictionary dictionary :policy reconciliation-policy/default-policy
                  :base-revision 0}]
-    (observations/import! fixture/app root (:job-id artifact))
     (is (= :approved (get-in (flow/inspect ledger [decision] config) ["jev-field-1" :status])))
     (is (thrown-with-msg? Exception #"stale or incomplete"
                           (reviews/approve-jev-dive-field! fixture/app ledger
                                                            (assoc-in decision [:evidence 0 :exact-excerpt] "Other")
                                                            config request)))
-    (is (thrown-with-msg? Exception #"unsupported"
+    (is (thrown-with-msg? Exception #"binding"
                           (reviews/approve-jev-dive-field! fixture/app ledger decision config
                                                            (assoc request :dictionary
                                                                   (assoc dictionary :categories {})))))
@@ -81,10 +82,10 @@
       (is (= "Women" (get-in (reviews/dive-fields fixture/app target) [:category :raw])))
       (is (= :model (:actor-kind event)))
       (is (= 1 (count (reviews/dive-decision-history fixture/app target)))))
-    (is (thrown-with-msg? Exception #"requires invalidation" (reviews/approve-jev-dive-field!
-                                                              fixture/app ledger decision config
-                                                              (assoc request :dictionary (assoc dictionary :version "labels/2")
-                                                                     :base-revision 2))))
+    (is (thrown-with-msg? Exception #"binding" (reviews/approve-jev-dive-field!
+                                                fixture/app ledger decision config
+                                                (assoc request :dictionary (assoc dictionary :version "labels/2")
+                                                       :base-revision 2))))
     (let [changed (assoc-in decision [:evidence 0 :exact-excerpt] "Women category label")
           invalidation {:target target :decision-type :category :dictionary dictionary
                         :base-revision 1}
@@ -108,6 +109,11 @@
         artifact (assoc-in artifact [:candidates 0 :raw :fields :representation] "AIN")
         receipt (fixture/publish! (assoc source :artifact artifact))
         target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-representation"}
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        binding (:field-binding (reviews/build-dive-field-jev-decision
+                                 fixture/app target dictionary :representation))
         decision {:id "jev-representation-1" :family :category-representation :action :representation
                   :subject "AIN label" :candidates ["representation"] :evidence
                   [{:evidence-id "printed-row" :citation {:source-position-id (:source-position-id target)
@@ -116,7 +122,7 @@
                                                           :artifact-sha256 (:artifact-sha256 receipt)
                                                           :parser-version "jev-representation/1"}
                     :exact-excerpt "AIN" :source-meaning "printed representation label"}]
-                  :evidence-adequate? true :dependencies []}
+                  :evidence-adequate? true :dependencies [] :field-binding binding}
         config {:version "config/1" :model "test-jev"}
         ledger (flow/run! (flow/empty-ledger) [decision]
                           {:config config :policy reconciliation-policy/default-policy
@@ -126,10 +132,8 @@
                                                          :probabilities {"category" 0.002 "representation" 0.99
                                                                          "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})
         request {:target target :decision-id "jev-representation-1" :decision-type :representation
-                 :dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
-                              :representations {"AIN" {:kind :neutral :code "AIN"}}}
+                 :dictionary dictionary
                  :policy reconciliation-policy/default-policy :base-revision 0}]
-    (observations/import! fixture/app root (:job-id artifact))
     (reviews/approve-jev-dive-field! fixture/app ledger decision config request)
     (is (= {:kind :neutral :code "AIN"}
            (get-in (reviews/dive-fields fixture/app target) [:representation :accepted])))
@@ -164,6 +168,17 @@
                                                             {:type "choice" :choice "representation" :confidence 0.99
                                                              :probabilities {"category" 0.002 "representation" 0.99
                                                                              "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})]
+        (is (thrown-with-msg? Exception #"binding"
+                              (reviews/approve-jev-dive-field! fixture/app ledger decision config
+                                                               {:target target :decision-id (:id decision)
+                                                                :decision-type :representation
+                                                                :dictionary (-> dictionary
+                                                                                (assoc :version "labels/2")
+                                                                                (assoc :federation "OTHER")
+                                                                                (assoc-in [:representations "AIN"]
+                                                                                          {:kind :country :code "FRA"}))
+                                                                :policy reconciliation-policy/default-policy
+                                                                :base-revision 0})))
         (reviews/approve-jev-dive-field! fixture/app ledger decision config
                                          {:target target :decision-id (:id decision)
                                           :decision-type :representation :dictionary dictionary
@@ -179,6 +194,10 @@
         artifact (assoc-in artifact [:candidates 0 :raw :fields :category] "Women")
         receipt (fixture/publish! (assoc source :artifact artifact))
         target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-human"}
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :categories {"Women" ["women"]}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        binding (:field-binding (reviews/build-dive-field-jev-decision fixture/app target dictionary :category))
         decision {:id "jev-human-1" :family :category-representation :action :category
                   :subject "Women label" :candidates ["category"]
                   :evidence [{:evidence-id "source-row"
@@ -186,7 +205,7 @@
                                                        :artifact-sha256 (:artifact-sha256 receipt)
                                                        :parser-version "jev-human/1"})
                               :exact-excerpt "Women"}]
-                  :evidence-adequate? true :dependencies []}
+                  :evidence-adequate? true :dependencies [] :field-binding binding}
         config {:version "config/1" :model "test-jev"}
         ledger (flow/run! (flow/empty-ledger) [decision]
                           {:config config :policy reconciliation-policy/default-policy
@@ -195,12 +214,9 @@
                                                         {:type "choice" :choice "category" :confidence 0.99
                                                          :probabilities {"category" 0.99 "representation" 0.002
                                                                          "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})
-        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
-                    :categories {"Women" ["women"]}}
         request {:target target :decision-id "jev-human-1" :decision-type :category
                  :dictionary dictionary :policy reconciliation-policy/default-policy
                  :base-revision 0}]
-    (observations/import! fixture/app root (:job-id artifact))
     (reviews/approve-jev-dive-field! fixture/app ledger decision config request)
     (let [corrected (flow/append-human-event ledger
                                              {:id "owner-rejects-label" :decision-id "jev-human-1"
@@ -212,10 +228,50 @@
       (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
       (is (= (select-keys synced [:id :event-id :revision :action])
              (select-keys (reviews/sync-human-jev-dive-field!
-                           reviewer corrected decision config (assoc request :base-revision 1))
+                           reviewer corrected decision config (assoc request :base-revision 2))
                           [:id :event-id :revision :action])))
       (is (thrown-with-msg? Exception #"correction"
                             (reviews/approve-jev-dive-field! fixture/app ledger decision config request))))))
+
+(deftest unapproved-parent-invalidates-model-dive-field-without-human-attestation
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "jev-dependency/1")
+        artifact (assoc-in artifact [:candidates 0 :raw :fields "Nationality"] "AIN")
+        _ (fixture/publish! (assoc source :artifact artifact))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-dependency"}
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        child (-> (reviews/build-dive-field-jev-decision fixture/app target dictionary :representation)
+                  :decision (assoc :dependencies ["source-parent"]))
+        parent {:id "source-parent" :family :source-revision :action :same-source
+                :subject "Source relation" :candidates ["same source"]
+                :evidence (:evidence child) :dependencies [] :evidence-adequate? true}
+        config {:version "config/1" :model "test-jev"}
+        ledger (flow/run! (flow/empty-ledger) [parent child]
+                          {:config config :policy reconciliation-policy/default-policy
+                           :deterministic-results {"source-parent" {:status :approve
+                                                                    :rule-version "source-rule/1"}}
+                           :execute! (fn [_] {:model "test-jev" :usage {:input_tokens 1 :output_tokens 1}
+                                              :answers {(:id child)
+                                                        {:type "choice" :choice "representation" :confidence 0.99
+                                                         :probabilities {"category" 0.002 "representation" 0.99
+                                                                         "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})
+        request {:target target :decision-id (:id child) :decision-type :representation
+                 :dictionary dictionary :policy reconciliation-policy/default-policy
+                 :base-revision 0}]
+    (reviews/approve-jev-dive-field! fixture/app ledger child config request)
+    (is (thrown-with-msg? Exception #"No changed"
+                          (reviews/invalidate-jev-dive-field! fixture/app child config
+                                                              {:target target :decision-type :representation
+                                                               :dictionary dictionary :base-revision 1
+                                                               :dependency-statuses {"source-parent" :approved}})))
+    (let [invalidated (reviews/invalidate-jev-dive-field!
+                       fixture/app child config
+                       {:target target :decision-type :representation :dictionary dictionary
+                        :base-revision 1 :dependency-statuses {"source-parent" :reversed}})]
+      (is (= :model (:actor-kind invalidated)))
+      (is (= :dependency-unapproved (:reason invalidated)))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:representation :accepted]))))))
 
 (deftest deterministic-dive-fields-are-cited-reversible-and-idempotent
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-test/1")

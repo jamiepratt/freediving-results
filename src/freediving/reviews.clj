@@ -725,6 +725,12 @@
 (defn- dictionary-entry [dictionary field raw]
   (get (if (= field :category) (:categories dictionary) (:representations dictionary)) raw))
 
+(defn- field-binding [row dictionary field]
+  (let [[source-key raw] (raw-field-entry (:payload row) field)]
+    {:source-position (citation row) :source-key source-key :raw-label raw
+     :normalized-value (dictionary-entry dictionary field raw)
+     :dictionary dictionary}))
+
 (defn- field-proposal [row dictionary field]
   (let [raw (raw-field (:payload row) field)
         heading (get dictionary (if (= field :category) :category-heading :representation-heading))
@@ -819,6 +825,7 @@
                  (fn [c]
                    (let [row (field-row c t)
                          [source-key raw] (raw-field-entry (:payload row) field)
+                         binding (field-binding row dictionary field)
                          proposal (field-proposal row dictionary field)
                          mapped (dictionary-entry dictionary field raw)
                          valid? (if (= field :category)
@@ -834,7 +841,8 @@
                                   :else nil)]
                      (if reason
                        {:status (if (= reason :deterministic) :deterministic :unresolved)
-                        :reason reason :source-position (citation row)}
+                        :reason reason :source-position (citation row)
+                        :field-binding binding}
                        (let [evidence {:evidence-id (str "row:" (:source-position-id t))
                                        :citation (citation row)
                                        :exact-excerpt raw
@@ -846,7 +854,7 @@
                                                             (:ordinal row) (:source-sha256 row)
                                                             (:artifact-sha256 row) (:parser-version row)
                                                             field (:version dictionary) raw mapped]) "UTF-8"))]
-                         {:status :ready
+                         {:status :ready :field-binding binding
                           :decision {:id id :family :category-representation
                                      :action field
                                      :subject {:source-position-id (:source-position-id t)
@@ -855,7 +863,9 @@
                                                :federation (:federation dictionary)
                                                :event-id (:event-id dictionary)}
                                      :candidates [{:field (name field) :raw-label raw
-                                                   :normalized-value (pr-str mapped)}]
+                                                   :normalized-value (pr-str mapped)
+                                                   :dictionary-hash (sha256 (.getBytes (encode dictionary) "UTF-8"))}]
+                                     :field-binding binding
                                      :evidence [evidence]
                                      :uncertainties [(get-in proposal [:rule-evidence :rule])]
                                      :contradictions [] :dependencies []
@@ -915,6 +925,7 @@
                            heading (get dictionary (if (= decision-type :category)
                                                      :category-heading :representation-heading))
                            proposed (dictionary-entry dictionary decision-type raw)
+                           current-binding (field-binding row dictionary decision-type)
                            cited? (some (fn [e]
                                           (let [ref (:citation e)]
                                             (and (map? ref)
@@ -940,6 +951,8 @@
                            old (first (filter #(= key (:decision-key %)) field-events))]
                        (when (some #(= :human (:actor-kind %)) field-events)
                          (fail! "Human dive field correction blocks model approval"))
+                       (when-not (= current-binding (:field-binding decision))
+                         (fail! "Jev dive field binding changed"))
                        (when (and old (some #(= (:id old) (:event-id %)) field-events))
                          (fail! "Model dive field approval was reversed"))
                        (when (and (not old)
@@ -983,8 +996,8 @@
                                              :request request})))))))))
 
 (defn invalidate-jev-dive-field!
-  "Reverse an active model field assertion after evidence or configuration changes."
-  [url decision config {:keys [target decision-type dictionary base-revision] :as request}]
+  "Reverse an active model field assertion after evidence, configuration or dependency changes."
+  [url decision config {:keys [target decision-type dictionary base-revision dependency-statuses] :as request}]
   (when-not (and (= :category-representation (:family decision))
                  (#{:category :representation} decision-type)
                  (nonblank? (:id decision)) (nat-int? base-revision)
@@ -1022,7 +1035,11 @@
                                         (not= (:model-config-hash previous)
                                               (sha256 (.getBytes (encode config) "UTF-8")))
                                         (not= (:dictionary-version previous) (:version dictionary))
-                                        (not= (:source-position previous) (citation row))))
+                                        (not= (:source-position previous) (citation row))
+                                        (and (map? dependency-statuses)
+                                             (seq (:dependencies previous))
+                                             (some #(not= :approved (get dependency-statuses % :unresolved))
+                                                   (:dependencies previous)))))
                        (fail! "No changed model dive field evidence"))
                      (if old old
                          (do
@@ -1041,7 +1058,11 @@
                                            :proposed nil :source-position (citation row)
                                            :supporting-evidence (:evidence decision)
                                            :prior-decision-id (:decision-id previous)
-                                           :reason :changed-model-evidence :request request}))))))))
+                                           :reason (if (and (map? dependency-statuses)
+                                                            (some #(not= :approved (get dependency-statuses % :unresolved))
+                                                                  (:dependencies previous)))
+                                                     :dependency-unapproved :changed-model-evidence)
+                                           :request request}))))))))
 
 (defn- human-decision! [url request action]
   (when-not (and (nonblank? (:id request)) (nonblank? (:actor request))
@@ -1125,12 +1146,20 @@
                                                      (= (:id decision) (:decision-id %)))
                                                (field-events c (:source-position-id target))))))]
       (when-not prior (fail! "No model dive field decision to correct"))
-      (reverse-dive-decision!
-       reviewer-url
-       {:id (str "flow-human:" (sha256 (.getBytes (encode [(:id human) (:id prior)]) "UTF-8")))
-        :event-id (:id prior) :base-revision base-revision
-        :actor (:actor human) :reason (:reason human)
-        :flow-event-id (:id human) :flow-status (:status human)}))))
+      (let [id (str "flow-human:" (sha256 (.getBytes (encode [(:id human) (:id prior)]) "UTF-8")))
+            existing (read-snapshot reviewer-url
+                                    (fn [c]
+                                      (first (filter #(= id (:id %))
+                                                     (field-events c (:source-position-id target))))))
+            stable {:event-id (:id prior) :actor (:actor human) :reason (:reason human)
+                    :flow-event-id (:id human) :flow-status (:status human)}]
+        (if existing
+          (if (and (= :human (:actor-kind existing)) (= :reverse (:action existing))
+                   (= stable (select-keys (:request existing) (keys stable))))
+            existing
+            (fail! "Conflicting human Jev field correction"))
+          (reverse-dive-decision! reviewer-url
+                                  (assoc stable :id id :base-revision base-revision)))))))
 
 (defn export-dive-fields [url]
   (read-snapshot url
