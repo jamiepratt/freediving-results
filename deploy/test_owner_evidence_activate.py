@@ -106,6 +106,29 @@ class ActivationTests(unittest.TestCase):
         self.assertNotIn('OWNER_EVIDENCE_DECISION_DB=',
                          (self.layout.state / 'active.env').read_text())
 
+    def test_failed_activation_preserves_review_history(self):
+        self.config.write_text(self.config.read_text() + 'OWNER_EVIDENCE_DECISION_API_ENABLED=1\n')
+        self.run_activation()
+        ledger = self.layout.state / 'decisions' / 'ledger.sqlite'
+        ledger.write_bytes(b'approved owner correction')
+        prior_env = (self.layout.state / 'active.env').read_bytes()
+        new_data = b'failed replacement snapshot'
+        new_digest = hashlib.sha256(new_data).hexdigest()
+        (self.source / 'snapshot.sqlite').write_bytes(new_data)
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': new_digest}))
+        self.config.write_text(self.config.read_text().replace(self.digest, new_digest))
+        def fail_once(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise RuntimeError('restart failed')
+            return True
+        with self.assertRaises(RuntimeError):
+            activate(self.bundle, self.source, new_digest, self.layout,
+                     command=fail_once, health=lambda: None,
+                     owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(ledger.read_bytes(), b'approved owner correction')
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), prior_env)
+
     def test_stages_pinned_roster_with_snapshot_binding(self):
         activate(self.bundle, self.source, self.digest, self.layout,
                  roster_source=self.roster, expected_roster_sha256=self.roster_digest,
