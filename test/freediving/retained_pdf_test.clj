@@ -32,7 +32,7 @@
                     "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" xref
                     "\n%%EOF\n") "US-ASCII")))
 
-(defn- fixture []
+(defn fixture []
   (let [dir (.toRealPath (Files/createTempDirectory "retained-pdf-test-" (make-array FileAttribute 0))
                          (make-array java.nio.file.LinkOption 0))
         path (.resolve dir "source.pdf")

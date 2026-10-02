@@ -1,9 +1,10 @@
 (ns freediving.parser-adapters
   "Source-bound bridges from retained extractor inputs to parser-routing claims.
-   JSON result APIs, scan packets and workbooks have independent replay paths;
-   they remain explicit gaps here until their source-position evidence is bridged."
+   The JSON bridge is limited to one receipt-bound Microplus result route.
+   Scan packets and workbooks remain explicit gaps."
   (:require [clojure.string :as str]
             [freediving.aida-html :as aida-html]
+            [freediving.retained-json :as retained-json]
             [freediving.vdst-neckar-2025 :as neckar]))
 
 (defn- sha256 [^String source]
@@ -59,11 +60,14 @@
    The source-specific parser checks the known hash and four-page signature.
    HTML input is {:html retained-UTF-8-source}; its bytes are SHA-256 checked.
    Inventory entries must have exact :id, :citation and :coordinates from the
-   extractor. JSON APIs, image scan packets and workbooks have source-specific
-   packet paths, but no checked bridge to this router yet."
+   extractor. JSON requires original response bytes and its acquisition receipt.
+   Image scan packets and workbooks have no checked bridge to this router yet."
   [document retained-input]
   (let [{:keys [source-sha256 format]} document]
     (case format
+      :json
+      (retained-json/claims-for-document document retained-input)
+
       :html
       (if (and (string? (:html retained-input))
                (= source-sha256 (sha256 (:html retained-input))))

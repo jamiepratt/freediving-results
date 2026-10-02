@@ -3,6 +3,7 @@
             [freediving.aida-html-test :as html-fixture]
             [freediving.parser-adapters :as adapters]
             [freediving.parser-routing :as routing]
+            [freediving.retained-json-test :as json-fixture]
             [freediving.vdst-neckar-2025 :as neckar]
             [freediving.vdst-neckar-2025-test :as neckar-fixture]))
 
@@ -83,7 +84,7 @@
                                                         :pages neckar-fixture/pages}))))))
 
 (deftest unsupported-format-families-remain-explicit-gaps
-  (doseq [format [:json :image :workbook]]
+  (doseq [format [:image :workbook]]
     (let [hash (apply str (repeat 64 "a"))
           document {:source-sha256 hash :format format
                     :positions [{:id "source:1" :citation (str "sha256:" hash "#source:1")}]}
@@ -92,6 +93,15 @@
       (is (= [format] (:unsupported-formats result)))
       (is (= [:unsupported]
              (mapv :status (:gaps (routing/route-document document (:claims result)))))))))
+
+(deftest retained-json-registers-through-the-shared-router
+  (let [{:keys [document retained-input]} (json-fixture/fixture
+                                           [(json-fixture/result-row 101)])
+        result (adapters/claims-for-document document retained-input)
+        routed (routing/route-document document (:claims result))]
+    (is (= :raw-bytes-and-receipt-sha256 (:source-verification result)))
+    (is (= ["json-pointer=/0"] (mapv :position-id (:routed routed))))
+    (is (empty? (:gaps routed)))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.parser-adapters-test)]

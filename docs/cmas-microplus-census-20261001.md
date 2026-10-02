@@ -49,3 +49,14 @@ The `snapshot-v2/` extension from the same v8 base has 631 new records:
 76 cited PDF/API relationships and seven empty-unit gaps. Snapshot SHA-256 is
 `278daebb34b6770cf52baf1cc412148f3384435c09fd113e5ab6267815bf6a71`.
 Verification and byte-identical replay passed for both snapshot versions.
+
+The registered retained JSON router now covers one source-backed Results route:
+unit 3533 under competition 28, event 558. Its original response is 9,155 bytes,
+SHA-256 `1fb994cd08c19eebfc9ffe1e757d8ee3ef7ccf0d1e94d4a2fbd797acdb94adf0`.
+Its acquisition receipt and six packet positions at JSON pointers `/0` through
+`/5` were checked against those bytes. The bridge requires the exact route,
+receipt hash and length, supported row schema, and source-hash-bound pointer
+citations before claiming positions. Identical replay merges duplicate inputs;
+changed bytes require their own matching receipt and remain a separate version.
+This narrow route does not generalize to the other Microplus unit endpoints or
+establish six distinct sporting attempts.

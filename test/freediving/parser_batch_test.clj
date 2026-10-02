@@ -1,6 +1,10 @@
 (ns freediving.parser-batch-test
   (:require [clojure.test :refer [deftest is run-tests]]
-            [freediving.parser-batch :as batch]))
+            [freediving.parser-batch :as batch]
+            [freediving.retained-pdf-test :as pdf-fixture]
+            [freediving.retained-json-test :as json-fixture]
+            [freediving.vdst-neckar-2025 :as neckar]
+            [freediving.vdst-neckar-2025-test :as neckar-fixture]))
 
 (def hash-a (apply str (repeat 64 "a")))
 (def hash-b (apply str (repeat 64 "b")))
@@ -80,13 +84,65 @@
   (let [json (assoc (document hash-a) :format :json)
         result (batch/replay-registered-batch [{:document json :retained-input {}}])]
     (is (empty? (get-in result [:documents 0 :routed])))
-    (is (= [:no-checked-json-replay-bridge]
+    (is (= [:source-or-receipt-mismatch]
            (get-in result [:documents 0 :unsupported-reasons])))
     (is (= {:source-sha256 hash-a :source-version hash-a
-            :status :unsupported-document :reason :no-checked-json-replay-bridge}
+            :status :unsupported-document :reason :source-or-receipt-mismatch}
            (last (:exception-queue result))))
     (is (= 5 (get-in result [:metrics :exceptions])))
     (is (= 0 (get-in result [:metrics :requests])))))
+
+(deftest registered-json-batch-replays-verified-rows-once
+  (let [entry (select-keys (json-fixture/fixture
+                            [(json-fixture/result-row 101)
+                             (json-fixture/result-row 102)])
+                           [:document :retained-input])
+        replay (batch/replay-registered-batch [entry entry])]
+    (is (= 1 (count (:documents replay))))
+    (is (= 2 (get-in replay [:metrics :coverage :routed])))
+    (is (= 1 (get-in replay [:metrics :duplicate-inputs])))
+    (is (= 0 (get-in replay [:metrics :exceptions])))
+    (is (= 0 (get-in replay [:metrics :requests])))
+    (is (= 0 (get-in replay [:metrics :cache-reuses])))))
+
+(deftest archived-pdf-requires-source-object-before-routing
+  (let [document {:source-sha256 (apply str (repeat 64 "0")) :format :pdf
+                  :positions []}
+        missing-root "/definitely-missing-retained-pdf-archive"]
+    (is (= :missing-source
+           (try (batch/replay-registered-batch
+                 [{:document document :archive-root missing-root}])
+                (catch clojure.lang.ExceptionInfo error
+                  (:reason (ex-data error))))))))
+
+(deftest archived-pdf-keeps-tool-provenance-as-an-unsupported-source-gap
+  (let [{:keys [root hash]} (pdf-fixture/fixture)
+        result (batch/replay-registered-batch
+                [{:document {:source-sha256 hash :format :pdf :positions []}
+                  :archive-root root}])
+        document (first (:documents result))]
+    (is (= :archive-object-sha256
+           (get-in document [:verifications 0 :source-verification])))
+    (is (= "pdftotext"
+           (get-in document [:verifications 0 :pdftotext :name])))
+    (is (= [:unsupported-or-unverified-pdf-source]
+           (:unsupported-reasons document)))
+    (is (= 0 (get-in result [:metrics :requests])))))
+
+(deftest registered-batch-rejects-caller-asserted-pdf-trust
+  (let [hash neckar/source-sha256
+        coordinates {:page 1 :line 6 :column-start 1 :column-end 102}
+        id "page=1&line=6&column=1-102"
+        result (batch/replay-registered-batch
+                [{:document {:source-sha256 hash :format :pdf
+                             :positions [{:id id
+                                          :citation (str "sha256:" hash "#" id)
+                                          :coordinates coordinates}]}
+                  :retained-input {:source-sha256 hash :pages neckar-fixture/pages
+                                   :trusted-extraction? true}}])]
+    (is (empty? (get-in result [:documents 0 :routed])))
+    (is (= [:missing-archived-pdf-source]
+           (get-in result [:documents 0 :unsupported-reasons])))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.parser-batch-test)]
