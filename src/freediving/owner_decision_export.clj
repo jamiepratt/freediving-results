@@ -102,16 +102,18 @@
                    (contains? source :original) (contains? source :proposed)
                    (keyword? selected) model-origin?)
       (invalid! "Incomplete owner proposal provenance" {:decision-id id}))
-    (let [bindings (mapv #(select-keys % [:evidence-id :snapshot-record-id :observation-revision]) bound)
+    (let [bindings (mapv (fn [{:keys [evidence-id snapshot-record-id observation-revision]}]
+                           {:evidence_id evidence-id :snapshot_record_id snapshot-record-id
+                            :observation_revision observation-revision}) bound)
           observations (mapv :observation-revision bound)
           confidence (when answer (:confidence answer))
           probability (when answer (get (:probabilities answer) selected))]
       (when-not (and (or (nil? confidence) (and (number? confidence) (<= 0 confidence 1)))
                      (or (nil? probability) (and (number? probability) (<= 0 probability 1))))
         (invalid! "Invalid provider probability" {:decision-id id}))
-      {:id id :type (name (:family decision)) :subject_id (:subject_id source)
+      {:id id :type (str/replace (name (:family decision)) "-" "_") :subject_id (:subject_id source)
        :source_name (:source_name source) :original (:original source)
-       :proposed (:proposed source) :selected_option (name selected)
+       :proposed (:proposed source) :selected_option (str/replace (name selected) "-" "_")
        :competing_options (:competing_options source)
        :evidence (mapv (fn [{:keys [evidence-id snapshot-record-id observation-revision source]}]
                          {:id snapshot-record-id

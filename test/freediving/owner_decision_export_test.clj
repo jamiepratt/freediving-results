@@ -43,6 +43,9 @@
     (is (= (:citation (first (:evidence decision)))
            (get-in proposal [:evidence 0 :citation :source_citation])))
     (is (= observation (get-in proposal [:canonical_binding :observation_revisions 0])))
+    (is (= {:evidence_id "source-row-1" :snapshot_record_id record
+            :observation_revision observation}
+           (get-in proposal [:canonical_binding :evidence_bindings 0])))
     (is (= "event-1" (get-in proposal [:canonical_binding :reconciliation_event_id])))))
 
 (deftest refuses-unverified-or-changed-observation-bindings
