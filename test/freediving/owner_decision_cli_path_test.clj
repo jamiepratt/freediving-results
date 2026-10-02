@@ -77,7 +77,7 @@
                                  ["python3" "tests/test_owner_decision_synthetic_path.py"
                                   "--serve-integrated" (str metadata-path)])
                             (.directory (java.io.File. (System/getProperty "user.dir")))
-                            (.redirectErrorStream true)))
+                            (.redirectError (java.io.File. (str (.resolve temp "origin-stderr.log"))))))
           reader (BufferedReader. (InputStreamReader. (.getInputStream process) "UTF-8"))]
       (try
         (let [line (.readLine reader)
@@ -101,8 +101,13 @@
                                                {:id "original-flow" :decision-id (:id decision)}))
           (Files/writeString config-path (pr-str config) (make-array java.nio.file.OpenOption 0))
           (Files/setPosixFilePermissions config-path (PosixFilePermissions/fromString "rw-------"))
-          (let [action (browser! (:origin_port service) "approve" (:id decision))]
+          (let [action (browser! (:origin_port service) "ui-approve" (:id decision))]
             (is (= (:decision_id action) (:id decision)))
+            (is (= [(str "Inspect " (:id decision)) "Preview approve" "Confirm approve"]
+                   (get-in action [:ui :clicks])))
+            (is (= "human_approved" (get-in action [:ui :rendered_status])))
+            (is (= "approve" (get-in action [:ui :post_action])))
+            (is (= (:id decision) (get-in action [:ui :post_decision_id])))
             (is (= {:expired_access 403 :foreign_origin 403 :stale_revision 409
                     :browser_event_feed 403} (:rejected action)))
             (is (= 200 (:retry action)))
@@ -114,7 +119,7 @@
           (is (= (:id decision)
                  (get-in (last (identity/private-history app))
                          [:owner-canonical-decision :id])))
-          (let [projection (browser! (:origin_port service) "projection" (:id decision))]
+          (let [projection (browser! (:origin_port service) "ui-projection" (:id decision))]
             (is (= 1 (:accepted-group-count projection))
                 (when (Files/exists (.resolve temp "canonical-error.txt")
                                     (make-array java.nio.file.LinkOption 0))
@@ -127,7 +132,12 @@
           (is (= "automatic_approved"
                  (:effective_status (browser! (:origin_port service) "inspect"
                                               "synthetic-dependent"))))
-          (let [action (browser! (:origin_port service) "reverse" (:id decision))]
+          (let [action (browser! (:origin_port service) "ui-reverse" (:id decision))]
+            (is (= [(str "Inspect " (:id decision)) "Preview reverse" "Confirm reverse"]
+                   (get-in action [:ui :clicks])))
+            (is (= "reversed" (get-in action [:ui :rendered_status])))
+            (is (= "reverse" (get-in action [:ui :post_action])))
+            (is (= (:id decision) (get-in action [:ui :post_decision_id])))
             (is (= (:id decision)
                    (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
                            [:events 1 :decision_id]))))
@@ -136,7 +146,7 @@
           (is (= (:id decision)
                  (get-in (last (identity/private-history app))
                          [:owner-canonical-decision :id])))
-          (let [projection (browser! (:origin_port service) "projection" (:id decision))]
+          (let [projection (browser! (:origin_port service) "ui-projection" (:id decision))]
             (is (= 0 (:accepted-group-count projection)))
             (is (= 1 (count (:negative-pairs projection)))))
           (is (= "invalidated"

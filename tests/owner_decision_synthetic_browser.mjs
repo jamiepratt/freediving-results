@@ -1,6 +1,10 @@
 // Synthetic browser requests through the real Cloudflare Worker into a loopback origin.
 import {webcrypto} from 'node:crypto';
 import http from 'node:http';
+import {createRequire} from 'node:module';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import worker from '../deploy/worker.mjs';
 
 const port = Number(process.argv[2]);
@@ -37,7 +41,8 @@ async function token(overrides={}) {
 
 globalThis.fetch = async (url, options={}) => {
   if (url === `${issuer}/cdn-cgi/access/certs`) return Response.json({keys:[jwk]});
-  if (!String(url).startsWith(upstream + '/owner-evidence/')) throw Error('unexpected upstream');
+  if (String(url) !== upstream + '/owner-evidence' &&
+      !String(url).startsWith(upstream + '/owner-evidence/')) throw Error('unexpected upstream');
   const headers = new Headers(options.headers);
   headers.set('Host', 'owner-private.alphacompose.com');
   if (options.body) headers.set('Content-Length', String(options.body.length));
@@ -73,7 +78,72 @@ const action = (id, actionName, expectedRevision, key, extra={}, headers={}) => 
     'Content-Type':'application/json', 'X-Freediving-CSRF':csrf, ...headers}});
 };
 
+async function clickOwnerAction(id, actionName) {
+  const staticProbe = await request('/owner-evidence');
+  if (staticProbe.status !== 200) throw Error(`owner static probe ${staticProbe.status}`);
+  const require = createRequire(import.meta.url);
+  const {chromium} = require('playwright');
+  const profile = await mkdtemp(join(tmpdir(), 'owner-decision-playwright-'));
+  const gateway = http.createServer(async (incoming, outgoing) => {
+    try {
+      const chunks = [];
+      for await (const chunk of incoming) chunks.push(chunk);
+      const body = Buffer.concat(chunks);
+      const headers = new Headers(incoming.headers);
+      headers.set('Cf-Access-Jwt-Assertion', browser);
+      // The local listener represents the public HTTPS origin for this isolated test.
+      if (headers.has('Origin')) headers.set('Origin', origin);
+      const response = await worker.fetch(new Request(origin + incoming.url, {
+        method:incoming.method, headers, body:body.length ? body : undefined
+      }), env);
+      outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+      outgoing.end(Buffer.from(await response.arrayBuffer()));
+    } catch (error) {
+      outgoing.writeHead(500, {'Content-Type':'text/plain'});
+      outgoing.end(String(error));
+    }
+  });
+  await new Promise(resolve => gateway.listen(0, '127.0.0.1', resolve));
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      headless:true,
+      executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    });
+    const page = await context.newPage();
+    const base = `http://127.0.0.1:${gateway.address().port}`;
+    const navigation = await page.goto(base + '/owner-evidence', {waitUntil:'domcontentloaded'});
+    if (navigation.status() !== 200) throw Error(`owner page ${navigation.status()}`);
+    if (actionName === 'projection') return await page.evaluate(async () => {
+      const response = await fetch('/owner-evidence/api/canonical-projection');
+      if (!response.ok) throw Error(`canonical projection ${response.status}`);
+      return response.json();
+    });
+    await page.getByRole('button', {name:`Inspect ${id}`}).first().click();
+    await page.getByRole('button', {name:actionName === 'reverse' ? 'Preview Reverse' : 'Preview approve'}).click();
+    await page.getByRole('textbox', {name:'Reason for decision action'}).fill('synthetic owner review');
+    const responsePromise = page.waitForResponse(response =>
+      response.request().method() === 'POST' &&
+      response.url().endsWith(`/owner-evidence/api/decisions/${id}/actions`));
+    await page.getByRole('button', {name:`Confirm ${actionName}`}).click();
+    const response = await responsePromise;
+    if (response.status() !== 200) throw Error(`UI ${actionName} ${response.status()}: ${await response.text()}`);
+    await page.locator('#decision-detail').getByText(actionName === 'approve' ? 'human_approved' : 'reversed', {exact:true}).first().waitFor();
+    return {status:response.status(), body:response.request().postData(),
+            clicks:[`Inspect ${id}`,`Preview ${actionName}`,`Confirm ${actionName}`],
+            rendered_status:actionName === 'approve' ? 'human_approved' : 'reversed'};
+  } finally {
+    if (context) await context.close();
+    await new Promise(resolve => gateway.close(resolve));
+    await rm(profile, {recursive:true, force:true});
+  }
+}
+
 const phase = process.argv[3];
+if (phase === 'ui-projection') {
+  process.stdout.write(JSON.stringify(await clickOwnerAction(null, 'projection')));
+  process.exit(0);
+}
 if (phase === 'projection') {
   const response = await request('/owner-evidence/api/canonical-projection');
   if (response.status !== 200) throw Error(`canonical projection ${response.status}`);
@@ -90,21 +160,25 @@ if (phase === 'inspect') {
     store_revision:detail.store_revision}));
   process.exit(0);
 }
-if (phase === 'approve' || phase === 'reverse') {
+if (phase === 'approve' || phase === 'reverse' || phase === 'ui-approve' || phase === 'ui-reverse') {
   const id = process.argv[4];
   if (!id) throw Error('decision ID required');
+  const actionName = phase.replace(/^ui-/, '');
   const rejected = {};
   rejected.expired_access = (await request(actionPath(id), {method:'POST',
-    body:JSON.stringify({action:phase,expected_revision:revision,
+    body:JSON.stringify({action:actionName,expected_revision:revision,
       idempotency_key:'expired-'+phase,reason:'synthetic',csrf_token:csrf}),
     headers:{Origin:origin,'Content-Type':'application/json','X-Freediving-CSRF':csrf,
       'Cf-Access-Jwt-Assertion':await token({exp:Math.floor(Date.now()/1000)-1})}})).status;
-  rejected.foreign_origin = (await action(id,phase,revision,'foreign-'+phase,{},
+  rejected.foreign_origin = (await action(id,actionName,revision,'foreign-'+phase,{},
                                           {Origin:'https://foreign.example'})).status;
-  const result = await action(id,phase,revision,'synthetic-'+phase);
+  const ui = phase.startsWith('ui-') ? await clickOwnerAction(id, actionName) : null;
+  const result = ui ? {status:ui.status} : await action(id,actionName,revision,'synthetic-'+phase);
   if (result.status !== 200) throw Error(`${phase} ${result.status}: ${await result.text()}`);
-  const retry = await action(id,phase,revision,'synthetic-'+phase);
-  rejected.stale_revision = (await action(id,phase,revision,'stale-'+phase)).status;
+  const retry = ui ? await request(actionPath(id), {method:'POST', body:ui.body,
+    headers:{Origin:origin, 'Content-Type':'application/json', 'X-Freediving-CSRF':csrf}})
+    : await action(id,actionName,revision,'synthetic-'+phase);
+  rejected.stale_revision = (await action(id,actionName,revision,'stale-'+phase)).status;
   const detailResponse = await request(`/owner-evidence/api/decisions/${id}`);
   if (detailResponse.status !== 200) throw Error(`inspect ${detailResponse.status}`);
   const detail = await detailResponse.json();
@@ -114,7 +188,9 @@ if (phase === 'approve' || phase === 'reverse') {
   const feedResponse = await request(feedPath, {headers:{
     'Cf-Access-Jwt-Assertion':machine, 'X-Freediving-Import-Token':importToken}});
   if (feedResponse.status !== 200) throw Error(`machine feed ${feedResponse.status}`);
-  process.stdout.write(JSON.stringify({action:result.status, retry:retry.status,
+  const uiEvidence = ui && {clicks:ui.clicks, rendered_status:ui.rendered_status,
+    post_action:JSON.parse(ui.body).action, post_decision_id:id};
+  process.stdout.write(JSON.stringify({action:result.status, retry:retry.status, ui:uiEvidence,
     rejected, decision_id:id, effective_status:detail.effective_status,
     feed:await feedResponse.json()}));
   process.exit(0);

@@ -36,6 +36,10 @@ def main():
                 'FREEDIVING_TEST_URL': base + 'observations_app',
                 'FREEDIVING_TEST_REVIEW_URL': base + 'reviews_owner',
             }
+            bundled_node_modules = (Path.home() / '.cache/codex-runtimes/codex-primary-runtime'
+                                    / 'dependencies/node/node_modules')
+            if 'NODE_PATH' not in env and bundled_node_modules.is_dir():
+                env['NODE_PATH'] = str(bundled_node_modules)
             run('clojure', '-Sdeps', '{:paths ["src" "resources" "test"]}', '-M', '-m',
                 'freediving.owner-decision-cli-path-test', env=env)
         finally:
