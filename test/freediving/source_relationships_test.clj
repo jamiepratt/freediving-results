@@ -97,6 +97,9 @@
 (def attempt-scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
                     :discipline "FIM" :participant "publisher:42" :attempt "2"})
 
+(defn raw-bindings [scope]
+  (into {} (map (fn [[field value]] [field {:path [:raw field] :value value}]) scope)))
+
 (defn attempt-fixture []
   (let [positions [{:id "p1" :source-id "official" :locator {:page 1 :line 2}}
                    {:id "p2" :source-id "mirror" :locator {:row 3}}]
@@ -104,20 +107,21 @@
                   (let [position (first (filter #(= position-id (:id %)) positions))]
                     {:source-id (:source-id position) :source-sha256 (if (= position-id "p1") "aa" "bb")
                      :position-id position-id
-                     :citation (:locator position) :fields attempt-scope}))]
+                     :citation (:locator position) :fields attempt-scope
+                     :bindings (raw-bindings attempt-scope)}))]
     (relationships/empty-attempt-ledger
      {:sources [{:id "official" :sha256 "aa"} {:id "mirror" :sha256 "bb"}]
       :positions positions
       :observation-versions [{:id "v1" :position-id "p1" :parser-version "1" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p1")
-                              :values {:raw-performance "70m" :final-performance "69m"
+                              :values {:raw attempt-scope :raw-performance "70m" :final-performance "69m"
                                        :penalty "1m" :card "yellow" :notes "turn"}}
                              {:id "v2" :position-id "p1" :parser-version "2" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p1")
-                              :values {:raw-performance "70m" :final-performance "69m"}}
+                              :values {:raw attempt-scope :raw-performance "70m" :final-performance "69m"}}
                              {:id "v3" :position-id "p2" :parser-version "1" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p2")
-                              :values {:raw-performance "70m" :final-performance "69m"}}]})))
+                              :values {:raw attempt-scope :raw-performance "70m" :final-performance "69m"}}]})))
 
 (def mirror-provenance
   {:kind :publisher-mirror :dependent-source "mirror" :upstream-source "official"
@@ -146,7 +150,9 @@
   (let [base (attempt-fixture)
         different-day (-> base
                           (assoc-in [:observation-versions "v3" :scope :day] "2026-06-02")
-                          (assoc-in [:observation-versions "v3" :scope-evidence :fields :day] "2026-06-02"))
+                          (assoc-in [:observation-versions "v3" :scope-evidence :fields :day] "2026-06-02")
+                          (assoc-in [:observation-versions "v3" :scope-evidence :bindings :day :value] "2026-06-02")
+                          (assoc-in [:observation-versions "v3" :values :raw :day] "2026-06-02"))
         missing-session (update-in base [:observation-versions "v3" :scope] dissoc :session)]
     (is (= 2 (get-in (relationships/project-attempts different-day) [:counts :accepted-attempts])))
     (is (= 1 (get-in (relationships/project-attempts missing-session) [:counts :unresolved-observations])))
@@ -164,6 +170,36 @@
                  (relationships/append-attempt-event unverified
                                                      {:id "uncited" :action :accept :type :same-attempt
                                                       :pair ["v1" "v3"] :evidence {:kind :verified-scope}})))))
+
+(deftest fabricated-scope-fields-cannot-qualify
+  (let [base (attempt-fixture)]
+    (doseq [field [:day :participant :attempt]]
+      (let [fabricated (-> base
+                           (assoc-in [:observation-versions "v3" :scope field] "fabricated")
+                           (assoc-in [:observation-versions "v3" :scope-evidence :fields field]
+                                     "fabricated"))]
+        (is (= 1 (get-in (relationships/project-attempts fabricated)
+                         [:counts :unresolved-observations]))
+            (str field " must bind retained observation values"))))))
+
+(deftest scope-binding-must-address-own-raw-field-or-exact-cited-text
+  (let [base (attempt-fixture)
+        cross-row (assoc-in base [:observation-versions "v3" :scope-evidence :bindings :day :path]
+                            [:other-row :day])
+        wrong-field (assoc-in base [:observation-versions "v3" :scope-evidence :bindings :day :path]
+                              [:raw :participant])
+        contextual (-> base
+                       (update-in [:observation-versions "v3" :values :raw] dissoc :day)
+                       (assoc-in [:observation-versions "v3" :source-text] "day=2026-06-01")
+                       (assoc-in [:observation-versions "v3" :scope-evidence :bindings :day]
+                                 {:path [:source-text] :value "2026-06-01"
+                                  :text "day=2026-06-01" :span [4 14]}))]
+    (is (= 1 (get-in (relationships/project-attempts cross-row)
+                     [:counts :unresolved-observations])))
+    (is (= 1 (get-in (relationships/project-attempts wrong-field)
+                     [:counts :unresolved-observations])))
+    (is (= 1 (get-in (relationships/project-attempts contextual)
+                     [:counts :accepted-attempts])))))
 
 (deftest independently-cited-equal-scopes-link-automatically-and-reverse
   (let [base (attempt-fixture)
@@ -248,7 +284,9 @@
                      :observation-versions (mapv #(if (= "v3" (:id %))
                                                     (-> %
                                                         (assoc-in [:scope :day] "2026-06-02")
-                                                        (assoc-in [:scope-evidence :fields :day] "2026-06-02")) %)
+                                                        (assoc-in [:scope-evidence :fields :day] "2026-06-02")
+                                                        (assoc-in [:scope-evidence :bindings :day :value] "2026-06-02")
+                                                        (assoc-in [:values :raw :day] "2026-06-02")) %)
                                                  (vals (:observation-versions base)))}
         rebased (relationships/rebase-attempt-ledger linked replacement)]
     (is (= #{"dive"} (:invalidated-events rebased)))

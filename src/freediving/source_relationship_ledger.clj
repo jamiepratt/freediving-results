@@ -37,6 +37,7 @@
      :discipline (:discipline parsed)
      :day (:event-date parsed)
      :parser-version (:parser-version artifact)
+     :raw (:raw candidate)
      :parsed parsed}))
 
 (defn- validate-routes! [{:keys [routes source-candidates]}]
@@ -73,7 +74,8 @@
                                     (get-in row [:parsed :result-role]))
                             :scope (:scope binding)
                             :scope-evidence (:scope-evidence binding)
-                            :values (:parsed row)
+                            :source-text (:source-text row)
+                            :values (assoc (:parsed row) :raw (:raw row))
                             :reference ref})) rows)]
     {:sources sources :positions positions :observation-versions versions}))
 

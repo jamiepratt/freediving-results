@@ -33,17 +33,19 @@
 (deftest corpus-attempt-counts-require-retained-scope-bindings
   (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M
                 :result-role :individual-result}
-        row (candidate 9 "printed row" parsed)
+        scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
+               :discipline "FIM" :participant "publisher:42" :attempt "1"}
+        row (assoc (candidate 9 "printed row" parsed) :raw scope)
         jobs [(inspected "job-a" "parser/1" [row])
               (inspected "job-b" "parser/2" [row])]
         raw (ledger/build-ledger jobs {:routes []})
         source (apply str (repeat 64 "a"))
         position (pr-str [source [{:page 1 :line 9}]])
-        scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
-               :discipline "FIM" :participant "publisher:42" :attempt "1"}
         binding {:scope scope
                  :scope-evidence {:source-id source :source-sha256 source :position-id position
-                                  :citation [{:page 1 :line 9}] :fields scope}}
+                                  :citation [{:page 1 :line 9}] :fields scope
+                                  :bindings (into {} (map (fn [[field value]]
+                                                            [field {:path [:raw field] :value value}]) scope))}}
         accepted (ledger/build-ledger jobs {:routes []}
                                       {:scope-bindings {{:job-id "job-a" :ordinal 0} binding
                                                         {:job-id "job-b" :ordinal 0} binding}})]

@@ -224,6 +224,24 @@
 (defn- source-of [ledger version-id]
   (get-in ledger [:positions (get-in ledger [:observation-versions version-id :position-id]) :source-id]))
 
+(defn- scope-field-bound? [row field binding]
+  (let [{:keys [path value span text]} binding
+        claimed (get (:scope row) field)]
+    (and (= claimed value)
+         (or (and (= [:raw field] path)
+                  (map? (get-in row [:values :raw]))
+                  (= value (get-in row [:values :raw field])))
+             (and (= [:source-text] path)
+                  (= text (:source-text row))
+                  (string? text) (string? value)
+                  (vector? span) (= 2 (count span))
+                  (every? nat-int? span)
+                  (let [[start end] span
+                        prefix (str (name field) "=")]
+                    (and (<= (count prefix) start end (count text))
+                         (= value (subs text start end))
+                         (= prefix (subs text (- start (count prefix)) start)))))))))
+
 (defn- verified-scope? [ledger version-id]
   (let [row (get-in ledger [:observation-versions version-id])
         position (get-in ledger [:positions (:position-id row)])
@@ -236,7 +254,10 @@
             (:source-sha256 evidence))
          (= (:locator position) (:citation evidence))
          (some? (:citation evidence))
-         (= (:scope row) (:fields evidence)))))
+         (= (:scope row) (:fields evidence))
+         (= (set attempt-scope-keys) (set (keys (:bindings evidence))))
+         (every? #(scope-field-bound? row % (get-in evidence [:bindings %]))
+                 attempt-scope-keys))))
 
 (defn- automatic-attempt-links [ledger]
   (let [rows (filter #(verified-scope? ledger (:id %))
