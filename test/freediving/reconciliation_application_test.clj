@@ -17,6 +17,40 @@
                :fact "Synthetic cited result"}]
    :evidence-adequate? true})
 
+(deftest remote-owner-corrections-require-proof-and-current-evidence
+  (let [d (decision "identity" :identity
+                    [:same-person :different-person :unknown] ["a" "b"])
+        event {:id "owner-event-17" :decision-id "identity" :store-revision 17
+               :action :reverse :actor "owner" :reason "different athlete"
+               :snapshot-sha256 (apply str (repeat 64 "a")) :decision d}
+        verify! (fn [candidate] (= event candidate))
+        imported (application/import-remote-review-events
+                  (flow/empty-ledger) [d] [event] {:verify-event! verify!})]
+    (is (= :reversed (get-in (flow/inspect imported [d]) ["identity" :status])))
+    (is (= :human (get-in (flow/inspect imported [d]) ["identity" :origin])))
+    (is (= imported
+           (application/import-remote-review-events imported [d] [event]
+                                                    {:verify-event! verify!})))
+    (with-redefs [identity/sync-model-correction! (fn [_ _ _ _]
+                                                    {:accepted-group-count 0})]
+      (is (= :reversed
+             (get-in (application/run! imported [d]
+                                       {:config config :policy policy/default-policy
+                                        :persist-flow! (fn [_] true)
+                                        :reviewer-url "synthetic-review"})
+                     [:results "identity" :status]))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d] [event] {})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  imported [d] [(assoc event :id "older" :store-revision 16)]
+                  {:verify-event! (constantly true)})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/import-remote-review-events
+                  (flow/empty-ledger) [d] [(assoc event :decision (assoc d :candidates ["x" "y"]))]
+                  {:verify-event! (constantly true)})))))
+
 (deftest approved-identity-routes-and-row-semantics-remains-unresolved
   (let [identity-decision (decision "identity" :identity
                                     [:same-person :different-person :unknown] ["a" "b"])
