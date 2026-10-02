@@ -64,8 +64,15 @@
 
 (defn- proposal [decision event run-revision opts]
   (let [id (:id decision)
-        source (:owner-proposal decision)
         evidence (:evidence decision)
+        names (set (keep :source-name evidence))
+        derived {:subject_id (get-in decision [:subject :id])
+                 :source_name (when (= 1 (count names)) (first names))
+                 :competing_options (when (vector? (:choices decision))
+                                      (mapv #(str/replace (name %) "-" "_")
+                                            (remove #{(:action event)} (:choices decision))))
+                 :supporting_evidence [] :conflicting_evidence []}
+        source (merge derived (:owner-proposal decision))
         mappings (:evidence-bindings opts)
         verified (:verified-snapshot-record-ids opts)
         bound (mapv (fn [item]

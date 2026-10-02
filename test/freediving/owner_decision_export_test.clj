@@ -48,6 +48,25 @@
            (get-in proposal [:canonical_binding :evidence_bindings 0])))
     (is (= "event-1" (get-in proposal [:canonical_binding :reconciliation_event_id])))))
 
+(deftest derives-only-evidenced-proposal-metadata
+  (let [{:keys [ledger decision observation mapping]} (fixture)
+        decision (-> decision
+                     (assoc :choices [:same-person :different-person :unknown])
+                     (assoc-in [:evidence 0 :source-name] "Synthetic source")
+                     (update :owner-proposal dissoc :subject_id :source_name :competing_options
+                             :supporting_evidence :conflicting_evidence))
+        ledger (assoc-in ledger [:events 0 :evidence] (:evidence decision))
+        opts {:snapshot-sha256 sha :binding-revision 7
+              :evidence-bindings {"source-row-1" mapping}
+              :observation-revisions {[job 0] observation}
+              :verified-snapshot-record-ids #{record}}
+        proposal (first (:proposals (export/export-proposals ledger [decision] opts)))]
+    (is (= "person-a" (:subject_id proposal)))
+    (is (= "Synthetic source" (:source_name proposal)))
+    (is (= ["different_person" "unknown"] (:competing_options proposal)))
+    (is (= [] (:supporting_evidence proposal)))
+    (is (= [] (:conflicting_evidence proposal)))))
+
 (deftest refuses-unverified-or-changed-observation-bindings
   (let [{:keys [ledger decision observation mapping]} (fixture)
         base {:snapshot-sha256 sha :binding-revision 7
