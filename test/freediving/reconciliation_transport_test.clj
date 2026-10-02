@@ -72,6 +72,35 @@
                                    {:bearer-token "fixture-secret"})))
         (is (= 1 @calls))))))
 
+(deftest stalled-body-obeys-the-total-deadline
+  (let [calls (atom 0)]
+    (with-server
+      (fn [exchange]
+        (swap! calls inc)
+        (.sendResponseHeaders exchange 200 100)
+        (with-open [output (.getResponseBody exchange)]
+          (.write output (.getBytes "start" "UTF-8"))
+          (.flush output)
+          (Thread/sleep 500)
+          (try (.write output (.getBytes "late" "UTF-8")) (catch Exception _))))
+      (fn [url]
+        (let [started (System/nanoTime)
+              result (transport/execute! (assoc-in (request url) [:config :timeout-ms] 80)
+                                         {:bearer-token "fixture-secret"})
+              elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)]
+          (is (= {:outcome :error :error :timeout} result))
+          (is (< elapsed-ms 400))
+          (is (= 1 @calls)))))))
+
+(deftest credential-lookup-details-never-enter-error-results
+  (let [secret "fixture-secret-that-must-not-return"
+        lookup (resolve 'freediving.reconciliation-transport/credential)
+        result (with-redefs-fn
+                 {lookup (fn [] (throw (ex-info secret {:secret secret})))}
+                 #(transport/execute! (request "https://example.com/jev") {}))]
+    (is (= {:outcome :error :error :credential-unavailable} result))
+    (is (not (.contains (pr-str result) secret)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-transport-test)]
     (when (pos? (+ (:fail result) (:error result)))

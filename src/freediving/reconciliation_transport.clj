@@ -9,7 +9,7 @@
             HttpResponse$BodyHandlers HttpTimeoutException]
            [java.nio.charset StandardCharsets]
            [java.time Duration]
-           [java.util.concurrent TimeUnit]))
+           [java.util.concurrent ExecutionException TimeUnit]))
 
 (defn- command-output [args token]
   (let [builder (ProcessBuilder. ^java.util.List args)
@@ -82,6 +82,21 @@
               (.write output buffer 0 read)
               (recur next-total))))))))
 
+(defn- read-before-deadline [^InputStream input maximum deadline]
+  (let [result-promise (promise)
+        reader (doto (Thread. (fn [] (deliver result-promise
+                                              (try (bounded-body input maximum)
+                                                   (catch Throwable error error)))))
+                 (.setDaemon true)
+                 (.start))
+        remaining (max 0 (long (Math/ceil (/ (- deadline (System/nanoTime)) 1000000.0))))
+        result (deref result-promise remaining ::timeout)]
+    (if (= ::timeout result)
+      (do (.interrupt reader)
+          (try (.close input) (catch Exception _))
+          (throw (ex-info "Response body timed out" {:reason :timeout})))
+      (if (instance? Throwable result) (throw result) result))))
+
 (defn execute!
   "Return a raw response or a finite error. Never retry an uncertain dispatch."
   [request runtime]
@@ -110,10 +125,11 @@
                                    (.header "Authorization" (str "Bearer " token))
                                    (.POST (HttpRequest$BodyPublishers/ofString body))
                                    (.build))
+                  deadline (+ (System/nanoTime) (* 1000000 timeout))
                   response (.send client http-request (HttpResponse$BodyHandlers/ofInputStream))
                   status (.statusCode response)]
               (if (= 200 status)
-                {:raw-response (bounded-body (.body response) max-response)
+                {:raw-response (read-before-deadline (.body response) max-response deadline)
                  :http-status status}
                 (do (.close ^InputStream (.body response))
                     {:outcome :error
@@ -122,6 +138,9 @@
                               (#{401 403} status) :unauthorized
                               :else :http-error)})))))
         (catch HttpTimeoutException _ {:outcome :error :error :timeout})
+        (catch ExecutionException error
+          {:outcome :error
+           :error (or (:reason (ex-data (.getCause error))) :transport-error)})
         (catch InterruptedException _
           (.interrupt (Thread/currentThread))
           {:outcome :error :error :interrupted})
