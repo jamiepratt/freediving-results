@@ -667,7 +667,6 @@
         view (get (flow/inspect flow-ledger [decision] config) (:id decision))]
     (if (and existing
              (model-current? (:rows ledger) existing)
-             (= expected-revision (:base-revision existing))
              (= decision (get-in existing [:model-proof :decision]))
              (= config (get-in existing [:model-proof :config]))
              (= approval-policy (get-in existing [:model-proof :approval-policy]))

@@ -107,6 +107,8 @@
                 (identity/record-model-event! app flow-ledger decision config policy 0))))
       (is (= 1 (:accepted-group-count
                 (identity/record-model-event! app flow-ledger decision config policy 0))))
+      (is (= 1 (:accepted-group-count
+                (identity/record-model-event! app flow-ledger decision config policy 1))))
       (is (= [:model] (get-in (identity/private-projection app) [:athletes a :decision-origin])))
       (is (= :model (:actor-kind (first (identity/private-history app)))))
       (is (thrown? Exception
