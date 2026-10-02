@@ -6,7 +6,10 @@
             [clojure.string :as str]
             [freediving.aida-html :as html]
             [freediving.html-evidence :as html-evidence]
-            [freediving.candidates :as candidates])
+            [freediving.candidates :as candidates]
+            [freediving.reconciliation-flow :as reconciliation-flow]
+            [freediving.reconciliation-policy :as reconciliation-policy]
+            [freediving.reconciliation-jev :as reconciliation-jev])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -69,6 +72,11 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=15"))]
                      (when-not (= checksum (:sha256 old)) (fail! "Athlete identity migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(15,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/016-reconciliation-model-events.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=16"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "Model reconciliation migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(16,?)" checksum))))
                  (execute! c "DROP TRIGGER stamp_dive_field_decisions ON freediving.dive_field_decisions")
                  (execute! c (str "CREATE TRIGGER stamp_dive_field_decisions BEFORE INSERT ON freediving.dive_field_decisions FOR EACH ROW EXECUTE FUNCTION freediving.stamp_dive_field_decision('" ingest-role "','" reviewer-role "')"))
                  (execute! c "DROP TRIGGER stamp_athlete_identity_event ON freediving.athlete_identity_events")
@@ -797,6 +805,174 @@
                                                                  :dependencies (if latest-human [(:id latest-human)] [])
                                                                  :model-confidence nil}))))))
                            {} [:category :representation])))))
+
+(defn build-dive-field-jev-decision
+  "Build a private Jev question only for a mapped native label with unresolved semantics.
+   Missing mappings and conflicting headings stay explicitly unresolved."
+  [url t dictionary field]
+  (when-not (and (#{:category :representation} field)
+                 (nonblank? (:source-position-id t))
+                 (map? dictionary) (nonblank? (:version dictionary))
+                 (nonblank? (:federation dictionary)) (nonblank? (:event-id dictionary)))
+    (fail! "Versioned source-position dictionary required"))
+  (read-snapshot url
+                 (fn [c]
+                   (let [row (field-row c t)
+                         [source-key raw] (raw-field-entry (:payload row) field)
+                         proposal (field-proposal row dictionary field)
+                         mapped (dictionary-entry dictionary field raw)
+                         valid? (if (= field :category)
+                                  (and (vector? mapped) (seq mapped) (every? nonblank? mapped))
+                                  (and (map? mapped)
+                                       (#{:country :federation :neutral :organization} (:kind mapped))
+                                       (nonblank? (:code mapped))))
+                         reason (cond
+                                  (not (nonblank? raw)) :missing-label
+                                  (not valid?) :unmapped-label
+                                  (seq (:conflicting-evidence proposal)) :conflicting-heading
+                                  (= :accepted (:status proposal)) :deterministic
+                                  :else nil)]
+                     (if reason
+                       {:status (if (= reason :deterministic) :deterministic :unresolved)
+                        :reason reason :source-position (citation row)}
+                       (let [evidence {:evidence-id (str "row:" (:source-position-id t))
+                                       :citation (citation row)
+                                       :exact-excerpt raw
+                                       :source-label (name source-key)
+                                       :source-meaning (str "Native source column " (name source-key)
+                                                            "; category and representation are distinct")
+                                       :uncertainty (name (get-in proposal [:rule-evidence :rule]))}
+                             id (sha256 (.getBytes (encode [(:source-position-id t) (:job-id row)
+                                                            (:ordinal row) (:source-sha256 row)
+                                                            (:artifact-sha256 row) (:parser-version row)
+                                                            field (:version dictionary) raw mapped]) "UTF-8"))]
+                         {:status :ready
+                          :decision {:id id :family :category-representation
+                                     :action field
+                                     :subject {:source-position-id (:source-position-id t)
+                                               :job-id (:job-id row) :ordinal (:ordinal row)
+                                               :source-label (name source-key) :raw-label raw
+                                               :federation (:federation dictionary)
+                                               :event-id (:event-id dictionary)}
+                                     :candidates [{:field (name field) :raw-label raw
+                                                   :normalized-value (pr-str mapped)}]
+                                     :evidence [evidence]
+                                     :uncertainties [(get-in proposal [:rule-evidence :rule])]
+                                     :contradictions [] :dependencies []
+                                     :evidence-adequate? true}}))))))
+
+(defn approve-jev-dive-field!
+  "Apply one approved source-label classification to a canonical dive field.
+   The dictionary supplies the normalized value; Jev only classifies its meaning."
+  [url ledger decision config {:keys [target decision-id decision-type dictionary policy base-revision] :as request}]
+  (when-not (and (= decision-id (:id decision))
+                 (= :category-representation (:family decision))
+                 (#{:category :representation} decision-type)
+                 (nat-int? base-revision)
+                 (map? dictionary) (nonblank? (:version dictionary))
+                 (nonblank? (:federation dictionary)) (nonblank? (:event-id dictionary))
+                 (map? policy) (nonblank? (:version policy)))
+    (fail! "Invalid Jev dive field request"))
+  (let [view (get (reconciliation-flow/inspect ledger [decision] config) decision-id)
+        event (last (filter #(and (= decision-id (:decision-id %))
+                                  (= (:request-hash view) (:request-hash %))
+                                  (= (:result-hash view) (:result-hash %))
+                                  (= :approved (:status %))) (:events ledger)))
+        answer (:answer view)
+        request-hash (or (:request-hash event) (:request-hash answer))
+        result-hash (or (:result-hash event) (:result-hash answer))
+        template-version (or (:template-version event) (:template-version answer))
+        choice (:outcome answer)
+        assessment (reconciliation-policy/assess policy (assoc decision :action choice) answer)]
+    (when-not (and (= :approved (:status view))
+                   (#{:jev :cached-jev :retained} (:origin view))
+                   (= :approved (:status event))
+                   (= (:origin view) (:origin event))
+                   (= (:evidence decision) (:evidence event))
+                   (= (:candidates decision) (:candidates event))
+                   (= (:dependencies decision) (:dependencies event))
+                   (= (:version policy) (:policy-version event))
+                   (= :approve (:status assessment))
+                   (= reconciliation-jev/template-version template-version)
+                   (= (:model config) (:model-version answer) (:actual-model answer))
+                   (nonblank? request-hash) (nonblank? result-hash)
+                   (map? (:receipt answer))
+                   (= request-hash (get-in answer [:receipt :request-hash]))
+                   (= result-hash (get-in answer [:receipt :result-hash]))
+                   (map? (:raw-answer answer)) (map? (:raw-probabilities answer))
+                   (= 5 (count (:raw-probabilities answer)))
+                   (or (= choice :both) (= choice decision-type)))
+      (fail! "Jev field approval is stale or incomplete"))
+    (transaction url
+                 (fn [c]
+                   (let [subject (:source-position-id target)]
+                     (when-not (nonblank? subject) (fail! "Source position ID required"))
+                     (query c "SELECT pg_advisory_xact_lock(hashtext(?))" subject)
+                     (let [row (field-row c target)
+                           events (field-events c subject)
+                           field-events (filter #(= decision-type (:decision-type %)) events)
+                           raw (raw-field (:payload row) decision-type)
+                           heading (get dictionary (if (= decision-type :category)
+                                                     :category-heading :representation-heading))
+                           proposed (dictionary-entry dictionary decision-type raw)
+                           cited? (some (fn [e]
+                                          (let [ref (:citation e)]
+                                            (and (map? ref)
+                                                 (= subject (:source-position-id ref))
+                                                 (= (:job-id row) (:job-id ref))
+                                                 (= (:ordinal row) (:ordinal ref))
+                                                 (= (:source-sha256 row) (:source-sha256 ref))
+                                                 (= (:artifact-sha256 row) (:artifact-sha256 ref))
+                                                 (= (:parser-version row) (:parser-version ref))
+                                                 (nonblank? raw)
+                                                 (string? (:exact-excerpt e))
+                                                 (str/includes? (:exact-excerpt e) raw))))
+                                        (:evidence decision))
+                           valid-value? (if (= decision-type :category)
+                                          (and (vector? proposed) (seq proposed) (every? nonblank? proposed))
+                                          (and (map? proposed)
+                                               (#{:country :federation :neutral :organization} (:kind proposed))
+                                               (nonblank? (:code proposed))))
+                           key (sha256 (.getBytes (encode [decision-id decision-type (citation row)
+                                                           (:version dictionary) proposed
+                                                           request-hash result-hash
+                                                           (:version policy)]) "UTF-8"))
+                           old (first (filter #(= key (:decision-key %)) field-events))]
+                       (when (some #(= :human (:actor-kind %)) field-events)
+                         (fail! "Human dive field correction blocks model approval"))
+                       (when-not (and (nonblank? raw) cited? valid-value?
+                                      (or (nil? heading) (= raw (:label heading)))
+                                      (= (:job-id row) (:job-id target)))
+                         (fail! "Jev field value or source citation is unsupported"))
+                       (if old old
+                           (do
+                             (when-not (= base-revision (or (:revision (last events)) 0))
+                               (fail! "Stale dive decision revision"))
+                             (append-field! c row
+                                            {:id (str "model:" key) :decision-key key
+                                             :source-position-id subject :job-id (:job-id row)
+                                             :ordinal (:ordinal row) :decision-type decision-type
+                                             :action :assert :revision (inc base-revision)
+                                             :actor-kind :model :actor :jev :status :accepted
+                                             :original raw :proposed proposed
+                                             :supporting-evidence (:evidence decision)
+                                             :conflicting-evidence (or (:contradictions decision) [])
+                                             :dependencies (:dependencies decision)
+                                             :source-position (citation row)
+                                             :observation-version (select-keys row [:job-id :ordinal :source-sha256
+                                                                                    :artifact-sha256 :parser-version])
+                                             :federation (:federation dictionary)
+                                             :event-context-id (:event-id dictionary)
+                                             :dictionary-version (:version dictionary)
+                                             :model-version (:model-version answer)
+                                             :template-version template-version
+                                             :policy-version (:version policy)
+                                             :decision-id decision-id
+                                             :model-confidence (:confidence answer)
+                                             :answer answer :receipt (:receipt answer)
+                                             :request-hash request-hash
+                                             :result-hash result-hash
+                                             :request request})))))))))
 
 (defn- human-decision! [url request action]
   (when-not (and (nonblank? (:id request)) (nonblank? (:actor request))
