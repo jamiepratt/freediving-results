@@ -9,7 +9,8 @@
    :row-semantics [:attempt :aggregate :summary :not-result]})
 
 (def default-policy
-  {:version "reconciliation-approval-v1"
+  {:version "reconciliation-approval-v2"
+   :approval-blocks {:row-semantics :no-canonical-role-ledger}
    :thresholds
    (into {} (map (fn [[family choices]]
                    [family (into {} (map (fn [choice]
@@ -52,6 +53,8 @@
                  (not= action (:outcome answer)) :unexpected-answer
                  (not (and (unit-number? (:confidence answer))
                            (valid-distribution? probabilities (:family decision) action))) :invalid-answer
+                 (get-in policy [:approval-blocks (:family decision)])
+                 (get-in policy [:approval-blocks (:family decision)])
                  (< (:confidence answer) (:min-confidence thresholds)) :low-confidence
                  (< selected (:min-probability thresholds)) :low-probability
                  (< (- selected (apply max alternatives)) (:min-margin thresholds)) :close-alternative

@@ -39,8 +39,10 @@
   (update ledger :events conj (assoc event :origin :human)))
 
 (defn- evidence-key [decision]
-  (digest (select-keys decision [:id :family :action :choices :evidence :candidates
-                                 :dependencies :conflicts :stale? :evidence-adequate?])))
+  (digest (select-keys decision [:id :family :action :choices :subject :evidence
+                                 :candidates :uncertainties :contradictions
+                                 :field-binding :dependencies :conflicts :stale?
+                                 :evidence-adequate?])))
 
 (defn- decision-key [decision config]
   (digest [(evidence-key decision) config jev/template-version]))
