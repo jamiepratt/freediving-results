@@ -81,6 +81,25 @@ test('snapshot overview distinguishes evidence records from AIDA and Eindhoven s
   for (const phrase of ['14689', '281', '92', '58', '94', 'confirmed_distinct_attempts unknown']) assert.ok(text.includes(phrase), phrase);
 });
 
+test('snapshot presents source positions and observation versions separately from unknown accepted attempts', async () => {
+  const {context, node} = workspace({
+    '/api/overview': {coverage: 'partial', counts: [
+      {source_name: 'sample', collection: 'positions', kind: 'candidate_position', records: 2},
+      {source_name: 'sample', collection: 'observation_versions', kind: 'observation_version', records: 3},
+    ], candidate_source_positions: 2, observation_version_records: 3,
+    confirmed_distinct_attempts: null},
+    '/api/sources': [],
+  });
+  await vm.runInContext('loadOverview()', context);
+  const text = node('overview').visibleText;
+  assert.match(text, /candidate_source_positions 2/);
+  assert.match(text, /observation_version_records 3/);
+  assert.match(text, /confirmed_distinct_attempts unknown/);
+  assert.match(text, /overlap/i);
+  assert.match(text, /publisher revision direction/i);
+  assert.match(text, /Source row counts are not attempt totals/);
+});
+
 test('Eindhoven browse row keeps its session cell concise and clickable', async () => {
   const session = JSON.stringify({session_id: 23, event_date: '2026-05-09', discipline: 'DNF', raw_fields: {buckets: Array.from({length: 50}, (_, i) => ({bucket_id: i, label: 'large source payload'}))}});
   const {context, node} = workspace({'/api/browse?offset=0': {total: 1, offset: 0, records: [{record_id: 'b'.repeat(64), source_name: 'eindhoven-noxy5', kind: 'candidate_position', event_date: '2026-05-09', session, discipline: 'DNF', record_path: 'result_rows[0]'}]}});

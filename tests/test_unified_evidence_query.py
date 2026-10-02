@@ -254,12 +254,34 @@ class QueryContractTest(unittest.TestCase):
                 result = query.overview()
         self.assertEqual(result['coverage'], 'dated partial census')
         self.assertIsNone(result['confirmed_distinct_attempts'])
+        self.assertEqual(result['candidate_source_positions'], 2)
+        self.assertEqual(result['observation_version_records'], 0)
         self.assertEqual(result['counts'], [
             {'source_name': 'visual', 'collection': 'pages', 'kind': 'other', 'records': 1},
             {'source_name': 'visual', 'collection': 'pages.rows', 'kind': 'candidate_position', 'records': 2},
             {'source_name': 'visual', 'collection': 'source_gaps', 'kind': 'gap', 'records': 1},
             {'source_name': 'visual', 'collection': 'source_relationship_candidates', 'kind': 'relationship', 'records': 1},
         ])
+
+    def test_overview_does_not_count_versions_as_new_source_positions(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            packet = root / 'packet.json'
+            packet.write_text(json.dumps({
+                'schema': 'synthetic/v1',
+                'positions': [{'id': 'one'}],
+                'candidate_versions': [{'id': 'candidate-v1'}],
+                'observation_versions': [{'id': 'observation-v1'}, {'id': 'observation-v2'}],
+            }))
+            out = root / 'out'
+            subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-10-02T00:00:00Z',
+                            '--input', f'sample={packet}', '--output-dir', str(out)],
+                           check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                result = query.overview()
+        self.assertEqual(result['candidate_source_positions'], 1)
+        self.assertEqual(result['observation_version_records'], 2)
+        self.assertIsNone(result['confirmed_distinct_attempts'])
 
     def test_browse_filters_and_pages_stably(self):
         with tempfile.TemporaryDirectory() as d:
