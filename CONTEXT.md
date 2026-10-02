@@ -26,6 +26,12 @@ and publication dates are different facts.
    parsers and their recognition functions. Routine fetching and supported
    parsing should not require an LLM per document or row.
 
+Refresh discovery indexes on later discovery runs. Recheck archived result
+sources selectively: recent or provisional results more often, older results
+less often. Reuse verified evidence within a run, retain changed versions, and
+distinguish archive integrity from a fresh publisher check. Exact intervals are
+not yet specified.
+
 Generalize parsers incrementally: retain existing source restrictions until
 another document demonstrates the same format. Broaden that parser and its
 recognizer with evidence and regression checks, rather than generalizing all

@@ -27,6 +27,16 @@ Separate ingestion into three stages with retained outputs:
    recognition function, or create both. Retain source and parser versions so
    repaired extraction can replay without rediscovering or refetching evidence.
 
+Use selective refresh across runs. Refresh discovery indexes to find new links;
+recheck recent or provisional result sources more often and older results less
+often. Reuse verified acquisitions within a run and retain changed source
+versions with their retrieval provenance. Archive reuse establishes local byte
+integrity, not publisher freshness. Checking every result on every run is rejected
+for unnecessary requests; checking only on explicit request is rejected because
+publisher corrections can otherwise remain undiscovered. Exact intervals and
+freshness-state rules remain implementation details in #62. This is a policy
+decision, not creation of a scheduled automation.
+
 Generalize parsers incrementally. Keep existing source restrictions until another
 document demonstrates the same format, then broaden the parser and recognizer
 with source-backed tests. Upfront generalization of all retained format families
@@ -91,7 +101,7 @@ deferred. Record evidence needed for those decisions without making them.
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
   evidence, not yet a uniform cross-format registry. The recognizer API, refresh
-  policy and stopping rules remain unresolved in #62; this decision does not
+  intervals and stopping rules remain unresolved in #62; this decision does not
   select their design.
 
 ## Evidence
