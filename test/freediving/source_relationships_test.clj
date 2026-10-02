@@ -241,6 +241,78 @@
     (is (= 1 (count (:events reversed))))
     (is (= projection (relationships/project-attempts reordered)))))
 
+(deftest three-cited-positions-split-when-one-automatic-link-is-reversed
+  (let [base (attempt-fixture)
+        third (-> (get-in base [:observation-versions "v3"])
+                  (assoc :id "v4" :position-id "p3")
+                  (assoc-in [:scope-evidence :source-id] "aggregate")
+                  (assoc-in [:scope-evidence :source-sha256] "cc")
+                  (assoc-in [:scope-evidence :position-id] "p3")
+                  (assoc-in [:scope-evidence :citation] {:page 2 :line 8}))
+        ledger (-> base
+                   (assoc-in [:sources "aggregate"] {:id "aggregate" :sha256 "cc"})
+                   (assoc-in [:positions "p3"] {:id "p3" :source-id "aggregate"
+                                                :locator {:page 2 :line 8}})
+                   (assoc-in [:observation-versions "v4"] third))
+        before (relationships/project-attempts ledger)
+        link (first (filter #(some #{"v4"} (:pair %)) (:automatic-links before)))
+        reversed (relationships/append-attempt-event
+                  ledger {:id "split-aggregate" :action :reverse :event-id (:id link)})
+        after (relationships/project-attempts reversed)]
+    (is (= 2 (count (:automatic-links before))))
+    (is (= 1 (get-in before [:counts :accepted-attempts])))
+    (is (= #{"p1" "p2" "p3"} (set (-> before :attempts first :position-ids))))
+    (is (= 2 (get-in after [:counts :accepted-attempts])))
+    (is (= #{#{"v1" "v2" "v3"} #{"v4"}}
+           (set (map (comp set :observation-ids) (:attempts after)))))
+    (is (= 4 (count (:observation-versions reversed))))
+    (is (= {:page 2 :line 8} (get-in reversed [:positions "p3" :locator])))))
+
+(deftest publisher-revision-may-change-one-row-and-leave-another-unchanged
+  (let [base (attempt-fixture)
+        other-scope (assoc attempt-scope :attempt "3")
+        another (fn [id position-id source-id sha locator value]
+                  {:id id :position-id position-id :parser-version "1"
+                   :role :individual-result :scope other-scope
+                   :scope-evidence {:source-id source-id :source-sha256 sha
+                                    :position-id position-id :citation locator
+                                    :fields other-scope :bindings (raw-bindings other-scope)}
+                   :values {:raw other-scope :raw-performance value
+                            :final-performance value :penalty nil :card "white" :notes nil}})
+        ledger (-> base
+                   (assoc-in [:positions "prelim-row-2"] {:id "prelim-row-2"
+                                                          :source-id "official"
+                                                          :locator {:page 1 :line 5}})
+                   (assoc-in [:positions "final-row-2"] {:id "final-row-2"
+                                                         :source-id "mirror"
+                                                         :locator {:page 1 :line 6}})
+                   (assoc-in [:observation-versions "prelim-2"]
+                             (another "prelim-2" "prelim-row-2" "official" "aa"
+                                      {:page 1 :line 5} "50m"))
+                   (assoc-in [:observation-versions "final-2"]
+                             (another "final-2" "final-row-2" "mirror" "bb"
+                                      {:page 1 :line 6} "50m"))
+                   (assoc-in [:observation-versions "v3" :values :raw-performance] "71m")
+                   (assoc-in [:observation-versions "v3" :values :final-performance] "70m")
+                   (relationships/append-attempt-event
+                    {:id "publisher-revision" :action :accept :type :source-revision
+                     :pair ["official" "mirror"]
+                     :evidence {:kind :publisher-correction :predecessor "official"
+                                :successor "mirror"
+                                :citation {:source-id "mirror" :locator "header"
+                                           :text "Publisher correction notice"}}}))
+        result (relationships/project-attempts ledger)]
+    (is (= 2 (get-in result [:counts :accepted-attempts])))
+    (is (= 1 (count (:source-relationships result))))
+    (is (= "70m" (get-in ledger [:observation-versions "v1" :values :raw-performance])))
+    (is (= "71m" (get-in ledger [:observation-versions "v3" :values :raw-performance])))
+    (is (= (get-in ledger [:observation-versions "prelim-2" :values])
+           (get-in ledger [:observation-versions "final-2" :values])))
+    (is (= #{"prelim-2" "final-2"}
+           (set (->> (:attempts result)
+                     (filter #(= "3" (get-in % [:scope :attempt])))
+                     first :observation-ids))))))
+
 (deftest nonindividual-row-cannot-become-accepted-attempt
   (let [ranking (assoc-in (attempt-fixture) [:observation-versions "v3" :role] :ranking)
         result (relationships/project-attempts ranking)]
