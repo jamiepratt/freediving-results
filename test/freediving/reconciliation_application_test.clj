@@ -149,7 +149,8 @@
           (is (= "owner-store:8" (get-in @seen [:event :event-id]))))))))
 
 (deftest signed-owner-field-approval-routes-to-transactional-review-store
-  (let [d (decision "field" :category [:category :representation :unknown]
+  (let [d (decision "field" :category-representation
+                    [:category :representation :both :neither :unknown]
                     [{:field "category"}])
         binding {:decision_id "field" :reconciliation_run_revision 1
                  :reconciliation_event_id "flow-1" :observation_revisions []

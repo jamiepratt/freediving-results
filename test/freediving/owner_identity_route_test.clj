@@ -1,12 +1,22 @@
 (ns freediving.owner-identity-route-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [clojure.data.json :as json]
             [freediving.athlete-identity :as identity]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
             [freediving.owner-decision-export :as export]
             [freediving.owner-identity-route :as route]
+            [freediving.reconciliation-application :as application]
             [freediving.reconciliation-flow :as flow]
             [freediving.reviews :as reviews]))
+
+(defn signed-feed [secret feed]
+  (let [payload (json/write-str feed)
+        mac (javax.crypto.Mac/getInstance "HmacSHA256")]
+    (.init mac (javax.crypto.spec.SecretKeySpec. (.getBytes secret "UTF-8") "HmacSHA256"))
+    {:payload_json payload
+     :signature (.formatHex (java.util.HexFormat/of)
+                            (.doFinal mac (.getBytes payload "UTF-8")))}))
 
 (def admin (System/getenv "FREEDIVING_TEST_ADMIN_URL"))
 (def app (System/getenv "FREEDIVING_TEST_URL"))
@@ -109,6 +119,46 @@
       (is (= 1 (count (:negative-pairs (identity/private-projection app)))))
       (is (= 0 (:accepted-group-count
                 (route/record-imported-decision! reviewer ledger decision binding 0)))))))
+
+(deftest signed-owner-runner-persists-before-real-identity-write
+  (let [source (fixture/synthetic 1 "owner-signed-runner/1")
+        job (get-in source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")]
+    (fixture/publish! source)
+    (observations/import! app (:root source) job)
+    (let [decision (identity/private-jev-decision app a b)
+          revisions (export/load-observation-revisions! app [[job 0] [job 1]])
+          versions (mapv revisions [[job 0] [job 1]])
+          binding {:decision_id (:id decision) :reconciliation_run_revision 1
+                   :reconciliation_event_id "original-flow"
+                   :observation_revisions versions
+                   :evidence_bindings (mapv (fn [revision]
+                                              {:evidence_id (str (:job_id revision) ":" (:ordinal revision))
+                                               :snapshot_record_id (apply str (repeat 64 "a"))
+                                               :observation_revision revision}) versions)}
+          sha (apply str (repeat 64 "b"))
+          owner {:id "owner-store:4" :store_revision 4 :binding_revision 2
+                 :snapshot_sha256 sha :decision_id (:id decision)
+                 :action "approve" :actor "owner" :reason "same athlete"
+                 :proposal {:selected_option "same_person" :canonical_binding binding}}
+          base (update (flow/empty-ledger) :events conj
+                       {:id "original-flow" :decision-id (:id decision)})
+          persisted (atom [])
+          opts {:config {:version "synthetic/1"} :policy {:version "synthetic/1"}
+                :persist-flow! #(swap! persisted conj %)
+                :import-token "private-import-token-for-test"
+                :current-bindings {(:id decision) binding}
+                :active-snapshot-sha256 sha :active-binding-revision 2
+                :reviewer-url reviewer
+                :identity-revisions {(:id decision) 0}}
+          feed (signed-feed (:import-token opts)
+                            {:events [owner] :store_revision 4 :next_revision 4})
+          result (application/run-imported! base [decision] feed opts)]
+      (is (= :materialized (get-in result [:results (:id decision) :status])))
+      (is (= 1 (:accepted-group-count (identity/private-projection app))))
+      (is (= 2 (count @persisted)))
+      (is (= 2 (count (:events (first @persisted))))))))
 
 (defn -main [& _]
   (let [result (clojure.test/run-tests 'freediving.owner-identity-route-test)]

@@ -288,7 +288,8 @@
                    nil)]
     (if-not (and (#{"approve" "correct" "reject" "reverse"} action)
                  (#{:category :representation} decision-type)
-                 (= decision-type (:family decision))
+                 (or (= decision-type (:family decision))
+                     (= :category-representation (:family decision)))
                  (or (#{"reject" "reverse"} action)
                      (= decision-type (:action view)))
                  (or (not (#{"approve" "correct"} action))
