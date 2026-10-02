@@ -1,0 +1,89 @@
+(ns freediving.athlete-identity-db-test
+  (:require [clojure.test :refer [deftest is use-fixtures]]
+            [freediving.athlete-identity :as identity]
+            [freediving.observations :as observations]
+            [freediving.observations-test :as fixture]
+            [freediving.reviews :as reviews]))
+
+(def admin (System/getenv "FREEDIVING_TEST_ADMIN_URL"))
+(def app (System/getenv "FREEDIVING_TEST_URL"))
+(def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
+(use-fixtures :each
+  (fn [f]
+    (when-not (and admin app reviewer)
+      (throw (ex-info "Run scripts/test-postgres.sh test-athlete-identity-db" {})))
+    (fixture/sql! admin "DROP SCHEMA IF EXISTS freediving CASCADE")
+    (observations/migrate! admin "observations_app")
+    (reviews/migrate! admin "observations_app" "reviews_owner")
+    (f)))
+
+(deftest persisted-links-reverse-with-stable-provisional-records
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "identity-db/1")
+        job (:job-id artifact)
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")
+        link {:id "identity-link" :action :accept :actor-kind :human :pair [a b] :reason "synthetic evidence"}
+        reverse {:id "identity-reverse" :action :reverse :actor-kind :human
+                 :event-id "identity-link" :reason "synthetic split"}]
+    (fixture/publish! source)
+    (observations/import! app root job)
+    (is (= 2 (:provisional-record-count (identity/private-projection app))))
+    (is (= 1 (:accepted-group-count (identity/record-event! reviewer link))))
+    (is (= 1 (:accepted-group-count (identity/record-event! reviewer link))))
+    (is (= 0 (:accepted-group-count (identity/record-event! reviewer reverse))))
+    (is (= 0 (:accepted-group-count (identity/record-event! reviewer reverse))))
+    (is (= 0 (:accepted-group-count (identity/private-projection app))))
+    (is (= ["identity-link" "identity-reverse"]
+           (mapv :id (identity/private-history app))))
+    (is (= "reviews_owner" (:db-role (first (identity/private-history app)))))
+    (is (= #{a b} (set (map :observation-id
+                            (get-in (first (identity/private-history app)) [:evidence :observations])))))
+    (is (= #{(str "athlete:" a) (str "athlete:" b)}
+           (set (map :provisional-id (vals (:athletes (identity/private-projection app)))))))
+    (is (thrown? Exception
+                 (identity/record-event! app {:id "forged-human" :action :accept :actor-kind :human
+                                              :pair [a b] :reason "wrong role"})))
+    (is (thrown? Exception
+                 (fixture/sql! app "DELETE FROM freediving.athlete_identity_events")))))
+
+(deftest automatic-link-sees-competing-retained-observations
+  (let [rename (fn [source]
+                 (update-in source [:artifact :candidates]
+                            (fn [rows] (mapv #(-> %
+                                                  (assoc-in [:parsed :source-name] "Distinctive Diver")
+                                                  (assoc-in [:raw :fields :source-name] "Distinctive Diver")) rows))))
+        source1 (rename (fixture/synthetic 1 "identity-compete/1"))
+        source2 (rename (fixture/synthetic 1 "identity-compete/2"))
+        first-job (get-in source1 [:artifact :job-id])
+        a (str "local-observation:" first-job ":0")
+        b (str "local-observation:" first-job ":1")]
+    (doseq [source [source1 source2]]
+      (fixture/publish! source)
+      (observations/import! app (:root source) (get-in source [:artifact :job-id])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! app {:id "unsafe-auto" :action :accept :actor-kind :automatic
+                                              :pair [a b] :rule-version identity/rule-version})))
+    (is (= 0 (:revision (identity/private-projection app))))))
+
+(deftest automatic-link-accepts-one-complete-distinctive-candidate
+  (let [source (update-in (fixture/synthetic 1 "identity-unique/1") [:artifact :candidates]
+                          (fn [rows] (mapv #(-> %
+                                                (assoc-in [:parsed :source-name] "Distinctive Diver")
+                                                (assoc-in [:raw :fields :source-name] "Distinctive Diver")) rows)))
+        job (get-in source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")]
+    (fixture/publish! source)
+    (observations/import! app (:root source) job)
+    (is (= 1 (:accepted-group-count
+              (identity/record-event! app {:id "safe-auto" :action :accept :actor-kind :automatic
+                                           :pair [a b] :rule-version identity/rule-version}))))
+    (is (= [:automatic] (get-in (identity/private-projection app) [:athletes a :decision-origin])))
+    (is (= :distinctive-exact-name (get-in (first (identity/private-history app)) [:decision :reason])))
+    (is (= 1 (get-in (first (identity/private-history app)) [:evidence :candidate-count])))))
+
+(defn -main [& _]
+  (let [result (clojure.test/run-tests 'freediving.athlete-identity-db-test)]
+    (shutdown-agents)
+    (when (pos? (+ (:fail result) (:error result)))
+      (System/exit 1))))

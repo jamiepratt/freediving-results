@@ -41,6 +41,7 @@
            :packets {:main-opts ["-m" "freediving.packets"]}
            :reviews {:main-opts ["-m" "freediving.reviews"]}
            :test-reviews {:extra-paths ["test"] :main-opts ["-m" "freediving.reviews-test"]}
+           :test-athlete-identity-db {:extra-paths ["test"] :main-opts ["-m" "freediving.athlete-identity-db-test"]}
            :test-postgres {:extra-paths ["test"] :main-opts ["-m" "freediving.observations-test"]}
            :test {:extra-paths ["test"]
                   :main-opts ["-m" "freediving.test-runner"]}
