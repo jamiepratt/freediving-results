@@ -287,7 +287,20 @@
        (some? (:locator citation))
        (not (and (string? (:locator citation)) (str/blank? (:locator citation))))
        (string? (:text citation))
-       (not (str/blank? (:text citation)))))
+       (not (str/blank? (:text citation)))
+       (some #(= citation %) (get-in ledger [:sources (:source-id citation)
+                                             :publisher-citations]))))
+
+(defn- automatic-source-equivalence-links [ledger]
+  (->> (for [[sha sources] (group-by :sha256 (vals (:sources ledger)))
+             :let [ids (sort (map :id sources))]
+             other (rest ids)
+             :let [pair [(first ids) other]]]
+         {:id (str "auto-source-equivalent:" (pr-str pair))
+          :type :source-equivalent :pair pair
+          :evidence {:source-sha256 sha :proof :identical-source-bytes}
+          :rule-version attempt-rule-version})
+       (sort-by :id) vec))
 
 (defn append-attempt-event
   "Append an accepted source or attempt relationship, or reverse a prior acceptance.
@@ -386,6 +399,8 @@
         dependent-sources (set (keep #(when (= :source-dependent (:type %))
                                         (get-in % [:evidence :dependent-source]))
                                      (active-events ledger)))
+        source-equivalence-links (automatic-source-equivalence-links ledger)
+        equivalent-sources (set (mapcat :pair source-equivalence-links))
         attempts (->> (distinct (vals groups))
                       (map (fn [members]
                              (let [ids (vec (sort members))
@@ -396,8 +411,9 @@
                                 :source-ids (vec (sort (set (map #(source-of ledger %) ids))))
                                 :source-support (mapv (fn [source-id]
                                                         {:source-id source-id
-                                                         :role (if (dependent-sources source-id)
-                                                                 :dependent :unknown)})
+                                                         :role (cond (dependent-sources source-id) :dependent
+                                                                     (equivalent-sources source-id) :equivalent
+                                                                     :else :unknown)})
                                                       (sort (set (map #(source-of ledger %) ids))))
                                 :status (if (and (every? #(verified-scope? ledger %) ids)
                                                  (every? #(= scope (scope-of ledger %)) ids))
@@ -405,6 +421,7 @@
                       (sort-by :id) vec)]
     {:version attempt-rule-version :revision (count (:events ledger))
      :attempts attempts :automatic-links automatic-links
+     :source-equivalence-links source-equivalence-links
      :source-relationships (vec (filter #(not= :same-attempt (:type %))
                                         (active-events ledger)))
      :counts {:sources (count (:sources ledger))

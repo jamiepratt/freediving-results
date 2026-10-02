@@ -54,10 +54,11 @@
       (when-not (= #{:left :right :reason} (set (keys candidate)))
         (throw (ex-info "Source candidates need only left, right and reason" {}))))))
 
-(defn- attempt-input [rows routes scope-bindings]
+(defn- attempt-input [rows routes scope-bindings publisher-citations]
   (let [sources (->> (concat (map :source-sha256 rows) (keep :source-sha256 routes))
                      distinct sort
-                     (mapv (fn [sha] {:id sha :sha256 sha})))
+                     (mapv (fn [sha] {:id sha :sha256 sha
+                                      :publisher-citations (get publisher-citations sha)})))
         positions (->> rows
                        (map (fn [row]
                               {:id (pr-str [(:source-sha256 row) (:position row)])
@@ -84,10 +85,10 @@
    Third argument is retained v1 attempt decisions and exact scope bindings."
   ([inspected-jobs route-evidence] (build-ledger inspected-jobs route-evidence {}))
   ([inspected-jobs {:keys [routes source-candidates] :as route-evidence}
-    {:keys [scope-bindings events] :as attempt-evidence}]
+    {:keys [scope-bindings events publisher-citations] :as attempt-evidence}]
    (when-not (every? #{:routes :source-candidates} (keys route-evidence))
      (throw (ex-info "Unexpected route evidence field" {})))
-   (when-not (every? #{:scope-bindings :events} (keys attempt-evidence))
+   (when-not (every? #{:scope-bindings :events :publisher-citations} (keys attempt-evidence))
      (throw (ex-info "Unexpected attempt evidence field" {})))
    (validate-routes! route-evidence)
    (let [artifacts (mapv :artifact inspected-jobs)
@@ -99,7 +100,7 @@
          links (mapcat ffessm/source-links artifacts)
          attempt-ledger (reduce relationships/append-attempt-event
                                 (relationships/empty-attempt-ledger
-                                 (attempt-input rows routes scope-bindings)) events)
+                                 (attempt-input rows routes scope-bindings publisher-citations)) events)
          attempt-projection (relationships/project-attempts attempt-ledger)]
      (assoc (relationships/classify {:observations rows
                                      :same-attempt-evidence links

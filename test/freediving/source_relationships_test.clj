@@ -110,7 +110,12 @@
                      :citation (:locator position) :fields attempt-scope
                      :bindings (raw-bindings attempt-scope)}))]
     (relationships/empty-attempt-ledger
-     {:sources [{:id "official" :sha256 "aa"} {:id "mirror" :sha256 "bb"}]
+     {:sources [{:id "official" :sha256 "aa"}
+                {:id "mirror" :sha256 "bb"
+                 :publisher-citations [{:source-id "mirror" :locator "header"
+                                        :text "Mirror of official report"}
+                                       {:source-id "mirror" :locator "header"
+                                        :text "Publisher correction notice"}]}]
       :positions positions
       :observation-versions [{:id "v1" :position-id "p1" :parser-version "1" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p1")
@@ -126,6 +131,26 @@
 (def mirror-provenance
   {:kind :publisher-mirror :dependent-source "mirror" :upstream-source "official"
    :citation {:source-id "mirror" :locator "header" :text "Mirror of official report"}})
+
+(deftest identical-source-bytes-have-automatic-equivalence-without-corroboration
+  (let [base (attempt-fixture)
+        duplicate (-> base
+                      (assoc-in [:sources "mirror" :sha256] "aa")
+                      (assoc-in [:observation-versions "v3" :scope-evidence :source-sha256] "aa"))
+        result (relationships/project-attempts duplicate)]
+    (is (= 1 (count (:source-equivalence-links result))))
+    (is (= 1 (get-in result [:counts :source-objects])))
+    (is (= 1 (get-in result [:counts :accepted-attempts])))
+    (is (= #{:equivalent}
+           (set (map :role (-> result :attempts first :source-support)))))))
+
+(deftest publisher-relationship-requires-retained-citation
+  (let [base (attempt-fixture)
+        invented (assoc-in mirror-provenance [:citation :text] "Invented notice")]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event
+                  base {:id "invented" :action :accept :type :source-dependent
+                        :pair ["official" "mirror"] :evidence invented})))))
 
 (deftest source-versions-and-mirror-positions-count-one-cited-attempt
   (let [ledger (-> (attempt-fixture)

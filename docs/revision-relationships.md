@@ -3,7 +3,8 @@
 ## Distinct-attempt projection v1
 
 `freediving.source-relationships/empty-attempt-ledger` accepts immutable source
-objects (`:id`, `:sha256`), cited positions (`:id`, `:source-id`, `:locator`),
+objects (`:id`, `:sha256`, optional `:publisher-citations`), cited positions
+(`:id`, `:source-id`, `:locator`),
 and observation versions (`:id`, `:position-id`, `:parser-version`, `:role`,
 `:values`, `:scope`, `:scope-evidence`). `:role` must be `:individual-result`.
 The required scope fields are event, day, session, round, discipline,
@@ -25,15 +26,20 @@ binding, not independent verification of publisher semantics or athlete identity
 position and independently cited positions with exactly equal verified scope.
 It returns source, source-object, position, observation-version, accepted-attempt
 and unresolved-observation counts separately. Each attempt retains its position
-and observation IDs. Source support is marked dependent only with an accepted,
-cited mirror/aggregate/upstream relationship; otherwise its independence is
-unknown. A publisher-cited source revision records direction without asserting
+and observation IDs. Identical SHA-256 bytes produce stable automatic source
+equivalence links; repeated acquisitions do not add corroboration. Source
+support is marked equivalent for identical bytes, dependent for an accepted
+cited mirror/aggregate/upstream relationship, and otherwise unknown.
+A publisher-cited source revision records direction without asserting
 that every row changed. The existing `classify` edges remain source-row
 diagnostics, not this accepted-attempt count.
 
 `append-attempt-event` retains v1 accept/reverse events. Accepted same-attempt
 links require the verified scope above. Source dependence and revision require
-a cited publisher source, locator and text. Automatic links have stable IDs and
+a cited publisher source, locator and text exactly present in that source's
+retained `:publisher-citations` inventory. Event text alone cannot qualify.
+`build-ledger` accepts the inventory keyed by source SHA-256 in its third
+argument. Automatic links have stable IDs and
 can be suppressed by an append-only reverse event. `rebase-attempt-ledger`
 preserves events and invalidates an acceptance when its source, position or
 observation version changes. The caller must retain the event log across runs;
