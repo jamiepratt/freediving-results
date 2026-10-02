@@ -10,6 +10,48 @@
 (def ^:private correction-statuses #{:rejected :reversed})
 (def ^:private satisfied-statuses #{:materialized :no-link})
 
+(defn import-remote-review-events
+  "Import authenticated owner rejections/reversals into the private flow ledger.
+   verify-event! must authenticate each complete event against the persistent
+   owner decision store. This function deliberately has no publisher-data path.
+   A caller must persist the returned ledger before running canonical routing."
+  [ledger decisions events {:keys [verify-event!]}]
+  (when-not (and (fn? verify-event!) (vector? decisions) (vector? events)
+                 (= flow/ledger-version (:version ledger)))
+    (throw (ex-info "Authenticated remote review import required" {})))
+  (let [by-id (into {} (map (juxt :id identity) decisions))]
+    (reduce
+     (fn [current {:keys [id decision-id store-revision snapshot-sha256
+                          action actor reason decision] :as event}]
+       (let [event-id (str "owner-store:" store-revision)
+             prior (some #(when (= event-id (:id %)) %) (:events current))
+             last-revision (reduce max 0 (keep :remote-store-revision (:events current)))
+             status ({:reject :rejected :reverse :reversed} action)]
+         (when-not (and (string? id) (seq id) (string? decision-id)
+                        (pos-int? store-revision)
+                        (string? snapshot-sha256)
+                        (re-matches #"[0-9a-f]{64}" snapshot-sha256)
+                        (string? actor) (seq actor) (string? reason)
+                        status (= decision (get by-id decision-id))
+                        (true? (verify-event! event)))
+           (throw (ex-info "Unverified or stale remote review event"
+                           {:decision-id decision-id :store-revision store-revision})))
+         (if prior
+           (if (= event (:remote-event prior)) current
+               (throw (ex-info "Conflicting remote review replay"
+                               {:store-revision store-revision})))
+           (do
+             (when (<= store-revision last-revision)
+               (throw (ex-info "Out-of-order remote review event"
+                               {:store-revision store-revision :last-revision last-revision})))
+             (flow/append-human-event current
+                                      {:id event-id :decision-id decision-id
+                                       :status status :actor actor :reason reason
+                                       :remote-store-revision store-revision
+                                       :remote-snapshot-sha256 snapshot-sha256
+                                       :remote-event event})))))
+     ledger events)))
+
 (defn- dependency-order [decisions]
   (loop [remaining decisions done #{} ordered []]
     (if (empty? remaining) ordered

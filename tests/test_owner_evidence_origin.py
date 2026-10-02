@@ -164,6 +164,112 @@ class PrivateOriginTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_server(Path(self.tmp.name) / 'missing', self.env)
 
+    def test_decision_routes_require_store_and_return_private_queue(self):
+        self.assertEqual(self.request('/owner-evidence/api/decisions')[0], 503)
+        class Decisions:
+            def queue(self, **filters):
+                self.filters = filters
+                return {'revision': 1, 'items': [{'id': 'decision-1'}], 'total': 1,
+                        'scoreless_items': [], 'scoreless_total': 0}
+            def inspect(self, decision_id):
+                return {'id': decision_id, 'store_revision': 1, 'history': []}
+            def preview(self, decision_id, action):
+                return {'id': decision_id, 'action': action, 'affected': []}
+            def projection(self): return {'snapshot_sha256': 'a' * 64}
+            def audit_sample(self, *, limit): return {'items': [], 'sample_size': 0, 'blocking': False}
+        self.server.decisions = Decisions()
+        status, _, body = self.request('/owner-evidence/api/decisions?type=identity&status=pending&source=meet&limit=2')
+        self.assertEqual(status, 200)
+        listing = json.loads(body)
+        self.assertEqual(listing['items'][0]['id'], 'decision-1')
+        self.assertIn('csrf_token', listing)
+        self.assertEqual(self.server.decisions.filters,
+                         {'decision_type': 'identity', 'status': 'pending', 'source_name': 'meet', 'limit': 2, 'offset': 0})
+        self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1')[2])['id'], 'decision-1')
+        self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1/preview?action=reverse')[2])['action'], 'reverse')
+        self.assertEqual(self.request('/owner-evidence/api/decisions?limit=101')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/decisions?type=x&type=x')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=invalid')[0], 400)
+        self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/audit-sample')[2])['blocking'], False)
+
+    def test_decision_action_checks_origin_csrf_revision_and_body(self):
+        class Decisions:
+            def queue(self, **_): return {'revision': 3, 'items': [], 'total': 0,
+                                          'scoreless_items': [], 'scoreless_total': 0}
+            def projection(self): return {'snapshot_sha256': 'a' * 64}
+            def act(self, *args, **kwargs):
+                self.call = (args, kwargs)
+                return {'revision': 4, 'status': 'reversed'}
+        self.server.decisions = Decisions()
+        csrf = json.loads(self.request('/owner-evidence/api/decisions')[2])['csrf_token']
+        payload = json.dumps({'action': 'reverse', 'expected_revision': 3,
+                              'idempotency_key': 'retry-1', 'reason': 'owner correction',
+                              'csrf_token': csrf}).encode()
+        base = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                ('X-Freediving-Owner-Email', EMAIL), ('Origin', 'https://poc.alphacompose.com'),
+                ('Content-Type', 'application/json'), ('X-Freediving-CSRF', csrf),
+                ('Content-Length', str(len(payload)))]
+        path = '/owner-evidence/api/decisions/decision-1/actions'
+        self.assertEqual(self.request(path, method='POST', headers=base[:-1], body=payload)[0], 400)
+        self.assertEqual(self.request(path, method='POST', headers=base[:-2] + base[-1:], body=payload)[0], 403)
+        self.assertEqual(self.request(path, method='POST', headers=base, body=payload)[0], 200)
+        self.assertEqual(self.server.decisions.call,
+                         (('decision-1',), {'action': 'reverse', 'expected_revision': 3,
+                                           'idempotency_key': 'retry-1',
+                                           'actor': EMAIL, 'reason': 'owner correction'}))
+        self.assertEqual(self.request('/owner-evidence/api/queue', method='POST', headers=base, body=payload)[0], 405)
+
+    def test_real_decision_store_is_bound_to_verified_snapshot(self):
+        from test_owner_decision_store import proposal
+        decision_path = Path(self.tmp.name) / 'durable-decisions' / 'ledger.sqlite'
+        server = make_server(self.snapshot_dir, {**self.env, 'OWNER_EVIDENCE_DECISION_DB': str(decision_path)})
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.decisions.projection()['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
+        self.assertTrue(decision_path.exists())
+        self.assertFalse(decision_path.is_relative_to(self.snapshot_dir))
+        evidence_id = server.query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
+        server.decisions.register(self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'],
+                                  proposal('decision-1', evidence=evidence_id, status='automatic_approved'),
+                                  idempotency_key='register-decision-1')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+        def request(path, method='GET', payload=None, csrf=None):
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+            headers = {'Host': HOST, 'X-Freediving-Owner-Gateway': SECRET,
+                       'X-Freediving-Owner-Email': EMAIL}
+            if method == 'POST':
+                headers.update({'Origin': 'https://poc.alphacompose.com',
+                                'Content-Type': 'application/json', 'X-Freediving-CSRF': csrf})
+            connection.request(method, path, body=payload, headers=headers)
+            response = connection.getresponse()
+            result = response.status, response.read()
+            connection.close()
+            return result
+        status, data = request('/owner-evidence/api/decisions?status=automatic_approved')
+        self.assertEqual(status, 200)
+        listing = json.loads(data)
+        self.assertEqual(listing['items'][0]['id'], 'decision-1')
+        self.assertEqual(listing['active_snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
+        status, data = request('/owner-evidence/api/decisions/decision-1/preview?action=reverse')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)['after']['decision-1'], 'reversed')
+        payload = json.dumps({'action': 'reverse', 'expected_revision': listing['revision'],
+                              'idempotency_key': 'reverse-decision-1', 'reason': 'owner review',
+                              'csrf_token': listing['csrf_token']}).encode()
+        status, data = request('/owner-evidence/api/decisions/decision-1/actions',
+                               method='POST', payload=payload, csrf=listing['csrf_token'])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)['effective_status'], 'reversed')
+        self.assertEqual(request('/owner-evidence/api/decisions/decision-1/actions',
+                                 method='POST', payload=payload, csrf=listing['csrf_token'])[0], 200)
+        stale = json.dumps({'action': 'approve', 'expected_revision': listing['revision'],
+                            'idempotency_key': 'stale-approve', 'reason': 'outdated review',
+                            'csrf_token': listing['csrf_token']}).encode()
+        self.assertEqual(request('/owner-evidence/api/decisions/decision-1/actions',
+                                 method='POST', payload=stale, csrf=listing['csrf_token'])[0], 409)
+        self.assertEqual(request('/owner-evidence/api/decisions/audit-sample')[0], 200)
+
 
 class RetainedSnapshotTest(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('OWNER_EVIDENCE_TEST_SNAPSHOT_DIR'), 'private retained snapshot not supplied')
