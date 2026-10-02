@@ -120,6 +120,39 @@
                   (identity/sync-model-correction! reviewer corrected decision config))))
         (is (= 2 (count (identity/private-history app))))))))
 
+(deftest failed-flow-dependency-reverses-persisted-model-identity
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "identity-dependency/1")
+        job (:job-id artifact)
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")
+        config {:provider :jev :model "jev-1.13.0" :version "test-config/1"}
+        policy {:version "test-policy/1"
+                :thresholds {:identity {:same-person {:min-confidence 0.9
+                                                      :min-probability 0.9 :min-margin 0.2}}}}]
+    (fixture/publish! source)
+    (observations/import! app root job)
+    (let [base (identity/private-jev-decision app a b)
+          parent (assoc base :id "parent" :dependencies [])
+          child (identity/private-jev-decision app a b {:id "child" :dependencies ["parent"]})
+          execute! (fn [_] {:model "jev-1.13.0" :usage {}
+                            :answers {"child" {:type "choice" :choice "same_person" :confidence 0.96
+                                               :probabilities {"same_person" 0.94
+                                                               "different_person" 0.04 "unknown" 0.02}}}})
+          approved (flow/run! (flow/empty-ledger) [parent child]
+                              {:config config :policy policy :execute! execute!
+                               :deterministic-results {"parent" {:status :approve :rule-version "rule/1"}}})
+          _ (identity/record-model-event! app approved child config policy 0)
+          corrected (flow/append-human-event approved
+                                             {:id "parent-no" :decision-id "parent"
+                                              :status :rejected :reason "bad parent"})
+          failed (flow/run! corrected [parent child]
+                            {:config config :policy policy :execute! execute!})]
+      (is (= 1 (:accepted-group-count (identity/private-projection app))))
+      (is (= 0 (:accepted-group-count
+                (identity/invalidate-model-dependency! app failed child 1))))
+      (is (= 0 (:accepted-group-count
+                (identity/invalidate-model-dependency! app failed child 1)))))))
+
 (defn -main [& _]
   (let [result (clojure.test/run-tests 'freediving.athlete-identity-db-test)]
     (shutdown-agents)

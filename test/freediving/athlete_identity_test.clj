@@ -154,14 +154,7 @@
         b (athlete "b" "Romanized Name" :citation {:job-id "b" :ordinal 0 :source-sha256 "sha-b"}
                    :aliases [{:name "Native Name" :origin :publisher :citation {:source "synthetic"}}])
         rows [a b]
-        decision {:id "identity-1" :family :identity :action :same-person
-                  :choices [:same-person :different-person :unknown]
-                  :subject {:pair ["a" "b"] :target-id "a"
-                            :observation-versions {"a" (:citation a) "b" (:citation b)}}
-                  :candidates ["a" "b"]
-                  :evidence [{:evidence-id "a" :citation (:citation a) :fact "Native name"}
-                             {:evidence-id "b" :citation (:citation b) :fact "Romanized name"}]
-                  :dependencies [] :evidence-adequate? true}
+        decision (identity/jev-decision (identity/empty-ledger rows) "a" "b")
         config {:provider :jev :model "jev-1.13.0" :version "test-config/1"}
         policy {:version "test-policy/1"
                 :thresholds {:identity {:same-person {:min-confidence 0.9 :min-probability 0.9 :min-margin 0.2}}}}
@@ -169,8 +162,8 @@
                    {:raw-response
                     (json/write-str
                      {:model "jev-1.13.0" :usage {}
-                      :answers {"identity-1" {:type "choice" :choice "same_person" :confidence 0.96
-                                              :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}}})})
+                      :answers {(:id decision) {:type "choice" :choice "same_person" :confidence 0.96
+                                                :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}}})})
         flow-ledger (flow/run! (flow/empty-ledger) [decision]
                                {:config config :policy policy :execute! execute!})
         ledger (identity/empty-ledger rows)
@@ -194,24 +187,18 @@
   (let [a (athlete "a" "A Name" :citation {:job-id "a" :ordinal 0 :source-sha256 "sha-a"})
         b (athlete "b" "B Name" :citation {:job-id "b" :ordinal 0 :source-sha256 "sha-b"}
                    :aliases [{:name "A Name" :origin :publisher :citation {:source "synthetic"}}])
-        decision {:id "link" :family :identity :action :same-person
-                  :choices [:same-person :different-person :unknown]
-                  :subject {:pair ["a" "b"] :target-id "a"
-                            :observation-versions {"a" (:citation a) "b" (:citation b)}}
-                  :candidates ["a" "b"] :dependencies [] :evidence-adequate? true
-                  :evidence [{:evidence-id "ea" :citation (:citation a) :fact "A"}
-                             {:evidence-id "eb" :citation (:citation b) :fact "B"}]}
+        decision (identity/jev-decision (identity/empty-ledger [a b]) "a" "b")
         config {:provider :jev :model "jev-1.13.0" :version "config/1"}
         policy {:version "policy/1" :thresholds {:identity {:same-person {:min-confidence 0.9
                                                                           :min-probability 0.9 :min-margin 0.2}}}}
         flow-ledger (flow/run! (flow/empty-ledger) [decision]
                                {:config config :policy policy
                                 :execute! (fn [_] {:model "jev-1.13.0" :usage {}
-                                                   :answers {"link" {:type "choice" :choice "same_person"
-                                                                     :confidence 0.96
-                                                                     :probabilities {"same_person" 0.94
-                                                                                     "different_person" 0.04
-                                                                                     "unknown" 0.02}}}})})
+                                                   :answers {(:id decision) {:type "choice" :choice "same_person"
+                                                                             :confidence 0.96
+                                                                             :probabilities {"same_person" 0.94
+                                                                                             "different_person" 0.04
+                                                                                             "unknown" 0.02}}}})})
         ledger (identity/empty-ledger [a b])
         event (identity/model-event ledger flow-ledger decision config policy 0)
         rejected (identity/append-event ledger {:id "human-no" :action :reject :actor-kind :human
@@ -219,6 +206,10 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (identity/model-event ledger flow-ledger
                                        (assoc-in decision [:subject :observation-versions "a" :source-sha256] "changed")
+                                       config policy 0)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/model-event ledger flow-ledger
+                                       (assoc-in decision [:evidence 0 :fact] "Invented supporting fact")
                                        config policy 0)))
     (is (thrown? clojure.lang.ExceptionInfo
                  (identity/model-event ledger flow-ledger decision config policy 1)))
@@ -252,3 +243,62 @@
                                                               :citation {:job-id "job-c" :ordinal 0
                                                                          :source-sha256 "sha-c"})])
                                                "a" "b"))))))
+
+(deftest failed-parent-invalidates-dependent-model-link
+  (let [a (athlete "a" "One Diver" :citation {:job-id "job-a" :ordinal 0 :source-sha256 "sha-a"})
+        b (athlete "b" "One Diver" :citation {:job-id "job-b" :ordinal 0 :source-sha256 "sha-b"})
+        ledger (identity/empty-ledger [a b])
+        child (identity/jev-decision ledger "a" "b" {:dependencies ["parent"]})
+        parent (assoc child :id "parent" :dependencies [])
+        config {:provider :jev :model "jev-test" :version "config/1"}
+        policy {:version "policy/1" :thresholds {:identity {:same-person {:min-confidence 0.9
+                                                                          :min-probability 0.9 :min-margin 0.2}}}}
+        execute! (fn [_] {:model "jev-test" :usage {}
+                          :answers {(:id child) {:type "choice" :choice "same_person" :confidence 0.96
+                                                 :probabilities {"same_person" 0.94
+                                                                 "different_person" 0.04 "unknown" 0.02}}}})
+        approved (flow/run! (flow/empty-ledger) [parent child]
+                            {:config config :policy policy :execute! execute!
+                             :deterministic-results {"parent" {:status :approve :rule-version "rule/1"}}})
+        linked (identity/append-event ledger (identity/model-event ledger approved child config policy 0))
+        canonical-failure (identity/dependency-reversal-event
+                           linked approved child config {"parent" :unresolved} 1)
+        corrected (flow/append-human-event approved
+                                           {:id "owner-parent-no" :decision-id "parent"
+                                            :status :rejected :reason "bad parent"})
+        failed (flow/run! corrected [parent child]
+                          {:config config :policy policy :execute! execute!})
+        reverse-event (identity/dependency-reversal-event linked failed child 1)
+        reversed (identity/append-event linked reverse-event)]
+    (is (= 1 (:accepted-group-count (identity/project linked))))
+    (is (= 0 (:accepted-group-count
+              (identity/project (identity/append-event linked canonical-failure)))))
+    (is (= :model (:actor-kind reverse-event)))
+    (is (= 0 (:accepted-group-count (identity/project reversed))))
+    (is (= reversed (identity/append-event reversed reverse-event)))))
+
+(deftest stricter-policy-invalidates-current-model-link
+  (let [a (athlete "a" "One Diver" :citation {:job-id "job-a" :ordinal 0 :source-sha256 "sha-a"})
+        b (athlete "b" "One Diver" :citation {:job-id "job-b" :ordinal 0 :source-sha256 "sha-b"})
+        ledger (identity/empty-ledger [a b])
+        d (identity/jev-decision ledger "a" "b")
+        config {:provider :jev :model "jev-test" :version "config/1"}
+        policy {:version "policy/1" :thresholds {:identity {:same-person {:min-confidence 0.9
+                                                                          :min-probability 0.9 :min-margin 0.2}}}}
+        execute! (fn [_] {:model "jev-test" :usage {}
+                          :answers {(:id d) {:type "choice" :choice "same_person" :confidence 0.96
+                                             :probabilities {"same_person" 0.94
+                                                             "different_person" 0.04 "unknown" 0.02}}}})
+        approved (flow/run! (flow/empty-ledger) [d]
+                            {:config config :policy policy :execute! execute!})
+        linked (identity/append-event ledger (identity/model-event ledger approved d config policy 0))
+        strict-policy (assoc-in (assoc policy :version "policy/2")
+                                [:thresholds :identity :same-person :min-confidence] 0.99)
+        now-unresolved (flow/run! approved [d]
+                                  {:config config :policy strict-policy :execute! execute!})
+        reverse-event (identity/dependency-reversal-event
+                       linked now-unresolved d config {} 1)]
+    (is (= :unresolved (get-in (flow/inspect now-unresolved [d] config) [(:id d) :status])))
+    (is (= :current-approval-unavailable (:reason reverse-event)))
+    (is (= 0 (:accepted-group-count
+              (identity/project (identity/append-event linked reverse-event)))))))

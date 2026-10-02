@@ -101,36 +101,42 @@
 
 (defn jev-decision
   "Build one identity question from the current indexed corpus. Include every retrieved candidate."
-  [ledger target-id candidate-id]
-  (let [rows (:rows ledger)
-        target (rows target-id)
-        retrieval (when target (retrieve (build-index (vals rows)) target))
-        found (mapv :observation-id (:candidates retrieval))
-        scope (vec (cons target-id found))]
-    (when-not (and (string? target-id) (string? candidate-id)
-                   (some #{candidate-id} found)
-                   (empty? (:omitted retrieval))
-                   (every? #(and (= :parsed (:parse-status (rows %)))
-                                 (map? (:citation (rows %)))
-                                 (string? (get-in (rows %) [:citation :source-sha256]))
-                                 (string? (:source-name (rows %)))) scope))
-      (fail! "Identity question lacks complete current source evidence"
-             {:target-id target-id :candidate-id candidate-id}))
-    {:id (str "identity-" (format "%064x" (java.math.BigInteger. 1
-                                                                 (.digest (java.security.MessageDigest/getInstance "SHA-256")
-                                                                          (.getBytes (pr-str [target-id candidate-id]) "UTF-8")))))
-     :family :identity :action :same-person
-     :choices [:same-person :different-person :unknown]
-     :subject {:pair [target-id candidate-id] :target-id target-id
-               :observation-versions (into {} (map (fn [id] [id (:citation (rows id))]) scope))}
-     :candidates scope
-     :evidence (mapv (fn [id]
-                       {:evidence-id (str "identity-" id)
-                        :citation (:citation (rows id))
-                        :fact (str "Source name: " (:source-name (rows id))
-                                   "; publisher person ID: " (or (:publisher-athlete-id (rows id)) "unknown"))
-                        :source-meaning "Retained result-row athlete identity evidence"}) scope)
-     :dependencies [] :evidence-adequate? true}))
+  ([ledger target-id candidate-id]
+   (jev-decision ledger target-id candidate-id {}))
+  ([ledger target-id candidate-id {:keys [dependencies id]}]
+   (let [rows (:rows ledger)
+         target (rows target-id)
+         retrieval (when target (retrieve (build-index (vals rows)) target))
+         found (mapv :observation-id (:candidates retrieval))
+         scope (vec (cons target-id found))]
+     (when-not (and (string? target-id) (string? candidate-id)
+                    (some #{candidate-id} found)
+                    (empty? (:omitted retrieval))
+                    (vector? (vec dependencies))
+                    (every? string? dependencies)
+                    (or (nil? id) (and (string? id)
+                                       (re-matches #"[A-Za-z0-9._-]{1,100}" id)))
+                    (every? #(and (= :parsed (:parse-status (rows %)))
+                                  (map? (:citation (rows %)))
+                                  (string? (get-in (rows %) [:citation :source-sha256]))
+                                  (string? (:source-name (rows %)))) scope))
+       (fail! "Identity question lacks complete current source evidence"
+              {:target-id target-id :candidate-id candidate-id}))
+     {:id (or id (str "identity-" (format "%064x" (java.math.BigInteger. 1
+                                                                         (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                                                                  (.getBytes (pr-str [target-id candidate-id]) "UTF-8"))))))
+      :family :identity :action :same-person
+      :choices [:same-person :different-person :unknown]
+      :subject {:pair [target-id candidate-id] :target-id target-id
+                :observation-versions (into {} (map (fn [id] [id (:citation (rows id))]) scope))}
+      :candidates scope
+      :evidence (mapv (fn [id]
+                        {:evidence-id (str "identity-" id)
+                         :citation (:citation (rows id))
+                         :fact (str "Source name: " (:source-name (rows id))
+                                    "; publisher person ID: " (or (:publisher-athlete-id (rows id)) "unknown"))
+                         :source-meaning "Retained result-row athlete identity evidence"}) scope)
+      :dependencies (vec dependencies) :evidence-adequate? true})))
 
 (defn- compatible? [a b]
   (and (not (and (person-id a) (person-id b)
@@ -175,7 +181,7 @@
   (let [index (build-index rows)]
     {:version rule-version :rows (:rows index) :events []}))
 
-(declare pair project)
+(declare pair project dependency-reversal-event)
 
 (defn- complete-model-answer? [answer receipt config]
   (let [probabilities (:probabilities answer)
@@ -211,6 +217,12 @@
         refs (when (and (vector? pair*) (= 2 (count pair*))) (pair pair*))
         rows (:rows ledger)
         target-id (get-in decision [:subject :target-id])
+        selected-id (first (remove #{target-id} refs))
+        canonical-decision (when (and target-id selected-id)
+                             (try (jev-decision ledger target-id selected-id
+                                                {:dependencies (:dependencies decision)
+                                                 :id (:id decision)})
+                                  (catch clojure.lang.ExceptionInfo _ nil)))
         retrieval (when (rows target-id) (retrieve (build-index (vals rows)) (rows target-id)))
         current-scope (when retrieval (vec (cons target-id (map :observation-id (:candidates retrieval)))))
         versions (get-in decision [:subject :observation-versions])
@@ -236,6 +248,7 @@
                    (some #{target-id} refs)
                    (every? (set current-scope) refs)
                    (= current-scope (:candidates decision))
+                   (= canonical-decision decision)
                    (empty? (:omitted retrieval))
                    (= (set current-scope) (set (keys versions)))
                    (every? #(= (get versions %) (:citation (rows %))) current-scope)
@@ -290,7 +303,20 @@
     (and (= scope (:candidates decision))
          (empty? (:omitted retrieval))
          (= (set scope) (set (keys versions)))
-         (every? #(= (versions %) (:citation (rows %))) scope))))
+         (every? #(= (versions %) (:citation (rows %))) scope)
+         (= decision
+            (try (jev-decision {:rows rows} target-id
+                               (first (remove #{target-id} (get-in decision [:subject :pair])))
+                               {:id (:id decision) :dependencies (:dependencies decision)})
+                 (catch clojure.lang.ExceptionInfo _ nil))))))
+
+(defn- dependency-events [flow-ledger ids]
+  (let [events (:events flow-ledger)]
+    (into {}
+          (map (fn [id]
+                 [id (or (last (filter #(and (= id (:decision-id %))
+                                             (= :human (:origin %))) events))
+                         (last (filter #(= id (:decision-id %)) events)))]) ids))))
 (defn- active-edges [events rows]
   (let [reversed (set (keep #(when (= :reverse (:action %)) (:event-id %)) events))]
     (filter #(and (= :accept (:action %)) (not (reversed (:id %)))
@@ -347,7 +373,7 @@
                                                            (not (superseded (:id e))))]
                                    (:pair (some #(when (= (:event-id e) (:id %)) %) events)))))
             groups (:groups (project ledger))]
-        (when (and (= :model (:actor-kind event))
+        (when (and (= :model (:actor-kind event)) (= :accept (:action event))
                    (not (and (:request event) (not (model-current? rows event)))))
           (let [{:keys [decision flow-event dependency-events config approval-policy receipt]} (:model-proof event)
                 recreated (when (and (= :accept (:action event)) (map? decision)
@@ -373,9 +399,20 @@
                          (active-edges events rows)))
           (fail! "Changed model evidence requires reversal before relinking" {:id (:id event)}))
         (when (= :reverse (:action event))
-          (when-not (and (= :human (:actor-kind event)) (= :accept (:action prior))
+          (when-not (and (#{:human :model} (:actor-kind event)) (= :accept (:action prior))
                          (not-any? #(= (:event-id event) (:event-id %)) events))
             (fail! "Only active accepted links can be reversed" {:event event})))
+        (when (and (= :model (:actor-kind event)) (= :reverse (:action event)))
+          (let [proof (:model-dependency-proof event)
+                recreated (when (and prior (not (:request event)))
+                            (dependency-reversal-event
+                             ledger {:version flow/ledger-version :events (:flow-events proof)}
+                             (:decision proof) (:config proof) (:canonical-statuses proof)
+                             (:base-revision event)))]
+            (when-not (and (= :model (:actor-kind prior))
+                           (or (:request event) (= recreated event))
+                           (= (count events) (:base-revision event)))
+              (fail! "Model reversal lacks a current failed approval" {:id (:id event)}))))
         (when pair
           (when-not (every? rows pair) (fail! "Unknown observation" {:pair pair}))
           (when (and (= :accept (:action event))
@@ -394,6 +431,48 @@
                                       (= :model (:actor-kind event))
                                       (assoc :request (or (:request event) event))))))))
 (defn replay [rows events] (reduce append-event (empty-ledger rows) events))
+
+(defn dependency-reversal-event
+  "Build an auditable model reversal when its approval or dependency is no longer current."
+  ([ledger flow-ledger decision expected-revision]
+   (dependency-reversal-event ledger flow-ledger decision nil {} expected-revision))
+  ([ledger flow-ledger decision config canonical-statuses expected-revision]
+   (let [prior (last (filter #(and (= :model (:actor-kind %)) (= :accept (:action %))
+                                   (= (:id decision) (:model-decision-id %))
+                                   (some #{(:id %)} (map :id (active-edges (:events ledger) (:rows ledger)))))
+                             (:events ledger)))
+         ids (get-in prior [:model-proof :decision :dependencies])
+         config (or config (get-in prior [:model-proof :config]))
+         sources (filterv #(some #{(:decision-id %)} (conj (vec ids) (:id decision)))
+                          (:events flow-ledger))
+         statuses (into {} (map (fn [[id e]] [id (:status e)])
+                                (dependency-events {:events sources} ids)))
+         view (get (flow/inspect {:version flow/ledger-version :events sources}
+                                 [decision] config) (:id decision))
+         prior-answer (get-in prior [:model-proof :flow-event :answer])
+         own-stale? (or (not= :approved (:status view))
+                        (not (#{:jev :cached-jev :retained} (:origin view)))
+                        (not= prior-answer (:answer view))
+                        (not= (get-in prior [:model-proof :flow-event :policy-version])
+                              (:policy-version view)))
+         failed? (or own-stale?
+                     (some #(not= :approved %) (vals statuses))
+                     (some #(not= :approved %) (vals canonical-statuses)))]
+     (when-not (and (= expected-revision (count (:events ledger)))
+                    prior (map? canonical-statuses)
+                    (every? (set ids) (keys canonical-statuses))
+                    (= (set ids) (set (keys statuses))) failed?)
+       (fail! "No active model link with a failed approval" {:decision-id (:id decision)}))
+     {:id (str "jev-identity-dependency-reverse:" (:id prior) ":"
+               (hash [(:status view) (:request-hash view) (:result-hash view)
+                      statuses canonical-statuses]))
+      :action :reverse :actor-kind :model :event-id (:id prior)
+      :base-revision expected-revision
+      :reason (if own-stale? :current-approval-unavailable :dependency-unapproved)
+      :model-dependency-proof {:decision-id (:id decision)
+                               :decision decision :config config
+                               :flow-events sources :statuses statuses
+                               :canonical-statuses canonical-statuses}})))
 
 (defn- query [^Connection connection sql & args]
   (with-open [statement (.prepareStatement connection sql)]
@@ -450,15 +529,17 @@
 
 (defn private-jev-decision
   "Construct a cited identity question from a consistent database snapshot."
-  [url target-id candidate-id]
-  (with-open [connection (DriverManager/getConnection url)]
-    (.setAutoCommit connection false)
-    (.setReadOnly connection true)
-    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
-    (try
-      (let [result (jev-decision (read-ledger connection) target-id candidate-id)]
-        (.commit connection) result)
-      (catch Exception error (.rollback connection) (throw error)))))
+  ([url target-id candidate-id]
+   (private-jev-decision url target-id candidate-id {}))
+  ([url target-id candidate-id opts]
+   (with-open [connection (DriverManager/getConnection url)]
+     (.setAutoCommit connection false)
+     (.setReadOnly connection true)
+     (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+     (try
+       (let [result (jev-decision (read-ledger connection) target-id candidate-id opts)]
+         (.commit connection) result)
+       (catch Exception error (.rollback connection) (throw error))))))
 
 (defn private-history
   "Return the inspectable append-only identity history, including database actor and time."
@@ -510,14 +591,23 @@
                                                  (:id event))))
                          (:session_user (first (query connection "SELECT session_user AS session_user")))))
           (fail! "Model identity replay requires original database role" {:id (:id event)}))
-        (when (and existing (= :model (:actor-kind event))
+        (when (and existing (= :model (:actor-kind event)) (= :accept (:action event))
                    (not (model-current? (:rows ledger) existing)))
           (fail! "Model identity replay has stale source or candidate evidence" {:id (:id event)}))
         (when (and (= :model (:actor-kind event)) (nil? existing))
-          (let [{:keys [decision flow-event dependency-events config approval-policy]} (:model-proof event)
-                recreated (model-event ledger {:version flow/ledger-version
-                                               :events (conj (vec dependency-events) flow-event)}
-                                       decision config approval-policy (:base-revision event))]
+          (let [recreated (if (= :accept (:action event))
+                            (let [{:keys [decision flow-event dependency-events config approval-policy]}
+                                  (:model-proof event)]
+                              (model-event ledger {:version flow/ledger-version
+                                                   :events (conj (vec dependency-events) flow-event)}
+                                           decision config approval-policy (:base-revision event)))
+                            (dependency-reversal-event
+                             ledger {:version flow/ledger-version
+                                     :events (get-in event [:model-dependency-proof :flow-events])}
+                             (get-in event [:model-dependency-proof :decision])
+                             (get-in event [:model-dependency-proof :config])
+                             (get-in event [:model-dependency-proof :canonical-statuses])
+                             (:base-revision event)))]
             (when-not (= recreated event)
               (fail! "Invalid model identity submission" {:id (:id event)}))))
         (let [decision (when (and (= :automatic (:actor-kind event)) (nil? existing)
@@ -622,3 +712,24 @@
                                   :event-id (:id model)
                                   :reason (or (:reason human) "Private identity correction")
                                   :flow-human-event-id (:id human)})))))
+
+(defn invalidate-model-dependency!
+  "Reverse a model identity link after its approval or dependency becomes invalid."
+  ([url flow-ledger decision expected-revision]
+   (invalidate-model-dependency! url flow-ledger decision nil {} expected-revision))
+  ([url flow-ledger decision config canonical-statuses expected-revision]
+   (let [ledger (with-open [connection (DriverManager/getConnection url)]
+                  (.setAutoCommit connection false)
+                  (.setReadOnly connection true)
+                  (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+                  (try
+                    (let [result (read-ledger connection)] (.commit connection) result)
+                    (catch Exception error (.rollback connection) (throw error))))
+         old (last (filter #(and (= :model (:actor-kind %)) (= :reverse (:action %))
+                                 (= (:id decision)
+                                    (get-in % [:model-dependency-proof :decision-id])))
+                           (:events ledger)))]
+     (if old
+       (record-event! url (:request old))
+       (record-event! url (dependency-reversal-event ledger flow-ledger decision
+                                                     config canonical-statuses expected-revision))))))
