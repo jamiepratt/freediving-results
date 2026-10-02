@@ -728,8 +728,12 @@
          old (last (filter #(and (= :model (:actor-kind %)) (= :reverse (:action %))
                                  (= (:id decision)
                                     (get-in % [:model-dependency-proof :decision-id])))
-                           (:events ledger)))]
-     (if old
-       (record-event! url (:request old))
-       (record-event! url (dependency-reversal-event ledger flow-ledger decision
-                                                     config canonical-statuses expected-revision))))))
+                           (:events ledger)))
+         active (last (filter #(and (= :model (:actor-kind %)) (= :accept (:action %))
+                                    (= (:id decision) (:model-decision-id %)))
+                              (active-edges (:events ledger) (:rows ledger))))]
+     (cond
+       active (record-event! url (dependency-reversal-event ledger flow-ledger decision
+                                                            config canonical-statuses expected-revision))
+       old (record-event! url (:request old))
+       :else (fail! "No model identity event to invalidate" {:decision-id (:id decision)})))))
