@@ -49,6 +49,53 @@
     (is (some #(and (= :ambiguous (:status %)) (= "p1:l3" (:position-id %)))
               (get-in result [:routing :gaps])))))
 
+(def pzf-url "https://pzf-sport.org/team_department/kadra-basen-2025/")
+(def pzf-html
+  (str "<html><head><link rel='canonical' href='" pzf-url "'></head>"
+       "<body class='archive tax-team_department term-kadra-basen-2025'>"
+       "<ul id='archive-container'>"
+       "<li><article class='team post-100 team_department-kadra-basen-2025'>"
+       "<h2 class='entry-title'><a href='https://pzf-sport.org/team/ewa-zolc/'>Ewa Żółć</a></h2>"
+       "</article></li>"
+       "<li><article class='team post-101 team_department-kadra-basen-2025'>"
+       "<h2 class='entry-title'><a href='https://pzf-sport.org/team/lukasz-zuk/'>Łukasz Żuk</a></h2>"
+       "</article></li>"
+       "<li><article class='team post-102 team_department-kadra-basen-2025'>"
+       "<h2 class='entry-title'>Unclear</h2></article></li></ul>"
+       "<nav class='pagination'><a href='" pzf-url "page/2/'>2</a></nav>"
+       "</body></html>"))
+
+(deftest pzf-directory-preserves-diacritics-ids-and-page-gap
+  (let [result (affiliate/parse-pzf-team-directory
+                {:html pzf-html :source-sha256 (sha pzf-html) :url pzf-url})]
+    (is (= ["Ewa Żółć" "Łukasz Żuk"] (mapv :original-name (:name-assertions result))))
+    (is (= ["100" "101"] (mapv #(get-in % [:person-id :value]) (:name-assertions result))))
+    (is (= ["#archive-container article.post-100 h2.entry-title a"
+            "#archive-container article.post-101 h2.entry-title a"]
+           (mapv #(get-in % [:source-position :selector]) (:name-assertions result))))
+    (is (every? #(nil? (:publisher-romanization %)) (:name-assertions result)))
+    (is (= #{:unsupported :unexamined}
+           (set (map :status (get-in result [:routing :gaps])))))
+    (is (= 2 (count (:name-assertions
+                     (names/import-name-evidence
+                      (names/import-name-evidence {} (:name-sources result))
+                      (:name-sources result))))))))
+
+(deftest pzf-directory-declines-wrong-page-or-overlap
+  (is (thrown? clojure.lang.ExceptionInfo
+               (affiliate/parse-pzf-team-directory
+                {:html pzf-html :source-sha256 (apply str (repeat 64 "a")) :url pzf-url})))
+  (let [h (sha pzf-html)
+        overlap {:parser-id "other" :parser-version "1" :match-reason "test overlap"
+                 :source-restriction {:sha256s #{h} :formats #{:html}}
+                 :supported-positions #{"team-post-100"}
+                 :claimed-positions #{"team-post-100"}}
+        result (affiliate/parse-pzf-team-directory
+                {:html pzf-html :source-sha256 h :url pzf-url
+                 :additional-claims [overlap]})]
+    (is (= ["Łukasz Żuk"] (mapv :original-name (:name-assertions result))))
+    (is (= :ambiguous (:status (first (get-in result [:routing :gaps])))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.affiliate-html-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

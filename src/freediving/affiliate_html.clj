@@ -14,7 +14,12 @@
     :post-selector "#post-6495"
     :publisher "Japan Apnea Society"
     :parser-id "japan-apnea-2025-team"
-    :parser-version parser-version}})
+    :parser-version parser-version}
+   :pzf-2025-indoor-team
+   {:url "https://pzf-sport.org/team_department/kadra-basen-2025/"
+    :publisher "Polski Związek Freedivingu"
+    :parser-id "pzf-indoor-team-directory"
+    :parser-version "pzf-indoor-team-directory/1"}})
 
 (defn- sha256 [source]
   (.formatHex (HexFormat/of)
@@ -118,6 +123,87 @@
       {:source-id :japan-apnea-2025-team
        :source-sha256 source-sha256
        :parser-version parser-version
+       :routing routed
+       :roster-entries entries
+       :name-sources sources
+       :name-assertions (mapv names/name-assertion sources)})))
+
+(def pzf-parser-version "pzf-indoor-team-directory/1")
+
+(defn parse-pzf-team-directory
+  "Parse registered first page of the PZF 2025 indoor team directory.
+   Later pages and unreadable cards remain explicit gaps."
+  [{:keys [html source-sha256 url additional-claims]}]
+  (when-not (and (string? html) (= source-sha256 (sha256 html)))
+    (throw (ex-info "Source hash mismatch" {:reason :source-mismatch})))
+  (let [{registered-url :url :keys [publisher parser-id]}
+        (:pzf-2025-indoor-team source-registry)
+        document (Jsoup/parse html)
+        body (.body document)
+        canonical (.selectFirst document "link[rel=canonical]")
+        container (.selectFirst document "#archive-container")]
+    (when-not (and (= registered-url url)
+                   canonical (= registered-url (.attr canonical "href"))
+                   (.hasClass body "term-kadra-basen-2025")
+                   container (seq (.select container "article.team")))
+      (throw (ex-info "Incompatible PZF team directory" {:reason :incompatible-page})))
+    (let [cards (map-indexed
+                 (fn [idx article]
+                   (let [post-id (some #(second (re-matches #"post-(\d+)" %))
+                                       (.classNames article))
+                         anchor (.selectFirst article "h2.entry-title a")
+                         original-name (when anchor (str/trim (.text anchor)))
+                         profile-url (when anchor (.attr anchor "href"))
+                         valid? (and (.hasClass article "team_department-kadra-basen-2025")
+                                     post-id
+                                     (some->> original-name (re-matches #"[\p{L}\p{M} .'-]+"))
+                                     (str/includes? original-name " ")
+                                     (str/starts-with? profile-url "https://pzf-sport.org/team/"))]
+                     {:id (if post-id (str "team-post-" post-id) (str "card-" (inc idx)))
+                      :card (inc idx) :post-id post-id :original-name original-name
+                      :profile-url profile-url :valid? (boolean valid?)}))
+                 (.select container "article.team"))
+          positions (mapv (fn [{:keys [id card post-id]}]
+                            {:id id :citation (str url "#archive-container article"
+                                                   (if post-id (str ".post-" post-id)
+                                                       (str ":nth-of-type(" card ")"))
+                                                   " h2.entry-title a")})
+                          cards)
+          claimed (->> cards (filter :valid?) (map :id) set)
+          claim {:parser-id parser-id
+                 :parser-version pzf-parser-version
+                 :match-reason "registered PZF canonical taxonomy archive and team cards"
+                 :source-restriction {:sha256s #{source-sha256} :formats #{:html}}
+                 :supported-positions claimed :claimed-positions claimed}
+          next-page (.selectFirst document "nav.pagination a[href*=/page/2/]")
+          sections (cond-> [{:id "outside-team-cards"
+                             :citation (str url "#main outside #archive-container article.team")
+                             :examined? false}]
+                     next-page (conj {:id "following-page"
+                                      :citation (.attr next-page "href")
+                                      :examined? false}))
+          routed (routing/route-document
+                  {:source-sha256 source-sha256 :format :html
+                   :positions positions :sections sections}
+                  (into [claim] additional-claims))
+          accepted (set (map :position-id (:routed routed)))
+          entries (->> cards (filter #(contains? accepted (:id %))) vec)
+          sources (mapv (fn [{:keys [post-id original-name profile-url]}]
+                          {:source-sha256 source-sha256
+                           :parser-version pzf-parser-version
+                           :source-position {:format :html :url url
+                                             :selector (str "#archive-container article.post-"
+                                                            post-id " h2.entry-title a")
+                                             :profile-url profile-url}
+                           :publisher publisher
+                           :source-family :national-team-directory
+                           :person-id {:authority publisher
+                                       :kind :team-post-id :value post-id}
+                           :original-name original-name})
+                        entries)]
+      {:source-id :pzf-2025-indoor-team
+       :source-sha256 source-sha256
+       :parser-version pzf-parser-version
        :routing routed
        :roster-entries entries
        :name-sources sources
