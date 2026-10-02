@@ -46,6 +46,30 @@
     (is (= 4 (count (:events rerun))))
     (is (= :approved (get-in (flow/inspect rerun changed) ["model" :status])))))
 
+(deftest changed-question-context-invalidates-cached-answer
+  (doseq [[field before after]
+          [[:subject {:event "cup-a"} {:event "cup-b"}]
+           [:uncertainties ["source label unclear"] ["source label confirmed"]]
+           [:contradictions [] ["different printed ID"]]]]
+    (let [calls (atom 0)
+          execute! (fn [request]
+                     (swap! calls inc)
+                     {:model "jev-1.13.0" :usage {}
+                      :answers (zipmap (:decision-ids request)
+                                       (repeat {:type "choice" :choice "same_person"
+                                                :confidence 0.96
+                                                :probabilities {"same_person" 0.94
+                                                                "different_person" 0.04
+                                                                "unknown" 0.02}}))})
+          opts {:config config :policy policy :execute! execute!}
+          original (assoc (decision "model") field before)
+          changed (assoc original field after)
+          first-run (flow/run! (flow/empty-ledger) [original] opts)
+          rerun (flow/run! first-run [changed] opts)]
+      (is (= 2 @calls) (name field))
+      (is (= :approved (get-in (flow/inspect rerun [changed] config)
+                               ["model" :status])) (name field)))))
+
 (deftest dependency-and-human-override-control-dispatch
   (let [calls (atom [])
         execute! (fn [request]

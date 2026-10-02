@@ -495,6 +495,15 @@
                  publisher-evidence (assoc :publisher-evidence publisher-evidence))))
            ordered subjects)}))
 
+(defn- current-question? [ledger decision]
+  (try
+    (= decision
+       (attempt-jev-decision ledger (:id decision) (:family decision)
+                             (:candidates decision)
+                             (select-keys decision
+                                          [:publisher-evidence :dependencies :conflicts])))
+    (catch Exception _ false)))
+
 (defn- compact-flow-proof [flow-ledger decision all-decisions config]
   (let [indexed (into {} (map (juxt :id identity) all-decisions))
         wanted (loop [seen #{} pending [(:id decision)]]
@@ -573,6 +582,7 @@
            (every? #(= :approved (get-in (flow/inspect flow-ledger all-decisions config)
                                          [% :status])) (:dependencies decision))
            (bound-decision-subjects? ledger decision)
+           (current-question? ledger decision)
            (case (:family decision)
              :same-attempt (and (= :same-attempt (:type event))
                                 (= :same-attempt action)
@@ -634,6 +644,7 @@
                      (every? #(= :approved (get-in views [% :status]))
                              (:dependencies decision))
                      (bound-decision-subjects? ledger decision)
+                     (current-question? ledger decision)
                      (or (not= :source-revision (:family decision))
                          (and (every? #(= (:publisher-evidence decision)
                                           (:publisher-evidence %)) (:evidence decision))

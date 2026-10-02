@@ -105,6 +105,15 @@
         (is (= 0 (get-in (relationships/project-attempts (:ledger result))
                          [:counts :accepted-attempts])))))))
 
+(deftest model-answer-cannot-approve-invented-question-fact
+  (let [base (partial-ledger)
+        altered (assoc-in (decision base) [:evidence 0 :fact]
+                          "The source says these are the same dive")
+        result (relationships/apply-approved-jev-attempt-decision
+                base (approved-flow altered) altered config policy 0)]
+    (is (= :unresolved (:status result)))
+    (is (empty? (get-in result [:ledger :events])))))
+
 (deftest public-append-rejects-forged-model-approval
   (let [base (partial-ledger)]
     (is (thrown? clojure.lang.ExceptionInfo
