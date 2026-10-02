@@ -19,7 +19,8 @@
                        (range) rows)})
 
 (deftest corpus-ledger-retains-replay-versions-with-exact-source-references
-  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M}
+  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M
+                :result-role :individual-result}
         row (candidate 9 "printed row" parsed)
         jobs [(inspected "job-a" "parser/1" [row])
               (inspected "job-b" "parser/2" [(assoc row :parsed (assoc parsed :final-performance 71M))])]
@@ -30,7 +31,8 @@
     (is (= result (ledger/build-ledger (reverse jobs) {:routes []})))))
 
 (deftest corpus-attempt-counts-require-retained-scope-bindings
-  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M}
+  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M
+                :result-role :individual-result}
         row (candidate 9 "printed row" parsed)
         jobs [(inspected "job-a" "parser/1" [row])
               (inspected "job-b" "parser/2" [row])]
@@ -40,7 +42,7 @@
         scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
                :discipline "FIM" :participant "publisher:42" :attempt "1"}
         binding {:scope scope
-                 :scope-evidence {:source-id source :position-id position
+                 :scope-evidence {:source-id source :source-sha256 source :position-id position
                                   :citation [{:page 1 :line 9}] :fields scope}}
         accepted (ledger/build-ledger jobs {:routes []}
                                       {:scope-bindings {{:job-id "job-a" :ordinal 0} binding

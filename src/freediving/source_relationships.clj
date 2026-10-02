@@ -210,8 +210,13 @@
                   (not (contains? (:invalidated-events ledger) (:id %)))) events)))
 
 (defn- event-subjects [ledger type pair]
-  (let [rows (if (= type :same-attempt) (:observation-versions ledger) (:sources ledger))]
-    (mapv rows pair)))
+  (if (= type :same-attempt)
+    (mapv (fn [id]
+            (let [version (get-in ledger [:observation-versions id])
+                  position (get-in ledger [:positions (:position-id version)])]
+              {:version version :position position
+               :source (get-in ledger [:sources (:source-id position)])})) pair)
+    (mapv #((:sources ledger) %) pair)))
 
 (defn- scope-of [ledger version-id]
   (get-in ledger [:observation-versions version-id :scope]))
@@ -223,12 +228,45 @@
   (let [row (get-in ledger [:observation-versions version-id])
         position (get-in ledger [:positions (:position-id row)])
         evidence (:scope-evidence row)]
-    (and (complete-scope? (:scope row))
+    (and (= :individual-result (:role row))
+         (complete-scope? (:scope row))
          (= (:position-id row) (:position-id evidence))
          (= (:source-id position) (:source-id evidence))
+         (= (get-in ledger [:sources (:source-id position) :sha256])
+            (:source-sha256 evidence))
          (= (:locator position) (:citation evidence))
          (some? (:citation evidence))
          (= (:scope row) (:fields evidence)))))
+
+(defn- automatic-attempt-links [ledger]
+  (let [rows (filter #(verified-scope? ledger (:id %))
+                     (vals (:observation-versions ledger)))
+        reversed (set (keep #(when (= :reverse (:action %)) (:event-id %)) (:events ledger)))
+        reversed-pairs (set (keep (fn [event]
+                                    (when (and (= :reverse (:action event))
+                                               (not (str/starts-with? (:event-id event) "auto-attempt:")))
+                                      (:pair (some #(when (= (:event-id event) (:id %)) %)
+                                                   (:events ledger))))) (:events ledger)))]
+    (->> (for [[_ scoped] (group-by :scope rows)
+               :let [representatives (->> scoped (group-by :position-id) vals
+                                          (map #(first (sort-by :id %)))
+                                          (sort-by :id) vec)]
+               other (rest representatives)
+               :let [pair (ordered-pair [(:id (first representatives)) (:id other)])
+                     id (str "auto-attempt:" (pr-str pair))]
+               :when (and (not (contains? reversed id))
+                          (not (contains? reversed-pairs pair)))]
+           {:id id :type :same-attempt :pair pair :rule-version attempt-rule-version
+            :evidence {:kind :verified-scope :scope (:scope other)}})
+         (sort-by :id) vec)))
+
+(defn- publisher-citation? [ledger citation]
+  (and (map? citation)
+       (contains? (:sources ledger) (:source-id citation))
+       (some? (:locator citation))
+       (not (and (string? (:locator citation)) (str/blank? (:locator citation))))
+       (string? (:text citation))
+       (not (str/blank? (:text citation)))))
 
 (defn append-attempt-event
   "Append an accepted source or attempt relationship, or reverse a prior acceptance.
@@ -245,8 +283,9 @@
                    (#{:accept :reverse} action))
       (throw (ex-info "Invalid or duplicate attempt event" {:id id})))
     (if (= action :reverse)
-      (when-not (and prior (= :accept (:action prior))
-                     (some #(= event-id (:id %)) (active-events ledger)))
+      (when-not (or (and prior (= :accept (:action prior))
+                         (some #(= event-id (:id %)) (active-events ledger)))
+                    (some #(= event-id (:id %)) (automatic-attempt-links ledger)))
         (throw (ex-info "Only active acceptance can be reversed" {:event-id event-id})))
       (do
         (when-not (and (#{:same-attempt :source-equivalent :source-dependent
@@ -268,15 +307,20 @@
           (let [{:keys [kind predecessor successor citation]} evidence]
             (when-not (and (#{:publisher-version :publisher-correction} kind)
                            (= (set pair) #{predecessor successor})
-                           (string? citation) (not (str/blank? citation))
+                           (publisher-citation? ledger citation)
+                           (contains? (set pair) (:source-id citation))
                            (not-any? #(and (= :source-revision (:type %))
                                            (= pair (:pair %))
                                            (not= predecessor (get-in % [:evidence :predecessor])))
                                      (active-events ledger)))
               (throw (ex-info "Publisher revision direction missing or conflicting" {:pair pair}))))
           :source-dependent
-          (when-not (#{:publisher-mirror :publisher-aggregate :shared-upstream}
-                     (:kind evidence))
+          (when-not (and (#{:publisher-mirror :publisher-aggregate :shared-upstream}
+                          (:kind evidence))
+                         (= (set pair) #{(:dependent-source evidence)
+                                         (:upstream-source evidence)})
+                         (publisher-citation? ledger (:citation evidence))
+                         (contains? (set pair) (get-in evidence [:citation :source-id])))
             (throw (ex-info "Source dependence needs provenance evidence" {:pair pair}))))))
     (update ledger :events conj (cond-> (assoc event :rule-version attempt-rule-version)
                                   pair (assoc :pair pair :evidence-snapshot
@@ -313,10 +357,14 @@
                                        (join-groups groups (first ids) id) groups))
                                    groups (rest ids))))
                        groups (group-by :position-id (vals versions)))
+        automatic-links (automatic-attempt-links ledger)
         groups (reduce (fn [groups {:keys [pair type]}]
                          (if (= type :same-attempt)
                            (join-groups groups (first pair) (second pair)) groups))
-                       groups (active-events ledger))
+                       groups (concat automatic-links (active-events ledger)))
+        dependent-sources (set (keep #(when (= :source-dependent (:type %))
+                                        (get-in % [:evidence :dependent-source]))
+                                     (active-events ledger)))
         attempts (->> (distinct (vals groups))
                       (map (fn [members]
                              (let [ids (vec (sort members))
@@ -325,13 +373,19 @@
                                 :scope scope :observation-ids ids
                                 :position-ids (vec (sort (set (map #(get-in ledger [:observation-versions % :position-id]) ids))))
                                 :source-ids (vec (sort (set (map #(source-of ledger %) ids))))
+                                :source-support (mapv (fn [source-id]
+                                                        {:source-id source-id
+                                                         :role (if (dependent-sources source-id)
+                                                                 :dependent :unknown)})
+                                                      (sort (set (map #(source-of ledger %) ids))))
                                 :status (if (and (every? #(verified-scope? ledger %) ids)
                                                  (every? #(= scope (scope-of ledger %)) ids))
                                           :accepted :unresolved)})))
                       (sort-by :id) vec)]
     {:version attempt-rule-version :revision (count (:events ledger))
-     :attempts attempts :source-relationships (vec (filter #(not= :same-attempt (:type %))
-                                                           (active-events ledger)))
+     :attempts attempts :automatic-links automatic-links
+     :source-relationships (vec (filter #(not= :same-attempt (:type %))
+                                        (active-events ledger)))
      :counts {:sources (count (:sources ledger))
               :source-objects (count (set (map :sha256 (vals (:sources ledger)))))
               :positions (count (:positions ledger))

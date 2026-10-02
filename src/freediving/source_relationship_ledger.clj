@@ -69,6 +69,8 @@
                            {:id (pr-str ref)
                             :position-id (pr-str [(:source-sha256 row) (:position row)])
                             :parser-version (:parser-version row)
+                            :role (when (= "result-row" (:observation-kind row))
+                                    (get-in row [:parsed :result-role]))
                             :scope (:scope binding)
                             :scope-evidence (:scope-evidence binding)
                             :values (:parsed row)

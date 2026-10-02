@@ -102,27 +102,33 @@
                    {:id "p2" :source-id "mirror" :locator {:row 3}}]
         binding (fn [position-id]
                   (let [position (first (filter #(= position-id (:id %)) positions))]
-                    {:source-id (:source-id position) :position-id position-id
+                    {:source-id (:source-id position) :source-sha256 (if (= position-id "p1") "aa" "bb")
+                     :position-id position-id
                      :citation (:locator position) :fields attempt-scope}))]
     (relationships/empty-attempt-ledger
      {:sources [{:id "official" :sha256 "aa"} {:id "mirror" :sha256 "bb"}]
       :positions positions
-      :observation-versions [{:id "v1" :position-id "p1" :parser-version "1"
+      :observation-versions [{:id "v1" :position-id "p1" :parser-version "1" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p1")
                               :values {:raw-performance "70m" :final-performance "69m"
                                        :penalty "1m" :card "yellow" :notes "turn"}}
-                             {:id "v2" :position-id "p1" :parser-version "2"
+                             {:id "v2" :position-id "p1" :parser-version "2" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p1")
                               :values {:raw-performance "70m" :final-performance "69m"}}
-                             {:id "v3" :position-id "p2" :parser-version "1"
+                             {:id "v3" :position-id "p2" :parser-version "1" :role :individual-result
                               :scope attempt-scope :scope-evidence (binding "p2")
                               :values {:raw-performance "70m" :final-performance "69m"}}]})))
+
+(def mirror-provenance
+  {:kind :publisher-mirror :dependent-source "mirror" :upstream-source "official"
+   :citation {:source-id "mirror" :locator "header" :text "Mirror of official report"}})
 
 (deftest source-versions-and-mirror-positions-count-one-cited-attempt
   (let [ledger (-> (attempt-fixture)
                    (relationships/append-attempt-event
                     {:id "mirror-link" :action :accept :type :source-dependent
-                     :pair ["official" "mirror"] :evidence {:kind :publisher-mirror}})
+                     :pair ["official" "mirror"]
+                     :evidence mirror-provenance})
                    (relationships/append-attempt-event
                     {:id "attempt-link" :action :accept :type :same-attempt
                      :pair ["v1" "v3"] :evidence {:kind :verified-scope}}))
@@ -131,6 +137,8 @@
             :accepted-attempts 1 :unresolved-observations 0} (:counts result)))
     (is (= #{"v1" "v2" "v3"} (set (-> result :attempts first :observation-ids))))
     (is (= #{"p1" "p2"} (set (-> result :attempts first :position-ids))))
+    (is (= #{:dependent :unknown}
+           (set (map :role (-> result :attempts first :source-support)))))
     (is (= "turn" (get-in ledger [:observation-versions "v1" :values :notes])))
     (is (= result (relationships/project-attempts ledger)))))
 
@@ -157,12 +165,52 @@
                                                      {:id "uncited" :action :accept :type :same-attempt
                                                       :pair ["v1" "v3"] :evidence {:kind :verified-scope}})))))
 
+(deftest independently-cited-equal-scopes-link-automatically-and-reverse
+  (let [base (attempt-fixture)
+        projection (relationships/project-attempts base)
+        auto-id (-> projection :automatic-links first :id)
+        reversed (relationships/append-attempt-event
+                  base {:id "human-split" :action :reverse :event-id auto-id})
+        reordered (relationships/empty-attempt-ledger
+                   {:sources (reverse (vals (:sources base)))
+                    :positions (reverse (vals (:positions base)))
+                    :observation-versions (reverse (vals (:observation-versions base)))})]
+    (is (= 1 (get-in projection [:counts :accepted-attempts])))
+    (is (= 2 (get-in (relationships/project-attempts reversed) [:counts :accepted-attempts])))
+    (is (= 1 (count (:events reversed))))
+    (is (= projection (relationships/project-attempts reordered)))))
+
+(deftest nonindividual-row-cannot-become-accepted-attempt
+  (let [ranking (assoc-in (attempt-fixture) [:observation-versions "v3" :role] :ranking)
+        result (relationships/project-attempts ranking)]
+    (is (= 1 (get-in result [:counts :unresolved-observations])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (relationships/append-attempt-event
+                  ranking {:id "rank-link" :action :accept :type :same-attempt
+                           :pair ["v1" "v3"] :evidence {:kind :verified-scope}})))))
+
+(deftest changed-source-hash-invalidates-dependent-attempt-link
+  (let [base (attempt-fixture)
+        linked (relationships/append-attempt-event
+                base {:id "link" :action :accept :type :same-attempt
+                      :pair ["v1" "v3"] :evidence {:kind :verified-scope}})
+        replacement {:sources (mapv #(if (= "mirror" (:id %))
+                                       (assoc % :sha256 "changed") %) (vals (:sources base)))
+                     :positions (vals (:positions base))
+                     :observation-versions (vals (:observation-versions base))}
+        rebased (relationships/rebase-attempt-ledger linked replacement)]
+    (is (contains? (:invalidated-events rebased) "link"))
+    (is (= 1 (get-in (relationships/project-attempts rebased)
+                     [:counts :unresolved-observations])))))
+
 (deftest publisher-direction-and-reversal-recompute-without-deleting-evidence
   (let [base (attempt-fixture)
         revision {:id "rev" :action :accept :type :source-revision
                   :pair ["official" "mirror"]
                   :evidence {:kind :publisher-version :predecessor "official"
-                             :successor "mirror" :citation "publisher correction notice"}}
+                             :successor "mirror"
+                             :citation {:source-id "mirror" :locator "header"
+                                        :text "Publisher correction notice"}}}
         linked (-> base
                    (relationships/append-attempt-event revision)
                    (relationships/append-attempt-event
@@ -178,7 +226,9 @@
                  (relationships/append-attempt-event
                   linked (assoc revision :id "reverse-rev"
                                 :evidence {:kind :publisher-version :predecessor "mirror"
-                                           :successor "official" :citation "conflict"}))))
+                                           :successor "official"
+                                           :citation {:source-id "mirror" :locator "header"
+                                                      :text "Conflicting notice"}}))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (relationships/append-attempt-event
                   base (dissoc revision :evidence))))))
@@ -188,7 +238,8 @@
         linked (-> base
                    (relationships/append-attempt-event
                     {:id "dependent" :action :accept :type :source-dependent
-                     :pair ["official" "mirror"] :evidence {:kind :publisher-mirror}})
+                     :pair ["official" "mirror"]
+                     :evidence mirror-provenance})
                    (relationships/append-attempt-event
                     {:id "dive" :action :accept :type :same-attempt
                      :pair ["v1" "v3"] :evidence {:kind :verified-scope}}))
