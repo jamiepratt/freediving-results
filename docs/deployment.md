@@ -141,6 +141,14 @@ also makes its origin unavailable. Private data remains on the VPS/local archive
 
 ## Owner evidence remote activation checkpoint
 
+The [1 October 2026 activation report in #54](https://github.com/jamiepratt/freediving-results/issues/54)
+records successful owner HTML/API access using the v8 snapshot after PRs #58-#60.
+The instructions below describe fresh setup and guarded updates; the September
+Access-token failure is historical, not a current unfulfilled prerequisite.
+Recheck live configuration before changing it. New acquisition and parsing run
+locally; the remote server receives verified evidence for presentation. The
+repeatable handoff is tracked in [#64](https://github.com/jamiepratt/freediving-results/issues/64).
+
 The read-only owner evidence origin and `/owner-evidence` Worker route are prepared,
 but **not activated by `deploy/release.sh`**. The private snapshot remains separate
 from the public PostgreSQL database, public service, release tar and Git. The
