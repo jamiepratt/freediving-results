@@ -690,7 +690,7 @@
                                      :actor-kind (:actor-kind e) :decision-id (:id e)
                                      :citation (first (:supporting-evidence e))}
                                     s)
-                          :reverse {:accepted nil :status :reversed :actor-kind :human
+                          :reverse {:accepted nil :status :reversed :actor-kind (:actor-kind e)
                                     :decision-id (:id e) :citation (:citation s)}
                           s))
                       {:accepted nil :status :unresolved :actor-kind nil
@@ -940,6 +940,12 @@
                            old (first (filter #(= key (:decision-key %)) field-events))]
                        (when (some #(= :human (:actor-kind %)) field-events)
                          (fail! "Human dive field correction blocks model approval"))
+                       (when (and old (some #(= (:id old) (:event-id %)) field-events))
+                         (fail! "Model dive field approval was reversed"))
+                       (when (and (not old)
+                                  (= :model (:actor-kind (last field-events)))
+                                  (= :assert (:action (last field-events))))
+                         (fail! "Prior model dive field approval requires invalidation"))
                        (when-not (and (nonblank? raw) cited? valid-value?
                                       (or (nil? heading) (= raw (:label heading)))
                                       (= (:job-id row) (:job-id target)))
@@ -965,6 +971,8 @@
                                              :event-context-id (:event-id dictionary)
                                              :dictionary-version (:version dictionary)
                                              :model-version (:model-version answer)
+                                             :model-decision decision
+                                             :model-config-hash (sha256 (.getBytes (encode config) "UTF-8"))
                                              :template-version template-version
                                              :policy-version (:version policy)
                                              :decision-id decision-id
@@ -973,6 +981,67 @@
                                              :request-hash request-hash
                                              :result-hash result-hash
                                              :request request})))))))))
+
+(defn invalidate-jev-dive-field!
+  "Reverse an active model field assertion after evidence or configuration changes."
+  [url decision config {:keys [target decision-type dictionary base-revision] :as request}]
+  (when-not (and (= :category-representation (:family decision))
+                 (#{:category :representation} decision-type)
+                 (nonblank? (:id decision)) (nat-int? base-revision)
+                 (map? dictionary) (nonblank? (:version dictionary))
+                 (map? config) (nonblank? (:version config)))
+    (fail! "Invalid model dive field invalidation"))
+  (transaction url
+               (fn [c]
+                 (let [subject (:source-position-id target)]
+                   (when-not (nonblank? subject) (fail! "Source position ID required"))
+                   (query c "SELECT pg_advisory_xact_lock(hashtext(?))" subject)
+                   (let [row (field-row c target)
+                         events (field-events c subject)
+                         relevant (filter #(= decision-type (:decision-type %)) events)
+                         previous (last (filter #(and (= :model (:actor-kind %))
+                                                      (= :assert (:action %))) relevant))
+                         key (sha256 (.getBytes (encode [(:id previous) decision config
+                                                         (:version dictionary) (citation row)]) "UTF-8"))
+                         old (first (filter #(and (= key (:decision-key %))
+                                                  (= :reverse (:action %))) relevant))
+                         cited? (some (fn [e]
+                                        (let [ref (:citation e)]
+                                          (and (map? ref)
+                                               (= subject (:source-position-id ref))
+                                               (= (:job-id row) (:job-id ref))
+                                               (= (:ordinal row) (:ordinal ref))
+                                               (= (:source-sha256 row) (:source-sha256 ref))
+                                               (= (:artifact-sha256 row) (:artifact-sha256 ref))
+                                               (= (:parser-version row) (:parser-version ref)))))
+                                      (:evidence decision))]
+                     (when (some #(= :human (:actor-kind %)) relevant)
+                       (fail! "Human dive field correction blocks model invalidation"))
+                     (when-not (and previous cited?
+                                    (or (not= (:model-decision previous) decision)
+                                        (not= (:model-config-hash previous)
+                                              (sha256 (.getBytes (encode config) "UTF-8")))
+                                        (not= (:dictionary-version previous) (:version dictionary))
+                                        (not= (:source-position previous) (citation row))))
+                       (fail! "No changed model dive field evidence"))
+                     (if old old
+                         (do
+                           (when-not (and (= base-revision (or (:revision (last events)) 0))
+                                          (= :assert (:action (last relevant)))
+                                          (= (:id previous) (:id (last relevant))))
+                             (fail! "Stale dive decision revision"))
+                           (append-field! c row
+                                          {:id (str "model-reverse:" key) :decision-key key
+                                           :source-position-id subject :job-id (:job-id row)
+                                           :ordinal (:ordinal row) :decision-type decision-type
+                                           :action :reverse :event-id (:id previous)
+                                           :revision (inc base-revision) :actor-kind :model
+                                           :actor :jev :status :reversed
+                                           :original (raw-field (:payload row) decision-type)
+                                           :proposed nil :source-position (citation row)
+                                           :supporting-evidence (:evidence decision)
+                                           :prior-decision-id (:decision-id previous)
+                                           :reason :changed-model-evidence :request request}))))))))
 
 (defn- human-decision! [url request action]
   (when-not (and (nonblank? (:id request)) (nonblank? (:actor request))
@@ -1033,6 +1102,35 @@
 
 (defn reverse-dive-decision! [url request] (human-decision! url request :reverse))
 (defn assert-dive-field! [url request] (human-decision! url request :assert))
+
+(defn sync-human-jev-dive-field!
+  "Materialize an explicit private owner rejection or reversal as a reviewer reversal."
+  [reviewer-url ledger decision config {:keys [target decision-type base-revision]}]
+  (let [human (last (filter #(and (= :human (:origin %))
+                                  (= (:id decision) (:decision-id %))) (:events ledger)))
+        view (get (reconciliation-flow/inspect ledger [decision] config) (:id decision))]
+    (when-not (and human (= :human (:origin view))
+                   (#{:rejected :reversed} (:status human))
+                   (= (:status human) (:status view))
+                   (nonblank? (:actor human)) (nonblank? (:reason human))
+                   (#{:category :representation} decision-type)
+                   (nat-int? base-revision))
+      (fail! "Explicit human Jev field correction required"))
+    (let [prior (read-snapshot reviewer-url
+                               (fn [c]
+                                 (field-row c target)
+                                 (last (filter #(and (= decision-type (:decision-type %))
+                                                     (= :model (:actor-kind %))
+                                                     (= :assert (:action %))
+                                                     (= (:id decision) (:decision-id %)))
+                                               (field-events c (:source-position-id target))))))]
+      (when-not prior (fail! "No model dive field decision to correct"))
+      (reverse-dive-decision!
+       reviewer-url
+       {:id (str "flow-human:" (sha256 (.getBytes (encode [(:id human) (:id prior)]) "UTF-8")))
+        :event-id (:id prior) :base-revision base-revision
+        :actor (:actor human) :reason (:reason human)
+        :flow-event-id (:id human) :flow-status (:status human)}))))
 
 (defn export-dive-fields [url]
   (read-snapshot url

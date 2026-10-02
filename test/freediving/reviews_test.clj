@@ -81,12 +81,23 @@
       (is (= "Women" (get-in (reviews/dive-fields fixture/app target) [:category :raw])))
       (is (= :model (:actor-kind event)))
       (is (= 1 (count (reviews/dive-decision-history fixture/app target)))))
-    (is (thrown-with-msg? Exception #"Stale" (reviews/approve-jev-dive-field!
-                                              fixture/app ledger decision config
-                                              (assoc request :dictionary (assoc dictionary :version "labels/2")
-                                                     :base-revision 2))))
+    (is (thrown-with-msg? Exception #"requires invalidation" (reviews/approve-jev-dive-field!
+                                                              fixture/app ledger decision config
+                                                              (assoc request :dictionary (assoc dictionary :version "labels/2")
+                                                                     :base-revision 2))))
+    (let [changed (assoc-in decision [:evidence 0 :exact-excerpt] "Women category label")
+          invalidation {:target target :decision-type :category :dictionary dictionary
+                        :base-revision 1}
+          reversed (reviews/invalidate-jev-dive-field! fixture/app changed config invalidation)]
+      (is (= :model (:actor-kind reversed)))
+      (is (= :reverse (:action reversed)))
+      (is (= reversed (reviews/invalidate-jev-dive-field!
+                       fixture/app changed config invalidation)))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
+      (is (thrown-with-msg? Exception #"reversed"
+                            (reviews/approve-jev-dive-field! fixture/app ledger decision config request))))
     (reviews/assert-dive-field! reviewer (merge target {:id "human-jev-correction" :decision-type :category
-                                                        :base-revision 1 :actor "owner" :reason "Corrected label"
+                                                        :base-revision 2 :actor "owner" :reason "Corrected label"
                                                         :proposed ["open"]}))
     (is (thrown-with-msg? Exception #"Human dive field correction"
                           (reviews/approve-jev-dive-field! fixture/app ledger decision config request)))
@@ -162,6 +173,49 @@
     (is (= :unresolved (:status (reviews/build-dive-field-jev-decision
                                  fixture/app target (dissoc dictionary :representations)
                                  :representation))))))
+
+(deftest private-human-rejection-reverses-materialized-model-field
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "jev-human/1")
+        artifact (assoc-in artifact [:candidates 0 :raw :fields :category] "Women")
+        receipt (fixture/publish! (assoc source :artifact artifact))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-human"}
+        decision {:id "jev-human-1" :family :category-representation :action :category
+                  :subject "Women label" :candidates ["category"]
+                  :evidence [{:evidence-id "source-row"
+                              :citation (merge target {:source-sha256 (:source-sha256 artifact)
+                                                       :artifact-sha256 (:artifact-sha256 receipt)
+                                                       :parser-version "jev-human/1"})
+                              :exact-excerpt "Women"}]
+                  :evidence-adequate? true :dependencies []}
+        config {:version "config/1" :model "test-jev"}
+        ledger (flow/run! (flow/empty-ledger) [decision]
+                          {:config config :policy reconciliation-policy/default-policy
+                           :execute! (fn [_] {:model "test-jev" :usage {:input_tokens 1 :output_tokens 1}
+                                              :answers {"jev-human-1"
+                                                        {:type "choice" :choice "category" :confidence 0.99
+                                                         :probabilities {"category" 0.99 "representation" 0.002
+                                                                         "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :categories {"Women" ["women"]}}
+        request {:target target :decision-id "jev-human-1" :decision-type :category
+                 :dictionary dictionary :policy reconciliation-policy/default-policy
+                 :base-revision 0}]
+    (observations/import! fixture/app root (:job-id artifact))
+    (reviews/approve-jev-dive-field! fixture/app ledger decision config request)
+    (let [corrected (flow/append-human-event ledger
+                                             {:id "owner-rejects-label" :decision-id "jev-human-1"
+                                              :status :rejected :actor "owner" :reason "Checked source"})
+          synced (reviews/sync-human-jev-dive-field! reviewer corrected decision config
+                                                     (assoc request :base-revision 1))]
+      (is (= :human (:actor-kind synced)))
+      (is (= :reverse (:action synced)))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
+      (is (= (select-keys synced [:id :event-id :revision :action])
+             (select-keys (reviews/sync-human-jev-dive-field!
+                           reviewer corrected decision config (assoc request :base-revision 1))
+                          [:id :event-id :revision :action])))
+      (is (thrown-with-msg? Exception #"correction"
+                            (reviews/approve-jev-dive-field! fixture/app ledger decision config request))))))
 
 (deftest deterministic-dive-fields-are-cited-reversible-and-idempotent
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-test/1")

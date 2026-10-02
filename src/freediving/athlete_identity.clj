@@ -3,7 +3,9 @@
   (:require [clojure.edn :as edn]
             [clojure.set :as set]
             [clojure.string :as str]
-            [freediving.candidates :as candidates])
+            [freediving.candidates :as candidates]
+            [freediving.reconciliation-flow :as flow]
+            [freediving.reconciliation-policy :as policy])
   (:import [java.sql DriverManager Connection]))
 
 (def rule-version "athlete-identity/1")
@@ -97,6 +99,39 @@
      :excluded (mapv (fn [id] {:observation-id id :reason :unsupported-different-known-name}) excluded)
      :retrieval-complete? (empty? omitted)}))
 
+(defn jev-decision
+  "Build one identity question from the current indexed corpus. Include every retrieved candidate."
+  [ledger target-id candidate-id]
+  (let [rows (:rows ledger)
+        target (rows target-id)
+        retrieval (when target (retrieve (build-index (vals rows)) target))
+        found (mapv :observation-id (:candidates retrieval))
+        scope (vec (cons target-id found))]
+    (when-not (and (string? target-id) (string? candidate-id)
+                   (some #{candidate-id} found)
+                   (empty? (:omitted retrieval))
+                   (every? #(and (= :parsed (:parse-status (rows %)))
+                                 (map? (:citation (rows %)))
+                                 (string? (get-in (rows %) [:citation :source-sha256]))
+                                 (string? (:source-name (rows %)))) scope))
+      (fail! "Identity question lacks complete current source evidence"
+             {:target-id target-id :candidate-id candidate-id}))
+    {:id (str "identity-" (format "%064x" (java.math.BigInteger. 1
+                                                                 (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                                                          (.getBytes (pr-str [target-id candidate-id]) "UTF-8")))))
+     :family :identity :action :same-person
+     :choices [:same-person :different-person :unknown]
+     :subject {:pair [target-id candidate-id] :target-id target-id
+               :observation-versions (into {} (map (fn [id] [id (:citation (rows id))]) scope))}
+     :candidates scope
+     :evidence (mapv (fn [id]
+                       {:evidence-id (str "identity-" id)
+                        :citation (:citation (rows id))
+                        :fact (str "Source name: " (:source-name (rows id))
+                                   "; publisher person ID: " (or (:publisher-athlete-id (rows id)) "unknown"))
+                        :source-meaning "Retained result-row athlete identity evidence"}) scope)
+     :dependencies [] :evidence-adequate? true}))
+
 (defn- compatible? [a b]
   (and (not (and (person-id a) (person-id b)
                  (= (first (person-id a)) (first (person-id b)))
@@ -139,21 +174,134 @@
 (defn empty-ledger [rows]
   (let [index (build-index rows)]
     {:version rule-version :rows (:rows index) :events []}))
+
+(declare pair project)
+
+(defn- complete-model-answer? [answer receipt config]
+  (let [probabilities (:probabilities answer)
+        raw (:raw-probabilities answer)]
+    (and (= :same-person (:outcome answer))
+         (not (:error answer))
+         (not (:stale? answer))
+         (= (:model config) (:model-version answer) (:actual-model answer) (:model receipt))
+         (= (:request-hash answer) (:request-hash receipt))
+         (= (:result-hash answer) (:result-hash receipt))
+         (every? #(and (string? %) (re-matches #"[0-9a-f]{64}" %))
+                 [(:request-hash answer) (:result-hash answer)])
+         (map? (:usage answer)) (= (:usage answer) (:usage receipt))
+         (number? (:confidence answer))
+         (map? probabilities) (= #{:same-person :different-person :unknown} (set (keys probabilities)))
+         (= #{"same_person" "different_person" "unknown"} (set (keys raw)))
+         (= "same_person" (get-in answer [:raw-answer "choice"]))
+         (= (set (keys raw)) (set (keys (get-in answer [:raw-answer "probabilities"]))))
+         (every? (fn [[k v]] (and (number? v)
+                                  (= (double v)
+                                     (double (get-in answer [:raw-answer "probabilities" k]))))) raw)
+         (every? #(and (number? %) (Double/isFinite (double %)) (<= 0 % 1)) (vals probabilities))
+         (every? (fn [[k v]] (and (number? v)
+                                  (= (double v)
+                                     (double (get probabilities (keyword (str/replace k "_" "-"))))))) raw)
+         (< (Math/abs (- 1.0 (double (reduce + (vals probabilities))))) 0.00001))))
+
+(defn model-event
+  "Build a source-bound canonical identity event from a current private Jev approval.
+   The caller supplies the current identity ledger and its expected revision."
+  [ledger flow-ledger decision config approval-policy expected-revision]
+  (let [pair* (get-in decision [:subject :pair])
+        refs (when (and (vector? pair*) (= 2 (count pair*))) (pair pair*))
+        rows (:rows ledger)
+        target-id (get-in decision [:subject :target-id])
+        retrieval (when (rows target-id) (retrieve (build-index (vals rows)) (rows target-id)))
+        current-scope (when retrieval (vec (cons target-id (map :observation-id (:candidates retrieval)))))
+        versions (get-in decision [:subject :observation-versions])
+        view (get (flow/inspect flow-ledger [decision] config) (:id decision))
+        source-event (last (filter #(and (= (:id decision) (:decision-id %))
+                                         (= (:request-hash view) (:request-hash %))
+                                         (= (:result-hash view) (:result-hash %))
+                                         (= (:policy-version view) (:policy-version %)))
+                                   (:events flow-ledger)))
+        dependency-events (mapv (fn [id]
+                                  (last (filter #(= id (:decision-id %)) (:events flow-ledger))))
+                                (:dependencies decision))
+        reassessed (policy/assess approval-policy (assoc decision :action :same-person)
+                                  (:answer source-event))
+        evidence (:evidence decision)
+        citations (set (map :citation evidence))]
+    (when-not (and (= :identity (:family decision)) (= :same-person (:action view))
+                   (= :approved (:status view))
+                   (#{:jev :cached-jev :retained} (:origin view))
+                   (#{:jev :cached-jev :retained} (:origin source-event))
+                   (= expected-revision (count (:events ledger)))
+                   refs (every? rows refs)
+                   (some #{target-id} refs)
+                   (every? (set current-scope) refs)
+                   (= current-scope (:candidates decision))
+                   (empty? (:omitted retrieval))
+                   (= (set current-scope) (set (keys versions)))
+                   (every? #(= (get versions %) (:citation (rows %))) current-scope)
+                   (every? #(contains? citations (get versions %)) current-scope)
+                   (vector? evidence) (seq evidence)
+                   (not (seq (:conflicts decision))) (not (seq (:contradictions decision)))
+                   (:evidence-adequate? decision)
+                   (= :approve (get-in source-event [:assessment :status]))
+                   (= :thresholds-met (:reason source-event))
+                   (= :approve (:status reassessed))
+                   (= (:assessment source-event) reassessed)
+                   (= (:version approval-policy) (:policy-version source-event))
+                   (every? #(and (= :approved (:status %))
+                                 (not= :human (:origin %))) dependency-events)
+                   (= (:policy-version view) (get-in source-event [:assessment :policy-version]))
+                   (= (:answer view) (:answer source-event))
+                   (complete-model-answer? (:answer source-event) (:receipt source-event) config)
+                   (= (:request-hash source-event) (get-in source-event [:receipt :request-hash]))
+                   (= (:result-hash source-event) (get-in source-event [:receipt :result-hash]))
+                   (= (:template-version source-event) (get-in source-event [:answer :template-version]))
+                   (string? (:policy-version source-event))
+                   (string? (:template-version source-event))
+                   (not (:rule-version source-event)))
+      (fail! "Identity model approval is stale or insufficiently bound" {:decision-id (:id decision)}))
+    {:id (str "jev-identity:" (:id source-event))
+     :action :accept :actor-kind :model :pair refs
+     :base-revision expected-revision
+     :model-decision-id (:id decision)
+     :model-event-id (:id source-event)
+     :model-proof {:decision decision :flow-event source-event
+                   :dependency-events dependency-events
+                   :config config :approval-policy approval-policy
+                   :receipt (:receipt source-event)}
+     :evidence {:observations (mapv #(select-keys (rows %)
+                                                  [:observation-id :source-name :citation :aliases]) refs)
+                :cited-facts evidence}
+     :dependencies (:dependencies decision)
+     :original-value (mapv #(get-in (project ledger) [:athletes % :group-id]) refs)
+     :proposed-value :same-athlete}))
 (defn- pair [ids]
   (when-not (and (vector? ids) (= 2 (count ids)) (every? string? ids)
                  (not= (first ids) (second ids)))
     (fail! "Distinct observation pair required" {:pair ids}))
   (vec (sort ids)))
-(defn- active-edges [events]
+(defn- model-current? [rows event]
+  (let [decision (get-in event [:model-proof :decision])
+        target-id (get-in decision [:subject :target-id])
+        versions (get-in decision [:subject :observation-versions])
+        target (rows target-id)
+        retrieval (when target (retrieve (build-index (vals rows)) target))
+        scope (when retrieval (vec (cons target-id (map :observation-id (:candidates retrieval)))))]
+    (and (= scope (:candidates decision))
+         (empty? (:omitted retrieval))
+         (= (set scope) (set (keys versions)))
+         (every? #(= (versions %) (:citation (rows %))) scope))))
+(defn- active-edges [events rows]
   (let [reversed (set (keep #(when (= :reverse (:action %)) (:event-id %)) events))]
-    (filter #(and (= :accept (:action %)) (not (reversed (:id %)))) events)))
+    (filter #(and (= :accept (:action %)) (not (reversed (:id %)))
+                  (or (not= :model (:actor-kind %)) (model-current? rows %))) events)))
 (defn- components [ids edges]
   (reduce (fn [groups {:keys [pair]}]
             (let [[a b] pair ga (get groups a) gb (get groups b) joined (set/union ga gb)]
               (reduce #(assoc %1 %2 joined) groups joined)))
           (into {} (map (fn [id] [id #{id}]) ids)) edges))
 (defn project [ledger]
-  (let [rows (:rows ledger) edges (vec (active-edges (:events ledger)))
+  (let [rows (:rows ledger) edges (vec (active-edges (:events ledger) rows))
         groups (components (keys rows) edges)
         group-id (fn [members] (str "athlete:" (first (sort members))))
         linked (set (mapcat :pair edges))
@@ -176,11 +324,12 @@
   (let [events (:events ledger)
         rows (:rows ledger)
         existing (some #(when (= (:id event) (:id %)) %) events)]
-    (when-not (and (string? (:id event)) (#{:automatic :human} (:actor-kind event))
+    (when-not (and (string? (:id event)) (#{:automatic :human :model} (:actor-kind event))
                    (#{:accept :reverse :reject} (:action event)))
       (fail! "Invalid identity event" {:event event}))
     (if existing
       (if (or (= existing event)
+              (= (:request existing) event)
               (and (= :reverse (:action event)) (= (dissoc existing :pair) event)))
         ledger (fail! "Conflicting identity event ID" {:id (:id event)}))
       (let [pair (when (#{:accept :reject} (:action event)) (pair (:pair event)))
@@ -198,6 +347,16 @@
                                                            (not (superseded (:id e))))]
                                    (:pair (some #(when (= (:event-id e) (:id %)) %) events)))))
             groups (:groups (project ledger))]
+        (when (and (= :model (:actor-kind event))
+                   (not (and (:request event) (not (model-current? rows event)))))
+          (let [{:keys [decision flow-event dependency-events config approval-policy receipt]} (:model-proof event)
+                recreated (when (and (= :accept (:action event)) (map? decision)
+                                     (map? flow-event) (map? config) (= receipt (:receipt flow-event)))
+                            (model-event ledger {:version flow/ledger-version
+                                                 :events (conj (vec dependency-events) flow-event)}
+                                         decision config approval-policy (:base-revision event)))]
+            (when-not (= recreated (select-keys event (keys recreated)))
+              (fail! "Invalid or stale model identity event" {:id (:id event)}))))
         (when (:supersedes event)
           (when-not (and (= :human (:actor-kind event)) (= :accept (:action event))
                          (= :human (:actor-kind superseded-event))
@@ -207,13 +366,21 @@
                    (or (not= rule-version (:rule-version event))
                        (and pair (blocked pair))))
           (fail! "Automatic identity rule stale or human-blocked" {:event event}))
+        (when (and (= :model (:actor-kind event))
+                   (some #(and (= :accept (:action %))
+                               (= (:model-decision-id event) (:model-decision-id %))
+                               (not= (:id event) (:id %)))
+                         (active-edges events rows)))
+          (fail! "Changed model evidence requires reversal before relinking" {:id (:id event)}))
         (when (= :reverse (:action event))
           (when-not (and (= :human (:actor-kind event)) (= :accept (:action prior))
                          (not-any? #(= (:event-id event) (:event-id %)) events))
             (fail! "Only active accepted links can be reversed" {:event event})))
         (when pair
           (when-not (every? rows pair) (fail! "Unknown observation" {:pair pair}))
-          (when (= :accept (:action event))
+          (when (and (= :accept (:action event))
+                     (not (and (= :model (:actor-kind event)) (:request event)
+                               (not (model-current? rows event)))))
             (let [members (set/union (set (get groups (get-in (project ledger) [:athletes (first pair) :group-id])))
                                      (set (get groups (get-in (project ledger) [:athletes (second pair) :group-id]))))]
               (when (and superseded-event
@@ -223,7 +390,9 @@
                 (fail! "Human rejected pair in proposed group" {:pair pair}))
               (when (some (fn [a] (some #(not (compatible? (rows a) (rows %))) members)) members)
                 (fail! "Conflicting athlete group" {:pair pair})))))
-        (update ledger :events conj (assoc event :pair (or pair (:pair prior))))))))
+        (update ledger :events conj (cond-> (assoc event :pair (or pair (:pair prior)))
+                                      (= :model (:actor-kind event))
+                                      (assoc :request (or (:request event) event))))))))
 (defn replay [rows events] (reduce append-event (empty-ledger rows) events))
 
 (defn- query [^Connection connection sql & args]
@@ -279,6 +448,18 @@
         (.commit connection) result)
       (catch Exception e (.rollback connection) (throw e)))))
 
+(defn private-jev-decision
+  "Construct a cited identity question from a consistent database snapshot."
+  [url target-id candidate-id]
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setReadOnly connection true)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (let [result (jev-decision (read-ledger connection) target-id candidate-id)]
+        (.commit connection) result)
+      (catch Exception error (.rollback connection) (throw error)))))
+
 (defn private-history
   "Return the inspectable append-only identity history, including database actor and time."
   [url]
@@ -323,6 +504,22 @@
             existing (some #(when (= (:id %) (:id event)) %) (:events ledger))]
         (when (and existing (not= event (:request existing)))
           (fail! "Conflicting identity event ID" {:id (:id event)}))
+        (when (and existing (= :model (:actor-kind event))
+                   (not= (:db_role (first (query connection
+                                                 "SELECT db_role FROM freediving.athlete_identity_events WHERE id=?"
+                                                 (:id event))))
+                         (:session_user (first (query connection "SELECT session_user AS session_user")))))
+          (fail! "Model identity replay requires original database role" {:id (:id event)}))
+        (when (and existing (= :model (:actor-kind event))
+                   (not (model-current? (:rows ledger) existing)))
+          (fail! "Model identity replay has stale source or candidate evidence" {:id (:id event)}))
+        (when (and (= :model (:actor-kind event)) (nil? existing))
+          (let [{:keys [decision flow-event dependency-events config approval-policy]} (:model-proof event)
+                recreated (model-event ledger {:version flow/ledger-version
+                                               :events (conj (vec dependency-events) flow-event)}
+                                       decision config approval-policy (:base-revision event))]
+            (when-not (= recreated event)
+              (fail! "Invalid model identity submission" {:id (:id event)}))))
         (let [decision (when (and (= :automatic (:actor-kind event)) (nil? existing)
                                   (= :accept (:action event)))
                          (automatic-event! ledger event))
@@ -332,20 +529,22 @@
                                                    [:observation-id :source-name :citation :publisher-scope
                                                     :publisher-athlete-id :publisher-id-kind :aliases])) refs)
               event* (if existing existing
-                         (assoc event :request event
-                                :evidence {:observations evidence
-                                           :candidate-count (get-in decision [:retrieval :candidate-count])
-                                           :alternatives (get-in decision [:retrieval :candidates])
-                                           :omitted (get-in decision [:retrieval :omitted])
-                                           :support (:support decision)
-                                           :rule-version (or (:rule-version decision) (:rule-version event))}
-                                :dependencies (mapv :id (active-edges (:events ledger)))
-                                :original-value (mapv #(get-in (project ledger) [:athletes % :group-id]) refs)
-                                :proposed-value (case (:action event)
-                                                  :accept :same-athlete
-                                                  :reject :different-athletes
-                                                  :reverse :unlinked)
-                                :decision (select-keys decision [:status :reason :candidate-id :confidence])))
+                         (if (= :model (:actor-kind event))
+                           (assoc event :request event)
+                           (assoc event :request event
+                                  :evidence {:observations evidence
+                                             :candidate-count (get-in decision [:retrieval :candidate-count])
+                                             :alternatives (get-in decision [:retrieval :candidates])
+                                             :omitted (get-in decision [:retrieval :omitted])
+                                             :support (:support decision)
+                                             :rule-version (or (:rule-version decision) (:rule-version event))}
+                                  :dependencies (mapv :id (active-edges (:events ledger) (:rows ledger)))
+                                  :original-value (mapv #(get-in (project ledger) [:athletes % :group-id]) refs)
+                                  :proposed-value (case (:action event)
+                                                    :accept :same-athlete
+                                                    :reject :different-athletes
+                                                    :reverse :unlinked)
+                                  :decision (select-keys decision [:status :reason :candidate-id :confidence]))))
               updated (append-event ledger event*)]
           (when-not existing
             (let [stored (last (:events updated))]
@@ -360,3 +559,66 @@
           (let [result (project updated)]
             (.commit connection) result)))
       (catch Exception e (.rollback connection) (throw e)))))
+
+(defn record-model-event!
+  "Append one current model-backed identity approval through the canonical DB ledger.
+   Replays of the same approval return the existing projection."
+  [url flow-ledger decision config approval-policy expected-revision]
+  (let [ledger (with-open [connection (DriverManager/getConnection url)]
+                 (.setAutoCommit connection false)
+                 (.setReadOnly connection true)
+                 (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+                 (try
+                   (let [result (read-ledger connection)] (.commit connection) result)
+                   (catch Exception error (.rollback connection) (throw error))))
+        existing (last (filter #(and (= :model (:actor-kind %))
+                                     (= (:id decision) (:model-decision-id %)))
+                               (:events ledger)))
+        view (get (flow/inspect flow-ledger [decision] config) (:id decision))]
+    (if (and existing
+             (model-current? (:rows ledger) existing)
+             (= expected-revision (:base-revision existing))
+             (= decision (get-in existing [:model-proof :decision]))
+             (= config (get-in existing [:model-proof :config]))
+             (= approval-policy (get-in existing [:model-proof :approval-policy]))
+             (= :approved (:status view))
+             (= (:request-hash view) (get-in existing [:model-proof :flow-event :request-hash]))
+             (= (:result-hash view) (get-in existing [:model-proof :flow-event :result-hash]))
+             (= (:policy-version view) (get-in existing [:model-proof :flow-event :policy-version])))
+      (record-event! url (:request existing))
+      (record-event! url (model-event ledger flow-ledger decision config approval-policy expected-revision)))))
+
+(defn sync-model-correction!
+  "Apply a later private owner rejection or reversal to a materialized model link.
+   Call with the reviewer role after appending the flow human event."
+  [url flow-ledger decision config]
+  (let [view (get (flow/inspect flow-ledger [decision] config) (:id decision))
+        human (last (filter #(and (= :human (:origin %))
+                                  (= (:id decision) (:decision-id %)))
+                            (:events flow-ledger)))]
+    (when-not (and (= :human (:origin view))
+                   (#{:rejected :reversed} (:status view))
+                   (= (:status view) (:status human))
+                   (string? (:id human)))
+      (fail! "Current human identity correction required" {:decision-id (:id decision)}))
+    (let [ledger (with-open [connection (DriverManager/getConnection url)]
+                   (.setAutoCommit connection false)
+                   (.setReadOnly connection true)
+                   (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+                   (try
+                     (let [result (read-ledger connection)] (.commit connection) result)
+                     (catch Exception error (.rollback connection) (throw error))))
+          model (last (filter #(and (= :model (:actor-kind %))
+                                    (= :accept (:action %))
+                                    (= (:id decision) (:model-decision-id %)))
+                              (:events ledger)))
+          reverse-id (str "flow-identity-reversal:" (:id human))
+          existing (some #(when (= reverse-id (:id %)) %) (:events ledger))]
+      (cond
+        existing (record-event! url (:request existing))
+        (nil? model) (project ledger)
+        (some #(= (:id model) (:event-id %)) (:events ledger)) (project ledger)
+        :else (record-event! url {:id reverse-id :action :reverse :actor-kind :human
+                                  :event-id (:id model)
+                                  :reason (or (:reason human) "Private identity correction")
+                                  :flow-human-event-id (:id human)})))))
