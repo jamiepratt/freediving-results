@@ -44,6 +44,8 @@ class AffiliateNameQuery:
                 or pinned.get('sqlite_sha256') != snapshot.manifest['snapshot_sha256']
                 or pinned.get('cutoff') != snapshot.manifest.get('cutoff')):
             raise ValueError('affiliate input snapshot mismatch')
+        if not isinstance(data.get('sources'), list) or len(data['sources']) > 10000:
+            raise ValueError('invalid affiliate sources')
         self.sources = {}
         self.receipt_hashes = {}
         for item in data.get('sources', []):
@@ -64,6 +66,8 @@ class AffiliateNameQuery:
                     or item.get('source_sha256') not in self.sources
                     or position.get('format') != 'html'
                     or not isinstance(position.get('selector'), str) or not position['selector']
+                    or not any(type(position.get(field)) is int and 1 <= position[field] <= 100000
+                               for field in ('row', 'ordinal'))
                     or not isinstance(item.get('original_name'), str) or not item['original_name']
                     or not isinstance(item.get('candidate_observation_refs'), list)
                     or not isinstance(item.get('uncertainty'), list)):

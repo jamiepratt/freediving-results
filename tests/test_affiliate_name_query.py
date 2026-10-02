@@ -133,3 +133,11 @@ class AffiliateNameViewTest(unittest.TestCase):
             (self.input_dir / 'receipt.json').write_text('{}')
             with self.assertRaises(ValueError):
                 query.listing()
+
+    def test_uncited_assertion_is_rejected(self):
+        from affiliate_name_query import AffiliateNameQuery
+        from unified_evidence_query import SnapshotQuery
+        self.input['assertions'][0]['source_position'].pop('ordinal')
+        self.save_input()
+        with SnapshotQuery(self.snapshot_dir) as snap, self.assertRaises(ValueError):
+            AffiliateNameQuery(self.input_path, self.input_sha, self.snapshot_dir, snap)
