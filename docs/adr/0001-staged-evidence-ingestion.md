@@ -27,6 +27,12 @@ Separate ingestion into three stages with retained outputs:
    recognition function, or create both. Retain source and parser versions so
    repaired extraction can replay without rediscovering or refetching evidence.
 
+Generalize parsers incrementally. Keep existing source restrictions until another
+document demonstrates the same format, then broaden the parser and recognizer
+with source-backed tests. Upfront generalization of all retained format families
+is not a prerequisite for further collection. This trades gradual coverage for
+lower risk of applying a source-specific parser to an incompatible document.
+
 Discovery includes event calendars and lists, individual results, local and
 international federation/organizer evidence, native-script athlete names and
 explicit romanized-name correspondences, event and annual rankings, and points

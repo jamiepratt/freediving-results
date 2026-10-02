@@ -26,6 +26,11 @@ and publication dates are different facts.
    parsers and their recognition functions. Routine fetching and supported
    parsing should not require an LLM per document or row.
 
+Generalize parsers incrementally: retain existing source restrictions until
+another document demonstrates the same format. Broaden that parser and its
+recognizer with evidence and regression checks, rather than generalizing all
+format families before the next sweep.
+
 Preserve native-script names and publisher-stated correspondence to romanized
 names, including evidence from national affiliates and local organizations.
 Keep event rankings, annual rankings and printed dive points with their original
