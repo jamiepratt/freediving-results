@@ -107,11 +107,15 @@ content-addressed archive, extraction, immutable PostgreSQL observations and
 separate review/publication APIs. These stores have different roles; the SQLite
 snapshot is not the production observation database.
 
-PDF dispatch in `src/freediving/extraction.clj` already uses `supported?` checks,
+PDF dispatch in `src/freediving/extraction.clj` uses `supported?` checks,
 ordered branches and source-specific hash guards. HTML, JSON, image and workbook
-routes also exist, often as separate modules/scripts. A uniform recognizer and
-batch router across all formats is **not implemented**. Broad discovery of
-native-script name mappings and annual rankings is scope, not verified coverage.
+routes also exist, often as separate modules/scripts. `parser-routing.clj`
+accounts for competing source-position claims; `parser-adapters.clj` registers a
+bounded PDF and HTML replay path. The PDF bridge requires upstream verification
+of source bytes and extracted pages; JSON, image and workbook bridges remain
+explicit gaps. `parser-batch.clj` routes retained inputs without acquisition or
+imports. Broad discovery of native-script name mappings and annual rankings is
+scope, not verified coverage.
 
 ## Working entry points
 
