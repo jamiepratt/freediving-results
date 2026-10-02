@@ -47,6 +47,14 @@
   (format "%064x" (java.math.BigInteger. 1 (.digest (MessageDigest/getInstance "SHA-256")
                                                     (.getBytes ^String x "UTF-8")))))
 (defn- id-of [decision] (or (:decision-id decision) (:id decision)))
+(defn- secret-shaped? [value]
+  (cond
+    (map? value) (or (some #(re-find #"(?i)(^|[-_])(api.?key|bearer|token|authorization|secret|password|credential)([-_]|$)"
+                                     (if (or (keyword? %) (symbol? %) (string? %)) (name %) (str %)))
+                           (keys value))
+                     (some secret-shaped? (vals value)))
+    (sequential? value) (some secret-shaped? value)
+    :else false))
 (def ^:private wire-evidence-keys
   [:evidence-id :citation :exact-excerpt :fact :source-meaning :dependence :uncertainty])
 (defn- cited-evidence? [e]
@@ -55,7 +63,14 @@
        (or (and (string? (:citation e)) (not (str/blank? (:citation e))))
            (and (map? (:citation e)) (seq (:citation e))))
        (some #(and (string? %) (not (str/blank? %)))
-             [(:exact-excerpt e) (:fact e)])))
+             [(:exact-excerpt e) (:fact e)])
+       (<= (count (json/write-str (select-keys e wire-evidence-keys))) 8192)))
+(defn- candidate? [candidate]
+  (and (or (and (string? candidate) (not (str/blank? candidate)))
+           (and (map? candidate) (seq candidate)
+                (every? #(or (string? %) (number? %) (keyword? %)) (vals candidate))))
+       (<= (count (json/write-str candidate)) 4096)
+       (not (secret-shaped? candidate))))
 (defn- family-of [decision]
   (let [family (:family decision)]
     (case family :category :category-representation :representation :category-representation family)))
@@ -65,8 +80,11 @@
         id (id-of decision)]
     (when-not (and (string? id) (re-matches #"[A-Za-z0-9._-]{1,100}" id)
                    (map? criteria) (vector? (:evidence decision)) (seq (:evidence decision))
+                   (<= (count (:evidence decision)) 32)
                    (every? cited-evidence? (:evidence decision))
-                   (vector? (:candidates decision)) (seq (:candidates decision)))
+                   (vector? (:candidates decision)) (<= 1 (count (:candidates decision)) 16)
+                   (every? candidate? (:candidates decision))
+                   (not (secret-shaped? decision)))
       (invalid! :invalid-decision))
     {:type "choice"
      :instructions {:scope (family-scope family)
@@ -99,6 +117,7 @@
   "Build ordered bounded requests. Dependent decisions never share a batch."
   [config decisions]
   (when-not (and (map? config) (string? (:model config)) (seq (:model config))
+                 (not (secret-shaped? config))
                  (not-any? #(contains? config %) [:bearer-token :api-key :authorization :headers])
                  (or (nil? (:timeout-ms config)) (and (int? (:timeout-ms config)) (<= 1 (:timeout-ms config) 60000)))
                  (or (nil? (:max-attempts config)) (= 1 (:max-attempts config)))
@@ -131,13 +150,27 @@
     (string? (:raw-response response)) (decoded-response (:raw-response response))
     (map? response) (json/read-str (json/write-str response))
     :else nil))
+(defn- raw-probabilities [response decision-id]
+  (let [raw (if (string? response) response (:raw-response response))]
+    (if (string? raw)
+      (try (get-in (json/read-str raw :bigdec true) ["answers" decision-id "probabilities"])
+           (catch Exception _ nil))
+      (let [answer (or (get-in response [:answers decision-id])
+                       (get-in response [:answers (keyword decision-id)]))]
+        (when (map? (:probabilities answer))
+          (into {} (map (fn [[k v]] [(name k) v]) (:probabilities answer))))))))
 (defn- valid-number? [x] (and (number? x) (Double/isFinite (double x)) (<= 0 x 1)))
+(defn- valid-usage? [usage]
+  (and (map? usage)
+       (every? #(and (number? %) (Double/isFinite (double %)) (<= 0 %)) (vals usage))))
 (defn- parsed [request response decision-id]
   (let [data (decoded-response response)
         raw (if (string? response) response (or (:raw-response response) (json/write-str response)))
         q (get-in (json/read-str (:body request)) ["questions" decision-id])
+        expected-ids (set (:decision-ids request))
         allowed (set (keys (get q "criteria")))
-        answer (get-in data ["answers" decision-id])
+        answers (get data "answers")
+        answer (get answers decision-id)
         choice (get answer "choice")
         probabilities (get answer "probabilities")
         actual-model (get data "model")
@@ -147,7 +180,8 @@
                  (nil? q) :unknown-decision
                  (not (map? data)) :invalid-response
                  (not= actual-model (get-in request [:config :model])) :model-mismatch
-                 (not (map? usage)) :invalid-usage
+                 (not (valid-usage? usage)) :invalid-usage
+                 (or (not (map? answers)) (not= expected-ids (set (keys answers)))) :invalid-answer-identifiers
                  (not (map? answer)) :missing-answer
                  (not= "choice" (get answer "type")) :invalid-answer-type
                  (not (allowed choice)) :invalid-choice
@@ -155,7 +189,7 @@
                  (not (map? probabilities)) :invalid-probabilities
                  (not= allowed (set (keys probabilities))) :invalid-probability-keys
                  (not (every? valid-number? (vals probabilities))) :invalid-probability-values
-                 (> (Math/abs (- 1 (reduce + (vals probabilities)))) 0.02) :invalid-probability-sum
+                 (> (Math/abs (double (- 1 (reduce + (vals probabilities))))) 0.02) :invalid-probability-sum
                  (not= (get probabilities choice) (apply max (vals probabilities))) :choice-probability-inconsistency)]
     (cond-> {:decision-id decision-id :outcome (if reason :error (keyword (str/replace choice "_" "-")))
              :request-hash (:request-hash request) :result-hash (hash-text raw)
@@ -165,6 +199,7 @@
                        :model actual-model :usage usage :http-status (:http-status response)}}
       reason (assoc :error reason)
       (map? answer) (assoc :raw-answer answer)
+      (map? probabilities) (assoc :raw-probabilities (raw-probabilities response decision-id))
       (map? probabilities) (assoc :probabilities (into {} (map (fn [[k v]] [(keyword (str/replace k "_" "-")) v]) probabilities)))
       (valid-number? (get answer "confidence")) (assoc :confidence (get answer "confidence")))))
 

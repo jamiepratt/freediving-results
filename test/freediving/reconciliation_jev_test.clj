@@ -1,6 +1,7 @@
 (ns freediving.reconciliation-jev-test
   (:require [clojure.test :refer [deftest is run-tests]]
             [clojure.data.json :as json]
+            [clojure.string :as str]
             [freediving.reconciliation-jev :as jev]))
 
 (def config {:model "jev-1.13.0" :endpoint "https://example.test/jev"})
@@ -88,6 +89,56 @@
                  (jev/prepare-batches config
                                       [base (assoc-in (decision "d1" :identity)
                                                       [:evidence 0 :source-label] "another label")])))))
+
+(deftest all-family-actions-parse-with-unknown-available
+  (doseq [[family choice probabilities]
+          [[:identity "same_person" {"same_person" 0.94 "different_person" 0.03 "unknown" 0.03}]
+           [:same-attempt "same_attempt" {"same_attempt" 0.94 "distinct_attempts" 0.03 "unknown" 0.03}]
+           [:source-revision "left_revises_right" {"left_revises_right" 0.92 "right_revises_left" 0.02 "same_source" 0.02 "unrelated" 0.02 "unknown" 0.02}]
+           [:category-representation "representation" {"category" 0.02 "representation" 0.92 "both" 0.02 "neither" 0.02 "unknown" 0.02}]
+           [:row-semantics "summary" {"attempt" 0.02 "aggregate" 0.02 "summary" 0.92 "not_result" 0.02 "unknown" 0.02}]]]
+    (let [request (first (jev/prepare-batches config [(decision "d0" family)]))
+          response (json/write-str {:model "jev-1.13.0" :usage {:input_tokens 9}
+                                    :answers {:d0 {:type "choice" :choice choice :confidence 0.95
+                                                   :probabilities probabilities}}})
+          answer (jev/parse-answer request response "d0")]
+      (is (= (keyword (str/replace choice "_" "-")) (:outcome answer)) (name family))
+      (is (= (into {} (map (fn [[k v]] [k (bigdec (str v))]) probabilities))
+             (:raw-probabilities answer)) (name family))
+      (is (= (:request-hash request) (get-in answer [:receipt :request-hash]))))))
+
+(deftest response-identifiers-usage-and-distribution-fail-closed
+  (let [request (first (jev/prepare-batches config [(decision "d0" :identity)]))
+        answer {:type "choice" :choice "same_person" :confidence 0.95
+                :probabilities {:same_person 0.94 :different_person 0.03 :unknown 0.03}}
+        response {:model "jev-1.13.0" :usage {:input_tokens 9} :answers {:d0 answer}}]
+    (doseq [[bad reason]
+            [[(assoc response :answers {}) :invalid-answer-identifiers]
+             [(assoc-in response [:answers :extra] answer) :invalid-answer-identifiers]
+             [(assoc-in response [:usage :input_tokens] -1) :invalid-usage]
+             [(assoc-in response [:usage :input_tokens] "nine") :invalid-usage]
+             [(assoc-in response [:answers :d0 :confidence] 1.1) :invalid-confidence]
+             [(assoc-in response [:answers :d0 :probabilities :same_person] 1.1) :invalid-probability-values]]]
+      (is (= reason (:error (jev/parse-answer request bad "d0"))) (pr-str bad)))))
+
+(deftest request-rejects-unbounded-or-credential-shaped-evidence
+  (let [base (decision "d0" :identity)]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (jev/prepare-batches config [(assoc-in base [:candidates 0 :name]
+                                                        (apply str (repeat 25000 "x")))])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (jev/prepare-batches config [(assoc-in base [:evidence 0 :api-key] "secret")])))))
+
+(deftest raw-json-probability-precision-is-retained
+  (let [request (first (jev/prepare-batches config [(decision "d0" :identity)]))
+        raw "{\"model\":\"jev-1.13.0\",\"usage\":{},\"answers\":{\"d0\":{\"type\":\"choice\",\"choice\":\"different_person\",\"confidence\":0.9,\"probabilities\":{\"same_person\":0.123456789012345678901,\"different_person\":0.8,\"unknown\":0.076543210987654321099}}}}"
+        parsed (jev/parse-answer request raw "d0")]
+    (is (= :different-person (:outcome parsed)))
+    (is (= 0.123456789012345678901M (get-in parsed [:raw-probabilities "same_person"])))
+    (is (= (format "%064x" (java.math.BigInteger. 1
+                                                  (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                                           (.getBytes raw "UTF-8"))))
+           (:result-hash parsed)))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-jev-test)]
