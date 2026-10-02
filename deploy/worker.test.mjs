@@ -64,6 +64,7 @@ async function withPrivateFetch(run, upstreamResponse=() => new Response('privat
     assert.equal(url,'https://owner-origin.alphacompose.com/owner-evidence/rows?q=one');
     assert.equal(options.headers.get('X-Freediving-Owner-Gateway'),'private-test-secret');
     assert.equal(options.headers.get('X-Freediving-Owner-Email'),'owner@example.com');
+    assert.equal(options.headers.get('X-Freediving-Import-Token'),null);
     for (const name of ['Cf-Access-Jwt-Assertion','Cookie','Authorization','X-Freediving-Gateway','X-Freediving-Owner-Gateway','X-Forwarded-For']) {
       if (name === 'X-Freediving-Owner-Gateway') continue;
       assert.equal(options.headers.get(name),null,name);
@@ -75,7 +76,7 @@ async function withPrivateFetch(run, upstreamResponse=() => new Response('privat
 }
 test('signed owner Access token reaches only the private upstream with isolated headers', async () => {
   await withPrivateFetch(async (calls) => {
-    const response = await worker.fetch(req('/owner-evidence/rows?q=one',{headers:{'Cf-Access-Jwt-Assertion':await token(),'Cookie':'fake','Authorization':'fake','X-Freediving-Gateway':'fake','X-Freediving-Owner-Gateway':'fake','X-Forwarded-For':'fake'}}),privateEnv);
+    const response = await worker.fetch(req('/owner-evidence/rows?q=one',{headers:{'Cf-Access-Jwt-Assertion':await token(),'Cookie':'fake','Authorization':'fake','X-Freediving-Gateway':'fake','X-Freediving-Owner-Gateway':'fake','X-Freediving-Import-Token':'fake','X-Forwarded-For':'fake'}}),privateEnv);
     assert.equal(response.status,200);
     assert.equal(await response.text(),'private rows');
     assert.equal(response.headers.get('Cache-Control'),'no-store');
@@ -172,4 +173,40 @@ test('owner decision action requires Access, exact origin, JSON and CSRF before 
     assert.equal((await response.json()).revision,3);
     assert.equal(seen,true);
   } finally { globalThis.fetch = original; }
+});
+
+test('decision event feed requires signed Access service identity and isolates machine token', async () => {
+  const path = '/owner-evidence/api/decision-events?after_revision=2';
+  const machineId = 'abc12345.access';
+  const importToken = 'separate-owner-import-token-for-tests';
+  const config = {...privateEnv, OWNER_EVIDENCE_IMPORT_CLIENT_ID: machineId};
+  const machineJwt = await token({email:undefined, common_name:machineId, sub:''});
+  const browserJwt = await token();
+  const original = globalThis.fetch;
+  let forwarded = 0;
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/cdn-cgi/access/certs')) return Response.json({keys:[jwk]});
+    forwarded++;
+    assert.equal(url,'https://owner-origin.alphacompose.com'+path);
+    assert.equal(options.headers.get('X-Freediving-Import-Token'),importToken);
+    assert.equal(options.headers.get('X-Freediving-Owner-Gateway'),'private-test-secret');
+    assert.equal(options.headers.get('X-Freediving-Owner-Machine'),machineId);
+    assert.equal(options.headers.get('X-Freediving-Owner-Email'),null);
+    assert.equal(options.headers.get('Cf-Access-Jwt-Assertion'),null);
+    return Response.json({payload_json:'{}',signature:'a'.repeat(64)});
+  };
+  try {
+    const headers = {'Cf-Access-Jwt-Assertion':machineJwt,'X-Freediving-Import-Token':importToken};
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,Origin:'https://evil.example'}}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,'X-Freediving-Import-Token':''}}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,'Cf-Access-Jwt-Assertion':browserJwt}}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,'Cf-Access-Jwt-Assertion':await token({common_name:'wrong.access',email:undefined,sub:''})}}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{headers}),privateEnv)).status,503);
+    assert.equal(forwarded,0);
+    assert.equal((await worker.fetch(req(path,{headers}),config)).status,200);
+    assert.equal(forwarded,1);
+    const other = await worker.fetch(req('/owner-evidence/api/queue',{headers}),config);
+    assert.equal(other.status,403);
+    assert.equal(forwarded,1);
+  } finally { globalThis.fetch=original; }
 });
