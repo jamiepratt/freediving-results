@@ -63,8 +63,54 @@
                 {:evidence-id (:evidence-id evidence) :position position}))
     revision))
 
-(defn- metadata [decision selected records]
-  (let [sources (vec (distinct (map :source-name records)))
+(defn- field-value [decision selected bound]
+  (let [field (:action decision)
+        binding (:field-binding decision)
+        dictionary (:dictionary binding)
+        item (first bound)
+        record (:record item)
+        revision (:observation-revision item)
+        source-position (:source-position binding)
+        source-key (:source-key binding)
+        raw (:raw-label binding)
+        normalized (:normalized-value binding)
+        mapped (get (if (= field :category) (:categories dictionary)
+                        (:representations dictionary)) raw)
+        valid-value? (if (= field :category)
+                       (and (vector? mapped) (seq mapped) (every? nonempty? mapped))
+                       (and (map? mapped)
+                            (#{:country :federation :neutral :organization} (:kind mapped))
+                            (nonempty? (:code mapped))))]
+    (when-not (and (#{:category :representation} field)
+                   (#{field :both} selected)
+                   (= 1 (count bound))
+                   (map? binding) (map? dictionary)
+                   (every? nonempty? (map dictionary [:version :federation :event-id]))
+                   (or (keyword? source-key) (nonempty? source-key))
+                   (nonempty? raw) (= raw (:source-value record))
+                   (= (:source-position-id source-position)
+                      (get-in decision [:subject :source-position-id]))
+                   (nonempty? (:source-position-id source-position))
+                   (= (:job-id source-position) (:job_id revision))
+                   (= (:ordinal source-position) (:ordinal revision))
+                   (= (:source-sha256 source-position) (:source_sha256 revision))
+                   (= (:artifact-sha256 source-position) (:artifact_sha256 revision))
+                   (= (:parser-version source-position) (:parser_version revision))
+                   (or (not= field :representation)
+                       (not (#{"Nationality" "PlaNat"} (name source-key)))
+                       (= :per-dive-representation
+                          (get-in dictionary [:representation-cell-semantics
+                                              (name source-key)])))
+                   valid-value? (= normalized mapped))
+      (invalid! "Cannot derive normalized field value from verified source"
+                {:decision-id (:id decision)}))
+    normalized))
+
+(defn- metadata [decision selected bound]
+  (let [records (mapv :record bound)
+        normalized (when (= :category-representation (:family decision))
+                     (field-value decision selected bound))
+        sources (vec (distinct (map :source-name records)))
         source-name (str/join " + " sources)
         originals (case (:family decision)
                     :identity (mapv :athlete-name records)
@@ -82,8 +128,9 @@
      :source_name source-name
      :source_names sources
      :original {original-key originals}
-     :proposed {:action (str/replace (name selected) "-" "_")
-                :subject (select-keys (:subject decision) [:pair :target-id :source-positions])}
+     :proposed (cond-> {:action (str/replace (name selected) "-" "_")
+                        :subject (select-keys (:subject decision) [:pair :target-id :source-positions])}
+                 normalized (assoc :value normalized))
      :competing_options (mapv #(str/replace (name %) "-" "_")
                               (remove #{selected} (:choices decision)))
      :supporting_evidence [] :conflicting_evidence []
@@ -147,7 +194,7 @@
         _ (verify-identity-subject! decision bound)
         answer (:answer event)
         selected (or (:action event) (:action decision))
-        source (metadata decision selected (mapv :record bound))
+        source (metadata decision selected bound)
         model-origin? (#{:jev :retained :cached-jev :deterministic} (:origin event))
         approved? (= :approved (:status event))
         rule-version (or (:rule-version event) (:template-version event))]

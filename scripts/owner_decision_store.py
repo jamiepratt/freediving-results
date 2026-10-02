@@ -18,6 +18,7 @@ from unified_evidence_query import SnapshotQuery
 
 ACCEPTED = {'automatic_approved', 'human_approved', 'human_corrected'}
 ACTIONS = {'approve', 'reject', 'reverse', 'correct'}
+DELIVERY_TARGETS = ('flow-ledger', 'postgresql')
 PUBLIC_ID = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
 
 
@@ -73,6 +74,11 @@ class DecisionStore:
             CREATE TABLE IF NOT EXISTS human_event_bindings (
                 event_revision INTEGER PRIMARY KEY REFERENCES events(revision),
                 binding_revision INTEGER NOT NULL, snapshot_sha256 TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS human_event_deliveries (
+                target TEXT NOT NULL, event_revision INTEGER NOT NULL REFERENCES events(revision),
+                event_sha256 TEXT NOT NULL, commit_receipt TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                PRIMARY KEY (target, event_revision));
         ''')
         if 'observation_refs_json' not in [row[1] for row in self.db.execute('PRAGMA table_info(bindings)')]:
             self.db.execute('ALTER TABLE bindings ADD COLUMN observation_refs_json TEXT')
@@ -315,6 +321,68 @@ class DecisionStore:
                            'proposal_sha256': _digest(proposal)})
         return {'store_revision': self.revision, 'events': events,
                 'next_revision': events[-1]['store_revision'] if events else after_revision}
+
+    def delivery_checkpoints(self):
+        """Last durably acknowledged owner event per required destination."""
+        rows = self.db.execute('''SELECT target, MAX(event_revision) AS revision
+                                  FROM human_event_deliveries GROUP BY target''').fetchall()
+        found = {row['target']: row['revision'] for row in rows}
+        return {target: found.get(target, 0) for target in DELIVERY_TARGETS}
+
+    def deliver_human_events(self, targets, *, limit=100):
+        """Resume ordered delivery to the flow ledger, then PostgreSQL.
+
+        Each callback must commit an event atomically and idempotently under its
+        immutable ID and content digest, then return a nonempty commit receipt.
+        A callback can commit before this SQLite store acknowledges it; retry
+        therefore deliberately replays that event. This is an outbox protocol,
+        not an atomic transaction across the three stores.
+        """
+        if (not isinstance(targets, (list, tuple)) or
+                tuple(name for name, _ in targets) != DELIVERY_TARGETS or
+                any(not callable(callback) for _, callback in targets)):
+            raise ValueError('delivery requires ordered flow-ledger and postgresql callbacks')
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('invalid delivery limit')
+        delivered = {target: 0 for target in DELIVERY_TARGETS}
+        for target, callback in targets:
+            cursor = self.delivery_checkpoints()[target]
+            events = self.human_events(after_revision=cursor, limit=limit)['events']
+            for event in events:
+                digest = _digest(event)
+                try:
+                    receipt = callback(event)
+                    _text(receipt, 'commit_receipt')
+                    self.db.execute('BEGIN IMMEDIATE')
+                    existing = self.db.execute('''SELECT event_sha256 FROM human_event_deliveries
+                                                  WHERE target=? AND event_revision=?''',
+                                               (target, event['store_revision'])).fetchone()
+                    if existing and existing['event_sha256'] != digest:
+                        raise ConflictError('conflicting delivered owner event')
+                    if not existing:
+                        self.db.execute('''INSERT INTO human_event_deliveries VALUES (?,?,?,?,?)''',
+                                        (target, event['store_revision'], digest, receipt,
+                                         datetime.now(timezone.utc).isoformat()))
+                    self.db.execute('COMMIT')
+                    delivered[target] += 1
+                except Exception as error:
+                    if self.db.in_transaction:
+                        self.db.execute('ROLLBACK')
+                    return {'status': 'retry_required', 'reason': 'delivery_failed',
+                            'failed_target': target, 'failed_event_id': event['id'],
+                            'failure_type': type(error).__name__,
+                            'checkpoints': self.delivery_checkpoints(), 'delivered': delivered}
+            if len(events) == limit and self.human_events(
+                    after_revision=events[-1]['store_revision'], limit=1)['events']:
+                return {'status': 'retry_required', 'reason': 'batch_limit',
+                        'failed_target': None, 'failed_event_id': None,
+                        'checkpoints': self.delivery_checkpoints(), 'delivered': delivered}
+        checkpoints = self.delivery_checkpoints()
+        if self.human_events(after_revision=min(checkpoints.values()), limit=1)['events']:
+            return {'status': 'retry_required', 'reason': 'new_events',
+                    'failed_target': None, 'failed_event_id': None,
+                    'checkpoints': checkpoints, 'delivered': delivered}
+        return {'status': 'complete', 'checkpoints': checkpoints, 'delivered': delivered}
 
     def _base(self, decision_id):
         row = self.db.execute('SELECT * FROM proposals WHERE id=?', (decision_id,)).fetchone()

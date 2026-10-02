@@ -148,6 +148,118 @@
           (is (= :reverse (get-in @seen [:event :action])))
           (is (= "owner-store:8" (get-in @seen [:event :event-id]))))))))
 
+(deftest signed-owner-attempt-correction-and-rejection-reverse-accepted-link
+  (let [base (attempt-fixture/partial-ledger)
+        d (relationships/attempt-jev-decision base "attempt-1" :same-attempt
+                                              ["v1" "v3"] {})
+        binding {:decision_id "attempt-1" :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        owner (fn [revision action correction]
+                (cond-> {:id (str "owner-store:" revision) :decision_id "attempt-1"
+                         :store_revision revision :binding_revision 1 :action action
+                         :actor "owner" :reason "synthetic" :snapshot_sha256 sha
+                         :proposal {:selected_option "same_attempt"
+                                    :canonical_binding binding}}
+                  correction (assoc :correction correction)))
+        opts {:config config :policy policy/default-policy
+              :persist-flow! (fn [_] true)
+              :import-token "private-import-token-for-test"
+              :current-bindings {"attempt-1" binding}
+              :active-snapshot-sha256 sha :active-binding-revision 1
+              :attempt-url "synthetic-db"
+              :attempt-revisions {"attempt-1" 1}}
+        seen (atom [])]
+    (with-redefs [attempt-store/private-ledger (fn [_] base)
+                  attempt-store/record-owner-decision!
+                  (fn [_ request]
+                    (swap! seen conj request)
+                    {:revision 2})]
+      (doseq [[action correction] [["correct" {:action "distinct_attempts"}]
+                                   ["reject" nil]]]
+        (let [approved (flow/append-human-event
+                        (flow/empty-ledger)
+                        {:id "owner-store:8" :decision-id "attempt-1"
+                         :status :approved :action :same-attempt
+                         :remote-event (owner 8 "approve" nil)})
+              event (owner 9 action correction)
+              result (application/run-imported!
+                      approved [d]
+                      (signed-feed "private-import-token-for-test"
+                                   {:events [event] :store_revision 9 :next_revision 9})
+                      opts)]
+          (is (= :reversed (get-in result [:results "attempt-1" :status])))
+          (is (= :reverse (get-in (last @seen) [:event :action])))
+          (is (= "owner-store:8" (get-in (last @seen) [:event :event-id])))))
+      (let [negative (application/run-imported!
+                      (flow/empty-ledger) [d]
+                      (signed-feed "private-import-token-for-test"
+                                   {:events [(owner 9 "reject" nil)]
+                                    :store_revision 9 :next_revision 9})
+                      opts)]
+        (is (= :no-link (get-in negative [:results "attempt-1" :status])))
+        (is (= :rejected (get-in (flow/inspect (:flow-ledger negative) [d])
+                                 ["attempt-1" :status])))))))
+
+(deftest signed-owner-source-correction-reverses-exact-approved-revision
+  (let [base (attempt-fixture/partial-ledger)
+        publisher {:kind :publisher-correction :predecessor "official"
+                   :successor "mirror"
+                   :citation {:source-id "mirror" :locator "header"
+                              :text "Publisher correction notice"}}
+        d (relationships/attempt-jev-decision
+           base "source-revision" :source-revision ["official" "mirror"]
+           {:publisher-evidence publisher})
+        binding {:decision_id "source-revision" :evidence_bindings []}
+        sha (apply str (repeat 64 "a"))
+        owner (fn [revision action correction]
+                (cond-> {:id (str "owner-store:" revision)
+                         :decision_id "source-revision" :store_revision revision
+                         :binding_revision 1 :action action :actor "owner"
+                         :reason "synthetic" :snapshot_sha256 sha
+                         :proposal {:selected_option "right_revises_left"
+                                    :canonical_binding binding}}
+                  correction (assoc :correction correction)))
+        approved (flow/append-human-event
+                  (flow/empty-ledger)
+                  {:id "owner-store:8" :decision-id "source-revision"
+                   :status :approved :action :right-revises-left
+                   :remote-event (owner 8 "approve" nil)})
+        seen (atom nil)]
+    (with-redefs [attempt-store/private-ledger (fn [_] base)
+                  attempt-store/record-owner-decision!
+                  (fn [_ request] (reset! seen request) {:revision 2})]
+      (let [result (application/run-imported!
+                    approved [d]
+                    (signed-feed "private-import-token-for-test"
+                                 {:events [(owner 9 "correct" {:action "unrelated"})]
+                                  :store_revision 9 :next_revision 9})
+                    {:config config :policy policy/default-policy
+                     :persist-flow! (fn [_] true)
+                     :import-token "private-import-token-for-test"
+                     :current-bindings {"source-revision" binding}
+                     :active-snapshot-sha256 sha :active-binding-revision 1
+                     :attempt-url "synthetic-db"
+                     :attempt-revisions {"source-revision" 1}})]
+        (is (= :reversed (get-in result [:results "source-revision" :status])))
+        (is (= :source-revision (get-in @seen [:event :type])))
+        (is (= "owner-store:8" (get-in @seen [:event :event-id])))
+        (reset! seen nil)
+        (let [opposite (application/run-imported!
+                        approved [d]
+                        (signed-feed "private-import-token-for-test"
+                                     {:events [(owner 9 "correct"
+                                                      {:action "left_revises_right"})]
+                                      :store_revision 9 :next_revision 9})
+                        {:config config :policy policy/default-policy
+                         :persist-flow! (fn [_] true)
+                         :import-token "private-import-token-for-test"
+                         :current-bindings {"source-revision" binding}
+                         :active-snapshot-sha256 sha :active-binding-revision 1
+                         :attempt-url "synthetic-db"
+                         :attempt-revisions {"source-revision" 1}})]
+          (is (= :unresolved (get-in opposite [:results "source-revision" :status])))
+          (is (nil? @seen)))))))
+
 (deftest signed-owner-field-approval-routes-to-transactional-review-store
   (let [d (decision "field" :category-representation
                     [:category :representation :both :neither :unknown]
@@ -162,7 +274,9 @@
         event {:id "owner-store:10" :decision_id "field" :store_revision 10
                :binding_revision 1 :action "approve" :actor "owner"
                :reason "category column" :snapshot_sha256 sha
-               :proposal {:id "field" :selected_option "category" :proposed ["senior"]
+               :proposal {:id "field" :selected_option "category"
+                          :proposed {:action "category" :subject target
+                                     :value ["senior"]}
                           :canonical_binding binding}}
         envelope (signed-feed "private-import-token-for-test"
                               {:events [event] :store_revision 10 :next_revision 10})

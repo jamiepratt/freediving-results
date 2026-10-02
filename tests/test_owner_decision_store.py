@@ -192,6 +192,102 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertEqual(event['proposal'], p)
         self.assertEqual(self.store.human_events(after_revision=before + 1)['events'], [])
 
+    def test_delivery_resumes_after_target_commits_before_owner_checkpoint(self):
+        self.bind()
+        self.store.register(SNAP_A, proposal('d1'), idempotency_key='register-d1')
+        self.store.act('d1', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-d1')
+        event = self.store.human_events()['events'][0]
+        target = sqlite3.connect(Path(self.tmp.name) / 'target.sqlite')
+        target.execute('CREATE TABLE imported (id TEXT PRIMARY KEY, event_sha256 TEXT NOT NULL)')
+        calls = []
+
+        def flow(item):
+            calls.append(('flow', item['id']))
+            digest = hashlib.sha256(json.dumps(item, sort_keys=True,
+                                               separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+            old = target.execute('SELECT event_sha256 FROM imported WHERE id=?', (item['id'],)).fetchone()
+            if old and old[0] != digest:
+                raise ValueError('conflicting replay')
+            target.execute('INSERT OR IGNORE INTO imported VALUES (?,?)', (item['id'], digest))
+            target.commit()
+            if len([name for name, _ in calls if name == 'flow']) == 1:
+                raise RuntimeError('crash after target commit')
+            return digest
+
+        def postgres(item):
+            calls.append(('postgres', item['id']))
+            return 'postgres-commit:' + item['id']
+
+        first = self.store.deliver_human_events([('flow-ledger', flow), ('postgresql', postgres)])
+        self.assertEqual(first['status'], 'retry_required')
+        self.assertEqual(first['failed_target'], 'flow-ledger')
+        self.assertEqual(first['checkpoints'], {'flow-ledger': 0, 'postgresql': 0})
+        self.assertEqual(target.execute('SELECT count(*) FROM imported').fetchone()[0], 1)
+        self.store.close()
+        self.store = DecisionStore(self.path)
+        second = self.store.deliver_human_events([('flow-ledger', flow), ('postgresql', postgres)])
+        self.assertEqual(second['status'], 'complete')
+        self.assertEqual(second['checkpoints'], {'flow-ledger': event['store_revision'],
+                                                 'postgresql': event['store_revision']})
+        self.assertEqual(calls, [('flow', event['id']), ('flow', event['id']),
+                                 ('postgres', event['id'])])
+        self.assertEqual(target.execute('SELECT count(*) FROM imported').fetchone()[0], 1)
+        target.close()
+
+    def test_delivery_preserves_destination_order_and_checkpoint_after_failure(self):
+        self.bind()
+        for ident in ('d1', 'd2'):
+            self.store.register(SNAP_A, proposal(ident), idempotency_key='register-' + ident)
+            self.store.act(ident, action='approve', expected_revision=self.store.revision,
+                           idempotency_key='approve-' + ident)
+        events = self.store.human_events()['events']
+        calls = []
+
+        def flow(item):
+            calls.append(('flow', item['id']))
+            return 'flow:' + item['id']
+
+        def postgres(item):
+            calls.append(('postgres', item['id']))
+            if item['id'] == events[1]['id'] and calls.count(('postgres', item['id'])) == 1:
+                raise OSError('temporary target failure')
+            return 'postgres:' + item['id']
+
+        first = self.store.deliver_human_events([('flow-ledger', flow), ('postgresql', postgres)])
+        self.assertEqual(first['status'], 'retry_required')
+        self.assertEqual(first['checkpoints'], {'flow-ledger': events[1]['store_revision'],
+                                                'postgresql': events[0]['store_revision']})
+        self.store.close()
+        self.store = DecisionStore(self.path)
+        second = self.store.deliver_human_events([('flow-ledger', flow), ('postgresql', postgres)])
+        self.assertEqual(second['status'], 'complete')
+        self.assertEqual(second['delivered'], {'flow-ledger': 0, 'postgresql': 1})
+        self.assertEqual(calls, [('flow', events[0]['id']), ('flow', events[1]['id']),
+                                 ('postgres', events[0]['id']), ('postgres', events[1]['id']),
+                                 ('postgres', events[1]['id'])])
+        with self.assertRaises(ValueError):
+            self.store.deliver_human_events([('flow-ledger', flow)])
+
+    def test_delivery_reports_new_event_appended_during_transfer(self):
+        self.bind()
+        for ident in ('d1', 'd2'):
+            self.store.register(SNAP_A, proposal(ident), idempotency_key='register-' + ident)
+        self.store.act('d1', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-d1')
+
+        def flow(item):
+            return 'flow:' + item['id']
+
+        def postgres(item):
+            self.store.act('d2', action='approve', expected_revision=self.store.revision,
+                           idempotency_key='approve-d2')
+            return 'postgres:' + item['id']
+
+        first = self.store.deliver_human_events([('flow-ledger', flow), ('postgresql', postgres)])
+        self.assertEqual(first['status'], 'retry_required')
+        self.assertEqual(first['reason'], 'new_events')
+
 
 if __name__ == '__main__':
     unittest.main()
