@@ -1,5 +1,11 @@
 # Freediving results: local evidence and extraction
 
+The project aims to collect all online freediving results across federations and
+historical years, preserving the evidence behind extraction, cleaning and
+relationships. Start with [CONTEXT.md](CONTEXT.md) for the compact project brief
+and [CONTEXT-MAP.md](CONTEXT-MAP.md) for targeted reading. The current 2025-2026
+census is a bounded evidence baseline, not complete worldwide coverage.
+
 Agents acquiring result sources should start with the [source acquisition and lineage guide](docs/source-acquisition.md). It maps official PDF, JSON and date-selected HTML routes to archive provenance and isolated database rows. This versioned entry point does not depend on a local `AGENTS.md`.
 
 This slice registers source bytes and acquisition provenance in a private archive, produces versioned PDF extraction artifacts, imports those artifacts into immutable PostgreSQL observations, and records reversible owner review decisions separately. It supports CMAS CWT men, CMAS 2025-2026 senior/master depth layouts, AIDA Wakayama rankings and CMAS Athens distance, STA and speed candidates. The 2026 Novi Sad parsers retain 412 distance rows and [236 STA/speed rows](docs/cmas-timing-acquisition-20260925.md#batch-7-2026-indoor-sta-and-speed), with printed timing ambiguities explicitly unresolved. Four exact Novi Sad PDF rows have since received owner publication validation and appear in a reviewed partial results view. Current acquisition scope and remaining gaps are tracked in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8); the [25 September championship inventory](docs/championship-inventory-20260925.md) records its dated acquisition checkpoint, including 1,942 reconciled AIDA rows and retained CMAS timing documents. Automated reconciliation supplies no reviewer attestation. Identity evaluation remains separate in [issue #6](https://github.com/jamiepratt/freediving-results/issues/6).
