@@ -98,6 +98,33 @@
                        (vals versions))))
           entries))))
 
+(defn- positive-owner-option [{:keys [type pair evidence]}]
+  (case type
+    :same-attempt "same_attempt"
+    :source-revision (cond
+                       (= [(:predecessor evidence) (:successor evidence)] pair)
+                       "right_revises_left"
+                       (= [(:successor evidence) (:predecessor evidence)] pair)
+                       "left_revises_right")
+    nil))
+
+(defn- owner-canonical-action [owner-event event]
+  (let [action (:action owner-event)
+        choice (if (= action "correct")
+                 (get-in owner-event [:correction :action])
+                 (get-in owner-event [:proposal :selected_option]))]
+    (case action
+      "approve" (when (= choice (positive-owner-option event)) :accept)
+      "correct" (cond
+                  (= choice (positive-owner-option event)) :accept
+                  (and (= :same-attempt (:type event))
+                       (= choice "distinct_attempts")) :reverse
+                  (and (= :source-revision (:type event))
+                       (#{"same_source" "unrelated"} choice)) :reverse)
+      "reject" :reverse
+      "reverse" :reverse
+      nil)))
+
 (defn record-owner-decision!
   "CAS import one already authenticated owner approval or reversal, then project
    in the same PostgreSQL transaction. Unsupported owner actions fail closed.
@@ -109,8 +136,7 @@
      (let [{:keys [state ledger]} (or (some-> (read-current connection) check-view!)
                                       (fail! "Canonical attempt store is uninitialized"))
            prior (some #(when (= (:id event) (:id %)) %) (:events ledger))
-           action (:action owner-event)
-           canonical-action (case action "approve" :accept "reverse" :reverse nil)]
+           canonical-action (owner-canonical-action owner-event event)]
        (when-not (and (map? event) (map? owner-event) (map? binding)
                       (= (:id event) (:id owner-event))
                       (= (:id event) (str "owner-store:" (:store_revision owner-event)))

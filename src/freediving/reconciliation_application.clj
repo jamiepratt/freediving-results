@@ -100,8 +100,11 @@
                                "approve" (some-> (get proposal :selected_option)
                                                  (str/replace "_" "-") keyword)
                                "correct" (some-> (:action correction) (str/replace "_" "-") keyword)
-                               "reject" (if (= :identity (:family decision))
-                                          :different-person (:action decision))
+                               "reject" (case (:family decision)
+                                          :identity :different-person
+                                          :same-attempt :distinct-attempts
+                                          :source-revision :unrelated
+                                          (:action decision))
                                (:action decision))]
          (when-not (and (= id event-id) (string? decision_id) decision
                         (pos-int? store_revision) (pos-int? binding_revision)
@@ -218,6 +221,22 @@
         family (:family decision)
         pair (:candidates decision)
         choice (:action view)
+        positive? (case family
+                    :same-attempt (= :same-attempt choice)
+                    :source-revision (#{:left-revises-right :right-revises-left} choice)
+                    false)
+        prior-positive? (and (= :approved (:status prior))
+                             (case family
+                               :same-attempt (= :same-attempt (:action prior))
+                               :source-revision
+                               (#{:left-revises-right :right-revises-left} (:action prior))
+                               false))
+        canonical-action (cond
+                           (= action "reverse") (when prior-positive? :reverse)
+                           (and (#{"correct" "reject"} action) (not positive?))
+                           (when prior-positive? :reverse)
+                           (and prior-positive? positive?) nil
+                           (and (#{"approve" "correct"} action) positive?) :accept)
         evidence (case family
                    :same-attempt (when (= :same-attempt choice)
                                    {:kind :verified-scope})
@@ -234,34 +253,39 @@
                                                                (:successor publisher)]))
                                         publisher))
                    nil)]
-    (if-not (and (#{"approve" "reverse"} action)
+    (if-not (and (#{"approve" "correct" "reject" "reverse"} action)
                  (#{:same-attempt :source-revision} family)
                  (vector? pair) (= 2 (count pair))
-                 (or (= action "reverse") evidence)
-                 (or (not= action "reverse")
-                     (and (= :approved (:status prior))
-                          (= "approve" (get-in prior [:remote-event :action]))
+                 (or (not= canonical-action :accept) evidence)
+                 (or (not= canonical-action :reverse)
+                     (and prior-positive?
                           (= (get-in prior [:remote-event :proposal :canonical_binding])
                              (get-in owner [:proposal :canonical_binding]))))
+                 (or (not= action "correct")
+                     (contains? (set (:choices decision)) choice))
                  (:attempt-url opts)
                  (nat-int? (get-in opts [:attempt-revisions id]))
                  (= (get-in owner [:proposal :canonical_binding])
                     (get-in opts [:current-bindings id])))
       (unresolved :unsupported-or-stale-owner-attempt-decision)
-      (let [current (attempt-store/private-ledger (:attempt-url opts))
-            canonical-action (if (= action "reverse") :reverse :accept)
-            event (cond-> {:id (:id human) :action canonical-action
-                           :type family :pair pair}
-                    (= canonical-action :accept) (assoc :evidence evidence)
-                    (= canonical-action :reverse) (assoc :event-id (:id prior)))
-            request {:event event :owner-event owner
-                     :binding (get-in opts [:current-bindings id])
-                     :subject-snapshot (relationships/attempt-subjects
-                                        current family pair)
-                     :expected-revision (get-in opts [:attempt-revisions id])}]
-        {:status (if (= canonical-action :reverse) :reversed :materialized)
-         :projection (attempt-store/record-owner-decision!
-                      (:attempt-url opts) request)}))))
+      (if-not canonical-action
+        (if (and (#{"correct" "reject" "reverse"} action)
+                 (not positive?))
+          {:status :no-link :reason :human-negative-attempt-decision}
+          (unresolved :contradictory-owner-attempt-decision))
+        (let [current (attempt-store/private-ledger (:attempt-url opts))
+              event (cond-> {:id (:id human) :action canonical-action
+                             :type family :pair pair}
+                      (= canonical-action :accept) (assoc :evidence evidence)
+                      (= canonical-action :reverse) (assoc :event-id (:id prior)))
+              request {:event event :owner-event owner
+                       :binding (get-in opts [:current-bindings id])
+                       :subject-snapshot (relationships/attempt-subjects
+                                          current family pair)
+                       :expected-revision (get-in opts [:attempt-revisions id])}]
+          {:status (if (= canonical-action :reverse) :reversed :materialized)
+           :projection (attempt-store/record-owner-decision!
+                        (:attempt-url opts) request)})))))
 
 (defn- field-target [opts decision]
   (get-in opts [:field-targets (:id decision)]))
@@ -283,7 +307,7 @@
                                       (reviews/dive-decision-history
                                        (:reviewer-url opts) target))))
         proposed (case action
-                   "approve" (get-in owner [:proposal :proposed])
+                   "approve" (get-in owner [:proposal :proposed :value])
                    "correct" (get-in owner [:correction :value])
                    nil)]
     (if-not (and (#{"approve" "correct" "reject" "reverse"} action)
@@ -468,7 +492,12 @@
                                        :detail (.getMessage error)))))
                   (if-not (or (= :approved (:status view))
                               (and (= :human (:origin view))
-                                   (correction-statuses (:status view))))
+                                   (or (correction-statuses (:status view))
+                                       (and (= :rejected (:status view))
+                                            (:remote-event
+                                             (last (filter #(and (= :human (:origin %))
+                                                                 (= id (:decision-id %)))
+                                                           (:events flow-ledger))))))))
                     (if (#{:identity :same-attempt :source-revision
                            :category :representation :category-representation}
                          (:family decision))

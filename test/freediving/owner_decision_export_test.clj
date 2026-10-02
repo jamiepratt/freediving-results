@@ -139,6 +139,66 @@
     (is (= {:source_values ["Overall ranking"]} (:original proposal)))
     (is (= "summary" (get-in proposal [:proposed :action])))))
 
+(deftest exports-concrete-field-value-from-verified-label-and-dictionary
+  (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
+        binding {:source-position {:source-position-id "synthetic:position-1"
+                                   :job-id job :ordinal 0 :source-sha256 sha
+                                   :artifact-sha256 artifact :parser-version "parser/1"}
+                 :source-key :category :raw-label "Women"
+                 :normalized-value ["women"]
+                 :dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                              :categories {"Women" ["women"]}}}
+        decision (assoc decision :family :category-representation :action :category
+                        :choices [:category :representation :both :neither :unknown]
+                        :subject {:id "synthetic:position-1"
+                                  :source-position-id "synthetic:position-1"}
+                        :field-binding binding)
+        ledger (assoc-in ledger [:events 0 :action] :category)
+        verified-record (assoc-in verified-record [record :source-value] "Women")
+        opts {:snapshot-sha256 sha :binding-revision 7
+              :evidence-bindings {"source-row-1" mapping}
+              :observation-revisions {[job 0] observation}
+              :verified-snapshot-records verified-record}
+        proposal (first (:proposals (export/export-proposals ledger [decision] opts)))]
+    (is (= ["women"] (get-in proposal [:proposed :value])))
+    (is (= {:source_values ["Women"]} (:original proposal)))
+    (doseq [changed [(dissoc decision :field-binding)
+                     (assoc-in decision [:field-binding :raw-label] "Forged")
+                     (assoc-in decision [:field-binding :normalized-value] ["open"])
+                     (assoc-in decision [:field-binding :source-position :source-sha256] artifact)
+                     (assoc-in decision [:field-binding :dictionary :categories "Women"] [])]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (export/export-proposals ledger [changed] opts))))))
+
+(deftest exports-typed-representation-only-with-supported-column-semantics
+  (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
+        binding {:source-position {:source-position-id "synthetic:position-1"
+                                   :job-id job :ordinal 0 :source-sha256 sha
+                                   :artifact-sha256 artifact :parser-version "parser/1"}
+                 :source-key "Nationality" :raw-label "AIN"
+                 :normalized-value {:kind :neutral :code "AIN"}
+                 :dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                              :representations {"AIN" {:kind :neutral :code "AIN"}}
+                              :representation-cell-semantics {"Nationality" :per-dive-representation}}}
+        decision (assoc decision :family :category-representation :action :representation
+                        :choices [:category :representation :both :neither :unknown]
+                        :subject {:id "synthetic:position-1"
+                                  :source-position-id "synthetic:position-1"}
+                        :field-binding binding)
+        ledger (assoc-in ledger [:events 0 :action] :representation)
+        verified-record (assoc-in verified-record [record :source-value] "AIN")
+        opts {:snapshot-sha256 sha :binding-revision 7
+              :evidence-bindings {"source-row-1" mapping}
+              :observation-revisions {[job 0] observation}
+              :verified-snapshot-records verified-record}]
+    (is (= {:kind :neutral :code "AIN"}
+           (get-in (first (:proposals (export/export-proposals ledger [decision] opts)))
+                   [:proposed :value])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (export/export-proposals
+                  ledger [(update-in decision [:field-binding :dictionary]
+                                     dissoc :representation-cell-semantics)] opts)))))
+
 (deftest refuses-identity-pair-that-is-not-the-bound-observation
   (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
         id (str "local-observation:" job ":1")

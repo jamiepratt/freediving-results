@@ -71,13 +71,18 @@
                                              (get-in base [:observation-versions id :observation-revision])}) pair)}
         proposal {:canonical_binding binding}
         owner {:id "owner-store:9" :store_revision 9 :decision_id "owner-same-attempt"
-               :action "approve" :proposal proposal}
+               :action "approve" :proposal (assoc proposal :selected_option "same_attempt")}
         event {:id "owner-store:9" :action :accept :type :same-attempt
                :pair pair :evidence {:kind :verified-scope}}
         request {:event event :owner-event owner :binding binding
                  :subject-snapshot (relationships/attempt-subjects base :same-attempt pair)
                  :expected-revision 0}]
     (store/persist! app base)
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (store/record-owner-decision!
+                  app (assoc request :owner-event
+                             (assoc-in owner [:proposal :selected_option]
+                                       "distinct_attempts")))))
     (is (= 1 (:revision (store/record-owner-decision! app request))))
     (is (= 1 (:revision (store/record-owner-decision!
                          app (assoc request :expected-revision 1)))))
@@ -99,7 +104,8 @@
                                                    [["official" "v1"] ["mirror" "v3"]])}
           source-owner {:id "owner-store:10" :store_revision 10
                         :decision_id "owner-source-revision" :action "approve"
-                        :proposal {:canonical_binding source-binding}}
+                        :proposal {:canonical_binding source-binding
+                                   :selected_option "right_revises_left"}}
           source-event {:id "owner-store:10" :action :accept :type :source-revision
                         :pair source-pair
                         :evidence {:kind :publisher-correction :predecessor "official"
@@ -111,21 +117,36 @@
                           :subject-snapshot
                           (relationships/attempt-subjects base :source-revision source-pair)}]
       (is (= 2 (:revision (store/record-owner-decision! app source-request))))
-      (is (= 1 (count (:source-relationships (store/private-projection app))))))
+      (is (= 1 (count (:source-relationships (store/private-projection app)))))
+      (let [correct-owner (assoc source-owner :id "owner-store:12"
+                                 :store_revision 12 :action "correct"
+                                 :correction {:action "unrelated"})
+            correct-request (assoc source-request
+                                   :event {:id "owner-store:12" :action :reverse
+                                           :type :source-revision :pair source-pair
+                                           :event-id "owner-store:10"}
+                                   :owner-event correct-owner :expected-revision 2)]
+        (is (= 3 (:revision (store/record-owner-decision! app correct-request))))
+        (is (empty? (:source-relationships (store/private-projection app))))
+        (is (= 3 (:revision (store/record-owner-decision! app correct-request))))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (store/record-owner-decision!
+                      app (assoc correct-request :owner-event
+                                 (assoc correct-owner :correction {:action "right_revises_left"})))))))
     (let [reverse-request (-> request
                               (assoc :event {:id "owner-store:11" :action :reverse
                                              :type :same-attempt :pair pair
                                              :event-id "owner-store:9"}
                                      :owner-event (assoc owner :id "owner-store:11"
                                                          :store_revision 11 :action "reverse")
-                                     :expected-revision 2))]
-      (is (= 3 (:revision (store/record-owner-decision! app reverse-request))))
-      (is (= 3 (:revision (store/record-owner-decision! app reverse-request))))
+                                     :expected-revision 3))]
+      (is (= 4 (:revision (store/record-owner-decision! app reverse-request))))
+      (is (= 4 (:revision (store/record-owner-decision! app reverse-request))))
       (is (thrown? clojure.lang.ExceptionInfo
                    (store/record-owner-decision!
                     app (assoc reverse-request :owner-event
                                (assoc (:owner-event reverse-request) :action "reject")))))
-      (is (= 3 (:revision (store/private-projection app)))))
+      (is (= 4 (:revision (store/private-projection app)))))
     (is (= (store/private-projection app) (store/rebuild! app)))))
 
 (defn -main [& _]
