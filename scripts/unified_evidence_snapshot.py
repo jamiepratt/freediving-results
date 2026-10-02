@@ -205,6 +205,7 @@ def records(name, root):
 
 def create_db(path):
     db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
     db.executescript('''
         PRAGMA page_size=4096;
         PRAGMA journal_mode=DELETE;
@@ -223,8 +224,81 @@ def create_db(path):
         CREATE INDEX records_source ON records(source_name,collection);
         CREATE INDEX records_object ON records(source_object_id);
         CREATE TABLE source_metadata(source_name TEXT PRIMARY KEY, metadata_json TEXT NOT NULL);
+        CREATE TABLE dive_field_decisions (
+          record_id TEXT PRIMARY KEY REFERENCES records(record_id),
+          projection_json TEXT NOT NULL
+        );
     ''')
     return db
+
+
+def add_dive_field_decisions(db, path):
+    """Bind a local ledger export to exact retained positions and evidence versions."""
+    data = path.read_bytes()
+    export = json.loads(data)
+    if not isinstance(export, dict) or export.get('schema') != 'dive-field-decisions/v1' or not isinstance(export.get('positions'), list):
+        raise ValueError('unsupported dive field decision export')
+    db.execute('CREATE TABLE IF NOT EXISTS dive_field_decisions (record_id TEXT PRIMARY KEY, projection_json TEXT NOT NULL)')
+    seen = set()
+    for position in export['positions']:
+        if not isinstance(position, dict) or not position.get('source_position_id'):
+            raise ValueError('decision source position id missing')
+        ident = position['source_position_id']
+        if ident in seen:
+            raise ValueError(f'duplicate decision source position: {ident}')
+        seen.add(ident)
+        rows = db.execute("SELECT * FROM records WHERE source_id=? AND kind='candidate_position'", (ident,)).fetchall()
+        if len(rows) != 1:
+            raise ValueError(f'decision source position must match one retained row: {ident}')
+        row = rows[0]
+        raw = json.loads(row['raw_json'])
+        source_id = row['source_object_id'] or ''
+        source_hashes = [value.removeprefix('sha256:') for value in
+                         (raw.get('source_sha256'), source_id) if isinstance(value, str) and value]
+        artifact_hashes = [raw['artifact_sha256']] if raw.get('artifact_sha256') else []
+        versions = raw.get('observation_refs') or []
+        parser_version = row['parser_version']
+        if versions:
+            matches = [version for version in versions
+                       if version.get('job_id') == position.get('job_id')
+                       and version.get('ordinal') == position.get('ordinal')]
+            if len(matches) != 1:
+                raise ValueError(f'decision version mismatch for {ident}: observation reference')
+            version = matches[0]
+            if version.get('artifact_sha256'):
+                artifact_hashes.append(version['artifact_sha256'])
+            parser_version = version.get('parser_version') or parser_version
+        for key in ('job_id', 'ordinal'):
+            if raw.get(key) is not None and position.get(key) != raw[key]:
+                raise ValueError(f'decision version mismatch for {ident}: {key}')
+        if (not source_hashes or not parser_version
+                or any(position.get('source_sha256') != value for value in source_hashes)
+                or position.get('parser_version') != parser_version
+                or any(position.get('artifact_sha256') != value for value in artifact_hashes)):
+            raise ValueError(f'decision version mismatch for {ident}')
+        raw_category = raw.get('category_raw') or raw.get('category')
+        raw_representation = raw.get('representation_raw')
+        if raw_category is not None and position.get('raw_category') != raw_category:
+            raise ValueError(f'decision version mismatch for {ident}: raw category')
+        if raw_representation is not None and position.get('raw_representation') != raw_representation:
+            raise ValueError(f'decision version mismatch for {ident}: raw representation')
+        if position.get('category_status') not in ('automatic', 'human', 'unresolved') or position.get('representation_status') not in ('automatic', 'human', 'unresolved'):
+            raise ValueError(f'invalid dive field decision status: {ident}')
+        categories = position.get('accepted_categories')
+        if categories is not None and not isinstance(categories, list):
+            raise ValueError(f'accepted categories must be an array or null: {ident}')
+        if position['category_status'] != 'unresolved' and categories is None:
+            raise ValueError(f'accepted categories missing: {ident}')
+        for field, status in (('category_citation', position['category_status']),
+                              ('representation_citation', position['representation_status'])):
+            if status != 'unresolved' and not position.get(field):
+                raise ValueError(f'{field} missing: {ident}')
+        if position.get('decision_revision') is None:
+            raise ValueError(f'decision revision missing: {ident}')
+        if db.execute('SELECT 1 FROM dive_field_decisions WHERE record_id=?', (row['record_id'],)).fetchone():
+            raise ValueError(f'decision source position already projected: {ident}')
+        db.execute('INSERT INTO dive_field_decisions VALUES (?,?)', (row['record_id'], canon(position)))
+    return {'path': str(path.resolve()), 'sha256': sha(data), 'positions': len(seen), 'schema': export['schema']}
 
 
 def validate_extension_packet(name, root):
@@ -408,6 +482,7 @@ def extend(args):
         shutil.copyfile(base_db, db_path)
         counts_by_name = {}
         with sqlite3.connect(db_path) as db:
+            db.row_factory = sqlite3.Row
             for name, (_, _, root) in packets.items():
                 counts = Counter()
                 for collection, record_path, obj, parent, nested in records(name, root):
@@ -426,6 +501,10 @@ def extend(args):
                 counts_by_name[name] = counts
                 db.execute('INSERT INTO source_metadata VALUES (?,?)',
                            (name, canon({k: v for k, v in root.items() if not isinstance(v, list)})))
+            if getattr(args, 'decisions_file', None):
+                if base_manifest.get('dive_field_decisions'):
+                    raise ValueError('extended decision exports cannot replace base projection')
+                decision_manifest = add_dive_field_decisions(db, Path(args.decisions_file))
             db.commit()
             db.execute('VACUUM')
         manifest = dict(base_manifest)
@@ -449,6 +528,8 @@ def extend(args):
             manifest.pop('extension_namespace', None)
         manifest['required_inputs'] = {**base_manifest.get('required_inputs', {}), **required}
         manifest['confirmed_distinct_attempts'] = None
+        if getattr(args, 'decisions_file', None):
+            manifest['dive_field_decisions'] = decision_manifest
         manifest['snapshot_sha256'] = sha(db_path.read_bytes())
         manifest_path = Path(work) / 'manifest.json'
         manifest_path.write_text(canon(manifest) + '\n', encoding='utf-8')
@@ -518,6 +599,8 @@ def build(args):
                 'sha256': sha(data), 'bytes': len(data), 'path': str(path.resolve()),
                 'record_count': 0, 'observed_collections': dict(sorted(observed.items())),
                 'observed_record_count': sum(observed.values())}
+        if getattr(args, 'decisions_file', None):
+            manifest['dive_field_decisions'] = add_dive_field_decisions(db, Path(args.decisions_file))
         db.commit()
         db.execute('VACUUM')
     except Exception:
@@ -547,6 +630,10 @@ def verify(args):
                 actual = dict(db.execute('SELECT collection,count(*) FROM records WHERE source_name=? GROUP BY collection', (name,)))
                 if actual != item['collections']:
                     raise ValueError(f'collection count mismatch: {name}')
+        if manifest.get('dive_field_decisions'):
+            actual = db.execute('SELECT count(*) FROM dive_field_decisions').fetchone()[0]
+            if actual != manifest['dive_field_decisions']['positions']:
+                raise ValueError('dive field decision count mismatch')
     print('verified')
 
 
@@ -554,6 +641,9 @@ def verify(args):
 def replay(args):
     out = Path(args.output_dir)
     manifest = json.loads((out / 'manifest.json').read_text())
+    decisions = manifest.get('dive_field_decisions')
+    if decisions and sha(Path(decisions['path']).read_bytes()) != decisions['sha256']:
+        raise ValueError('decision export hash mismatch')
     if 'base_snapshot_path' in manifest:
         base = Path(manifest['base_snapshot_path'])
         if sha((base / 'manifest.json').read_bytes()) != manifest['base_manifest_sha256']:
@@ -562,7 +652,9 @@ def replay(args):
         extend(argparse.Namespace(base_dir=str(base), cutoff=manifest['cutoff'],
                                   input=[f"{name}={manifest['inputs'][name]['path']}" for name in names],
                                   required_input=[f"{name}={manifest['inputs'][name]['sha256']}" for name in names],
-                                  output_dir=str(out)))
+                                  output_dir=str(out),
+                                  decisions_file=(manifest.get('dive_field_decisions') or {}).get('path')
+                                  if not json.loads((base / 'manifest.json').read_text()).get('dive_field_decisions') else None))
         new = json.loads((out / 'manifest.json').read_text())
         if new['snapshot_sha256'] != manifest['snapshot_sha256']:
             raise ValueError('replay hash mismatch')
@@ -580,6 +672,7 @@ def replay(args):
             excluded.append(f"{name}={path}:{item['reason']}")
     build(argparse.Namespace(output_dir=str(out), cutoff=manifest['cutoff'],
                              input=inputs, excluded=excluded,
+                             decisions_file=(manifest.get('dive_field_decisions') or {}).get('path'),
                              required_input=[f'{name}={digest}' for name, digest in manifest.get('required_inputs', {}).items()]))
     new = json.loads((out / 'manifest.json').read_text())
     if new['snapshot_sha256'] != manifest['snapshot_sha256']:
@@ -596,12 +689,14 @@ def main():
     b.add_argument('--required-input', action='append', default=[], metavar='NAME=SHA256')
     b.add_argument('--excluded', action='append', default=[], metavar='NAME=PATH:REASON')
     b.add_argument('--output-dir', required=True)
+    b.add_argument('--decisions-file')
     e = sub.add_parser('extend')
     e.add_argument('--base-dir', required=True)
     e.add_argument('--cutoff', required=True)
     e.add_argument('--input', action='append', required=True, metavar='NAME=PATH')
     e.add_argument('--required-input', action='append', required=True, metavar='NAME=SHA256')
     e.add_argument('--output-dir', required=True)
+    e.add_argument('--decisions-file')
     v = sub.add_parser('verify')
     v.add_argument('--output-dir', required=True)
     r = sub.add_parser('replay')

@@ -118,6 +118,15 @@ class SnapshotQuery:
             raise ValueError('snapshot hash mismatch')
         self.db = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)
         self.db.row_factory = sqlite3.Row
+        self.has_dive_fields = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dive_field_decisions'").fetchone() is not None
+
+    def _dive_fields(self, record_id):
+        if not self.has_dive_fields:
+            return None
+        row = self.db.execute('SELECT projection_json FROM dive_field_decisions WHERE record_id=?',
+                              (record_id,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def __enter__(self):
         return self
@@ -273,8 +282,10 @@ class SnapshotQuery:
             'page, review_status FROM records' + where +
             ' ORDER BY source_name, collection, record_path, record_id LIMIT ? OFFSET ?',
             [*args, limit, offset])
-        return {'total': total, 'limit': limit, 'offset': offset,
-                'records': [dict(row) for row in rows]}
+        records = [dict(row) for row in rows]
+        for record in records:
+            record['dive_fields'] = self._dive_fields(record['record_id'])
+        return {'total': total, 'limit': limit, 'offset': offset, 'records': records}
 
     def detail(self, record_id):
         _record_id(record_id)
@@ -291,6 +302,7 @@ class SnapshotQuery:
         result['source_sha256'] = source.get('source_sha256')
         result['source_schema'] = source.get('source_schema')
         result['snapshot_sha256'] = self.manifest['snapshot_sha256']
+        result['dive_fields'] = self._dive_fields(record_id)
         return result
 
     def _roatan_rows(self, collection):

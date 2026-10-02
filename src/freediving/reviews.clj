@@ -59,6 +59,13 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=13"))]
                      (when-not (= checksum (:sha256 old)) (fail! "PDF extraction review migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(13,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/014-dive-field-decisions.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=14"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "Dive field migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(14,?)" checksum))))
+                 (execute! c "DROP TRIGGER stamp_dive_field_decisions ON freediving.dive_field_decisions")
+                 (execute! c (str "CREATE TRIGGER stamp_dive_field_decisions BEFORE INSERT ON freediving.dive_field_decisions FOR EACH ROW EXECUTE FUNCTION freediving.stamp_dive_field_decision('" ingest-role "','" reviewer-role "')"))
                  (execute! c (str "REVOKE ALL ON freediving.extractions,freediving.observations FROM " reviewer-role))
                  (doseq [role [ingest-role reviewer-role]]
                    (execute! c (str "REVOKE CREATE ON SCHEMA freediving FROM " role))
@@ -66,16 +73,18 @@
                    (execute! c (str "REVOKE ALL ON freediving.review_proposals,freediving.review_decisions FROM " role))
                    (execute! c (str "REVOKE ALL ON freediving.extraction_reviews FROM " role))
                    (execute! c (str "REVOKE ALL ON freediving.pdf_extraction_reviews FROM " role))
+                   (execute! c (str "REVOKE ALL ON freediving.dive_field_decisions FROM " role))
                    (execute! c (str "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions TO " role))
                    (execute! c (str "GRANT SELECT ON freediving.extraction_reviews TO " role))
                    (execute! c (str "GRANT SELECT ON freediving.pdf_extraction_reviews TO " role))
+                   (execute! c (str "GRANT SELECT,INSERT ON freediving.dive_field_decisions TO " role))
                    (execute! c (str "GRANT INSERT ON freediving.review_proposals TO " role)))
                  (execute! c (str "GRANT INSERT ON freediving.review_decisions TO " reviewer-role))
                  (execute! c (str "GRANT INSERT ON freediving.extraction_reviews TO " reviewer-role))
                  (execute! c (str "GRANT INSERT ON freediving.pdf_extraction_reviews TO " reviewer-role))
                  {:schema-version 2})))
 (defn- target [c {:keys [job-id ordinal]}]
-  (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
+  (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256,e.parser_version FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
       (fail! "Unknown observation version")))
 (defn- body [row]
   (assoc (edn/read-string (:body_edn row)) :id (:id row) :job-id (:job_id row) :ordinal (:ordinal row) :db-role (:db_role row) :recorded-at (str (:recorded_at row))))
@@ -613,6 +622,264 @@
                                    (:id request) (:job-id request) (:ordinal request) (:revision record)
                                    "revoke" (:event-id request) (encode record))
                          (existing c "pdf_extraction_reviews" (:id request) request)))))))
+(defn- field-events [c source-position-id]
+  (mapv (fn [row]
+          (merge (edn/read-string (:body_edn row))
+                 {:id (:id row) :revision (:revision row)
+                  :db-role (:db_role row) :recorded-at (str (:recorded_at row))}))
+        (query c "SELECT * FROM freediving.dive_field_decisions WHERE source_position_id=? ORDER BY revision"
+               source-position-id)))
+
+(defn- field-row [c t]
+  (let [o (target c t) payload (edn/read-string (:payload_edn o))]
+    (when-not (= "result-row" (:kind o)) (fail! "Dive field target must be a result-row"))
+    {:job-id (:job-id t) :ordinal (:ordinal t)
+     :source-position-id (:source-position-id t)
+     :source-sha256 (:source_sha256 o) :artifact-sha256 (:artifact_sha256 o)
+     :parser-version (:parser_version o) :payload payload}))
+
+(defn- raw-field-entry [payload field]
+  (let [raw (:raw payload)
+        fields (if (map? (:fields raw)) (:fields raw) raw)]
+    (first (filter (comp nonblank? second)
+                   (map (fn [key] [key (get fields key)])
+                        (case field
+                          :category [:category "category" "Category" "PlaCat" "PlaCatEff"
+                                     "AGCodeDescr" "Gender"]
+                          :representation [:representation "representation" "Representation"
+                                           :country "Country" "PlaNat" "ParOrgCode" "Nationality"]))))))
+
+(defn- raw-field [payload field] (second (raw-field-entry payload field)))
+
+(defn- citation [row]
+  (merge {:source-position-id (:source-position-id row)
+          :job-id (:job-id row) :ordinal (:ordinal row)
+          :source-sha256 (:source-sha256 row)
+          :artifact-sha256 (:artifact-sha256 row)
+          :parser-version (:parser-version row)}
+         (select-keys (get-in row [:payload :coordinates])
+                      [:page :line :column-start :column-end :table :row :row-index-zero-based])
+         (select-keys (:payload row) [:source-page-url])))
+
+(defn- field-state [row events field]
+  (let [original (raw-field (:payload row) field)
+        relevant (filter #(= field (:decision-type %)) events)
+        state (reduce (fn [s e]
+                        (case (:action e)
+                          :assert (if (and (not= :suppressed (:status e))
+                                           (or (= :human (:actor-kind e))
+                                               (= (:job-id row) (:job-id e))))
+                                    {:accepted (:proposed e) :status (:status e)
+                                     :actor-kind (:actor-kind e) :decision-id (:id e)
+                                     :citation (first (:supporting-evidence e))}
+                                    s)
+                          :reverse {:accepted nil :status :reversed :actor-kind :human
+                                    :decision-id (:id e) :citation (:citation s)}
+                          s))
+                      {:accepted nil :status :unresolved :actor-kind nil
+                       :decision-id nil :citation (citation row)} relevant)]
+    (assoc state :raw original)))
+
+(defn dive-fields [url t]
+  (when-not (and (string? (:source-position-id t)) (not (str/blank? (:source-position-id t))))
+    (fail! "Source position ID required"))
+  (read-snapshot url
+                 (fn [c]
+                   (let [row (field-row c t) events (field-events c (:source-position-id t))]
+                     {:source-position-id (:source-position-id t)
+                      :job-id (:job-id row) :ordinal (:ordinal row)
+                      :source-sha256 (:source-sha256 row)
+                      :artifact-sha256 (:artifact-sha256 row)
+                      :parser-version (:parser-version row)
+                      :revision (or (:revision (last events)) 0)
+                      :category (field-state row events :category)
+                      :representation (field-state row events :representation)}))))
+
+(defn dive-decision-history [url t]
+  (read-snapshot url (fn [c] (field-row c t) (field-events c (:source-position-id t)))))
+
+(defn- append-field! [c row event]
+  (execute! c "INSERT INTO freediving.dive_field_decisions(id,source_position_id,job_id,ordinal,decision_type,revision,action,actor_kind,decision_key,event_id,body_edn) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+            (:id event) (:source-position-id row) (:job-id row) (:ordinal row)
+            (name (:decision-type event)) (:revision event) (name (:action event))
+            (name (:actor-kind event)) (:decision-key event) (:event-id event) (encode event))
+  (last (field-events c (:source-position-id row))))
+
+(defn- dictionary-entry [dictionary field raw]
+  (get (if (= field :category) (:categories dictionary) (:representations dictionary)) raw))
+
+(defn- field-proposal [row dictionary field]
+  (let [raw (raw-field (:payload row) field)
+        heading (get dictionary (if (= field :category) :category-heading :representation-heading))
+        heading-label (:label heading)
+        from-row (dictionary-entry dictionary field raw)
+        from-heading (dictionary-entry dictionary field heading-label)
+        conflict? (and raw heading-label (not= raw heading-label))
+        chosen (if raw from-row from-heading)
+        valid? (if (= field :category)
+                 (and (vector? chosen) (seq chosen) (every? #(and (string? %) (not (str/blank? %))) chosen))
+                 (and (map? chosen) (#{:country :federation :neutral :organization} (:kind chosen))
+                      (string? (:code chosen)) (not (str/blank? (:code chosen)))))
+        status (if (and (not conflict?) valid?) :accepted :unresolved)
+        source-key (first (raw-field-entry (:payload row) field))
+        semantic-binding? (or (not= field :representation)
+                              (not (#{"Nationality" "PlaNat"} source-key))
+                              (= :per-dive-representation
+                                 (get-in dictionary [:representation-cell-semantics source-key])))
+        evidence (cond-> []
+                   raw (conj (assoc (citation row) :raw-label raw :source :row))
+                   heading (conj (merge (citation row) (:citation heading)
+                                        {:raw-label heading-label :source :heading})))
+        evidence (if (seq evidence) evidence [(assoc (citation row) :raw-label nil :source :row)])
+        contrary (if conflict? [(last evidence)] [])]
+    {:original raw
+     :status (if semantic-binding? status :unresolved)
+     :proposed (when (and semantic-binding? (= status :accepted)) chosen)
+     :supporting-evidence (if conflict? [(first evidence)] evidence)
+     :conflicting-evidence contrary
+     :rule-evidence {:row-label raw :heading-label heading-label
+                     :dictionary-value chosen :dictionary-version (:version dictionary)
+                     :rule (cond conflict? :row-heading-conflict
+                                 (not semantic-binding?) :unsupported-column-semantics
+                                 (nil? (or raw heading-label)) :missing-label
+                                 (not valid?) :unmapped-label
+                                 :else :explicit-dictionary-map)}}))
+
+(defn reconcile-dive-fields!
+  "Append dictionary decisions for an imported row. The caller binds source-position-id
+  to the exact retained packet position ID; snapshot projection verifies that binding."
+  [url t dictionary]
+  (when-not (and (string? (:source-position-id t)) (not (str/blank? (:source-position-id t)))
+                 (map? dictionary) (nonblank? (:version dictionary))
+                 (nonblank? (:federation dictionary)) (nonblank? (:event-id dictionary)))
+    (fail! "Versioned source-position dictionary required"))
+  (transaction url
+               (fn [c]
+                 (query c "SELECT pg_advisory_xact_lock(hashtext(?))" (:source-position-id t))
+                 (let [row (field-row c t)]
+                   (reduce (fn [result field]
+                             (let [events (field-events c (:source-position-id t))
+                                   prior (filter #(= field (:decision-type %)) events)
+                                   latest-human (last (filter #(= :human (:actor-kind %)) prior))
+                                   proposal (cond-> (field-proposal row dictionary field)
+                                              latest-human (assoc :status :suppressed :proposed nil))
+                                   key (sha256 (.getBytes (encode [(:source-position-id t) (:job-id t)
+                                                                   (:ordinal t) field (:version dictionary)
+                                                                   (:federation dictionary) (:event-id dictionary)
+                                                                   proposal]) "UTF-8"))
+                                   old (first (filter #(= key (:decision-key %)) prior))]
+                               (assoc result field
+                                      (or old
+                                          (append-field! c row
+                                                         (merge proposal
+                                                                {:id (str "auto:" key) :decision-key key
+                                                                 :source-position-id (:source-position-id t)
+                                                                 :job-id (:job-id t) :ordinal (:ordinal t)
+                                                                 :decision-type field :action :assert
+                                                                 :revision (inc (or (:revision (last events)) 0))
+                                                                 :actor-kind :automatic :actor "deterministic-rule"
+                                                                 :rule-version "dive-fields/1"
+                                                                 :policy-version "deterministic-auto/1"
+                                                                 :federation (:federation dictionary)
+                                                                 :event-context-id (:event-id dictionary)
+                                                                 :source-position (citation row)
+                                                                 :observation-version (select-keys row [:job-id :ordinal :source-sha256
+                                                                                                        :artifact-sha256 :parser-version])
+                                                                 :dependencies (if latest-human [(:id latest-human)] [])
+                                                                 :model-confidence nil}))))))
+                           {} [:category :representation])))))
+
+(defn- human-decision! [url request action]
+  (when-not (and (nonblank? (:id request)) (nonblank? (:actor request))
+                 (nonblank? (:reason request)) (nat-int? (:base-revision request)))
+    (fail! "Human decision requires id, actor, reason and base revision"))
+  (transaction url
+               (fn [c]
+                 (let [existing (first (query c "SELECT * FROM freediving.dive_field_decisions WHERE id=?" (:id request)))]
+                   (if existing
+                     (let [record (edn/read-string (:body_edn existing))]
+                       (if (= (:request record) request) record (fail! "Conflicting decision ID")))
+                     (let [event (when (= action :reverse)
+                                   (first (query c "SELECT * FROM freediving.dive_field_decisions WHERE id=?" (:event-id request))))
+                           subject (if event (:source_position_id event) (:source-position-id request))]
+                       (when-not (nonblank? subject) (fail! "Unknown source position"))
+                       (query c "SELECT pg_advisory_xact_lock(hashtext(?))" subject)
+                       (let [events (field-events c subject) revision (or (:revision (last events)) 0)
+                             base (:base-revision request)]
+                         (when-not (= base revision) (fail! "Stale dive decision revision"))
+                         (when (and (= action :reverse)
+                                    (or (nil? event) (not= "assert" (:action event))
+                                        (some #(= (:event-id request) (:event-id %)) events)))
+                           (fail! "Decision cannot be reversed"))
+                         (let [t (if event {:job-id (:job_id event) :ordinal (:ordinal event)
+                                            :source-position-id subject} request)
+                               row (field-row c t)
+                               field (if event (keyword (:decision_type event)) (:decision-type request))
+                               proposed (when (= action :assert) (:proposed request))]
+                           (when-not (#{:category :representation} field) (fail! "Invalid dive decision type"))
+                           (when (and (= action :reverse)
+                                      (not= (:event-id request) (:decision-id (field-state row events field))))
+                             (fail! "Decision is no longer active"))
+                           (when (and (= action :assert)
+                                      (not (if (= field :category)
+                                             (and (vector? proposed) (seq proposed) (every? nonblank? proposed))
+                                             (and (map? proposed)
+                                                  (#{:country :federation :neutral :organization} (:kind proposed))
+                                                  (nonblank? (:code proposed))))))
+                             (fail! "Invalid proposed dive field value"))
+                           (let [record {:id (:id request) :source-position-id subject
+                                         :job-id (:job-id row) :ordinal (:ordinal row)
+                                         :source-position (citation row)
+                                         :observation-version (select-keys row [:job-id :ordinal :source-sha256
+                                                                                :artifact-sha256 :parser-version])
+                                         :decision-type field :action action
+                                         :event-id (:event-id request) :revision (inc revision)
+                                         :actor-kind :human :actor (:actor request)
+                                         :status (if (= action :reverse) :reversed :accepted)
+                                         :original (raw-field (:payload row) field)
+                                         :proposed proposed
+                                         :supporting-evidence (or (:supporting-evidence request) [(citation row)])
+                                         :conflicting-evidence (or (:conflicting-evidence request) [])
+                                         :dependencies (or (:dependencies request) [])
+                                         :rule-version nil :policy-version "human-review/1"
+                                         :model-confidence nil :reason (:reason request)
+                                         :request request}]
+                             (append-field! c row record))))))))))
+
+(defn reverse-dive-decision! [url request] (human-decision! url request :reverse))
+(defn assert-dive-field! [url request] (human-decision! url request :assert))
+
+(defn export-dive-fields [url]
+  (read-snapshot url
+                 (fn [c]
+                   (let [subjects (query c "SELECT DISTINCT ON (source_position_id) source_position_id,job_id,ordinal FROM freediving.dive_field_decisions ORDER BY source_position_id,revision DESC")]
+                     (json/write-str
+                      {:schema "dive-field-decisions/v1"
+                       :positions (mapv (fn [subject]
+                                          (let [t {:source-position-id (:source_position_id subject)
+                                                   :job-id (:job_id subject) :ordinal (:ordinal subject)}
+                                                row (field-row c t) events (field-events c (:source-position-id t))
+                                                category (field-state row events :category)
+                                                representation (field-state row events :representation)]
+                                            {:source_position_id (:source-position-id t)
+                                             :job_id (:job-id row) :ordinal (:ordinal row)
+                                             :source_sha256 (:source-sha256 row)
+                                             :artifact_sha256 (:artifact-sha256 row)
+                                             :parser_version (:parser-version row)
+                                             :raw_category (:raw category)
+                                             :raw_representation (:raw representation)
+                                             :accepted_categories (:accepted category)
+                                             :accepted_representation (:accepted representation)
+                                             :category_status (if (:accepted category) (name (:actor-kind category)) "unresolved")
+                                             :representation_status (if (:accepted representation) (name (:actor-kind representation)) "unresolved")
+                                             :category_actor_kind (some-> (:actor-kind category) name)
+                                             :representation_actor_kind (some-> (:actor-kind representation) name)
+                                             :decision_revision (:revision (last events))
+                                             :category_citation (:citation category)
+                                             :representation_citation (:citation representation)
+                                             :category_decision_id (:decision-id category)
+                                             :representation_decision_id (:decision-id representation)})) subjects)})))))
+
 (defn- read-request [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (let [eof (Object.) request (edn/read {:eof eof} r)]
@@ -624,13 +891,21 @@
     (let [url (System/getenv "FREEDIVING_DATABASE_URL")]
       (println (encode (case command
                          "migrate" (if (= 2 (count args)) (apply migrate! url args) (fail! "migrate INGEST-ROLE REVIEWER-ROLE"))
+                         "export-dive-fields" (if (= 1 (count args)) (do (spit (first args) (export-dive-fields url)) {:output (first args)})
+                                                  (fail! "export-dive-fields OUTPUT.json"))
                          ("propose" "decide" "effective" "history" "accept-extraction" "revoke-extraction" "extraction-effective" "extraction-history"
-                                    "accept-pdf-extraction" "revoke-pdf-extraction" "pdf-extraction-effective" "pdf-extraction-history")
+                                    "accept-pdf-extraction" "revoke-pdf-extraction" "pdf-extraction-effective" "pdf-extraction-history"
+                                    "dive-fields" "dive-decision-history" "reverse-dive-decision" "assert-dive-field")
                          (if (= 1 (count args)) (({"propose" propose! "decide" decide! "effective" effective "history" history
                                                    "accept-extraction" accept-extraction! "revoke-extraction" revoke-extraction!
                                                    "extraction-effective" extraction-effective "extraction-history" extraction-history
                                                    "accept-pdf-extraction" accept-pdf-extraction! "revoke-pdf-extraction" revoke-pdf-extraction!
-                                                   "pdf-extraction-effective" pdf-extraction-effective "pdf-extraction-history" pdf-extraction-history} command) url (read-request (first args)))
+                                                   "pdf-extraction-effective" pdf-extraction-effective "pdf-extraction-history" pdf-extraction-history
+                                                   "dive-fields" dive-fields "dive-decision-history" dive-decision-history
+                                                   "reverse-dive-decision" reverse-dive-decision! "assert-dive-field" assert-dive-field!} command) url (read-request (first args)))
                              (fail! "Expected one EDN request file"))
+                         "reconcile-dive-fields" (if (= 1 (count args)) (let [{:keys [target dictionary]} (read-request (first args))]
+                                                                          (reconcile-dive-fields! url target dictionary))
+                                                     (fail! "reconcile-dive-fields REQUEST.edn"))
                          (fail! "Commands: migrate INGEST-ROLE REVIEWER-ROLE | propose|decide|effective|history|accept-extraction|revoke-extraction|extraction-effective|extraction-history|accept-pdf-extraction|revoke-pdf-extraction|pdf-extraction-effective|pdf-extraction-history REQUEST.edn")))))
     (catch Exception e (binding [*out* *err*] (println "Review operation failed:" (.getMessage e))) (System/exit 1))))
