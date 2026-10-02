@@ -6,7 +6,9 @@
             [freediving.candidates :as candidates]
             [freediving.reconciliation-flow :as flow]
             [freediving.reconciliation-policy :as policy])
-  (:import [java.sql DriverManager Connection]))
+  (:import [java.sql DriverManager Connection]
+           [java.security MessageDigest]
+           [java.util HexFormat]))
 
 (def rule-version "athlete-identity/1")
 (def default-ambiguous-names #{"amy smith" "john smith" "maria silva"})
@@ -515,6 +517,59 @@
                      (query connection "SELECT body_edn FROM freediving.athlete_identity_events ORDER BY revision"))]
     (replay rows events)))
 
+(defn- evidence-digest [ledger]
+  (let [ordered (mapv (fn [id] [id (get-in ledger [:rows id])]) (sort (keys (:rows ledger))))]
+    (.formatHex (HexFormat/of)
+                (.digest (MessageDigest/getInstance "SHA-256")
+                         (.getBytes (pr-str ordered) "UTF-8")))))
+
+(defn- write-canonical-view! [^Connection connection ledger]
+  (let [projection (project ledger)]
+    (with-open [statement (.prepareStatement connection
+                                             (str "INSERT INTO freediving.canonical_identity_view"
+                                                  "(singleton,identity_revision,evidence_sha256,body_edn)"
+                                                  " VALUES(true,?,?,?) ON CONFLICT(singleton) DO UPDATE SET"
+                                                  " identity_revision=EXCLUDED.identity_revision,"
+                                                  " evidence_sha256=EXCLUDED.evidence_sha256,"
+                                                  " body_edn=EXCLUDED.body_edn,rebuilt_at=clock_timestamp()"))]
+      (.setInt statement 1 (:revision projection))
+      (.setString statement 2 (evidence-digest ledger))
+      (.setString statement 3 (binding [*print-length* nil *print-level* nil] (pr-str projection)))
+      (.executeUpdate statement))
+    projection))
+
+(defn rebuild-private-canonical-view!
+  "Atomically recover the private identity view from immutable observations and events."
+  [url]
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (query connection "SELECT pg_advisory_xact_lock(781246919)")
+      (let [projection (write-canonical-view! connection (read-ledger connection))]
+        (.commit connection) projection)
+      (catch Exception error (.rollback connection) (throw error)))))
+
+(defn private-canonical-view
+  "Read only a current, internally consistent private view; stale materializations fail closed."
+  [url]
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setReadOnly connection true)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (let [ledger (read-ledger connection)
+            stored (first (query connection
+                                 "SELECT identity_revision,evidence_sha256,body_edn FROM freediving.canonical_identity_view WHERE singleton=true"))
+            current (project ledger)]
+        (when-not (and stored
+                       (= (:revision current) (:identity_revision stored))
+                       (= (evidence-digest ledger) (:evidence_sha256 stored))
+                       (= current (edn/read-string (:body_edn stored))))
+          (fail! "Private canonical identity view requires rebuild" {}))
+        (.commit connection) current)
+      (catch Exception error (.rollback connection) (throw error)))))
+
 (defn private-projection
   "Read the current private grouping from retained observations and the append-only ledger."
   [url]
@@ -646,7 +701,8 @@
                 (.setString statement 4 (name (:actor-kind stored)))
                 (.setString statement 5 (binding [*print-length* nil *print-level* nil] (pr-str stored)))
                 (.executeUpdate statement))))
-          (let [result (project updated)]
+          (let [result (if existing (project updated)
+                           (write-canonical-view! connection updated))]
             (.commit connection) result)))
       (catch Exception e (.rollback connection) (throw e)))))
 

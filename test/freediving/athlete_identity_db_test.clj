@@ -18,6 +18,41 @@
     (reviews/migrate! admin "observations_app" "reviews_owner")
     (f)))
 
+(deftest private-canonical-view-follows-links-and-recovers-from-new-evidence
+  (let [source (fixture/synthetic 1 "canonical-view/1")
+        job (get-in source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")]
+    (fixture/publish! source)
+    (observations/import! app (:root source) job)
+    (is (= 2 (:provisional-record-count
+              (identity/rebuild-private-canonical-view! reviewer))))
+    (is (= 1 (:accepted-group-count
+              (identity/record-event! reviewer
+                                      {:id "canonical-link" :action :accept :actor-kind :human
+                                       :pair [a b] :reason "synthetic cited link"}))))
+    (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! reviewer
+                                         {:id "canonical-link" :action :reject :actor-kind :human
+                                          :pair [a b] :reason "conflicting replay"})))
+    (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (= 0 (:accepted-group-count
+              (identity/record-event! reviewer
+                                      {:id "canonical-reverse" :action :reverse :actor-kind :human
+                                       :event-id "canonical-link" :reason "synthetic split"}))))
+    (is (= 0 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (= #{a b} (set (keys (:athletes (identity/private-canonical-view app))))))
+    (is (= #{"Éxample"}
+           (set (map :source-name (vals (:athletes (identity/private-canonical-view app)))))))
+    (let [later (fixture/synthetic 1 "canonical-view/2")]
+      (fixture/publish! later)
+      (observations/import! app (:root later) (get-in later [:artifact :job-id]))
+      (is (thrown? clojure.lang.ExceptionInfo (identity/private-canonical-view app)))
+      (is (= 4 (:provisional-record-count
+                (identity/rebuild-private-canonical-view! reviewer))))
+      (is (= 0 (:accepted-group-count (identity/private-canonical-view app)))))))
+
 (deftest persisted-links-reverse-with-stable-provisional-records
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "identity-db/1")
         job (:job-id artifact)
