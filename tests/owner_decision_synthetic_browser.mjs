@@ -73,6 +73,53 @@ const action = (id, actionName, expectedRevision, key, extra={}, headers={}) => 
     'Content-Type':'application/json', 'X-Freediving-CSRF':csrf, ...headers}});
 };
 
+const phase = process.argv[3];
+if (phase === 'projection') {
+  const response = await request('/owner-evidence/api/canonical-projection');
+  if (response.status !== 200) throw Error(`canonical projection ${response.status}`);
+  process.stdout.write(JSON.stringify(await response.json()));
+  process.exit(0);
+}
+if (phase === 'inspect') {
+  const id = process.argv[4];
+  const response = await request(`/owner-evidence/api/decisions/${id}`);
+  if (response.status !== 200) throw Error(`decision inspect ${response.status}`);
+  const detail = await response.json();
+  process.stdout.write(JSON.stringify({decision_id:id,
+    effective_status:detail.effective_status,
+    store_revision:detail.store_revision}));
+  process.exit(0);
+}
+if (phase === 'approve' || phase === 'reverse') {
+  const id = process.argv[4];
+  if (!id) throw Error('decision ID required');
+  const rejected = {};
+  rejected.expired_access = (await request(actionPath(id), {method:'POST',
+    body:JSON.stringify({action:phase,expected_revision:revision,
+      idempotency_key:'expired-'+phase,reason:'synthetic',csrf_token:csrf}),
+    headers:{Origin:origin,'Content-Type':'application/json','X-Freediving-CSRF':csrf,
+      'Cf-Access-Jwt-Assertion':await token({exp:Math.floor(Date.now()/1000)-1})}})).status;
+  rejected.foreign_origin = (await action(id,phase,revision,'foreign-'+phase,{},
+                                          {Origin:'https://foreign.example'})).status;
+  const result = await action(id,phase,revision,'synthetic-'+phase);
+  if (result.status !== 200) throw Error(`${phase} ${result.status}: ${await result.text()}`);
+  const retry = await action(id,phase,revision,'synthetic-'+phase);
+  rejected.stale_revision = (await action(id,phase,revision,'stale-'+phase)).status;
+  const detailResponse = await request(`/owner-evidence/api/decisions/${id}`);
+  if (detailResponse.status !== 200) throw Error(`inspect ${detailResponse.status}`);
+  const detail = await detailResponse.json();
+  const feedPath = '/owner-evidence/api/decision-events?after_revision=0';
+  rejected.browser_event_feed = (await request(feedPath, {headers:{
+    'X-Freediving-Import-Token':importToken}})).status;
+  const feedResponse = await request(feedPath, {headers:{
+    'Cf-Access-Jwt-Assertion':machine, 'X-Freediving-Import-Token':importToken}});
+  if (feedResponse.status !== 200) throw Error(`machine feed ${feedResponse.status}`);
+  process.stdout.write(JSON.stringify({action:result.status, retry:retry.status,
+    rejected, decision_id:id, effective_status:detail.effective_status,
+    feed:await feedResponse.json()}));
+  process.exit(0);
+}
+
 const rejected = {};
 rejected.expired_access = (await request(actionPath('root'), {method:'POST',
   body:JSON.stringify({action:'reverse',expected_revision:revision,

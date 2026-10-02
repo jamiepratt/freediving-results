@@ -103,8 +103,9 @@ def _config(env):
 
 
 class PrivateOrigin(HTTPServer):
-    def __init__(self, snapshot_dir, env, port=0):
+    def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
+        self.canonical_reader = canonical_reader
         self.assets = _assets()
         try:
             self.query = SnapshotQuery(snapshot_dir)
@@ -335,6 +336,13 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result['csrf_token'] = self._csrf()
                 result['active_snapshot_sha256'] = self.server.decisions.projection()['snapshot_sha256']
                 result['canonical_projection_status'] = 'unavailable'
+            elif path == '/owner-evidence/api/canonical-projection' and not parsed.query:
+                if self.server.canonical_reader is None:
+                    return self._reply(503)
+                try:
+                    result = self.server.canonical_reader()
+                except Exception:
+                    return self._reply(503)
             elif path == '/owner-evidence/api/decision-events':
                 token = self._one('X-Freediving-Import-Token')
                 if self.server.import_token is None or token is None or len(token) > 256 or not compare_digest(token, self.server.import_token):
@@ -492,8 +500,9 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _unsupported
 
 
-def make_server(snapshot_dir, env=None, port=0):
-    return PrivateOrigin(snapshot_dir, os.environ if env is None else env, port)
+def make_server(snapshot_dir, env=None, port=0, canonical_reader=None):
+    return PrivateOrigin(snapshot_dir, os.environ if env is None else env, port,
+                         canonical_reader=canonical_reader)
 
 
 def main():

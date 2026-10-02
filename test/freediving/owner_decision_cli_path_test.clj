@@ -9,6 +9,7 @@
             [freediving.reconciliation-flow :as flow]
             [freediving.reviews :as reviews])
   (:import [com.sun.net.httpserver HttpHandler HttpServer]
+           [java.io BufferedReader InputStreamReader OutputStreamWriter]
            [java.net InetSocketAddress]
            [java.nio.file Files]
            [java.nio.file.attribute PosixFilePermissions]
@@ -41,6 +42,118 @@
                          "--config" config "--target" target "--event-id" event-id)]
     (is (zero? (:exit result)) (:err result))
     (when (zero? (:exit result)) (json/read-str (:out result) :key-fn keyword))))
+
+(defn- browser! [port phase decision-id]
+  (let [result (shell/sh "node" "tests/owner_decision_synthetic_browser.mjs"
+                         (str port) phase decision-id)]
+    (is (zero? (:exit result)) (:err result))
+    (when (zero? (:exit result)) (json/read-str (:out result) :key-fn keyword))))
+
+(defn- deliver! [decision-db config-path]
+  (let [result (shell/sh "python3" "scripts/owner_decision_export_adapter.py" "deliver"
+                         "--decision-db" (str decision-db) "--config" (str config-path))]
+    (is (zero? (:exit result)) (str (:out result) "\n" (:err result)))
+    (when (seq (:out result)) (json/read-str (:out result) :key-fn keyword))))
+
+(deftest browser-owner-action-delivers-exact-synthetic-decision-to-postgresql
+  (let [source (fixture/synthetic 1 "owner-cli-path/1")
+        job (get-in source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")
+        _ (fixture/publish! source)
+        _ (observations/import! app (:root source) job)
+        decision (identity/private-jev-decision app a b)
+        revisions (export/load-observation-revisions! app [[job 0] [job 1]])
+        versions (mapv revisions [[job 0] [job 1]])
+        temp (Files/createTempDirectory "owner-browser-pg" (make-array java.nio.file.attribute.FileAttribute 0))
+        metadata-path (.resolve temp "metadata.json")
+        flow-path (.resolve temp "flow.edn")
+        config-path (.resolve temp "config.edn")]
+    (Files/writeString metadata-path
+                       (json/write-str {:decision_id (:id decision)
+                                        :observation_revisions versions :app_url app})
+                       (make-array java.nio.file.OpenOption 0))
+    (let [process (.start (doto (ProcessBuilder.
+                                 ["python3" "tests/test_owner_decision_synthetic_path.py"
+                                  "--serve-integrated" (str metadata-path)])
+                            (.directory (java.io.File. (System/getProperty "user.dir")))
+                            (.redirectErrorStream true)))
+          reader (BufferedReader. (InputStreamReader. (.getInputStream process) "UTF-8"))]
+      (try
+        (let [line (.readLine reader)
+              service (try (json/read-str line :key-fn keyword)
+                           (catch Exception _ (throw (ex-info "Synthetic service failed"
+                                                              {:line line
+                                                               :tail (slurp reader)}))))
+              binding (:canonical_binding service)
+              config {:flow-path (str flow-path) :decisions [decision]
+                      :config {:version "synthetic/1"}
+                      :base-url (str "http://127.0.0.1:" (:import_port service))
+                      :allow-loopback-http? true :access-client-id "synthetic.access"
+                      :access-client-secret "synthetic-service-secret"
+                      :import-token "synthetic-separate-machine-import-token"
+                      :current-bindings {(:id decision) binding}
+                      :active-snapshot-sha256 (:snapshot_sha256 service)
+                      :active-binding-revision (:binding_revision service)
+                      :reviewer-url reviewer}
+              db-path (.resolve temp "decisions.sqlite")]
+          (flow/save-ledger! flow-path (update (flow/empty-ledger) :events conj
+                                               {:id "original-flow" :decision-id (:id decision)}))
+          (Files/writeString config-path (pr-str config) (make-array java.nio.file.OpenOption 0))
+          (Files/setPosixFilePermissions config-path (PosixFilePermissions/fromString "rw-------"))
+          (let [action (browser! (:origin_port service) "approve" (:id decision))]
+            (is (= (:decision_id action) (:id decision)))
+            (is (= {:expired_access 403 :foreign_origin 403 :stale_revision 409
+                    :browser_event_feed 403} (:rejected action)))
+            (is (= 200 (:retry action)))
+            (is (= (:id decision)
+                   (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
+                           [:events 0 :decision_id]))))
+          (is (= "complete" (:status (deliver! db-path config-path))))
+          (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
+          (is (= (:id decision)
+                 (get-in (last (identity/private-history app))
+                         [:owner-canonical-decision :id])))
+          (let [projection (browser! (:origin_port service) "projection" (:id decision))]
+            (is (= 1 (:accepted-group-count projection))
+                (when (Files/exists (.resolve temp "canonical-error.txt")
+                                    (make-array java.nio.file.LinkOption 0))
+                  (Files/readString (.resolve temp "canonical-error.txt")))))
+          (let [writer (OutputStreamWriter. (.getOutputStream process) "UTF-8")]
+            (.write writer "register-dependent\n")
+            (.flush writer)
+            (is (= "synthetic-dependent"
+                   (:registered (json/read-str (.readLine reader) :key-fn keyword)))))
+          (is (= "automatic_approved"
+                 (:effective_status (browser! (:origin_port service) "inspect"
+                                              "synthetic-dependent"))))
+          (let [action (browser! (:origin_port service) "reverse" (:id decision))]
+            (is (= (:id decision)
+                   (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
+                           [:events 1 :decision_id]))))
+          (is (= "complete" (:status (deliver! db-path config-path))))
+          (is (= 0 (:accepted-group-count (identity/private-canonical-view app))))
+          (is (= (:id decision)
+                 (get-in (last (identity/private-history app))
+                         [:owner-canonical-decision :id])))
+          (let [projection (browser! (:origin_port service) "projection" (:id decision))]
+            (is (= 0 (:accepted-group-count projection)))
+            (is (= 1 (count (:negative-pairs projection)))))
+          (is (= "invalidated"
+                 (:effective_status (browser! (:origin_port service) "inspect"
+                                              "synthetic-dependent"))))
+          (is (= "complete" (:status (deliver! db-path config-path)))))
+        (finally
+          (when (.isAlive process)
+            (with-open [writer (OutputStreamWriter. (.getOutputStream process) "UTF-8")]
+              (.write writer "stop\n") (.flush writer)))
+          (when-not (.waitFor process 10 java.util.concurrent.TimeUnit/SECONDS)
+            (.destroyForcibly process)
+            (.waitFor process 5 java.util.concurrent.TimeUnit/SECONDS))
+          (.close reader)
+          (with-open [paths (Files/walk temp (make-array java.nio.file.FileVisitOption 0))]
+            (doseq [path (reverse (iterator-seq (.iterator paths)))]
+              (Files/deleteIfExists path))))))))
 
 (deftest signed-cli-checkpoints-before-canonical-identity-and-retries
   (let [source (fixture/synthetic 1 "owner-cli-path/1")
@@ -117,7 +230,9 @@
         (Files/deleteIfExists (.resolve temp "flow.edn.lock"))
         (Files/deleteIfExists temp)))))
 
-(defn -main [& _]
-  (let [result (run-tests 'freediving.owner-decision-cli-path-test)]
-    (shutdown-agents)
-    (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
+(defn -main [& args]
+  (if (= ["projection"] (vec args))
+    (println (json/write-str (identity/private-canonical-view app)))
+    (let [result (run-tests 'freediving.owner-decision-cli-path-test)]
+      (shutdown-agents)
+      (when (pos? (+ (:fail result) (:error result))) (System/exit 1)))))
