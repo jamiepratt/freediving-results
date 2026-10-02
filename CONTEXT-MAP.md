@@ -17,7 +17,8 @@ Older references to an issue being open are historical, not current status.
 | Capturing AIDA selected-day results | [AIDA HTML ingestion](docs/aida-html-ingestion.md) | Implemented format contract |
 | Building/querying private evidence | [Census contract](docs/census-evidence-contract.md), [snapshot](docs/unified-evidence-snapshot.md), [private bundle](docs/private-source-bundle.md) | Implemented contracts plus dated snapshots |
 | Changing owner evidence display | [Owner workspace](docs/owner-evidence-workspace.md) | Implemented UI and access contract |
-| Discussing reconciliation later | [Revision relationships](docs/revision-relationships.md), [review rubric](docs/review-rubric.md), [event selections](docs/event-selections.md), [publication policy](docs/publication-policy.md) | Existing contracts, not new reconciliation decisions |
+| Applying automatic reconciliation policy | [ADR 0003](docs/adr/0003-automatic-evidence-reconciliation.md), [issue #67](https://github.com/jamiepratt/freediving-results/issues/67) | Accepted policy; general reconciliation and remote review writes remain implementation work |
+| Checking existing review/publication contracts | [Revision relationships](docs/revision-relationships.md), [review rubric](docs/review-rubric.md), [event selections](docs/event-selections.md), [publication policy](docs/publication-policy.md) | Implemented boundaries; distinguish them from ADR 0003 direction |
 | Deploying an approved change | [Deployment](docs/deployment.md) | Operational runbook |
 | Deciding unresolved ingestion design | [Issue #62](https://github.com/jamiepratt/freediving-results/issues/62) | Design discussion; future scope lives here |
 | Opening a bounded ingestion task | [Issue template](.github/ISSUE_TEMPLATE/ingestion-evidence.yml) | Intake for discovery, acquisition and parser gaps |

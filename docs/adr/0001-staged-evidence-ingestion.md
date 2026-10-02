@@ -4,6 +4,11 @@ Date: 2026-10-02. Status: accepted project direction from the owner request.
 Implementation status: partial. Detailed contracts remain in
 [issue #62](https://github.com/jamiepratt/freediving-results/issues/62).
 
+Reconciliation follow-up: [ADR 0003](0003-automatic-evidence-reconciliation.md)
+settles the later automatic reconciliation policy. Deferral language below records
+the original ingestion boundary; ingestion alone still makes no reconciliation
+or publication decision. Cross-federation scoring remains outside that follow-up.
+
 ## Context
 
 The project seeks an authoritative database of online freediving results across

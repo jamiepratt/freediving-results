@@ -1,5 +1,14 @@
 # Local owner evidence workspace
 
+The runbook below describes the implemented read-only workspace.
+[ADR 0003](adr/0003-automatic-evidence-reconciliation.md) now accepts automatic
+reconciliation with later review and rollback on the existing private website.
+[Issue #67](https://github.com/jamiepratt/freediving-results/issues/67) owns that
+next phase: persistent decisions independent of snapshot replacement, confidence
+sorting, automatic/human decision states and reversible writes. Those capabilities
+are not enabled by this documentation update; the read-only origin and gateway
+contracts below continue to describe current behavior.
+
 Run `python3 scripts/owner_evidence_web.py --snapshot-dir PATH` with a verified private unified snapshot directory. Enter a local password at the terminal prompt, then open the printed loopback login URL. The process binds only to `127.0.0.1` on an ephemeral port. Stop it with Ctrl-C.
 
 The workspace reads the immutable SQLite snapshot through `SnapshotQuery`. It provides source counts and dispositions, filters for source, collection, kind, event, printed date span, session, discipline and category, plus paged candidate, gap and relationship views. Detail shows retained packet raw and parsed fields, citation and source hashes. The interface labels normalized federation unavailable, and never treats candidate rows as confirmed distinct attempts. Pass `--source-bundle-dir` and `--source-bundle-sha256` together to enable record-bound original and safe-derivative inspection from a verified [private source bundle](private-source-bundle.md). Without those arguments, source viewing stays unavailable. Owner review, mutation and publication remain outside this process.
