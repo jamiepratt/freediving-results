@@ -43,6 +43,7 @@
            :test-reviews {:extra-paths ["test"] :main-opts ["-m" "freediving.reviews-test"]}
            :test-athlete-identity-db {:extra-paths ["test"] :main-opts ["-m" "freediving.athlete-identity-db-test"]}
            :test-canonical-attempt-store {:extra-paths ["test"] :main-opts ["-m" "freediving.canonical-attempt-store-test"]}
+           :test-owner-identity-route {:extra-paths ["test"] :main-opts ["-m" "freediving.owner-identity-route-test"]}
            :test-postgres {:extra-paths ["test"] :main-opts ["-m" "freediving.observations-test"]}
            :test {:extra-paths ["test"]
                   :main-opts ["-m" "freediving.test-runner"]}

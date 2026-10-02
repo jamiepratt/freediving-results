@@ -638,6 +638,19 @@
           (fail! "Athlete identity write capability required" {})))
       (let [ledger (read-ledger connection)
             existing (some #(when (= (:id %) (:id event)) %) (:events ledger))]
+        (when (and (nil? existing) (contains? event :base-revision)
+                   (not= (:base-revision event) (count (:events ledger))))
+          (fail! "Stale identity ledger revision" {:expected (:base-revision event)
+                                                   :current (count (:events ledger))}))
+        (when (and (nil? existing) (:owner-binding event))
+          (let [[a b] (:pair event)
+                expected (:owner-canonical-decision event)
+                current (try (jev-decision ledger a b
+                                           {:id (:id expected)
+                                            :dependencies (:dependencies expected)})
+                             (catch clojure.lang.ExceptionInfo _ nil))]
+            (when-not (= current expected)
+              (fail! "Owner identity pair or candidate evidence changed" {:id (:id event)}))))
         (when (and existing (not= event (:request existing)))
           (fail! "Conflicting identity event ID" {:id (:id event)}))
         (when (and existing (= :model (:actor-kind event))
