@@ -82,6 +82,11 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=17"))]
                      (when-not (= checksum (:sha256 old)) (fail! "Canonical identity migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(17,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/018-canonical-attempt-store.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=18"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "Canonical attempt migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(18,?)" checksum))))
                  (execute! c "DROP TRIGGER stamp_dive_field_decisions ON freediving.dive_field_decisions")
                  (execute! c (str "CREATE TRIGGER stamp_dive_field_decisions BEFORE INSERT ON freediving.dive_field_decisions FOR EACH ROW EXECUTE FUNCTION freediving.stamp_dive_field_decision('" ingest-role "','" reviewer-role "')"))
                  (execute! c "DROP TRIGGER stamp_athlete_identity_event ON freediving.athlete_identity_events")
@@ -96,12 +101,15 @@
                    (execute! c (str "REVOKE ALL ON freediving.dive_field_decisions FROM " role))
                    (execute! c (str "REVOKE ALL ON freediving.athlete_identity_events FROM " role))
                    (execute! c (str "REVOKE ALL ON freediving.canonical_identity_view FROM " role))
+                   (execute! c (str "REVOKE ALL ON freediving.canonical_attempt_evidence,freediving.canonical_attempt_events,freediving.canonical_attempt_state FROM " role))
                    (execute! c (str "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions TO " role))
                    (execute! c (str "GRANT SELECT ON freediving.extraction_reviews TO " role))
                    (execute! c (str "GRANT SELECT ON freediving.pdf_extraction_reviews TO " role))
                    (execute! c (str "GRANT SELECT,INSERT ON freediving.dive_field_decisions TO " role))
                    (execute! c (str "GRANT SELECT,INSERT ON freediving.athlete_identity_events TO " role))
                    (execute! c (str "GRANT SELECT,INSERT,UPDATE ON freediving.canonical_identity_view TO " role))
+                   (execute! c (str "GRANT SELECT,INSERT ON freediving.canonical_attempt_evidence,freediving.canonical_attempt_events TO " role))
+                   (execute! c (str "GRANT SELECT,INSERT,UPDATE ON freediving.canonical_attempt_state TO " role))
                    (execute! c (str "GRANT INSERT ON freediving.review_proposals TO " role)))
                  (execute! c (str "GRANT INSERT ON freediving.review_decisions TO " reviewer-role))
                  (execute! c (str "GRANT INSERT ON freediving.extraction_reviews TO " reviewer-role))
