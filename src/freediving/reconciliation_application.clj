@@ -266,11 +266,65 @@
 (defn- field-target [opts decision]
   (get-in opts [:field-targets (:id decision)]))
 
+(defn- route-imported-field! [flow-ledger decision view opts]
+  (let [id (:id decision)
+        human (last (filter #(and (= :human (:origin %))
+                                  (= id (:decision-id %))) (:events flow-ledger)))
+        owner (:remote-event human)
+        action (:action owner)
+        {:keys [target decision-type base-revision]} (field-target opts decision)
+        binding (get-in opts [:current-bindings id])
+        current (when (and (:reviewer-url opts) target
+                           (#{"reject" "reverse"} action))
+                  (reviews/dive-fields (:reviewer-url opts) target))
+        event-id (when current (get-in current [decision-type :decision-id]))
+        active-event (when event-id
+                       (first (filter #(= event-id (:id %))
+                                      (reviews/dive-decision-history
+                                       (:reviewer-url opts) target))))
+        proposed (case action
+                   "approve" (get-in owner [:proposal :proposed])
+                   "correct" (get-in owner [:correction :value])
+                   nil)]
+    (if-not (and (#{"approve" "correct" "reject" "reverse"} action)
+                 (#{:category :representation} decision-type)
+                 (= decision-type (:family decision))
+                 (or (#{"reject" "reverse"} action)
+                     (= decision-type (:action view)))
+                 (or (not (#{"approve" "correct"} action))
+                     (if (= decision-type :category)
+                       (and (vector? proposed) (seq proposed)
+                            (every? string? proposed))
+                       (and (map? proposed) (keyword? (:kind proposed))
+                            (string? (:code proposed)))))
+                 (:reviewer-url opts) (map? target) (nat-int? base-revision)
+                 (= binding (get-in owner [:proposal :canonical_binding]))
+                 (or (not (#{"reject" "reverse"} action))
+                     (and (= base-revision (:revision current))
+                          (string? event-id)
+                          (= id (or (:decision-id active-event)
+                                    (get-in active-event
+                                            [:request :binding :decision_id]))))))
+      (unresolved :unsupported-or-stale-owner-field-decision)
+      {:status (if (#{"reject" "reverse"} action) :reversed :materialized)
+       :event (reviews/import-owner-dive-field!
+               (:reviewer-url opts)
+               {:id (:id human) :owner-event owner :binding binding
+                :target target :decision-type decision-type
+                :base-revision base-revision :proposed proposed
+                :event-id event-id})})))
+
 (defn- route-field! [flow-ledger decision view opts]
   (let [{:keys [target decision-type dictionary base-revision]} (field-target opts decision)
         request {:target target :decision-id (:id decision) :decision-type decision-type
                  :dictionary dictionary :policy (:policy opts) :base-revision base-revision}]
     (cond
+      (and (= :human (:origin view))
+           (:remote-event (last (filter #(and (= :human (:origin %))
+                                              (= (:id decision) (:decision-id %)))
+                                        (:events flow-ledger)))))
+      (route-imported-field! flow-ledger decision view opts)
+
       (and (= :human (:origin view)) (correction-statuses (:status view)))
       (if (and (:reviewer-url opts) target decision-type)
         (let [current (reviews/dive-fields (:reviewer-url opts) target)]
