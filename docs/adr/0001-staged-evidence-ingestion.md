@@ -46,9 +46,17 @@ to reusable parser development. Retain the transcription, exact source
 page/region citations and verification evidence as a replayable artifact; replay
 must not require another model call. A unique scan need not receive a bespoke
 parser. This exception does not make the transcription authoritative or approve
-identities or publication. The verification procedure remains to be specified
-in #62. Requiring a reusable parser for every scan is rejected because it can
+identities or publication. Requiring a reusable parser for every scan is rejected because it can
 add work without producing a reusable extraction method.
+
+Verify exceptional scan transcriptions with an independent second pass that
+does not see the first transcription. Compare the retained outputs
+deterministically, then inspect disagreements and a sample of agreements against
+the source. Preserve both outputs and verification evidence; unresolved readings
+remain explicit. Agreement between passes is not proof of correctness because
+both can make the same mistake. Mandatory human verification of every row is
+not the default. Sampling details and escalation criteria belong to the
+implementation contract in #62.
 
 Discovery includes event calendars and lists, individual results, local and
 international federation/organizer evidence, native-script athlete names and
@@ -75,7 +83,7 @@ deferred. Record evidence needed for those decisions without making them.
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
   evidence, not yet a uniform cross-format registry. The recognizer API,
-  section composition, partial matches, scan verification, refresh policy and
+  section composition, partial matches, refresh policy and
   stopping rules remain unresolved in #62; this decision does not select their design.
 
 ## Evidence

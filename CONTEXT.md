@@ -39,6 +39,9 @@ For unusual scans, direct LLM transcription is an allowed exception. Retain the
 transcription, exact source page/region citations and verification evidence;
 replay the retained artifact without another LLM call. This does not require
 a bespoke parser for every unique scan or grant review/publication approval.
+Verify with an independent second transcription, deterministic comparison, and
+source inspection of disagreements plus a sample of agreements. Retain both
+passes and verification evidence; agreement alone can still hide shared errors.
 
 Preserve native-script names and publisher-stated correspondence to romanized
 names, including evidence from national affiliates and local organizations.
