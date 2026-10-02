@@ -81,6 +81,28 @@ class ScanVerificationTest(unittest.TestCase):
                                       [check for check in self.checks() if check["position"] != missing],
                                       sample_size=1)
 
+    def test_requires_nonempty_agreement_sample_when_agreements_exist(self):
+        with self.assertRaisesRegex(ValueError, "agreement sample"):
+            verify_transcriptions(self.first, self.second,
+                                  [inspection("p1-r2", "resolved", "B"),
+                                   inspection("p1-r3", "unresolved")], sample_size=0)
+
+    def test_uninspected_agreements_are_marked_explicitly(self):
+        first = transcription("pass-1", "worker-1", {"p1-r1": "A", "p1-r2": "B"})
+        second = transcription("pass-2", "worker-2", {"p1-r1": "A", "p1-r2": "B"})
+        sampled = verify_transcriptions(first, second, [inspection("p1-r1", "confirmed", "A")],
+                                         sample_size=1)
+        statuses = {row["position"]: row["status"] for row in sampled["positions"]}
+        self.assertEqual({"source_inspected", "agreed_uninspected"}, set(statuses.values()))
+
+    def test_zero_sample_is_valid_when_no_agreements_exist(self):
+        first = transcription("pass-1", "worker-1", {"p1-r1": "A"})
+        second = transcription("pass-2", "worker-2", {"p1-r1": "8"})
+        result = verify_transcriptions(first, second,
+                                       [inspection("p1-r1", "unresolved")], sample_size=0)
+        self.assertEqual([], result["sampled_agreements"])
+        self.assertEqual("unresolved", result["positions"][0]["status"])
+
     def test_rejects_uncited_or_unresolved_acceptance(self):
         bad = self.checks()
         bad[1]["region_px"] = {"x1": 2, "y1": 13, "x2": 10, "y2": 22}

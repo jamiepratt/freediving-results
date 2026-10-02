@@ -63,6 +63,7 @@ def _validate_pass(artifact):
 
 def _sample(source_sha, positions, sample_size):
     _require(type(sample_size) is int and 0 <= sample_size <= len(positions), "invalid agreement sample size")
+    _require(not positions or sample_size > 0, "agreement sample must include a position")
     ranked = sorted(positions, key=lambda position: (
         hashlib.sha256(f"{source_sha}:{position}".encode()).hexdigest(), position))
     return sorted(ranked[:sample_size])
