@@ -1,6 +1,10 @@
 (ns freediving.reconciliation-flow-test
-  (:require [clojure.test :refer [deftest is run-tests]]
-            [freediving.reconciliation-flow :as flow]))
+  (:require [clojure.data.json :as json]
+            [clojure.test :refer [deftest is run-tests]]
+            [freediving.reconciliation-flow :as flow]
+            [freediving.reconciliation-transport :as transport])
+  (:import [com.sun.net.httpserver HttpServer]
+           [java.net InetSocketAddress]))
 
 (def policy {:version "test/1"
              :thresholds {:identity {:same-person {:min-confidence 0.9 :min-probability 0.9 :min-margin 0.2}
@@ -207,6 +211,50 @@
            (get-in (flow/inspect (flow/load-ledger! path) decisions) ["a" :status])))
     (flow/run-file! path decisions {:config config :policy policy :execute! second-execute!})
     (is (= 1 @calls))))
+
+(deftest file-backed-loopback-batches-replays-and-invalidates-evidence
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-loopback-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "ledger.edn")
+        requests (atom [])
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)
+        decisions [(decision "a") (decision "b")]]
+    (.createContext server "/jev"
+                    (reify com.sun.net.httpserver.HttpHandler
+                      (handle [_ exchange]
+                        (let [body (slurp (.getRequestBody exchange))
+                              questions (get (json/read-str body) "questions")
+                              ids (vec (keys questions))
+                              response (json/write-str
+                                        {:model "jev-1.13.0" :usage {}
+                                         :answers (into {}
+                                                        (map (fn [id]
+                                                               [id {:type "choice" :choice "same_person"
+                                                                    :confidence 0.96
+                                                                    :probabilities {"same_person" 0.94
+                                                                                    "different_person" 0.04
+                                                                                    "unknown" 0.02}}]) ids))})
+                              bytes (.getBytes response "UTF-8")]
+                          (swap! requests conj ids)
+                          (.sendResponseHeaders exchange 200 (alength bytes))
+                          (with-open [output (.getResponseBody exchange)]
+                            (.write output bytes))))))
+    (.start server)
+    (try
+      (let [url (str "http://127.0.0.1:" (.getPort (.getAddress server)) "/jev")
+            config (assoc config :endpoint url :timeout-ms 2000)
+            runtime {:bearer-token "synthetic-loopback-token"}
+            opts {:config config :policy policy
+                  :execute! #(transport/execute! % runtime)}
+            changed (assoc-in (decision "a") [:evidence 0 :exact-excerpt] "Revised result row")]
+        (flow/run-file! path decisions opts)
+        (flow/run-file! path decisions opts)
+        (flow/run-file! path [changed (decision "b")] opts)
+        (is (= [["a" "b"] ["a"]] @requests))
+        (is (= 2 (count (:approved-decisions
+                         (flow/project-private (flow/load-ledger! path)
+                                               [changed (decision "b")] config))))))
+      (finally (.stop server 0)))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-flow-test)]
