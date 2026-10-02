@@ -27,7 +27,7 @@ Older references to an issue being open are historical, not current status.
 
 | Area | Entry points | Read when |
 | --- | --- | --- |
-| Discovery | `scripts/discover_results.py`, `scripts/issue55_route_roster.py`, `scripts/fipsas_calendar.py`, `config/source-discovery.example.json` | Checking date limits, route states and coverage |
+| Discovery | [Bounded discovery pass](docs/discovery-pass.md), `scripts/discovery_pass.py`, `scripts/discovery_frontier.py`, `scripts/discovery_refresh.py`, `scripts/discover_results.py`, `scripts/issue55_route_roster.py`, `scripts/fipsas_calendar.py`, `config/source-discovery.example.json` | Checking date limits, route states, refresh and coverage |
 | Acquisition/reuse | `scripts/acquire_source.py`, `scripts/source_acquisition.py`, `scripts/source_inventory.py`; `test/test_source_inventory.py`, `test/test_source_acquisition.py` | Avoiding repeat fetches, checking pacing or receipts |
 | Browser evidence | `scripts/browser_acquisition.py`, `scripts/capture_browser.py`, `scripts/browser-selection.example.json` | Capturing response and selected view context |
 | Archive/PDF extraction | `src/freediving/archive.clj`, `src/freediving/extraction.clj`, adjacent parser modules; `test/freediving/` | Inspecting supported formats, hash guards, citations and replay |
