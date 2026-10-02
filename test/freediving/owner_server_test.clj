@@ -16,6 +16,7 @@
             [freediving.observations-test :as fixture]
             [freediving.observations :as observations]
             [freediving.reviews :as reviews]
+            [freediving.athlete-identity :as athlete-identity]
             [freediving.evaluation-labels :as labels]
             [freediving.publication :as publication]
             [freediving.public-results :as public-results]
@@ -62,6 +63,27 @@
   (let [r (request s "POST" "/api/login" {:capability (slurp (:capability-file s))} {"Origin" (:url s) "Content-Type" "application/json"})]
     {"Origin" (:url s) "Content-Type" "application/json"
      "Cookie" (first (str/split (:cookie r) #";")) "X-CSRF-Token" (get-in r [:body :csrf])}))
+
+(deftest private-athletes-require-owner-session-and-show-reversible-origin
+  (let [target (publication-fixture/sample
+                (fn [artifact]
+                  (let [artifact (assoc-in artifact [:config :synthetic] true)]
+                    (assoc artifact :job-id (fixture/hash-value
+                                             (select-keys artifact observations/identity-keys))))))
+        job (:job-id target)
+        a (str "local-observation:" job ":0") b (str "local-observation:" job ":1")]
+    (athlete-identity/record-event! publication-fixture/reviewer
+                                    {:id "owner-link" :action :accept :actor-kind :human
+                                     :pair [a b] :reason "Synthetic test"})
+    (let [s (server/start! (config))]
+      (try
+        (is (= 401 (:status (request s "GET" "/api/athletes" nil {}))))
+        (let [h (login s) result (request s "GET" "/api/athletes" nil h)]
+          (is (= 200 (:status result)))
+          (is (= 1 (get-in result [:body :projection :accepted-group-count])))
+          (is (= "accepted-link" (get-in result [:body :projection :athletes (keyword a) :origin])))
+          (is (= "owner-link" (get-in result [:body :history 0 :id]))))
+        (finally (server/stop! s))))))
 
 (deftest private-detail-shows-missing-current-jev-pair
   (let [t (publication-fixture/sample (fn [a]
@@ -276,7 +298,7 @@
 
 (defn inspector! []
   (fixture/sql! fixture/admin "DO $$ BEGIN CREATE ROLE source_inspector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
-  (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO source_inspector; GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.extraction_reviews,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector")
+  (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO source_inspector; GRANT SELECT ON freediving.extractions,freediving.observations,freediving.review_proposals,freediving.review_decisions,freediving.extraction_reviews,freediving.pdf_extraction_reviews,freediving.dive_field_decisions,freediving.athlete_identity_events,freediving.publication_decisions,freediving.publication_policy_events,freediving.correction_requests,freediving.correction_triage TO source_inspector")
   (str/replace publication-fixture/reviewer "user=reviews_owner" "user=source_inspector"))
 
 (deftest registered-pages-stay-private-and-real-inspection-cannot-mutate
@@ -289,6 +311,9 @@
     (try
       (is (= 401 (:status (request s "GET" png nil {}))))
       (let [h (login s) info (request s "GET" path nil h) image-url (get-in info [:body :image-url])]
+        (is (= 200 (:status (request s "GET" "/api/athletes" nil h))))
+        (is (= 0 (get-in (request s "GET" "/api/athletes" nil h)
+                         [:body :projection :accepted-group-count])))
         (is (= 200 (:status info)))
         (is (= 1 (get-in info [:body :page-count])))
         (is (= (:source-sha256 row) (get-in info [:body :source-sha256])))

@@ -3,6 +3,7 @@
   (:require [clojure.edn :as edn] [clojure.data.json :as json] [clojure.java.io :as io] [clojure.string :as str]
             [freediving.candidates :as candidates] [freediving.packets :as packets]
             [freediving.corrections :as corrections]
+            [freediving.athlete-identity :as athlete-identity]
             [freediving.reviews :as reviews] [freediving.publication :as publication]
             [freediving.spelling-normalization :as spelling])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
@@ -28,13 +29,13 @@
               (seq (query c "SELECT oid FROM pg_namespace WHERE nspname='freediving' AND pg_has_role(current_user,nspowner,'MEMBER')"))
               (seq (query c "SELECT oid FROM pg_database WHERE datname=current_database() AND pg_has_role(current_user,datdba,'MEMBER')")))
       (fail! 403 "Restricted reviewer role required"))
-    (doseq [table ["extractions" "observations" "review_proposals" "review_decisions" "extraction_reviews" "publication_decisions" "publication_policy_events" "correction_requests" "correction_triage"]]
+    (doseq [table ["extractions" "observations" "review_proposals" "review_decisions" "extraction_reviews" "pdf_extraction_reviews" "dive_field_decisions" "athlete_identity_events" "publication_decisions" "publication_policy_events" "correction_requests" "correction_triage"]]
       (let [v (first (query c (str "SELECT has_table_privilege(current_user,'freediving." table "','SELECT') AS readable,has_table_privilege(current_user,'freediving." table "','UPDATE,DELETE,TRUNCATE') AS mutable,has_table_privilege(current_user,'freediving." table "','INSERT') AS appendable")))]
-        (when (or (not (:readable v)) (:mutable v) (not= (and review-enabled? (contains? #{"review_proposals" "review_decisions" "extraction_reviews" "publication_decisions" "correction_triage"} table)) (:appendable v))) (fail! 403 (if review-enabled? "Reviewer table privileges invalid" "Inspector table privileges invalid")))))
+        (when (or (not (:readable v)) (:mutable v) (not= (and review-enabled? (contains? #{"review_proposals" "review_decisions" "extraction_reviews" "pdf_extraction_reviews" "dive_field_decisions" "athlete_identity_events" "publication_decisions" "correction_triage"} table)) (:appendable v))) (fail! 403 (if review-enabled? "Reviewer table privileges invalid" "Inspector table privileges invalid")))))
     (when (or (seq (query c "SELECT oid FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' AND (pg_has_role(current_user,nspowner,'MEMBER') OR has_schema_privilege(current_user,oid,'CREATE'))"))
               (:allowed (first (query c "SELECT has_database_privilege(current_user,current_database(),'CREATE') AS allowed")))
               (seq (query c "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.prosecdef AND p.oid IS DISTINCT FROM to_regprocedure('freediving.lock_selection_authority()') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND has_function_privilege(current_user,p.oid,'EXECUTE')"))
-              (seq (query c "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR has_table_privilege(current_user,c.oid,'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'REFERENCES') OR (NOT (n.nspname='freediving' AND c.relname IN ('public_projection_cache','event_coverage_cache')) AND (has_any_column_privilege(current_user,c.oid,'UPDATE') OR has_table_privilege(current_user,c.oid,'DELETE'))) OR (NOT (n.nspname='freediving' AND c.relname IN ('review_proposals','review_decisions','extraction_reviews','publication_decisions','correction_triage','evaluation_labels','revision_proposals','revision_decisions','public_projection_cache','event_selections','event_coverage_cache')) AND has_any_column_privilege(current_user,c.oid,'INSERT')))")))
+              (seq (query c "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR has_table_privilege(current_user,c.oid,'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'REFERENCES') OR (NOT (n.nspname='freediving' AND c.relname IN ('public_projection_cache','event_coverage_cache')) AND (has_any_column_privilege(current_user,c.oid,'UPDATE') OR has_table_privilege(current_user,c.oid,'DELETE'))) OR (NOT (n.nspname='freediving' AND c.relname IN ('review_proposals','review_decisions','extraction_reviews','pdf_extraction_reviews','dive_field_decisions','athlete_identity_events','publication_decisions','correction_triage','evaluation_labels','revision_proposals','revision_decisions','public_projection_cache','event_selections','event_coverage_cache')) AND has_any_column_privilege(current_user,c.oid,'INSERT')))")))
       (fail! 403 "Owner database authority invalid"))
     (when (and (not review-enabled?)
                (or (seq (query c "SELECT oid FROM pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND has_schema_privilege(current_user,oid,'CREATE')"))
@@ -187,6 +188,9 @@
       (let [p (params e) offset (try (Long/parseLong (get p :offset "0")) (catch Exception _ -1))]
         (when-not (<= 0 offset 10000) (fail! 400 "Correction offset must be between 0 and 10000"))
         (respond (corrections/list-requests database-url {:limit 100 :offset offset})))
+      (= path "/api/athletes")
+      (respond {:projection (athlete-identity/private-projection database-url)
+                :history (athlete-identity/private-history database-url)})
       (= path "/api/candidates")
       (let [corpus (candidates/load-corpus database-url {})
             result (candidates/packets corpus {:limit 1000})
