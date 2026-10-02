@@ -693,6 +693,52 @@
                    {:status :unresolved :reason :canonical-conflict
                     :detail (ex-data error) :ledger ledger}))))))))))
 
+(defn- model-decision-id [event]
+  (when (and (= :accept (:action event)) (:approval-proof event))
+    (case (:type event)
+      :same-attempt (when (= :jev-source-bound (get-in event [:evidence :kind]))
+                      (get-in event [:evidence :decision-id]))
+      :source-revision (get-in event [:evidence :jev :decision-id])
+      nil)))
+
+(defn synchronize-human-attempt-correction
+  "Reverse active canonical model events after the latest owner rejection or reversal.
+   Exact retry is idempotent; deterministic and manual relationships are untouched."
+  [ledger flow-ledger decision-id expected-revision]
+  (let [human (last (filter #(and (= :human (:origin %))
+                                  (= decision-id (:decision-id %)))
+                            (:events flow-ledger)))
+        model-events (filter #(= decision-id (model-decision-id %)) (:events ledger))
+        active-ids (set (map :id (active-events ledger)))
+        targets (filter #(active-ids (:id %)) model-events)
+        reverse-id (fn [event] (str "human-model-reverse:" (:id human) ":" (:id event)))
+        prior-ids (set (map :id (:events ledger)))]
+    (cond
+      (not= attempt-rule-version (:version ledger))
+      {:status :unresolved :reason :ledger-version-mismatch :ledger ledger}
+      (not= flow/ledger-version (:version flow-ledger))
+      {:status :unresolved :reason :flow-version-mismatch :ledger ledger}
+      (not= expected-revision (count (:events ledger)))
+      {:status :unresolved :reason :stale-revision :ledger ledger}
+      (or (not (string? decision-id))
+          (not (#{:rejected :reversed} (:status human))))
+      {:status :unresolved :reason :no-current-owner-correction :ledger ledger}
+      (seq targets)
+      (let [updated (reduce (fn [current event]
+                              (append-attempt-event current
+                                                    {:id (reverse-id event) :action :reverse
+                                                     :event-id (:id event)}))
+                            ledger targets)]
+        {:status :reversed :ledger updated
+         :events (subvec (:events updated) (count (:events ledger)))
+         :projection (project-attempts updated)})
+      (and (seq model-events)
+           (every? #(prior-ids (reverse-id %)) model-events))
+      {:status :replayed :reason :already-reversed :ledger ledger
+       :projection (project-attempts ledger)}
+      :else
+      {:status :unresolved :reason :no-active-model-decision :ledger ledger})))
+
 (defn- join-groups [groups left right]
   (let [members (into (get groups left) (get groups right))]
     (reduce #(assoc %1 %2 members) groups members)))

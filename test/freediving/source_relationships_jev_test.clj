@@ -171,6 +171,40 @@
     (is (= :unresolved (:status (relationships/apply-approved-jev-attempt-decision
                                  base corrected child config policy 0 [parent child]))))))
 
+(deftest later-owner-correction-reverses-only-active-model-decision
+  (let [base (partial-ledger)
+        d (decision base)
+        run (approved-flow d)
+        applied (relationships/apply-approved-jev-attempt-decision
+                 base run d config policy 0)
+        with-publisher (relationships/append-attempt-event
+                        (:ledger applied)
+                        {:id "publisher-mirror" :action :accept :type :source-dependent
+                         :pair ["official" "mirror"]
+                         :evidence fixture/mirror-provenance})
+        human (flow/append-human-event
+               run {:id "owner-reversal" :decision-id (:id d) :status :reversed})
+        result (relationships/synchronize-human-attempt-correction
+                with-publisher human (:id d) 2)
+        replay (relationships/synchronize-human-attempt-correction
+                (:ledger result) human (:id d) 3)
+        unrelated (relationships/synchronize-human-attempt-correction
+                   with-publisher
+                   (flow/append-human-event run
+                                            {:id "other-reversal" :decision-id "other"
+                                             :status :reversed})
+                   "other" 2)]
+    (is (= :reversed (:status result)))
+    (is (= 0 (get-in (relationships/project-attempts (:ledger result))
+                     [:counts :accepted-attempts])))
+    (is (= 3 (count (get-in result [:ledger :events]))))
+    (is (= 1 (count (:source-relationships
+                     (relationships/project-attempts (:ledger result))))))
+    (is (= :replayed (:status replay)))
+    (is (= (:ledger result) (:ledger replay)))
+    (is (= :unresolved (:status unrelated)))
+    (is (= with-publisher (:ledger unrelated)))))
+
 (deftest publisher-cited-model-revision-records-direction-without-changing-count
   (let [base (fixture/attempt-fixture)
         publisher {:kind :publisher-correction :predecessor "official" :successor "mirror"
@@ -194,12 +228,19 @@
                                                                       "same_source" 0.005
                                                                       "unrelated" 0.005
                                                                       "unknown" 0.005}}}})})
-        result (relationships/apply-approved-jev-attempt-decision base run d config p 0)]
+        result (relationships/apply-approved-jev-attempt-decision base run d config p 0)
+        correction (flow/append-human-event run {:id "reject-source-revision"
+                                                 :decision-id (:id d) :status :rejected})
+        reversed (relationships/synchronize-human-attempt-correction
+                  (:ledger result) correction (:id d) 1)]
     (is (= :applied (:status result)))
     (is (= 1 (count (get (relationships/project-attempts (:ledger result))
                          :source-relationships))))
     (is (= (get-in (relationships/project-attempts base) [:counts :accepted-attempts])
-           (get-in (relationships/project-attempts (:ledger result)) [:counts :accepted-attempts])))))
+           (get-in (relationships/project-attempts (:ledger result)) [:counts :accepted-attempts])))
+    (is (= :reversed (:status reversed)))
+    (is (empty? (:source-relationships
+                 (relationships/project-attempts (:ledger reversed)))))))
 
 (defn -main []
   (let [result (run-tests 'freediving.source-relationships-jev-test)]
