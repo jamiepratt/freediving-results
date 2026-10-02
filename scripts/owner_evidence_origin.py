@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only owner evidence origin behind the verified Cloudflare Worker gate."""
+"""Owner evidence origin behind the verified Cloudflare Worker gate."""
 
 import argparse
 from hmac import compare_digest
+import hmac
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -21,6 +23,10 @@ CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; 
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
            'session', 'discipline', 'category', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
+MAX_ACTION = 16 * 1024
+DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
+DECISION_PREVIEW_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/preview$')
+DECISION_ACTION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/actions$')
 DETAIL_PATH = re.compile(r'^/owner-evidence/api/detail/([a-f0-9]{64})$')
 SOURCE_VIEW_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})$')
 COMPARISON_PATH = re.compile(r'^/owner-evidence/api/comparison/([a-f0-9]{64})$')
@@ -125,6 +131,18 @@ class PrivateOrigin(HTTPServer):
             self.roster = (RouteRosterQuery(roster_dir, roster_sha, self.query) if roster_dir else
                            RouteRosterQuery.from_snapshot(self.query)
                            if any(name in self.query.manifest['inputs'] for name in ('route-roster-v4', 'route-roster-v3')) else None)
+            decision_db = env.get('OWNER_EVIDENCE_DECISION_DB')
+            self.decisions = None
+            if decision_db:
+                from owner_decision_store import DecisionStore
+                decision_path = Path(decision_db).resolve()
+                if decision_path.is_relative_to(Path(snapshot_dir).resolve()):
+                    raise ValueError('decision DB must be independent of snapshot')
+                self.decisions = DecisionStore(decision_path)
+                if self.decisions.projection()['snapshot_sha256'] != expected_digest:
+                    self.decisions.bind_verified_snapshot(snapshot_dir,
+                        expected_revision=self.decisions.revision,
+                        idempotency_key='snapshot-' + expected_digest)
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()
@@ -133,6 +151,8 @@ class PrivateOrigin(HTTPServer):
     def server_close(self):
         super().server_close()
         self.query.close()
+        if self.decisions is not None and hasattr(self.decisions, 'close'):
+            self.decisions.close()
 
     def get_request(self):
         sock, address = super().get_request()
@@ -165,12 +185,12 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         values = self.headers.get_all(name, [])
         return values[0] if len(values) == 1 else None
 
-    def _authorized(self):
+    def _authorized(self, body=False):
         if self._one('Host') != self.server.expected_host:
             return False
         if self.headers.get_all('Origin', []) not in ([], [PUBLIC_ORIGIN]):
             return False
-        if self.headers.get_all('Transfer-Encoding', []) or self.headers.get_all('Content-Length', []):
+        if self.headers.get_all('Transfer-Encoding', []) or (not body and self.headers.get_all('Content-Length', [])):
             return False
         if self.headers.get_all('Cookie', []) or self.headers.get_all('Authorization', []) or self.headers.get_all('Cf-Access-Jwt-Assertion', []):
             return False
@@ -179,6 +199,28 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         if gateway is None or len(gateway) > 256 or not compare_digest(gateway, self.server.secret):
             return False
         return email is not None and len(email) <= 254 and email in self.server.owners
+
+    def _csrf(self):
+        email = self._one('X-Freediving-Owner-Email')
+        return hmac.new(self.server.secret.encode('ascii'),
+                        ('decision-csrf-v1:' + email).encode('utf-8'), sha256).hexdigest()
+
+    def _decision_filters(self, query):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=5)
+        if set(args) - {'type', 'status', 'source', 'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+            raise ValueError('invalid decision filters')
+        values = {key: v[0] for key, v in args.items()}
+        result = {'decision_type': values.get('type') or None,
+                  'status': (values['status'] or None) if 'status' in values else 'pending',
+                  'source_name': values.get('source') or None, 'limit': 50, 'offset': 0}
+        for key in ('limit', 'offset'):
+            if key in values:
+                if not values[key].isdigit() or len(values[key]) > 6:
+                    raise ValueError('invalid paging')
+                result[key] = int(values[key])
+        if not 1 <= result['limit'] <= 100 or result['offset'] > 100000:
+            raise ValueError('invalid paging')
+        return result
 
     def _path(self):
         if len(self.path) > 2048 or '%' in self.path.split('?', 1)[0] or '#' in self.path:
@@ -269,6 +311,34 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.browse(**self._filters(parsed.query))
             elif path == '/owner-evidence/api/queue':
                 result = query.queue(**self._queue_filters(parsed.query))
+            elif path == '/owner-evidence/api/decisions':
+                if self.server.decisions is None:
+                    return self._reply(503)
+                result = self.server.decisions.queue(**self._decision_filters(parsed.query))
+                result['csrf_token'] = self._csrf()
+                result['active_snapshot_sha256'] = self.server.decisions.projection()['snapshot_sha256']
+                result['canonical_projection_status'] = 'unavailable'
+            elif path == '/owner-evidence/api/decisions/audit-sample':
+                if self.server.decisions is None:
+                    return self._reply(503)
+                args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1) if parsed.query else {}
+                if set(args) - {'limit'} or any(len(v) != 1 for v in args.values()):
+                    raise ValueError('invalid audit sample')
+                limit = args.get('limit', ['10'])[0]
+                if not limit.isdigit() or not 1 <= int(limit) <= 100:
+                    raise ValueError('invalid audit sample')
+                result = self.server.decisions.audit_sample(limit=int(limit))
+            elif DECISION_PATH.fullmatch(path) and not parsed.query:
+                if self.server.decisions is None:
+                    return self._reply(503)
+                result = self.server.decisions.inspect(DECISION_PATH.fullmatch(path).group(1))
+            elif DECISION_PREVIEW_PATH.fullmatch(path):
+                if self.server.decisions is None:
+                    return self._reply(503)
+                args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1)
+                if set(args) != {'action'} or len(args['action']) != 1 or args['action'][0] not in ('approve','reject','reverse'):
+                    raise ValueError('invalid preview action')
+                result = self.server.decisions.preview(DECISION_PREVIEW_PATH.fullmatch(path).group(1), action=args['action'][0])
             elif path == '/owner-evidence/api/comparisons':
                 result = query.comparisons(**self._comparison_filters(parsed.query))
             elif path in ('/owner-evidence/api/routes', '/owner-evidence/api/route-leads'):
@@ -313,7 +383,9 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 return self._reply(404)
         except SourceViewError as exc:
             return self._reply(exc.status)
-        except (ValueError, KeyError):
+        except KeyError:
+            return self._reply(404)
+        except ValueError:
             return self._reply(400)
         except (sqlite3.Error, OSError):
             return self._reply(503)
@@ -327,7 +399,52 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._reply(405)
 
-    do_POST = _unsupported
+    def do_POST(self):
+        if not self._authorized(body=True):
+            return self._reply(403)
+        try:
+            parsed = self._path()
+        except ValueError:
+            return self._reply(404)
+        match = DECISION_ACTION_PATH.fullmatch(parsed.path)
+        if match is None or parsed.query:
+            return self._unsupported()
+        if self.server.decisions is None:
+            return self._reply(503)
+        if self._one('Origin') != PUBLIC_ORIGIN or self._one('Content-Type') != 'application/json':
+            return self._reply(403)
+        if self._one('X-Freediving-CSRF') != self._csrf():
+            return self._reply(403)
+        lengths = self.headers.get_all('Content-Length', [])
+        if len(lengths) != 1 or not lengths[0].isdigit():
+            return self._reply(400)
+        length = int(lengths[0])
+        if length > MAX_ACTION:
+            return self._reply(413)
+        if not length:
+            return self._reply(400)
+        try:
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict) or set(body) != {'action', 'expected_revision', 'idempotency_key', 'reason', 'csrf_token'}:
+                raise ValueError('invalid action')
+            if not compare_digest(body['csrf_token'], self._csrf()):
+                return self._reply(403)
+            if body['action'] not in ('approve', 'reject', 'reverse'):
+                raise ValueError('invalid action')
+            from owner_decision_store import ConflictError
+            result = self.server.decisions.act(match.group(1), action=body['action'],
+                                               expected_revision=body['expected_revision'],
+                                               idempotency_key=body['idempotency_key'], actor=self._one('X-Freediving-Owner-Email'),
+                                               reason=body['reason'])
+        except KeyError:
+            return self._reply(404)
+        except ConflictError:
+            return self._reply(409)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return self._reply(400)
+        except (sqlite3.Error, OSError):
+            return self._reply(503)
+        return self._json(result)
     do_PUT = _unsupported
     do_PATCH = _unsupported
     do_DELETE = _unsupported

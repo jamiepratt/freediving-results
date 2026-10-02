@@ -22,7 +22,8 @@ import urllib.request
 
 
 SERVICE = 'freediving-owner-evidence.service'
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/unified_evidence_query.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/owner_decision_store.py',
+         'scripts/unified_evidence_query.py',
          'scripts/route_roster_query.py', 'scripts/owner_source_view.py',
          'scripts/private_source_bundle.py', 'scripts/vestico_safe_derivative.py',
          'resources/evidence_workspace.html', 'resources/evidence_workspace.js',
@@ -63,7 +64,10 @@ def _config(path, owner_uid, expected):
         if not match or match[1] in values:
             raise ValueError('invalid private environment file')
         values[match[1]] = match[2]
-    if values.keys() != REQUIRED_ENV or values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected:
+    if (not REQUIRED_ENV <= values.keys() or
+            set(values) - REQUIRED_ENV - {'OWNER_EVIDENCE_DECISION_API_ENABLED'} or
+            values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
+            values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected):
         raise ValueError('private environment does not match snapshot')
     secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
@@ -260,6 +264,15 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     layout.state.mkdir(parents=True, exist_ok=True)
     layout.state.chmod(0o711)
     os.chown(layout.state, os.geteuid(), os.getegid())
+    decision_dir = layout.state / 'decisions'
+    if decision_dir.is_symlink() or (decision_dir.exists() and not decision_dir.is_dir()):
+        raise ValueError('invalid durable decision directory')
+    decision_dir.mkdir(exist_ok=True)
+    decision_dir.chmod(0o700)
+    os.chown(decision_dir, owner_uid, owner_gid)
+    decision_db = decision_dir / 'ledger.sqlite'
+    if decision_db.is_symlink() or (decision_db.exists() and not decision_db.is_file()):
+        raise ValueError('invalid durable decision DB')
     app = _stage_directory(app_parent, app_version,
                            [(name, bundle / name) for name in FILES], os.geteuid(),
                            os.getegid(), 0o644)
@@ -296,6 +309,8 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     active_env = layout.state / 'active.env'
     old_env = active_env.read_bytes() if active_env.exists() else None
     new_env = layout.config.read_bytes()
+    if values.get('OWNER_EVIDENCE_DECISION_API_ENABLED') == '1':
+        new_env += f'OWNER_EVIDENCE_DECISION_DB={decision_db}\n'.encode()
     if roster:
         new_env += (f'OWNER_EVIDENCE_ROSTER_DIR={roster}\n'
                     f'OWNER_EVIDENCE_ROSTER_SHA256={expected_roster_sha256}\n').encode()

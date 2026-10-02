@@ -4,6 +4,7 @@ const allowed = /^(?:\/|\/public\.(?:js|css)|\/api\/results|\/(?:api\/)?(?:resul
 const failure = (status) => new Response('Request unavailable', {status, headers: {'Cache-Control':'no-store', 'Content-Type':'text/plain; charset=utf-8'}});
 const privatePath = (path) => path === '/owner-evidence' || path.startsWith('/owner-evidence/');
 const safePrivatePath = /^\/owner-evidence(?:\/[A-Za-z0-9._~-]+)*\/?$/;
+const decisionActionPath = /^\/owner-evidence\/api\/decisions\/[A-Za-z0-9_-]{1,128}\/actions$/;
 const decoder = new TextDecoder('utf-8', {fatal:true});
 function decodeSegment(value) {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) throw Error('Invalid JWT encoding');
@@ -52,16 +53,39 @@ async function verifiedOwner(token, config) {
 }
 async function privateRequest(request, url, env) {
   if (!safePrivatePath.test(url.pathname) || url.pathname.length > 2048 || url.search.length > 2048) return failure(404);
-  if (request.method !== 'GET' && request.method !== 'HEAD') return failure(405);
+  const action = request.method === 'POST' && decisionActionPath.test(url.pathname) && !url.search;
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !action) return failure(405);
   const origin = request.headers.get('Origin');
-  if (origin && origin !== ORIGIN) return failure(403);
+  if ((origin && origin !== ORIGIN) || (action && origin !== ORIGIN)) return failure(403);
+  if (action && request.headers.get('Content-Type') !== 'application/json') return failure(415);
+  const csrf = request.headers.get('X-Freediving-CSRF');
+  if (action && (typeof csrf !== 'string' || !/^[A-Za-z0-9_-]{3,128}$/.test(csrf))) return failure(403);
+  if (action && Number(request.headers.get('Content-Length')) > 16384) return failure(413);
   const config = privateConfig(env);
   if (!config) return failure(503);
   const email = await verifiedOwner(request.headers.get('Cf-Access-Jwt-Assertion'),config);
   if (!email) return failure(403);
   const headers = new Headers({'X-Freediving-Owner-Gateway':config.secret,'X-Freediving-Owner-Email':email});
+  let body;
+  if (action) {
+    headers.set('Origin', ORIGIN);
+    headers.set('Content-Type', 'application/json');
+    headers.set('X-Freediving-CSRF', csrf);
+    const reader = request.body?.getReader();
+    const chunks = []; let size = 0;
+    if (!reader) return failure(400);
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 16384) { await reader.cancel(); return failure(413); }
+      chunks.push(value);
+    }
+    body = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.length; }
+  }
   try {
-    const result = await fetch(config.upstream + url.pathname + url.search, {method:request.method,headers,redirect:'manual',signal:AbortSignal.timeout(15000),cf:{cacheTtl:0,cacheEverything:false}});
+    const result = await fetch(config.upstream + url.pathname + url.search, {method:request.method,headers,body,redirect:'manual',signal:AbortSignal.timeout(15000),cf:{cacheTtl:0,cacheEverything:false}});
     if (result.status >= 300 && result.status < 400) return failure(502);
     const responseHeaders = new Headers({'Cache-Control':'no-store','Strict-Transport-Security':'max-age=31536000','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
     const contentType = result.headers.get('Content-Type');

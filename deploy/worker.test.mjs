@@ -140,3 +140,36 @@ test('private path and configuration boundaries are closed', async () => {
     {OWNER_EVIDENCE_GATEWAY_SECRET:''}
   ]) assert.equal((await worker.fetch(req('/owner-evidence',{headers}),{...privateEnv,...change})).status,503);
 });
+
+test('owner decision action requires Access, exact origin, JSON and CSRF before forwarding', async () => {
+  const signed = await token();
+  const path = '/owner-evidence/api/decisions/decision-1/actions';
+  const body = JSON.stringify({action:'reverse', expected_revision:2, idempotency_key:'retry-1', csrf_token:'abc'});
+  const headers = {'Cf-Access-Jwt-Assertion':signed, Origin:'https://poc.alphacompose.com', 'Content-Type':'application/json', 'X-Freediving-CSRF':'abc'};
+  const original = globalThis.fetch;
+  let seen = false;
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/cdn-cgi/access/certs')) return Response.json({keys:[jwk]});
+    seen = true;
+    assert.equal(url,'https://owner-origin.alphacompose.com'+path);
+    assert.equal(options.method,'POST');
+    assert.equal(options.headers.get('Origin'),'https://poc.alphacompose.com');
+    assert.equal(options.headers.get('Content-Type'),'application/json');
+    assert.equal(options.headers.get('X-Freediving-CSRF'),'abc');
+    assert.equal(options.headers.get('Cookie'),null);
+    assert.equal(options.headers.get('Cf-Access-Jwt-Assertion'),null);
+    assert.equal(new TextDecoder().decode(options.body),body);
+    return Response.json({revision:3});
+  };
+  try {
+  assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,Origin:'https://evil.example'},body}),privateEnv)).status,403);
+  assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'Content-Type':'text/plain'},body}),privateEnv)).status,415);
+  assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'X-Freediving-CSRF':''},body}),privateEnv)).status,403);
+  assert.equal((await worker.fetch(req('/owner-evidence/api/queue',{method:'POST',headers,body}),privateEnv)).status,405);
+  assert.equal((await worker.fetch(req(path,{method:'POST',headers,body:'x'.repeat(16385)}),privateEnv)).status,413);
+    const response = await worker.fetch(req(path,{method:'POST',headers,body}),privateEnv);
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).revision,3);
+    assert.equal(seen,true);
+  } finally { globalThis.fetch = original; }
+});

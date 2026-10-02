@@ -24,7 +24,7 @@ class ActivationTests(unittest.TestCase):
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
         for name in ('owner_evidence_origin.py', 'unified_evidence_query.py', 'route_roster_query.py',
-                     'owner_source_view.py', 'vestico_safe_derivative.py'):
+                     'owner_source_view.py', 'owner_decision_store.py', 'vestico_safe_derivative.py'):
             (self.bundle / 'scripts' / name).write_text('print("test")\n')
         (self.bundle / 'scripts/private_source_bundle.py').write_bytes(
             (Path(__file__).resolve().parents[1] / 'scripts/private_source_bundle.py').read_bytes())
@@ -77,6 +77,34 @@ class ActivationTests(unittest.TestCase):
         self.calls.clear()
         self.run_activation()
         self.assertNotIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), self.calls)
+
+    def test_decision_state_is_writable_and_survives_snapshot_activation(self):
+        self.config.write_text(self.config.read_text() + 'OWNER_EVIDENCE_DECISION_API_ENABLED=1\n')
+        self.run_activation()
+        decision_dir = self.layout.state / 'decisions'
+        self.assertEqual(decision_dir.stat().st_mode & 0o777, 0o700)
+        ledger = decision_dir / 'ledger.sqlite'
+        ledger.write_bytes(b'owner review history')
+        self.assertIn(f'OWNER_EVIDENCE_DECISION_DB={ledger}',
+                      (self.layout.state / 'active.env').read_text())
+        self.assertTrue((self.layout.app / 'current' / 'scripts/owner_decision_store.py').exists())
+        unit = (self.layout.units / 'freediving-owner-evidence.service').read_text()
+        self.assertIn('ReadWritePaths=/var/lib/freediving-owner-evidence/decisions', unit)
+        new_data = b'another snapshot'
+        new_digest = hashlib.sha256(new_data).hexdigest()
+        (self.source / 'snapshot.sqlite').write_bytes(new_data)
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': new_digest}))
+        self.config.write_text(self.config.read_text().replace(self.digest, new_digest))
+        activate(self.bundle, self.source, new_digest, self.layout,
+                 command=self.command, health=lambda: None,
+                 owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(ledger.read_bytes(), b'owner review history')
+
+    def test_normal_activation_does_not_expose_parallel_decision_authority(self):
+        self.run_activation()
+        self.assertNotIn('OWNER_EVIDENCE_DECISION_DB=',
+                         (self.layout.state / 'active.env').read_text())
 
     def test_stages_pinned_roster_with_snapshot_binding(self):
         activate(self.bundle, self.source, self.digest, self.layout,
