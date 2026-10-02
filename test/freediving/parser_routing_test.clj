@@ -82,6 +82,35 @@
            (set (map :reason (:rejected-claims result)))))
     (is (= :unexamined (:status (last (:gaps result)))))))
 
+(deftest unexamined-section-with-unknown-position-count-remains-a-gap
+  (let [document (assoc html-document :sections
+                        [{:id "article#table-section"
+                          :citation "https://example.invalid/article#table"
+                          :examined? false}])
+        result (routing/route-document
+                document [(claim "article" #{"article#names"} #{"article#names"})])]
+    (is (= 1 (count (:routed result))))
+    (is (= {:section-id "article#table-section"
+            :citation "https://example.invalid/article#table"
+            :status :unexamined}
+           (last (:gaps result))))
+    (is (= 6 (count (concat (:routed result) (:gaps result)))))
+    (is (= [{:section-id "article#table-section"
+             :citation "https://example.invalid/article#table"
+             :status :unexamined}]
+           (:gaps (routing/route-document (assoc document :positions []) []))))))
+
+(deftest section-identifiers-cannot-collide-with-source-positions
+  (let [section {:id "article#names" :citation "https://example.invalid/article#table"
+                 :examined? false}]
+    (doseq [sections [[section]
+                      [(assoc section :id "unknown-section")
+                       (assoc section :id "unknown-section")]]]
+      (is (= :invalid-document
+             (try (routing/route-document (assoc html-document :sections sections) [])
+                  (catch clojure.lang.ExceptionInfo error
+                    (:reason (ex-data error)))))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.parser-routing-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

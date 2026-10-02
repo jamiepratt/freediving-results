@@ -12,13 +12,18 @@
 (defn- valid-position? [{:keys [id citation]}]
   (and (nonblank? id) (nonblank? citation)))
 
-(defn- validate-document! [{:keys [source-sha256 format positions]}]
+(defn- validate-document! [{:keys [source-sha256 format positions sections]}]
   (when-not (and (string? source-sha256)
                  (re-matches #"[0-9a-f]{64}" source-sha256)
                  (contains? supported-formats format)
                  (vector? positions)
                  (every? valid-position? positions)
-                 (= (count positions) (count (set (map :id positions)))))
+                 (or (nil? sections)
+                     (and (vector? sections)
+                          (every? #(and (valid-position? %)
+                                        (false? (:examined? %))) sections)))
+                 (let [ids (concat (map :id positions) (map :id sections))]
+                   (= (count ids) (count (set ids)))))
     (throw (ex-info "Invalid source-position inventory" {:reason :invalid-document}))))
 
 (defn- rejection-reason [document position-ids claim]
@@ -48,7 +53,9 @@
   "Route an inventoried document using explicit recognizer claims.
 
    Document: {:source-sha256 hex64 :format keyword :positions
-              [{:id stable-id :citation exact-location :examined? true|false}]}.
+              [{:id stable-id :citation exact-location :examined? true|false}]
+              :sections [{:id stable-id :citation exact-location :examined? false}]}.
+   Optional sections denote unexamined regions whose position count is unknown.
    Absence of :examined? means examined. Claim: {:parser-id string
    :parser-version string :match-reason string
    :source-restriction {:sha256s #{...} :formats #{...}}
@@ -91,5 +98,8 @@
     {:source-sha256 (:source-sha256 document)
      :format (:format document)
      :routed (vec (filter #(= :routed (:status %)) outcomes))
-     :gaps (vec (remove #(= :routed (:status %)) outcomes))
+     :gaps (into (vec (remove #(= :routed (:status %)) outcomes))
+                 (map (fn [{:keys [id citation]}]
+                        {:section-id id :citation citation :status :unexamined})
+                      (:sections document)))
      :rejected-claims rejected}))
