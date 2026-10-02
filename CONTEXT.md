@@ -35,6 +35,11 @@ If multiple parsers claim overlapping source rows, pause those rows and retain
 the competing claims for investigation. Continue other documents. Use LLM
 assistance where necessary, then encode a tested deterministic routing rule.
 
+For unusual scans, direct LLM transcription is an allowed exception. Retain the
+transcription, exact source page/region citations and verification evidence;
+replay the retained artifact without another LLM call. This does not require
+a bespoke parser for every unique scan or grant review/publication approval.
+
 Preserve native-script names and publisher-stated correspondence to romanized
 names, including evidence from national affiliates and local organizations.
 Keep event rankings, annual rankings and printed dive points with their original

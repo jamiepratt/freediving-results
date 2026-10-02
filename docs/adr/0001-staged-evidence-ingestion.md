@@ -41,6 +41,15 @@ by parser priority is rejected as the default: recognition mistakes could
 otherwise go unnoticed. Parsers covering disjoint sections are a separate
 composition decision.
 
+For unusual scanned documents, permit direct LLM transcription as an exception
+to reusable parser development. Retain the transcription, exact source
+page/region citations and verification evidence as a replayable artifact; replay
+must not require another model call. A unique scan need not receive a bespoke
+parser. This exception does not make the transcription authoritative or approve
+identities or publication. The verification procedure remains to be specified
+in #62. Requiring a reusable parser for every scan is rejected because it can
+add work without producing a reusable extraction method.
+
 Discovery includes event calendars and lists, individual results, local and
 international federation/organizer evidence, native-script athlete names and
 explicit romanized-name correspondences, event and annual rankings, and points
@@ -66,8 +75,8 @@ deferred. Record evidence needed for those decisions without making them.
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
   evidence, not yet a uniform cross-format registry. The recognizer API,
-  section composition, partial matches, scan exceptions, refresh policy and stopping rules
-  remain unresolved in #62; this decision does not select their design.
+  section composition, partial matches, scan verification, refresh policy and
+  stopping rules remain unresolved in #62; this decision does not select their design.
 
 ## Evidence
 
