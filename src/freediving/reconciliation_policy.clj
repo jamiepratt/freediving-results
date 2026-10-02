@@ -73,6 +73,9 @@
                              (or (::score entry) 0)
                              (::index entry)]))
        (mapv #(-> % (dissoc ::index ::score)
-                  (cond-> (and (nil? (:confidence %))
-                               (nil? (get-in % [:answer :confidence])))
-                    (assoc :scoreless-reason (or (:error %) (:reason %) :no-score)))))))
+                  (cond-> (nil? (::score %))
+                    (assoc :scoreless-reason
+                           (or (:error %) (:reason %)
+                               (if (or (some? (:confidence %))
+                                       (some? (get-in % [:answer :confidence])))
+                                 :invalid-score :no-score))))))))

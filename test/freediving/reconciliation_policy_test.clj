@@ -80,11 +80,12 @@
                  {:id :error :error :timeout}
                  {:id :low :answer {:confidence 0.2}}
                  {:id :low-tie :confidence 0.2}
-                 {:id :gap :reason :missing-evidence}]
+                 {:id :gap :reason :missing-evidence}
+                 {:id :bad-score :confidence ##NaN}]
         queue (policy/review-queue entries)]
-    (is (= [:low :low-tie :high :error :gap] (mapv :id queue)))
-    (is (= [:timeout :missing-evidence]
-           (mapv :scoreless-reason (take-last 2 queue))))))
+    (is (= [:low :low-tie :high :error :gap :bad-score] (mapv :id queue)))
+    (is (= [:timeout :missing-evidence :invalid-score]
+           (mapv :scoreless-reason (take-last 3 queue))))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-policy-test)]
