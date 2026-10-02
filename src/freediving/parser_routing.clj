@@ -96,9 +96,10 @@
                                         (update positions id (fnil conj []) claim))
                                       result (:claimed-positions claim)))
                             {} accepted)
-        outcomes (mapv (fn [{:keys [id citation examined?]}]
+        outcomes (mapv (fn [{:keys [id citation coordinates examined?]}]
                          (let [contenders (get by-position id [])
-                               base {:position-id id :citation citation}]
+                               base (cond-> {:position-id id :citation citation}
+                                      (some? coordinates) (assoc :coordinates coordinates))]
                            (cond
                              (false? examined?) (assoc base :status :unexamined)
                              (> (count contenders) 1)
