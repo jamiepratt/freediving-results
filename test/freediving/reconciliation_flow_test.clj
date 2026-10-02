@@ -3,7 +3,8 @@
             [freediving.reconciliation-flow :as flow]))
 
 (def policy {:version "test/1"
-             :thresholds {:identity {:same-person {:min-confidence 0.9 :min-probability 0.9 :min-margin 0.2}}}})
+             :thresholds {:identity {:same-person {:min-confidence 0.9 :min-probability 0.9 :min-margin 0.2}
+                                     :different-person {:min-confidence 0.9 :min-probability 0.9 :min-margin 0.2}}}})
 (def config {:provider :jev :model "jev-1.13.0" :max-request-bytes 49152
              :native-batch-size 8})
 (defn decision [id]
@@ -63,7 +64,7 @@
         decisions [(decision "model")]
         first-run (flow/run! (flow/empty-ledger) decisions opts)
         rerun (flow/run! first-run decisions opts)]
-    (is (= 2 @calls))
+    (is (= 1 @calls))
     (is (= :timeout (get-in (flow/inspect rerun decisions) ["model" :status])))))
 
 (deftest independent-decisions-batch-and-dependent-questions-follow
@@ -116,6 +117,80 @@
                            :retained-answers {"a" stale}})]
     (is (= 1 @calls))
     (is (= :jev (get-in (flow/inspect result decisions) ["a" :origin])))))
+
+(deftest human-correction-unblocks-dependent-question-on-rerun
+  (let [calls (atom 0)
+        execute! (fn [request]
+                   (swap! calls inc)
+                   {:model "jev-1.13.0" :usage {}
+                    :answers (zipmap (:decision-ids request)
+                                     (repeat {:type "choice" :choice "same_person" :confidence 0.96
+                                              :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}))})
+        decisions [(decision "first") (assoc (decision "second") :dependencies ["first"])]
+        blocked (flow/append-human-event (flow/empty-ledger)
+                                         {:id "human-no" :decision-id "first" :status :rejected})
+        first-run (flow/run! blocked decisions {:config config :policy policy :execute! execute!})
+        corrected (flow/append-human-event first-run
+                                           {:id "human-yes" :decision-id "first" :status :approved :action :same-person})
+        rerun (flow/run! corrected decisions {:config config :policy policy :execute! execute!})]
+    (is (= 1 @calls))
+    (is (= :approved (get-in (flow/inspect rerun decisions) ["second" :status])))))
+
+(deftest unresolved-deterministic-result-falls-through-to-jev
+  (let [calls (atom 0)
+        execute! (fn [request]
+                   (swap! calls inc)
+                   {:model "jev-1.13.0" :usage {}
+                    :answers (zipmap (:decision-ids request)
+                                     (repeat {:type "choice" :choice "same_person" :confidence 0.96
+                                              :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}))})
+        decisions [(decision "a")]
+        result (flow/run! (flow/empty-ledger) decisions
+                          {:config config :policy policy :execute! execute!
+                           :deterministic-results {"a" {:status :unresolved :rule-version "rule/1"}}})]
+    (is (= 1 @calls))
+    (is (= :jev (get-in (flow/inspect result decisions) ["a" :origin])))))
+
+(deftest jev-choice-determines-approved-action
+  (let [execute! (fn [request]
+                   {:model "jev-1.13.0" :usage {}
+                    :answers (zipmap (:decision-ids request)
+                                     (repeat {:type "choice" :choice "different_person" :confidence 0.96
+                                              :probabilities {"same_person" 0.03 "different_person" 0.95 "unknown" 0.02}}))})
+        decisions [(decision "a")]
+        result (flow/run! (flow/empty-ledger) decisions
+                          {:config config :policy policy :execute! execute!})]
+    (is (= :approved (get-in (flow/inspect result decisions) ["a" :status])))
+    (is (= :different-person (:action (last (:events result)))))))
+
+(deftest private-ledger-persists-and-projects-approved-decisions
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-ledger-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "ledger.edn")
+        decisions [(decision "a")]
+        execute! (fn [request]
+                   {:model "jev-1.13.0" :usage {}
+                    :answers (zipmap (:decision-ids request)
+                                     (repeat {:type "choice" :choice "same_person" :confidence 0.96
+                                              :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}))})
+        result (flow/run! (flow/load-ledger! path) decisions
+                          {:config config :policy policy :execute! execute!})]
+    (flow/save-ledger! path result)
+    (is (= result (flow/load-ledger! path)))
+    (is (= [{:decision-id "a" :family :identity :action :same-person :origin :jev}]
+           (mapv #(select-keys % [:decision-id :family :action :origin])
+                 (:approved-decisions (flow/project-private (flow/load-ledger! path)
+                                                            decisions config)))))))
+
+(deftest private-ledger-rejects-history-truncation
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-ledger-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve root "ledger.edn")
+        ledger (flow/append-human-event (flow/empty-ledger)
+                                        {:id "human-1" :decision-id "a" :status :rejected})]
+    (flow/save-ledger! path ledger)
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (flow/save-ledger! path (flow/empty-ledger))))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.reconciliation-flow-test)]

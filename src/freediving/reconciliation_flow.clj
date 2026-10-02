@@ -1,10 +1,14 @@
 (ns freediving.reconciliation-flow
   "Private, append-only reconciliation dispatch. It records proposed links, not publication approval."
   (:refer-clojure :exclude [run!])
-  (:require [freediving.reconciliation-jev :as jev]
+  (:require [clojure.edn :as edn]
+            [freediving.reconciliation-jev :as jev]
             [freediving.reconciliation-policy :as policy])
   (:import [java.security MessageDigest]
-           [java.util HexFormat]))
+           [java.util HexFormat]
+           [java.nio.channels FileChannel]
+           [java.nio.file Files LinkOption Path Paths StandardCopyOption StandardOpenOption]
+           [java.nio.file.attribute PosixFilePermissions]))
 
 (def ledger-version "reconciliation-flow/1")
 
@@ -26,9 +30,10 @@
 
 (defn append-human-event
   "Record a durable owner correction, including rejection or reversal."
-  [ledger {:keys [id decision-id status] :as event}]
+  [ledger {:keys [id decision-id status action] :as event}]
   (when-not (and (= ledger-version (:version ledger)) (string? id) (string? decision-id)
                  (#{:approved :rejected :reversed} status)
+                 (or (not= :approved status) (keyword? action))
                  (not-any? #(= id (:id %)) (:events ledger)))
     (throw (ex-info "Invalid human reconciliation event" {:event event})))
   (update ledger :events conj (assoc event :origin :human)))
@@ -51,7 +56,8 @@
                         (= version (:config-version %))) (:events ledger)))))
 
 (defn- result-view [decision event]
-  {:status (:status event) :origin (:origin event) :answer (:answer event)
+  {:status (:status event) :origin (:origin event) :family (:family decision)
+   :action (:action event) :answer (:answer event)
    :alternatives (when-let [probs (get-in event [:answer :probabilities])]
                    (dissoc probs (get-in event [:answer :outcome])))
    :evidence (:evidence decision) :candidates (:candidates decision)
@@ -77,7 +83,8 @@
 
 (defn- append-result [ledger decision config payload]
   (let [event (merge {:id (digest [(:id decision) (decision-key decision config)
-                                   (:policy-version payload) (:status payload) (:result-hash payload)])
+                                   (:policy-version payload) (:status payload) (:result-hash payload)
+                                   (:rule-version payload) (:reason payload)])
                       :decision-id (:id decision) :family (:family decision)
                       :action (:action decision) :origin :jev
                       :evidence-key (evidence-key decision)
@@ -89,8 +96,10 @@
         (update ledger :events conj event))))
 
 (defn- classify-answer [decision answer policy-config]
-  (let [assessment (policy/assess policy-config decision answer)]
-    {:status (if (= :approve (:status assessment)) :approved :unresolved)
+  (let [chosen-action (:outcome answer)
+        assessment (policy/assess policy-config (assoc decision :action chosen-action) answer)]
+    {:action chosen-action
+     :status (if (= :approve (:status assessment)) :approved :unresolved)
      :reason (:reason assessment) :assessment assessment
      :policy-version (:policy-version assessment) :answer answer
      :result-hash (:result-hash answer) :receipt (:receipt answer)}))
@@ -161,7 +170,7 @@
                                   (append-result ledger decision config
                                                  {:status :dependency-blocked :reason :dependency-unapproved
                                                   :policy-version (:version policy)})
-                                  deterministic
+                                  (and deterministic (= :approve (:status deterministic)))
                                   (append-result ledger decision config
                                                  {:status (if (and (= :approve (:status deterministic))
                                                                    (:rule-version deterministic)) :approved :unresolved)
@@ -179,7 +188,7 @@
                                                  (assoc (classify-answer decision retained policy)
                                                         :origin :retained))
                                   (and prior (= (:version policy) (:policy-version prior))
-                                       (not (#{:timeout :provider-error :interrupted :invalid-response} (:status prior)))) ledger
+                                       (not= :dependency-blocked (:status prior))) ledger
                                   :else ledger)))
                             ledger ready)
                     pending (filterv (fn [decision]
@@ -187,7 +196,7 @@
                                                        (current-event ledger decision config))]
                                          (and (ready? decision known)
                                               (or (nil? event)
-                                                  (#{:timeout :provider-error :interrupted :invalid-response} (:status event))))))
+                                                  (= :dependency-blocked (:status event))))))
                                      ready)
                     ledger (if (seq pending)
                              (reduce (fn [ledger request]
@@ -203,3 +212,82 @@
                                   known ready)
                     remaining (filterv (complement (set ready)) remaining)]
                 (recur ledger remaining known))))))))
+
+(defn project-private
+  "Approved private decisions only. Existing athlete/attempt ledgers still own canonical groups."
+  [ledger decisions config]
+  (let [current (inspect ledger decisions config)
+        approved? (fn [id] (= :approved (get-in current [id :status])))]
+    {:scope :private-reconciliation-decisions
+     :revision (count (:events ledger))
+     :approved-decisions
+     (mapv (fn [decision]
+             (let [view (get current (:id decision))]
+               {:decision-id (:id decision) :family (:family decision)
+                :action (:action view) :origin (:origin view)
+                :evidence (:evidence view) :answer (:answer view)
+                :policy-version (:policy-version view)}))
+           (filter (fn [decision]
+                     (and (approved? (:id decision))
+                          (keyword? (get-in current [(:id decision) :action]))
+                          (every? approved? (:dependencies decision)))) decisions))}))
+
+(defn- ledger-path [path]
+  (let [path (Paths/get (str path) (make-array String 0))]
+    (when-not (.isAbsolute path)
+      (throw (ex-info "Private ledger path must be absolute" {:path (str path)})))
+    path))
+
+(defn- private-permissions! [^Path path]
+  (try
+    (Files/setPosixFilePermissions path (PosixFilePermissions/fromString "rw-------"))
+    (catch UnsupportedOperationException _ nil)))
+
+(defn load-ledger!
+  "Read a private EDN ledger and verify its digest. Missing file is empty."
+  [path]
+  (let [path (ledger-path path)]
+    (if-not (Files/exists path (make-array LinkOption 0))
+      (empty-ledger)
+      (let [envelope (try (edn/read-string (Files/readString path))
+                          (catch Exception error
+                            (throw (ex-info "Unreadable private reconciliation ledger" {} error))))
+            ledger (:ledger envelope)]
+        (when-not (and (= ledger-version (:version ledger))
+                       (vector? (:events ledger))
+                       (= (:sha256 envelope) (digest ledger)))
+          (throw (ex-info "Private reconciliation ledger integrity check failed" {})))
+        ledger))))
+
+(defn save-ledger!
+  "Atomically persist a private append-only ledger; reject history truncation or rewrite."
+  [path ledger]
+  (let [path (ledger-path path)
+        parent (.getParent path)]
+    (when-not (and (= ledger-version (:version ledger)) (vector? (:events ledger)))
+      (throw (ex-info "Invalid private reconciliation ledger" {})))
+    (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0))
+    (let [lock-path (.resolve parent (str (.getFileName path) ".lock"))]
+      (with-open [channel (FileChannel/open lock-path
+                                            (into-array StandardOpenOption [StandardOpenOption/CREATE
+                                                                            StandardOpenOption/WRITE]))
+                  _lock (.lock channel)]
+        (private-permissions! lock-path)
+        (let [previous (load-ledger! path)
+              old-events (:events previous)
+              events (:events ledger)]
+          (when-not (and (<= (count old-events) (count events))
+                         (= old-events (subvec events 0 (count old-events))))
+            (throw (ex-info "Private reconciliation ledger history changed" {})))
+          (let [temp (Files/createTempFile parent ".reconciliation-" ".edn"
+                                           (make-array java.nio.file.attribute.FileAttribute 0))]
+            (try
+              (private-permissions! temp)
+              (Files/writeString temp (pr-str {:sha256 (digest ledger) :ledger ledger})
+                                 (into-array StandardOpenOption [StandardOpenOption/WRITE
+                                                                 StandardOpenOption/TRUNCATE_EXISTING]))
+              (Files/move temp path
+                          (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE
+                                                          StandardCopyOption/REPLACE_EXISTING]))
+              (finally (Files/deleteIfExists temp)))))))
+    ledger))
