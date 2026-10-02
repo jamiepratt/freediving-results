@@ -33,10 +33,14 @@ class ReconciliationCorpusTest(unittest.TestCase):
                 ("cmas-pdf", "aggregate", "source-2", None, "2026-04-02"),
             ])
         self.db_hash = digest(db_path.read_bytes())
+        source_input = self.root / "aida.json"
+        source_input.write_bytes(b'{"synthetic":true}')
         manifest = {"schema": "unified-evidence-snapshot/v1", "cutoff": "2026-10-01T12:39:47Z",
                     "snapshot_sha256": self.db_hash, "confirmed_distinct_attempts": None,
-                    "inputs": {"aida-html": {"status": "included", "record_count": 3},
-                               "cmas-pdf": {"status": "included", "record_count": 2}}}
+                    "inputs": {"aida-html": {"status": "included", "record_count": 3,
+                                             "path": str(source_input), "sha256": digest(source_input.read_bytes())},
+                               "cmas-pdf": {"status": "included", "record_count": 2,
+                                            "path": str(self.root / "missing.json"), "sha256": "0" * 64}}}
         manifest_path = self.snapshot / "manifest.json"
         manifest_path.write_text(json.dumps(manifest))
         self.manifest_hash = digest(manifest_path.read_bytes())
@@ -54,11 +58,23 @@ class ReconciliationCorpusTest(unittest.TestCase):
                          report["candidate_positions_by_year"])
         self.assertEqual(3, report["candidate_positions"])
         self.assertEqual(1, report["source_records"])
+        self.assertEqual(2, report["source_object_refs"])
+        self.assertEqual({"source": 1, "candidate_position": 3, "aggregate": 1},
+                         report["record_kinds"])
         self.assertEqual(3, report["observation_version_refs"])
         self.assertIsNone(report["confirmed_distinct_attempts"])
         self.assertEqual(1, report["checked_name_input"]["gap_count"])
         self.assertEqual(3, len(report["by_source_year"]))
         self.assertEqual(1, report["unknown_date_by_source"]["aida-html"])
+        self.assertEqual({"declared": 2, "verified": 1, "missing": 1, "unverified": 0},
+                         report["manifest_inputs"])
+        self.assertEqual(["missing-observation-store-revision", "missing-decision-store-revision",
+                          "missing-decision-api-mapping"], report["replay_blockers"])
+
+    def test_present_input_hash_mismatch_fails_closed(self):
+        (self.root / "aida.json").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "manifest input hash mismatch"):
+            build_report(self.snapshot, self.checked, self.checked_hash)
 
     def test_changed_checked_input_or_snapshot_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "checked input hash mismatch"):
@@ -69,7 +85,7 @@ class ReconciliationCorpusTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "manifest binding mismatch"):
             build_report(self.snapshot, self.checked, digest(self.checked.read_bytes()))
 
-    def test_publication_date_cannot_replace_missing_event_date(self):
+    def test_out_of_scope_event_date_is_not_counted_as_2026(self):
         with sqlite3.connect(self.snapshot / "snapshot.sqlite") as db:
             db.execute("UPDATE records SET event_date = '2024-12-01' WHERE observation_version = 'obs-3'")
         manifest = json.loads((self.snapshot / "manifest.json").read_text())

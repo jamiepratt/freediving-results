@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
+from reconciliation_replay_eligibility import replay_blockers
+
 SNAPSHOT_SCHEMA = "unified-evidence-snapshot/v1"
 CHECKED_SCHEMA = "affiliate-name-input/v1"
 
@@ -60,14 +62,35 @@ def build_report(snapshot_dir, checked_input, expected_checked_sha256):
     if manifest.get("confirmed_distinct_attempts") is not None:
         raise ValueError("snapshot claims confirmed attempts without decision ledger")
 
+    manifest_inputs = {"declared": 0, "verified": 0, "missing": 0, "unverified": 0}
+    for item in manifest.get("inputs", {}).values():
+        manifest_inputs["declared"] += 1
+        path, expected = item.get("path"), item.get("sha256")
+        if not isinstance(path, str) or not path or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            manifest_inputs["unverified"] += 1
+            continue
+        input_path = Path(path)
+        if not input_path.is_absolute():
+            input_path = snapshot_dir / input_path
+        if not input_path.exists():
+            manifest_inputs["missing"] += 1
+            continue
+        if not input_path.is_file():
+            raise ValueError("manifest input is not a file")
+        if sha256(input_path) != expected:
+            raise ValueError("manifest input hash mismatch")
+        manifest_inputs["verified"] += 1
+
     buckets = Counter({key: 0 for key in ("2025", "2026", "unknown", "outside_scope")})
     by_source = defaultdict(lambda: defaultdict(lambda: {"candidate_positions": 0,
                                                          "source_object_refs": set(),
                                                          "observation_version_refs": set()}))
     unknown_by_source = Counter()
     source_records = 0
+    source_object_refs = set()
     obs_refs = set()
     input_counts = Counter()
+    kind_counts = Counter()
     uri = db_path.as_uri() + "?mode=ro&immutable=1"
     with sqlite3.connect(uri, uri=True) as db:
         db.execute("PRAGMA query_only=ON")
@@ -78,6 +101,7 @@ def build_report(snapshot_dir, checked_input, expected_checked_sha256):
             rows = db.execute("SELECT source_name, kind, source_object_id, observation_version, event_date FROM records")
             for source, kind, source_object, observation, event_date in rows:
                 input_counts[source] += 1
+                kind_counts[kind] += 1
                 if kind == "source":
                     source_records += 1
                 if kind != "candidate_position":
@@ -88,6 +112,7 @@ def build_report(snapshot_dir, checked_input, expected_checked_sha256):
                 group["candidate_positions"] += 1
                 if source_object:
                     group["source_object_refs"].add(source_object)
+                    source_object_refs.add(source_object)
                 if observation:
                     group["observation_version_refs"].add(observation)
                     obs_refs.add(observation)
@@ -108,13 +133,17 @@ def build_report(snapshot_dir, checked_input, expected_checked_sha256):
                              "candidate_positions": group["candidate_positions"],
                              "source_object_refs": len(group["source_object_refs"]),
                              "observation_version_refs": len(group["observation_version_refs"])})
+    snapshot = {"manifest_sha256": manifest_hash, "sqlite_sha256": db_hash,
+                "cutoff": manifest["cutoff"]}
     return {"schema": "reconciliation-corpus-preflight/v1",
-            "snapshot": {"manifest_sha256": manifest_hash, "sqlite_sha256": db_hash,
-                         "cutoff": manifest["cutoff"]},
+            "snapshot": snapshot,
             "checked_name_input": {"sha256": checked_hash,
                                    "assertion_count": len(checked.get("assertions", [])),
                                    "gap_count": len(checked.get("gaps", []))},
             "source_records": source_records,
+            "source_object_refs": len(source_object_refs),
+            "record_kinds": dict(sorted(kind_counts.items())),
+            "manifest_inputs": manifest_inputs,
             "candidate_positions": sum(buckets.values()),
             "candidate_positions_by_year": dict(buckets),
             "observation_version_refs": len(obs_refs),
@@ -122,7 +151,8 @@ def build_report(snapshot_dir, checked_input, expected_checked_sha256):
             "by_source_year": rows,
             "confirmed_distinct_attempts": None,
             "identity_approvals": None,
-            "decision_ledger_revision": None}
+            "decision_ledger_revision": None,
+            "replay_blockers": replay_blockers(snapshot, None)}
 
 
 def main():
