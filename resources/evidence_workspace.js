@@ -17,6 +17,8 @@ async function loadOverview(){
   $('overview').replaceChildren();
   entries($('overview'),{
     coverage:o.coverage,cutoff:o.cutoff,evidence_records:count(()=>true),
+    candidate_source_positions:o.candidate_source_positions,
+    observation_version_records:o.observation_version_records,
     aida_selected_date_positions:count(row=>(selectedDates.has(row.source_name)||row.source_name.startsWith('aida-'))&&row.collection==='positions'&&row.kind==='candidate_position'),
     ffessm_ranking_positions:source('ffessm-rankings','positions','candidate_position'),
     ffessm_daily_positions:source('ffessm-daily','observations','candidate_position'),
@@ -31,6 +33,7 @@ async function loadOverview(){
     eindhoven_endpoint_records:source('eindhoven-noxy5','endpoint_records'),
     confirmed_distinct_attempts:o.confirmed_distinct_attempts,normalized_federation:o.normalized_federation,snapshot_sha256:o.snapshot_sha256,
   });
+  $('overview').append(cell('Source row counts are not attempt totals. A position can have several observation versions; mirrors, rankings, and repeated acquisitions can describe the same dive. Unresolved overlap or publisher revision direction leaves accepted distinct attempts unknown.', 'p'));
   const table=document.createElement('table');table.append(makeRow(['Source','Collection','Kind','Records'],'th'));
   for(const x of o.counts)table.append(makeRow([x.source_name,x.collection,x.kind,x.records]));
   $('counts').replaceChildren(table);

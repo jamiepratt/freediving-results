@@ -1,5 +1,52 @@
 # Private result revision relationships
 
+## Distinct-attempt projection v1
+
+`freediving.source-relationships/empty-attempt-ledger` accepts immutable source
+objects (`:id`, `:sha256`, optional `:publisher-citations`), cited positions
+(`:id`, `:source-id`, `:locator`),
+and observation versions (`:id`, `:position-id`, `:parser-version`, `:role`,
+`:values`, `:scope`, `:scope-evidence`). `:role` must be `:individual-result`.
+The required scope fields are event, day, session, round, discipline,
+participant and attempt. Every field needs its own binding in
+`:scope-evidence :bindings`, in addition to the exact source ID, source hash,
+position ID, position citation and claimed scope values.
+
+A field binding uses `{:path [:raw field] :value value}` when that exact field
+and value exist in the observation's retained `:values :raw`. A field present
+only in cited row text can use `{:path [:source-text] :value value :text text
+:span [start end]}`. The whole text must equal the observation's retained
+source text, the span must select the exact value, and the immediately preceding
+text must be `field=`. Other paths, including another row's values, do not
+qualify. A complete scope copied into the decision envelope without these
+bindings stays unresolved. These checks establish exact retained evidence
+binding, not independent verification of publisher semantics or athlete identity.
+
+`project-attempts` automatically groups eligible observation versions at one
+position and independently cited positions with exactly equal verified scope.
+It returns source, source-object, position, observation-version, accepted-attempt
+and unresolved-observation counts separately. Each attempt retains its position
+and observation IDs. Identical SHA-256 bytes produce stable automatic source
+equivalence links; repeated acquisitions do not add corroboration. Source
+support is marked equivalent for identical bytes, dependent for an accepted
+cited mirror/aggregate/upstream relationship, and otherwise unknown.
+A publisher-cited source revision records direction without asserting
+that every row changed. The existing `classify` edges remain source-row
+diagnostics, not this accepted-attempt count.
+
+`append-attempt-event` retains v1 accept/reverse events. Accepted same-attempt
+links require the verified scope above. Source dependence and revision require
+a cited publisher source, locator and text exactly present in that source's
+retained `:publisher-citations` inventory. Event text alone cannot qualify.
+`build-ledger` accepts the inventory keyed by source SHA-256 in its third
+argument. Automatic links have stable IDs and
+can be suppressed by an append-only reverse event. `rebase-attempt-ledger`
+preserves events and invalidates an acceptance when its source, position or
+observation version changes. The caller must retain the event log across runs;
+this module does not write it to PostgreSQL. `build-ledger`, `read-corpus` and
+the private CLI accept separately supplied scope bindings and events, while
+default corpus rows without verified individual-result scope remain unresolved.
+
 `freediving.revisions` records possible same-result revisions and explicit missing history separately from athlete identity, field corrections and publication validation. Both observation versions remain immutable. The API adds no automatic public suppression, policy activation or real review decisions. Championship acceptance remains in [issue #8](https://github.com/jamiepratt/freediving-results/issues/8).
 
 ## Evidence and matching

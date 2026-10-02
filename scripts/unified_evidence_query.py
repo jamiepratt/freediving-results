@@ -145,6 +145,11 @@ class SnapshotQuery:
             'schema': self.manifest['schema'], 'cutoff': self.manifest['cutoff'],
             'coverage': self.manifest['coverage'],
             'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts'],
+            'candidate_source_positions': sum(row['records'] for row in counts
+                                              if row['kind'] == 'candidate_position'
+                                              and row['collection'] not in ('candidate_versions', 'observation_versions')),
+            'observation_version_records': sum(row['records'] for row in counts
+                                               if row['collection'] == 'observation_versions'),
             'snapshot_sha256': self.manifest['snapshot_sha256'],
             'counts': counts,
         }

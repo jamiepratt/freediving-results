@@ -37,6 +37,7 @@
      :discipline (:discipline parsed)
      :day (:event-date parsed)
      :parser-version (:parser-version artifact)
+     :raw (:raw candidate)
      :parsed parsed}))
 
 (defn- validate-routes! [{:keys [routes source-candidates]}]
@@ -53,33 +54,70 @@
       (when-not (= #{:left :right :reason} (set (keys candidate)))
         (throw (ex-info "Source candidates need only left, right and reason" {}))))))
 
+(defn- attempt-input [rows routes scope-bindings publisher-citations]
+  (let [sources (->> (concat (map :source-sha256 rows) (keep :source-sha256 routes))
+                     distinct sort
+                     (mapv (fn [sha] {:id sha :sha256 sha
+                                      :publisher-citations (get publisher-citations sha)})))
+        positions (->> rows
+                       (map (fn [row]
+                              {:id (pr-str [(:source-sha256 row) (:position row)])
+                               :source-id (:source-sha256 row)
+                               :locator (:position row)}))
+                       distinct (sort-by :id) vec)
+        versions (mapv (fn [row]
+                         (let [ref (:ref row)
+                               binding (get scope-bindings ref)]
+                           {:id (pr-str ref)
+                            :position-id (pr-str [(:source-sha256 row) (:position row)])
+                            :parser-version (:parser-version row)
+                            :role (when (= "result-row" (:observation-kind row))
+                                    (get-in row [:parsed :result-role]))
+                            :scope (:scope binding)
+                            :scope-evidence (:scope-evidence binding)
+                            :source-text (:source-text row)
+                            :values (assoc (:parsed row) :raw (:raw row))
+                            :reference ref})) rows)]
+    {:sources sources :positions positions :observation-versions versions}))
+
 (defn build-ledger
-  "Build a deterministic ledger from inspected jobs and declarative route evidence."
-  [inspected-jobs {:keys [routes source-candidates] :as route-evidence}]
-  (when-not (every? #{:routes :source-candidates} (keys route-evidence))
-    (throw (ex-info "Unexpected route evidence field" {})))
-  (validate-routes! route-evidence)
-  (let [artifacts (mapv :artifact inspected-jobs)
-        rows (mapcat (fn [{:keys [artifact observations]}]
-                       (when-not (= (count (:candidates artifact)) (count observations))
-                         (throw (ex-info "Incomplete inspected job" {:job-id (:job-id artifact)})))
-                       (map (partial project-observation artifact) observations))
-                     inspected-jobs)
-        links (mapcat ffessm/source-links artifacts)]
-    (relationships/classify {:observations rows
-                             :same-attempt-evidence links
-                             :routes routes
-                             :source-candidates source-candidates})))
+  "Build a deterministic ledger from inspected jobs and declarative route evidence.
+   Third argument is retained v1 attempt decisions and exact scope bindings."
+  ([inspected-jobs route-evidence] (build-ledger inspected-jobs route-evidence {}))
+  ([inspected-jobs {:keys [routes source-candidates] :as route-evidence}
+    {:keys [scope-bindings events publisher-citations] :as attempt-evidence}]
+   (when-not (every? #{:routes :source-candidates} (keys route-evidence))
+     (throw (ex-info "Unexpected route evidence field" {})))
+   (when-not (every? #{:scope-bindings :events :publisher-citations} (keys attempt-evidence))
+     (throw (ex-info "Unexpected attempt evidence field" {})))
+   (validate-routes! route-evidence)
+   (let [artifacts (mapv :artifact inspected-jobs)
+         rows (mapcat (fn [{:keys [artifact observations]}]
+                        (when-not (= (count (:candidates artifact)) (count observations))
+                          (throw (ex-info "Incomplete inspected job" {:job-id (:job-id artifact)})))
+                        (map (partial project-observation artifact) observations))
+                      inspected-jobs)
+         links (mapcat ffessm/source-links artifacts)
+         attempt-ledger (reduce relationships/append-attempt-event
+                                (relationships/empty-attempt-ledger
+                                 (attempt-input rows routes scope-bindings publisher-citations)) events)
+         attempt-projection (relationships/project-attempts attempt-ledger)]
+     (assoc (relationships/classify {:observations rows
+                                     :same-attempt-evidence links
+                                     :routes routes
+                                     :source-candidates source-candidates})
+            :attempt-ledger attempt-ledger :attempt-projection attempt-projection))))
 
 (defn read-corpus
   "Read imported jobs and observations; this function does not mutate the database."
-  [database-url route-evidence]
-  (let [jobs (observations/list-extractions database-url)
-        inspected (mapv (fn [{:keys [job_id]}]
-                          (or (observations/inspect database-url job_id)
-                              (throw (ex-info "Listed extraction disappeared" {:job-id job_id}))))
-                        jobs)]
-    (build-ledger inspected route-evidence)))
+  ([database-url route-evidence] (read-corpus database-url route-evidence {}))
+  ([database-url route-evidence attempt-evidence]
+   (let [jobs (observations/list-extractions database-url)
+         inspected (mapv (fn [{:keys [job_id]}]
+                           (or (observations/inspect database-url job_id)
+                               (throw (ex-info "Listed extraction disappeared" {:job-id job_id}))))
+                         jobs)]
+     (build-ledger inspected route-evidence attempt-evidence))))
 
 (defn- private-write! [filename value]
   (let [target (.toPath (io/file filename))
@@ -95,17 +133,19 @@
                                            StandardCopyOption/REPLACE_EXISTING]))
       (finally (Files/deleteIfExists temp)))))
 
-(defn -main [& [output-path routes-path]]
+(defn -main [& [output-path routes-path attempts-path]]
   (try
     (when-not (and output-path routes-path) (throw (ex-info "Usage: OUTPUT_EDN ROUTES_EDN" {})))
     (let [database-url (System/getenv "FREEDIVING_DATABASE_URL")
-          routes (edn/read-string (slurp routes-path))]
+          routes (edn/read-string (slurp routes-path))
+          attempts (if attempts-path (edn/read-string (slurp attempts-path)) {})]
       (when-not database-url (throw (ex-info "FREEDIVING_DATABASE_URL required" {})))
-      (let [result (read-corpus database-url routes)]
+      (let [result (read-corpus database-url routes attempts)]
         (private-write! output-path result)
         (prn {:observation-versions (count (:observations result))
               :source-routes (count (:routes result))
-              :counts-by-scope (:counts-by-scope result)})))
+              :counts-by-scope (:counts-by-scope result)
+              :attempt-counts (get-in result [:attempt-projection :counts])})))
     (catch Exception e
       (binding [*out* *err*] (println "Source relationship ledger failed:" (.getMessage e)))
       (System/exit 1))))

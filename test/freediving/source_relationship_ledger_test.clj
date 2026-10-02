@@ -19,7 +19,8 @@
                        (range) rows)})
 
 (deftest corpus-ledger-retains-replay-versions-with-exact-source-references
-  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M}
+  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M
+                :result-role :individual-result}
         row (candidate 9 "printed row" parsed)
         jobs [(inspected "job-a" "parser/1" [row])
               (inspected "job-b" "parser/2" [(assoc row :parsed (assoc parsed :final-performance 71M))])]
@@ -28,6 +29,31 @@
     (is (= 1 (get-in result [:counts-by-scope :observation :parser-revision])))
     (is (= #{"job-a" "job-b"} (set (map (comp :job-id :ref) (:observations result)))))
     (is (= result (ledger/build-ledger (reverse jobs) {:routes []})))))
+
+(deftest corpus-attempt-counts-require-retained-scope-bindings
+  (let [parsed {:source-name "A Diver" :discipline "FIM" :final-performance 70M
+                :result-role :individual-result}
+        scope {:event "cup" :day "2026-06-01" :session "am" :round "final"
+               :discipline "FIM" :participant "publisher:42" :attempt "1"}
+        row (assoc (candidate 9 "printed row" parsed) :raw scope)
+        jobs [(inspected "job-a" "parser/1" [row])
+              (inspected "job-b" "parser/2" [row])]
+        raw (ledger/build-ledger jobs {:routes []})
+        source (apply str (repeat 64 "a"))
+        position (pr-str [source [{:page 1 :line 9}]])
+        binding {:scope scope
+                 :scope-evidence {:source-id source :source-sha256 source :position-id position
+                                  :citation [{:page 1 :line 9}] :fields scope
+                                  :bindings (into {} (map (fn [[field value]]
+                                                            [field {:path [:raw field] :value value}]) scope))}}
+        accepted (ledger/build-ledger jobs {:routes []}
+                                      {:scope-bindings {{:job-id "job-a" :ordinal 0} binding
+                                                        {:job-id "job-b" :ordinal 0} binding}})]
+    (is (= 2 (get-in raw [:attempt-projection :counts :unresolved-observations])))
+    (is (= 0 (get-in raw [:attempt-projection :counts :accepted-attempts])))
+    (is (= 1 (get-in accepted [:attempt-projection :counts :accepted-attempts])))
+    (is (= 1 (get-in accepted [:attempt-projection :counts :positions])))
+    (is (= 2 (get-in accepted [:attempt-projection :counts :observation-versions])))))
 
 (deftest held-out-ffessm-pdf-links-only-cited-subset-rows
   (let [pages (-> (slurp (io/resource "fixtures/ffessm-2026-b16/sans-palmes-hommes.txt"))
