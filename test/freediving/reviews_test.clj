@@ -273,6 +273,77 @@
       (is (= :dependency-unapproved (:reason invalidated)))
       (is (nil? (get-in (reviews/dive-fields fixture/app target) [:representation :accepted]))))))
 
+(deftest stale-own-flow-view-invalidates-model-dive-field
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "jev-own-stale/1")
+        artifact (assoc-in artifact [:candidates 0 :raw :fields "Nationality"] "AIN")
+        _ (fixture/publish! (assoc source :artifact artifact))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-own-stale"}
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        decision (-> (reviews/build-dive-field-jev-decision fixture/app target dictionary :representation)
+                     :decision)
+        config {:version "config/1" :model "test-jev"}
+        ledger (flow/run! (flow/empty-ledger) [decision]
+                          {:config config :policy reconciliation-policy/default-policy
+                           :execute! (fn [_] {:model "test-jev" :usage {:input_tokens 1 :output_tokens 1}
+                                              :answers {(:id decision)
+                                                        {:type "choice" :choice "representation" :confidence 0.99
+                                                         :probabilities {"category" 0.002 "representation" 0.99
+                                                                         "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})]
+    (reviews/approve-jev-dive-field! fixture/app ledger decision config
+                                     {:target target :decision-id (:id decision)
+                                      :decision-type :representation :dictionary dictionary
+                                      :policy reconciliation-policy/default-policy :base-revision 0})
+    (is (thrown-with-msg? Exception #"No changed"
+                          (reviews/invalidate-jev-dive-field! fixture/app decision config
+                                                              {:target target :decision-type :representation
+                                                               :dictionary dictionary :base-revision 1
+                                                               :current-flow-status :approved})))
+    (let [reversed (reviews/invalidate-jev-dive-field!
+                    fixture/app decision config
+                    {:target target :decision-type :representation :dictionary dictionary
+                     :base-revision 1 :current-flow-status :unresolved})]
+      (is (= :model (:actor-kind reversed)))
+      (is (= :reverse (:action reversed)))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:representation :accepted]))))))
+
+(deftest failed-canonical-parent-invalidates-model-field
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "jev-canonical-parent/1")
+        artifact (assoc-in artifact [:candidates 0 :raw :fields "Nationality"] "AIN")
+        _ (fixture/publish! (assoc source :artifact artifact))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "synthetic:jev-canonical-parent"}
+        dictionary {:version "labels/1" :federation "TEST" :event-id "event-1"
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}
+        _ (observations/import! fixture/app root (:job-id artifact))
+        child (-> (reviews/build-dive-field-jev-decision fixture/app target dictionary :representation)
+                  :decision (assoc :dependencies ["source-parent"]))
+        parent {:id "source-parent" :family :source-revision :action :same-source
+                :subject "Source relation" :candidates ["same source"]
+                :evidence (:evidence child) :dependencies [] :evidence-adequate? true}
+        config {:version "config/1" :model "test-jev"}
+        ledger (flow/run! (flow/empty-ledger) [parent child]
+                          {:config config :policy reconciliation-policy/default-policy
+                           :deterministic-results {"source-parent" {:status :approve
+                                                                    :rule-version "source-rule/1"}}
+                           :execute! (fn [_] {:model "test-jev" :usage {:input_tokens 1 :output_tokens 1}
+                                              :answers {(:id child)
+                                                        {:type "choice" :choice "representation" :confidence 0.99
+                                                         :probabilities {"category" 0.002 "representation" 0.99
+                                                                         "both" 0.002 "neither" 0.002 "unknown" 0.004}}}})})]
+    (reviews/approve-jev-dive-field! fixture/app ledger child config
+                                     {:target target :decision-id (:id child)
+                                      :decision-type :representation :dictionary dictionary
+                                      :policy reconciliation-policy/default-policy :base-revision 0})
+    (let [reversed (reviews/invalidate-jev-dive-field!
+                    fixture/app child config
+                    {:target target :decision-type :representation :dictionary dictionary
+                     :base-revision 1 :current-flow-status :approved
+                     :canonical-dependency-statuses {"source-parent" :canonical-unresolved}})]
+      (is (= :model (:actor-kind reversed)))
+      (is (= :dependency-unapproved (:reason reversed)))
+      (is (nil? (get-in (reviews/dive-fields fixture/app target) [:representation :accepted]))))))
+
 (deftest deterministic-dive-fields-are-cited-reversible-and-idempotent
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-test/1")
         artifact (-> artifact

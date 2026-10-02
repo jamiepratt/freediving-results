@@ -997,7 +997,8 @@
 
 (defn invalidate-jev-dive-field!
   "Reverse an active model field assertion after evidence, configuration or dependency changes."
-  [url decision config {:keys [target decision-type dictionary base-revision dependency-statuses] :as request}]
+  [url decision config {:keys [target decision-type dictionary base-revision dependency-statuses
+                               canonical-dependency-statuses current-flow-status] :as request}]
   (when-not (and (= :category-representation (:family decision))
                  (#{:category :representation} decision-type)
                  (nonblank? (:id decision)) (nat-int? base-revision)
@@ -1039,6 +1040,12 @@
                                         (and (map? dependency-statuses)
                                              (seq (:dependencies previous))
                                              (some #(not= :approved (get dependency-statuses % :unresolved))
+                                                   (:dependencies previous)))
+                                        (and (contains? request :current-flow-status)
+                                             (not= :approved current-flow-status))
+                                        (and (map? canonical-dependency-statuses)
+                                             (seq (:dependencies previous))
+                                             (some #(not= :approved (get canonical-dependency-statuses % :unresolved))
                                                    (:dependencies previous)))))
                        (fail! "No changed model dive field evidence"))
                      (if old old
@@ -1058,10 +1065,16 @@
                                            :proposed nil :source-position (citation row)
                                            :supporting-evidence (:evidence decision)
                                            :prior-decision-id (:decision-id previous)
-                                           :reason (if (and (map? dependency-statuses)
-                                                            (some #(not= :approved (get dependency-statuses % :unresolved))
-                                                                  (:dependencies previous)))
-                                                     :dependency-unapproved :changed-model-evidence)
+                                           :reason (cond
+                                                     (and (contains? request :current-flow-status)
+                                                          (not= :approved current-flow-status)) :flow-approval-stale
+                                                     (or (and (map? dependency-statuses)
+                                                              (some #(not= :approved (get dependency-statuses % :unresolved))
+                                                                    (:dependencies previous)))
+                                                         (and (map? canonical-dependency-statuses)
+                                                              (some #(not= :approved (get canonical-dependency-statuses % :unresolved))
+                                                                    (:dependencies previous)))) :dependency-unapproved
+                                                     :else :changed-model-evidence)
                                            :request request}))))))))
 
 (defn- human-decision! [url request action]
