@@ -15,9 +15,11 @@ run should automatically deploy that evidence to the private owner website,
 without a separate publish command. Transfer or validation failure must preserve
 the last working remote presentation and the local artifacts for retry. This is
 the accepted workflow direction, not an implemented end-to-end command.
-Acquisition and remote
-transfer are separate resumable phases: the October activation history records
-VPN interference with Tailscale SSH. The remote server serves the evidence;
+Acquisition and remote transfer are separate resumable phases: the October
+activation history records VPN interference with Tailscale SSH. Automatic VPN
+switching for transfer is authorized, with restoration afterward and explicit
+recovery on failure; see [ADR 0002](adr/0002-local-ingestion-remote-presentation.md).
+Publisher requests must finish or pause before that switch. The remote server serves the evidence;
 it is not the default acquisition or parsing worker. Existing manual deployment
 steps are in [deployment](deployment.md#owner-evidence-remote-activation-checkpoint).
 The repeatable run-to-presentation handoff is tracked in

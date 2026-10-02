@@ -147,6 +147,9 @@ must preserve the last working presentation and a resumable local result. This
 does not grant public result publication or owner review approval. The activation
 helper below supplies part of this behavior; the complete local-to-remote handoff
 is not implemented yet and remains in #64.
+Automatic NordVPN switching is authorized when needed to reach the VPS, followed
+by restoration of the prior connection state. The recovery and verification
+boundary is recorded in [ADR 0002](adr/0002-local-ingestion-remote-presentation.md).
 
 The [1 October 2026 activation report in #54](https://github.com/jamiepratt/freediving-results/issues/54)
 records successful owner HTML/API access using the v8 snapshot after PRs #58-#60.

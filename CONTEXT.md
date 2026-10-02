@@ -95,8 +95,11 @@ should produce a verified evidence snapshot and source bundle for presentation
 on the existing remote owner website. Verified runs should update that private
 presentation automatically, retaining the last working version if transfer or
 validation fails. Fetching and remote transfer are separate phases because VPN
-routing can interfere with the VPS connection. The automated handoff is not yet
-implemented; see [issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
+routing can interfere with the VPS connection. Automatic NordVPN switching for
+deployment is authorized, with restoration afterward and resumable failure.
+See [ADR 0002](docs/adr/0002-local-ingestion-remote-presentation.md).
+The automated handoff is not yet implemented;
+see [issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
 
 Python scripts handle bounded discovery, paced acquisition, browser capture,
 evidence packets and a private SQLite evidence snapshot. Clojure implements the
