@@ -1017,7 +1017,8 @@
                                                       (= :assert (:action %))) relevant))
                          key (sha256 (.getBytes (encode [(:id previous) decision config
                                                          (:version dictionary) (citation row)]) "UTF-8"))
-                         old (first (filter #(and (= key (:decision-key %))
+                         old (first (filter #(and (= (:id previous) (:event-id %))
+                                                  (= :model (:actor-kind %))
                                                   (= :reverse (:action %))) relevant))
                          cited? (some (fn [e]
                                         (let [ref (:citation e)]

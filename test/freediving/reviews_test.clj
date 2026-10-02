@@ -94,6 +94,12 @@
       (is (= :reverse (:action reversed)))
       (is (= reversed (reviews/invalidate-jev-dive-field!
                        fixture/app changed config invalidation)))
+      (is (= (select-keys reversed [:id :event-id :revision :action])
+             (select-keys (reviews/invalidate-jev-dive-field!
+                           fixture/app changed (assoc config :version "config/2")
+                           (assoc invalidation :dictionary (assoc dictionary :version "labels/2")
+                                  :base-revision 2))
+                          [:id :event-id :revision :action])))
       (is (nil? (get-in (reviews/dive-fields fixture/app target) [:category :accepted])))
       (is (thrown-with-msg? Exception #"reversed"
                             (reviews/approve-jev-dive-field! fixture/app ledger decision config request))))
