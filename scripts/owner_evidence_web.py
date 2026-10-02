@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from unified_evidence_query import SnapshotQuery
 from route_roster_query import RouteRosterQuery
 from owner_source_view import OriginalSourceView, SourceViewError
+from affiliate_name_query import AffiliateNameQuery
 
 
 ASSETS = {
@@ -32,17 +33,21 @@ ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 SOURCE_VIEW_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})$')
 SOURCE_PAGE_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 SOURCE_IMAGE_PATH = re.compile(r'^/api/source-view/([a-f0-9]{64})/image$')
+AFFILIATE_SOURCE_PATH = re.compile(r'^/api/affiliate-names/source/([a-f0-9]{64})$')
 
 
 class EvidenceServer(HTTPServer):
     def __init__(self, snapshot_dir, password, roster_dir=None, roster_sha256=None,
-                 source_bundle_dir=None, source_bundle_sha256=None):
+                 source_bundle_dir=None, source_bundle_sha256=None,
+                 affiliate_name_path=None, affiliate_name_sha256=None):
         if not password:
             raise ValueError('password is required')
         if bool(roster_dir) != bool(roster_sha256):
             raise ValueError('route roster configuration incomplete')
         if bool(source_bundle_dir) != bool(source_bundle_sha256):
             raise ValueError('source bundle configuration incomplete')
+        if bool(affiliate_name_path) != bool(affiliate_name_sha256):
+            raise ValueError('affiliate name configuration incomplete')
         self.snapshot_dir = snapshot_dir
         self.query = None
         self.roster = None
@@ -51,6 +56,9 @@ class EvidenceServer(HTTPServer):
         self.source_bundle_dir = source_bundle_dir
         self.source_bundle_sha256 = source_bundle_sha256
         self.source_view = None
+        self.affiliate_name_path = affiliate_name_path
+        self.affiliate_name_sha256 = affiliate_name_sha256
+        self.affiliate_names = None
         self.password = password
         self.sessions = {}
         self.login_attempts = deque()
@@ -82,6 +90,10 @@ class EvidenceServer(HTTPServer):
                     self.source_view = OriginalSourceView(self.source_bundle_dir,
                                                           self.source_bundle_sha256,
                                                           self.query.manifest['snapshot_sha256'])
+                if self.affiliate_name_path:
+                    self.affiliate_names = AffiliateNameQuery(
+                        self.affiliate_name_path, self.affiliate_name_sha256,
+                        self.snapshot_dir, self.query)
             except Exception:
                 self.query.close()
                 self.query = None
@@ -244,6 +256,20 @@ class EvidenceHandler(BaseHTTPRequestHandler):
                     result = self.server.roster.leads(**self._route_filters(parsed.query))
                 else:
                     result = self.server.roster.routes(**self._route_filters(parsed.query, routes=True))
+            elif path == '/api/affiliate-names' and not parsed.query:
+                self.server.snapshot()
+                if self.server.affiliate_names is None:
+                    return self._reply(503)
+                result = self.server.affiliate_names.listing()
+            elif AFFILIATE_SOURCE_PATH.fullmatch(path) and not parsed.query:
+                self.server.snapshot()
+                if self.server.affiliate_names is None:
+                    return self._reply(503)
+                original = self.server.affiliate_names.original(
+                    AFFILIATE_SOURCE_PATH.fullmatch(path).group(1))
+                if original is None:
+                    return self._reply(404)
+                return self._reply(200, original.encode('utf-8'), 'text/plain; charset=utf-8')
             elif path == '/api/roatan' and not parsed.query:
                 result = self.server.snapshot().roatan_positions()
             elif ROATAN_PATH.fullmatch(path) and not parsed.query:
@@ -351,9 +377,11 @@ class EvidenceHandler(BaseHTTPRequestHandler):
 
 
 def make_server(snapshot_dir, password, roster_dir=None, roster_sha256=None,
-                source_bundle_dir=None, source_bundle_sha256=None):
+                source_bundle_dir=None, source_bundle_sha256=None,
+                affiliate_name_path=None, affiliate_name_sha256=None):
     return EvidenceServer(snapshot_dir, password, roster_dir, roster_sha256,
-                          source_bundle_dir, source_bundle_sha256)
+                          source_bundle_dir, source_bundle_sha256,
+                          affiliate_name_path, affiliate_name_sha256)
 
 
 def main():
@@ -363,10 +391,13 @@ def main():
     parser.add_argument('--roster-sha256')
     parser.add_argument('--source-bundle-dir')
     parser.add_argument('--source-bundle-sha256')
+    parser.add_argument('--affiliate-name-path')
+    parser.add_argument('--affiliate-name-sha256')
     args = parser.parse_args()
     password = getpass.getpass('Local evidence password: ')
     with make_server(args.snapshot_dir, password, args.roster_dir, args.roster_sha256,
-                     args.source_bundle_dir, args.source_bundle_sha256) as server:
+                     args.source_bundle_dir, args.source_bundle_sha256,
+                     args.affiliate_name_path, args.affiliate_name_sha256) as server:
         print(f'Open http://127.0.0.1:{server.server_port}/login', flush=True)
         try:
             server.serve_forever()

@@ -140,6 +140,46 @@ async function loadRouteLeads(){
   params.set('offset',String(routeOffset));
   renderRouteLeads(await fetchJson('/api/route-leads?'+params));
 }
+async function loadAffiliateNames(){
+  const response=await fetch('/api/affiliate-names',{credentials:'same-origin',cache:'no-store'});
+  if(response.status===503){$('affiliate-summary').textContent='No checked affiliate name input configured.';return;}
+  if(response.status===401){location.href='/login';return;}
+  if(!response.ok)throw new Error(`HTTP ${response.status}`);
+  const input=await response.json();
+  $('affiliate-summary').textContent=`${input.assertions.length} cited name assertions; ${input.gaps.length} explicit gaps. Input SHA-256 ${input.input_sha256}. Snapshot manifest SHA-256 ${input.snapshot.manifest_sha256}. Identity candidate only; no attempts imported.`;
+  const sources=new Map(input.sources.map(item=>[item.source_sha256,item]));
+  const area=$('affiliate-results');area.replaceChildren();
+  for(const assertion of input.assertions){
+    const source=sources.get(assertion.source_sha256);
+    const card=document.createElement('article');card.className='source-view';
+    card.append(heading(assertion.original_name));
+    entries(card,{publisher_romanization:assertion.publisher_romanization,person_id:assertion.person_id,
+      evidence_key:assertion.evidence_key,parser_version:assertion.parser_version,
+      candidate_observation_refs:assertion.candidate_observation_refs,uncertainty:assertion.uncertainty,
+      source_sha256:assertion.source_sha256,publisher:source?.publisher,source_date:source?.source_date,
+      retrieved_at:source?.retrieved_at});
+    card.append(heading('Exact source position'),jsonBlock(assertion.source_position));
+    if(source){
+      const urls=document.createElement('p');
+      urls.append(cell('Discovery: ','span'),safeLink(source.discovery_url,'publisher route'),
+        cell(' Final: ','span'),safeLink(source.final_url,'retained source URL'));
+      card.append(urls);
+      const button=document.createElement('button');button.type='button';button.textContent='Show verified original as text';
+      const original=document.createElement('pre');
+      button.addEventListener('click',async()=>{
+        button.disabled=true;
+        try{const result=await fetch('/api/affiliate-names/source/'+assertion.source_sha256,{credentials:'same-origin',cache:'no-store'});
+          if(!result.ok)throw new Error(`HTTP ${result.status}`);
+          original.textContent=await result.text();
+        }catch(error){original.textContent=`Original unavailable: ${error.message}`;}
+        finally{button.disabled=false;}
+      });
+      card.append(button,original);
+    }
+    area.append(card);
+  }
+  if(input.gaps.length)area.append(heading('Explicit acquisition or parser gaps'),jsonBlock(input.gaps));
+}
 function params(){const data=new FormData($('filters'));const p=new URLSearchParams();for(const [k,v] of data)if(v)p.set(k,v);p.set('offset',String(offset));return p;}
 function sessionSummary(value){
   if(value==null)return 'unknown';
@@ -216,6 +256,7 @@ async function showRoatan(unit,index){const item=await fetchJson('/api/roatan/'+
 document.addEventListener('DOMContentLoaded',()=>{run(loadRoatan,'roatan-detail');run(loadOverview);run(browse);run(loadQueue,'queue-summary');run(loadComparisons,'comparison-summary');$('comparison-previous').addEventListener('click',()=>{comparisonOffset=Math.max(0,comparisonOffset-25);run(loadComparisons,'comparison-summary');});$('comparison-next').addEventListener('click',()=>{comparisonOffset+=25;run(loadComparisons,'comparison-summary');});$('filters').addEventListener('submit',e=>{e.preventDefault();offset=0;run(browse);});$('queue-filters').addEventListener('submit',e=>{e.preventDefault();queueOffset=0;run(loadQueue,'queue-summary');});$('queue-previous').addEventListener('click',()=>{queueOffset=Math.max(0,queueOffset-Number($('queue-filters').elements.limit.value));run(loadQueue,'queue-summary');});$('queue-next').addEventListener('click',()=>{queueOffset+=Number($('queue-filters').elements.limit.value);run(loadQueue,'queue-summary');});$('show-source').addEventListener('click',()=>run(sourceDetail));for(const name of ['candidates','gaps','relationships'])$(name).addEventListener('click',()=>{active=name==='candidates'?'browse':name;if(name==='candidates')document.querySelector('[name=kind]').value='candidate_position';offset=0;run(browse);});$('previous').addEventListener('click',()=>{offset=Math.max(0,offset-Number(document.querySelector('[name=limit]').value));run(browse);});$('next').addEventListener('click',()=>{offset+=Number(document.querySelector('[name=limit]').value);run(browse);});});
 document.addEventListener('DOMContentLoaded',()=>{
   run(async()=>{await loadRoutes();await loadRouteLeads();},'route-summary');
+  run(loadAffiliateNames,'affiliate-summary');
   $('route-filters').addEventListener('submit',event=>{event.preventDefault();routeOffset=0;run(loadRouteLeads,'route-lead-summary');});
   $('route-previous').addEventListener('click',()=>{routeOffset=Math.max(0,routeOffset-Number($('route-filters').elements.limit.value));run(loadRouteLeads,'route-lead-summary');});
   $('route-next').addEventListener('click',()=>{routeOffset+=Number($('route-filters').elements.limit.value);run(loadRouteLeads,'route-lead-summary');});
