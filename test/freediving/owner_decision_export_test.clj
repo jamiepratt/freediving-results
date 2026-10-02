@@ -10,7 +10,7 @@
 (defn fixture []
   (let [evidence {:evidence-id "source-row-1" :citation {:source-sha256 sha :locator "row 1"}
                   :exact-excerpt "Synthetic row"}
-        decision {:id "decision-1" :family :identity :action :same-person
+        decision {:id "decision-1" :family :row-semantics :action :same-person
                   :choices [:same-person :different-person :unknown]
                   :subject {:id "person-a"} :evidence [evidence] :dependencies []
                   :owner-proposal {:rule_version "rule/1" :subject_id "person-a" :source_name "Synthetic source"
@@ -32,7 +32,8 @@
      :verified-record {record {:record-id record :job-id job :ordinal 0
                                :candidate-id "candidate-1" :source-sha256 sha
                                :artifact-sha256 artifact :parser-version "parser/1"
-                               :source-name "Synthetic source" :athlete-name "A"}}}))
+                               :source-name "Synthetic source" :athlete-name "A"
+                               :source-value "Synthetic row"}}}))
 
 (deftest exports-exact-immutable-revisions-and-citations
   (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
@@ -97,7 +98,8 @@
                    {record {:record-id record :job-id job :ordinal 1
                             :candidate-id "candidate-1" :source-sha256 sha
                             :artifact-sha256 artifact :parser-version "parser/1"
-                            :source-name "Synthetic source" :athlete-name "A"}}})))))
+                            :source-name "Synthetic source" :athlete-name "A"
+                            :source-value "Synthetic row"}}})))))
 
 (deftest ignores-untrusted-owner-proposal-values
   (let [{:keys [ledger decision observation mapping]} (fixture)
@@ -114,9 +116,10 @@
                            {record {:record-id record :job-id job :ordinal 0
                                     :candidate-id "candidate-1" :source-sha256 sha
                                     :artifact-sha256 artifact :parser-version "parser/1"
-                                    :source-name "Synthetic source" :athlete-name "A"}}})))]
+                                    :source-name "Synthetic source" :athlete-name "A"
+                                    :source-value "Synthetic row"}}})))]
     (is (= "Synthetic source" (:source_name proposal)))
-    (is (= {:athlete_names ["A"]} (:original proposal)))
+    (is (= {:source_values ["Synthetic row"]} (:original proposal)))
     (is (= "reconciliation-jev/1" (:rule_version proposal)))))
 
 (deftest exports-row-meaning-from-retained-source-value
@@ -139,9 +142,10 @@
 (deftest refuses-identity-pair-that-is-not-the-bound-observation
   (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
         id (str "local-observation:" job ":1")
-        decision (assoc decision :subject {:id "person-a" :pair [id id]
-                                           :observation-versions {id {:source-sha256 sha
-                                                                      :artifact-sha256 artifact}}})]
+        decision (assoc decision :family :identity
+                        :subject {:id "person-a" :pair [id id]
+                                  :observation-versions {id {:source-sha256 sha
+                                                             :artifact-sha256 artifact}}})]
     (is (thrown? clojure.lang.ExceptionInfo
                  (export/export-proposals
                   ledger [decision]
@@ -149,6 +153,44 @@
                    :evidence-bindings {"source-row-1" mapping}
                    :observation-revisions {[job 0] observation}
                    :verified-snapshot-records verified-record})))))
+
+(deftest refuses-identity-without-exact-pair
+  (let [{:keys [ledger decision observation mapping verified-record]} (fixture)]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (export/export-proposals
+                  ledger [(assoc decision :family :identity)]
+                  {:snapshot-sha256 sha :binding-revision 7
+                   :evidence-bindings {"source-row-1" mapping}
+                   :observation-revisions {[job 0] observation}
+                   :verified-snapshot-records verified-record})))))
+
+(deftest names-all-cross-source-evidence
+  (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
+        other-job (apply str (repeat 64 "e"))
+        other-record (apply str (repeat 64 "f"))
+        second-evidence {:evidence-id "source-row-2"
+                         :citation {:source-sha256 sha :locator "row 2"}
+                         :exact-excerpt "Synthetic second row"}
+        decision (update decision :evidence conj second-evidence)
+        ledger (assoc-in ledger [:events 0 :evidence] (:evidence decision))
+        other-observation (assoc observation :job_id other-job :ordinal 1)
+        opts {:snapshot-sha256 sha :binding-revision 7
+              :evidence-bindings {"source-row-1" mapping
+                                  "source-row-2" {:evidence-id "source-row-2"
+                                                  :snapshot-record-id other-record
+                                                  :job-id other-job :ordinal 1}}
+              :observation-revisions {[job 0] observation
+                                      [other-job 1] other-observation}
+              :verified-snapshot-records
+              (assoc verified-record other-record
+                     {:record-id other-record :job-id other-job :ordinal 1
+                      :candidate-id "candidate-1" :source-sha256 sha
+                      :artifact-sha256 artifact :parser-version "parser/1"
+                      :source-name "Another synthetic source"
+                      :source-value "Synthetic second row"})}
+        proposal (first (:proposals (export/export-proposals ledger [decision] opts)))]
+    (is (= ["Synthetic source" "Another synthetic source"] (:source_names proposal)))
+    (is (= "Synthetic source + Another synthetic source" (:source_name proposal)))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.owner-decision-export-test)]

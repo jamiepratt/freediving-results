@@ -65,7 +65,7 @@
 
 (defn- metadata [decision selected records]
   (let [sources (vec (distinct (map :source-name records)))
-        source-name (when (= 1 (count sources)) (first sources))
+        source-name (str/join " + " sources)
         originals (case (:family decision)
                     :identity (mapv :athlete-name records)
                     (:same-attempt :source-revision :row-semantics
@@ -80,6 +80,7 @@
     {:subject_id (or (get-in decision [:subject :id])
                      (get-in decision [:subject :target-id]))
      :source_name source-name
+     :source_names sources
      :original {original-key originals}
      :proposed {:action (str/replace (name selected) "-" "_")
                 :subject (select-keys (:subject decision) [:pair :target-id :source-positions])}
@@ -98,24 +99,24 @@
     (let [subject (:subject decision)
           pair (:pair subject)
           versions (:observation-versions subject)]
-      (when pair
-        (when-not (and (vector? pair) (= 2 (count pair))
-                       (every? identity-position pair)
-                       (= (set (map identity-position pair))
-                          (set (map (fn [item]
-                                      (let [r (:observation-revision item)]
-                                        [(:job_id r) (:ordinal r)])) bound)))
-                       (every? (fn [id]
-                                 (let [cited (get versions id)
-                                       revision (some (fn [item]
-                                                        (let [r (:observation-revision item)]
-                                                          (when (= (identity-position id)
-                                                                   [(:job_id r) (:ordinal r)]) r))) bound)]
-                                   (and (= (:source-sha256 cited) (:source_sha256 revision))
-                                        (= (:artifact-sha256 cited) (:artifact_sha256 revision)))))
-                               pair))
-          (invalid! "Identity subject differs from exact observation revisions"
-                    {:decision-id (:id decision)}))))))
+      (when-not (and (vector? pair) (= 2 (count pair))
+                     (= 2 (count (set pair)))
+                     (every? identity-position pair)
+                     (= (set (map identity-position pair))
+                        (set (map (fn [item]
+                                    (let [r (:observation-revision item)]
+                                      [(:job_id r) (:ordinal r)])) bound)))
+                     (every? (fn [id]
+                               (let [cited (get versions id)
+                                     revision (some (fn [item]
+                                                      (let [r (:observation-revision item)]
+                                                        (when (= (identity-position id)
+                                                                 [(:job_id r) (:ordinal r)]) r))) bound)]
+                                 (and (= (:source-sha256 cited) (:source_sha256 revision))
+                                      (= (:artifact-sha256 cited) (:artifact_sha256 revision)))))
+                             pair))
+        (invalid! "Identity subject differs from exact observation revisions"
+                  {:decision-id (:id decision)})))))
 
 (defn- proposal [decision event run-revision opts]
   (let [id (:id decision)
@@ -179,6 +180,7 @@
         (invalid! "Invalid provider probability" {:decision-id id}))
       {:id id :type (str/replace (name (:family decision)) "-" "_") :subject_id (:subject_id source)
        :source_name (:source_name source) :original (:original source)
+       :source_names (:source_names source)
        :proposed (:proposed source) :selected_option (str/replace (name selected) "-" "_")
        :competing_options (:competing_options source)
        :evidence (mapv (fn [{:keys [evidence-id snapshot-record-id observation-revision source]}]
