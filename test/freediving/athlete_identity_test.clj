@@ -70,6 +70,21 @@
       (is (= [] (:negative-pairs (identity/project corrected))))
       (is (= 1 (:accepted-group-count (identity/project corrected)))))))
 
+(deftest human-rejection-cannot-contradict-an-active-identity-group
+  (let [rows [(athlete "a" "A Person") (athlete "b" "B Person")]
+        linked (identity/append-event (identity/empty-ledger rows)
+                                      {:id "owner-link" :action :accept :actor-kind :human
+                                       :pair ["a" "b"] :reason "initial evidence"})
+        reject {:id "owner-reject" :action :reject :actor-kind :human
+                :pair ["a" "b"] :reason "new evidence"}]
+    (is (thrown? clojure.lang.ExceptionInfo (identity/append-event linked reject)))
+    (let [reversed (identity/append-event linked
+                                          {:id "owner-reverse" :action :reverse
+                                           :actor-kind :human :event-id "owner-link"
+                                           :reason "split"})]
+      (is (= 0 (:accepted-group-count
+                (identity/project (identity/append-event reversed reject))))))))
+
 (deftest transitive-publisher-conflict-and-context-changes
   (let [rows [(athlete "a" "A Person" :publisher-scope "CMAS" :publisher-athlete-id "1" :publisher-id-kind :person)
               (athlete "b" "B Person")

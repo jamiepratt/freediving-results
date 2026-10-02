@@ -432,6 +432,11 @@
               (fail! "Model reversal lacks a current failed approval" {:id (:id event)}))))
         (when pair
           (when-not (every? rows pair) (fail! "Unknown observation" {:pair pair}))
+          (when (and (= :human (:actor-kind event)) (= :reject (:action event))
+                     (= (get-in (project ledger) [:athletes (first pair) :group-id])
+                        (get-in (project ledger) [:athletes (second pair) :group-id])))
+            (fail! "Human rejection requires reversing the active identity link first"
+                   {:pair pair}))
           (when (and (= :accept (:action event))
                      (not (and (= :model (:actor-kind event)) (:request event)
                                (not (model-current? rows event)))))

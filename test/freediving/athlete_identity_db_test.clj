@@ -34,6 +34,12 @@
     (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (identity/record-event! reviewer
+                                         {:id "contradictory-reject" :action :reject
+                                          :actor-kind :human :pair [a b]
+                                          :reason "must split first"})))
+    (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! reviewer
                                          {:id "canonical-link" :action :reject :actor-kind :human
                                           :pair [a b] :reason "conflicting replay"})))
     (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
