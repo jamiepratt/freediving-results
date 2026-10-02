@@ -1,0 +1,39 @@
+name: Ingestion evidence or parser gap
+description: Scope a discovery, acquisition or extraction task with replayable evidence.
+title: "[Ingestion] "
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome and bounded scope
+      description: State the stage, federation or route, competition dates, cutoff and completion condition. Distinguish event dates from publication dates.
+    validations:
+      required: true
+  - type: textarea
+    id: existing-evidence
+    attributes:
+      label: Existing evidence and related issues
+      description: Link checked indexes, existing acquisition reports and owning issues. Include safe hashes or opaque references for private evidence. Do not upload real source files, athlete ledgers, credentials or browser state.
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Missing capability or unresolved evidence
+      description: Explain what is unchecked, inaccessible, unsupported, ambiguous or partial. For a parser gap, identify the format, current parser/version and failing scope. An access failure is not proof that results are absent.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and accounting
+      description: Define applicable byte/hash checks, exact citations, source-position accounting, synthetic fixtures, negative parser cases and idempotent replay. Distinguish sources, rows, observations, aggregates and confirmed attempts.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Boundaries and user-facing copy impact
+      description: State dependencies, exclusions and any visible behavior/copy changes. Use None for copy when appropriate. Ingestion alone grants no identity approval, owner review or publication authority.
+    validations:
+      required: true
