@@ -26,6 +26,12 @@ and publication dates are different facts.
    parsers and their recognition functions. Routine fetching and supported
    parsing should not require an LLM per document or row.
 
+Each discovery pass declares its federation/year/source-family scope and dated
+cutoff. Finish when the declared routes have been checked and every discovered
+in-scope lead has a disposition. A budget limit creates a resumable checkpoint,
+not completion. Inaccessible or unsupported evidence remains an explicit gap;
+finishing a discovery pass does not imply complete ingestion or global coverage.
+
 Refresh discovery indexes on later discovery runs. Recheck archived result
 sources selectively: recent or provisional results more often, older results
 less often. Reuse verified evidence within a run, retain changed versions, and

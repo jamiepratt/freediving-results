@@ -27,6 +27,16 @@ Separate ingestion into three stages with retained outputs:
    recognition function, or create both. Retain source and parser versions so
    repaired extraction can replay without rediscovering or refetching evidence.
 
+Declare the federation, year and source-family scope of each discovery pass,
+including its routes and dated cutoff. Complete the pass when those routes have
+been checked and every discovered in-scope lead has an evidenced disposition.
+Inaccessible, missing or unsupported sources remain explicit gaps; unchecked
+in-scope leads prevent completion. Leads outside the declared scope remain
+available for another pass. Reaching a time, request or LLM budget creates a
+resumable checkpoint, not a completed pass. Fixed effort alone is rejected as
+the completion criterion. This defines completion of bounded discovery, not
+successful ingestion of every source or complete worldwide coverage.
+
 Use selective refresh across runs. Refresh discovery indexes to find new links;
 recheck recent or provisional result sources more often and older results less
 often. Reuse verified acquisitions within a run and retain changed source
@@ -100,9 +110,9 @@ deferred. Record evidence needed for those decisions without making them.
   Requiring deterministic code to discover every unfamiliar source is also too
   restrictive; LLM assistance remains available where it adds value.
 - The existing `supported?` functions and source-hash guards are implementation
-  evidence, not yet a uniform cross-format registry. The recognizer API, refresh
-  intervals and stopping rules remain unresolved in #62; this decision does not
-  select their design.
+  evidence, not yet a uniform cross-format registry. The recognizer API,
+  verification sampling, refresh intervals and checkpoint representation remain
+  implementation details in #62; this decision does not select their design.
 
 ## Evidence
 
