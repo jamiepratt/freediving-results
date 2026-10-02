@@ -638,18 +638,18 @@
      :source-sha256 (:source_sha256 o) :artifact-sha256 (:artifact_sha256 o)
      :parser-version (:parser_version o) :payload payload}))
 
-(defn- raw-field [payload field]
+(defn- raw-field-entry [payload field]
   (let [raw (:raw payload)
         fields (if (map? (:fields raw)) (:fields raw) raw)]
-    (case field
-      :category (first (filter nonblank? [(:category fields) (get fields "category")
-                                          (get fields "Category") (get fields "PlaCat")
-                                          (get fields "PlaCatEff") (get fields "AGCodeDescr")
-                                          (get fields "Gender")]))
-      :representation (first (filter nonblank? [(:representation fields) (get fields "representation")
-                                                (get fields "Representation") (:country fields)
-                                                (get fields "Country") (get fields "PlaNat")
-                                                (get fields "ParOrgCode") (get fields "Nationality")])))))
+    (first (filter (comp nonblank? second)
+                   (map (fn [key] [key (get fields key)])
+                        (case field
+                          :category [:category "category" "Category" "PlaCat" "PlaCatEff"
+                                     "AGCodeDescr" "Gender"]
+                          :representation [:representation "representation" "Representation"
+                                           :country "Country" "PlaNat" "ParOrgCode" "Nationality"]))))))
+
+(defn- raw-field [payload field] (second (raw-field-entry payload field)))
 
 (defn- citation [row]
   (merge {:source-position-id (:source-position-id row)
@@ -721,16 +721,26 @@
                  (and (map? chosen) (#{:country :federation :neutral :organization} (:kind chosen))
                       (string? (:code chosen)) (not (str/blank? (:code chosen)))))
         status (if (and (not conflict?) valid?) :accepted :unresolved)
-        evidence (cond-> [(assoc (citation row) :raw-label raw :source :row)]
+        source-key (first (raw-field-entry (:payload row) field))
+        semantic-binding? (or (not= field :representation)
+                              (not (#{"Nationality" "PlaNat"} source-key))
+                              (= :per-dive-representation
+                                 (get-in dictionary [:representation-cell-semantics source-key])))
+        evidence (cond-> []
+                   raw (conj (assoc (citation row) :raw-label raw :source :row))
                    heading (conj (merge (citation row) (:citation heading)
                                         {:raw-label heading-label :source :heading})))
+        evidence (if (seq evidence) evidence [(assoc (citation row) :raw-label nil :source :row)])
         contrary (if conflict? [(last evidence)] [])]
-    {:original raw :proposed (when (= status :accepted) chosen)
-     :status status :supporting-evidence (if conflict? [(first evidence)] evidence)
+    {:original raw
+     :status (if semantic-binding? status :unresolved)
+     :proposed (when (and semantic-binding? (= status :accepted)) chosen)
+     :supporting-evidence (if conflict? [(first evidence)] evidence)
      :conflicting-evidence contrary
      :rule-evidence {:row-label raw :heading-label heading-label
                      :dictionary-value chosen :dictionary-version (:version dictionary)
                      :rule (cond conflict? :row-heading-conflict
+                                 (not semantic-binding?) :unsupported-column-semantics
                                  (nil? (or raw heading-label)) :missing-label
                                  (not valid?) :unmapped-label
                                  :else :explicit-dictionary-map)}}))

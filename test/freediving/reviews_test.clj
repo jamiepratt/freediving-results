@@ -75,6 +75,71 @@
         (is (= {:kind :neutral :code "AIN"}
                (get-in (reviews/dive-fields fixture/app target) [:representation :accepted])))))))
 
+(deftest heading-only-category-cites-the-heading
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "heading-test/1")
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "packet:heading:row0"}
+        dictionary {:version "heading-test/1" :federation "TEST" :event-id "heading-event"
+                    :categories {"Women" ["women"]} :representations {}
+                    :category-heading {:label "Women" :citation {:page 1 :line 9}}}]
+    (fixture/publish! source)
+    (observations/import! fixture/app root (:job-id artifact))
+    (reviews/reconcile-dive-fields! fixture/app target dictionary)
+    (let [category (:category (reviews/dive-fields fixture/app target))]
+      (is (= ["women"] (:accepted category)))
+      (is (= :heading (get-in category [:citation :source])))
+      (is (= 9 (get-in category [:citation :line]))))))
+
+(deftest postgres-decision-export-projects-through-private-snapshot
+  (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "cross-language/1")
+        artifact (-> artifact
+                     (assoc-in [:candidates 0 :raw :fields :category] "Women")
+                     (assoc-in [:candidates 0 :raw :fields :representation] "AIN"))
+        target {:job-id (:job-id artifact) :ordinal 0 :source-position-id "packet:pdf:row0"}
+        dictionary {:version "cross-language/1" :federation "TEST" :event-id "synthetic-meet"
+                    :categories {"Women" ["women" "masters"]}
+                    :representations {"AIN" {:kind :neutral :code "AIN"}}}
+        dir (archive-fixture/workspace)
+        packet (str dir "/packet.json") decisions (str dir "/decisions.json")
+        output (str dir "/snapshot")]
+    (fixture/publish! (assoc source :artifact artifact))
+    (observations/import! fixture/app root (:job-id artifact))
+    (reviews/reconcile-dive-fields! fixture/app target dictionary)
+    (spit decisions (reviews/export-dive-fields fixture/app))
+    (let [projected (first (:positions (json/read-str (slurp decisions) :key-fn keyword)))
+          row {:id (:source_position_id projected)
+               :source_sha256 (:source_sha256 projected)
+               :artifact_sha256 (:artifact_sha256 projected)
+               :parser_version (:parser_version projected)
+               :category_raw (:raw_category projected)
+               :representation_raw (:raw_representation projected)
+               :citation {:page 1 :line 1}
+               :observation_refs [{:job_id (:job_id projected) :ordinal (:ordinal projected)
+                                   :artifact_sha256 (:artifact_sha256 projected)
+                                   :parser_version (:parser_version projected)}]}
+          _ (spit packet (json/write-str {:schema "synthetic/v1"
+                                          :source {:sha256 (:source_sha256 projected)}
+                                          :positions [row]}))
+          build (shell/sh "python3" "scripts/unified_evidence_snapshot.py" "build"
+                          "--cutoff" "2026-10-02T00:00:00Z" "--input" (str "synthetic=" packet)
+                          "--decisions-file" decisions "--output-dir" output)]
+      (is (= 0 (:exit build)) (:err build))
+      (when (zero? (:exit build))
+        (let [browse (shell/sh "python3" "scripts/unified_evidence_query.py"
+                               "--snapshot-dir" output "browse" "--kind" "candidate_position")
+              listing (when (zero? (:exit browse)) (json/read-str (:out browse) :key-fn keyword))
+              record-id (:record_id (first (:records listing)))
+              detail (when record-id
+                       (shell/sh "python3" "scripts/unified_evidence_query.py"
+                                 "--snapshot-dir" output "detail" record-id))
+              result (when (and detail (zero? (:exit detail)))
+                       (json/read-str (:out detail) :key-fn keyword))]
+          (is (= 0 (:exit browse)) (:err browse))
+          (is (= 0 (:exit detail)) (:err detail))
+          (is (= ["women" "masters"] (get-in result [:dive_fields :accepted_categories])))
+          (is (= "automatic" (get-in result [:dive_fields :representation_status])))
+          (is (= "AIN" (get-in result [:dive_fields :raw_representation])))
+          (is (= 1 (get-in result [:dive_fields :category_citation :page]))))))))
+
 (deftest conflicting-heading-remains-unresolved-and-human-correction-survives-replay
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "field-conflict/1")
         artifact (-> artifact
@@ -869,7 +934,8 @@
                            :source-position-id "packet:json:row0")
         json-dictionary {:version "test-json/1" :federation "CMAS" :event-id "meet-json"
                          :categories {"MASTERS M1" ["masters-m1"]}
-                         :representations {"GER" {:kind :country :code "GER"}}}
+                         :representations {"GER" {:kind :country :code "GER"}}
+                         :representation-cell-semantics {"PlaNat" :per-dive-representation}}
         json-run (reviews/reconcile-dive-fields! fixture/app json-target json-dictionary)
         dir (archive-fixture/workspace) root (str dir "/archive")
         hash (html-fixture/register-html root (str dir "/source.html") (html-fixture/document html-fixture/cells))
@@ -881,7 +947,15 @@
     (observations/import! fixture/app root job)
     (is (= ["masters-m1"] (get-in json-run [:category :proposed])))
     (is (= {:kind :country :code "GER"} (get-in json-run [:representation :proposed])))
-    (let [html-run (reviews/reconcile-dive-fields! fixture/app html-target html-dictionary)
+    (let [unbound (reviews/reconcile-dive-fields! fixture/app html-target html-dictionary)
+          _ (is (= :unresolved (get-in unbound [:representation :status])))
+          _ (is (= :unsupported-column-semantics
+                   (get-in unbound [:representation :rule-evidence :rule])))
+          html-dictionary (-> html-dictionary
+                              (assoc :version "test-html/2")
+                              (assoc :representation-cell-semantics
+                                     {"Nationality" :per-dive-representation}))
+          html-run (reviews/reconcile-dive-fields! fixture/app html-target html-dictionary)
           projected (reviews/dive-fields fixture/app html-target)]
       (is (= ["women"] (get-in html-run [:category :proposed])))
       (is (= {:kind :neutral :code "AIN"} (get-in projected [:representation :accepted])))
