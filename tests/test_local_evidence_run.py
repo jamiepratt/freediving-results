@@ -61,6 +61,95 @@ def test_run_resumes_completed_stage_and_binds_snapshot_bundle(tmp_path):
     assert sha(snapshot / 'manifest.json') == state['local']['snapshot_manifest_sha256']
 
 
+def test_reconciliation_checkpoints_after_local_staging_and_replays_without_scoring(tmp_path):
+    plan, _, counter, _ = fixture(tmp_path)
+    spec = tmp_path / 'reconciliation.edn'
+    spec.write_text('''{:config {:provider :jev :model "synthetic-jev" :version "synthetic/1"}
+ :decisions [{:id "different-people" :family :identity :action :different-person
+              :choices [:same-person :different-person :unknown]
+              :subject {:id "synthetic-pair"} :candidates ["person-a" "person-b"]
+              :dependencies [] :evidence-adequate? true
+              :evidence [{:evidence-id "synthetic-row" :citation {:source-sha256 "synthetic" :locator "row 1"}
+                          :fact "Two distinct synthetic people"}]}]
+ :synthetic-answers {"different-people" {:type "choice" :choice "different_person"
+   :confidence 0.99 :probabilities {"same_person" 0.005 "different_person" 0.99 "unknown" 0.005}}}}''')
+    data = json.loads(plan.read_text())
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec), 'name_evidence': {'status': 'gap', 'reason': 'synthetic fixture has no affiliate roster'}}
+    plan.write_text(json.dumps(data))
+    target = tmp_path / 'run'
+    first = run(plan, target)
+    assert first.returncode == 0, first.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['reconciliation']['status'] == 'complete'
+    assert state['reconciliation']['no_link'] == 1
+    assert state['reconciliation']['provider_calls'] == 1
+    assert state['reconciliation']['gaps'] == [{'name': 'affiliate-names', 'reason': 'synthetic fixture has no affiliate roster'}]
+    assert state['remote']['status'] == 'pending'
+    assert state['coverage']['confirmed_distinct_attempts'] is None
+    ledger_hash = sha(target / 'reconciliation' / 'flow.edn')
+    second = run(plan, target)
+    assert second.returncode == 0, second.stderr
+    assert counter.read_text() == 'x'
+    assert sha(target / 'reconciliation' / 'flow.edn') == ledger_hash
+    assert json.loads((target / 'state.json').read_text())['reconciliation']['provider_calls'] == 1
+
+
+def test_deterministic_local_reconciliation_has_no_provider_dispatch(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    spec = tmp_path / 'deterministic.edn'
+    spec.write_text('''{:config {:provider :jev :model "synthetic-jev" :version "synthetic/1"}
+ :decisions [{:id "known-rule" :family :identity :action :different-person
+              :choices [:same-person :different-person :unknown]
+              :subject {:id "synthetic-pair"} :candidates ["person-a" "person-b"]
+              :dependencies [] :evidence-adequate? true
+              :evidence [{:evidence-id "synthetic-row" :citation {:source-sha256 "synthetic" :locator "row 1"}
+                          :fact "Synthetic rule evidence"}]}]
+ :deterministic-results {"known-rule" {:status :approve :rule-version "synthetic-rule/1"}}
+ :synthetic-answers {}}''')
+    data = json.loads(plan.read_text())
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec),
+                              'name_evidence': {'status': 'gap', 'reason': 'no affiliate evidence in synthetic fixture'}}
+    plan.write_text(json.dumps(data))
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode == 0, result.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['reconciliation']['provider_calls'] == 0
+    assert state['reconciliation']['flow_statuses'] == {'approved': 1}
+    assert state['reconciliation']['unresolved'] == 1  # no canonical target for a rule-only identity decision
+    assert state['reconciliation']['accepted_athletes'] is None
+    assert state['reconciliation']['distinct_attempts'] is None
+
+
+def test_synthetic_reconciliation_cannot_activate_remote_presentation(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    data = json.loads(plan.read_text())
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(tmp_path / 'spec.edn'),
+                              'name_evidence': {'status': 'gap', 'reason': 'synthetic'}}
+    plan.write_text(json.dumps(data))
+    remote = tmp_path / 'remote.json'
+    remote.write_text('{}')
+    result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--plan', str(plan),
+                             '--run-dir', str(tmp_path / 'run'), '--remote-config', str(remote)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert 'synthetic reconciliation cannot activate remote presentation' in result.stderr
+    assert not (tmp_path / 'run').exists()
+
+
+def test_reconciliation_requires_checked_affiliate_names_or_explicit_gap(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    data = json.loads(plan.read_text())
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(tmp_path / 'spec.edn')}
+    plan.write_text(json.dumps(data))
+    result = run(plan, tmp_path / 'run')
+    assert result.returncode != 0
+    assert 'checked affiliate names or an explicit gap' in result.stderr
+    assert not (tmp_path / 'run').exists()
+
+
 def test_interruption_resumes_and_keeps_prior_completed_run(tmp_path):
     plan, packet, counter, _ = fixture(tmp_path)
     prior = tmp_path / 'prior'
