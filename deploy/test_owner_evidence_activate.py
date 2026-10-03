@@ -111,6 +111,57 @@ class ActivationTests(unittest.TestCase):
                          (self.layout.state / 'snapshots' / digest).resolve())
         self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'unchanged')
 
+    def test_candidate_pin_preserves_secret_containing_prior_pin_assignment(self):
+        secret = 'prefixOWNER_EVIDENCE_SNAPSHOT_SHA256=' + self.digest + 'suffix'
+        self.config.write_text(self.config.read_text().replace(
+            'some-private-gateway-secret', secret))
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        self.activate_candidate(digest, private, manifest_digest)
+        self.assertIn('OWNER_EVIDENCE_GATEWAY_SECRET=' + secret + '\n', self.config.read_text())
+        self.assertIn('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + digest + '\n', self.config.read_text())
+
+    def test_failed_candidate_restores_inactive_disabled_service(self):
+        self.run_activation()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        calls = []
+        def inactive_service(*args):
+            calls.append(args)
+            if args[:2] == ('systemctl', 'is-active') or args[:2] == ('systemctl', 'is-enabled'):
+                return False
+            return True
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest,
+                                    command=inactive_service,
+                                    health=lambda: (_ for _ in ()).throw(RuntimeError('unhealthy')))
+        self.assertIn(('systemctl', 'stop', 'freediving-owner-evidence.service'), calls)
+        self.assertIn(('systemctl', 'disable', 'freediving-owner-evidence.service'), calls)
+        self.assertNotIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), calls[-3:])
+
+    def test_interrupted_candidate_restores_inactive_disabled_state_on_retry(self):
+        self.run_activation()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args[:2] in (('systemctl', 'is-active'), ('systemctl', 'is-enabled')):
+                return False
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        calls = []
+        def retry_command(*args):
+            calls.append(args)
+            if args[:2] in (('systemctl', 'is-active'), ('systemctl', 'is-enabled')):
+                return False
+            return True
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest,
+                                                 command=retry_command), 'activated')
+        stop = calls.index(('systemctl', 'stop', 'freediving-owner-evidence.service'))
+        disable = calls.index(('systemctl', 'disable', 'freediving-owner-evidence.service'))
+        restart = calls.index(('systemctl', 'restart', 'freediving-owner-evidence.service'))
+        self.assertLess(stop, restart)
+        self.assertLess(disable, restart)
+
     def test_candidate_health_failure_restores_config_and_prior_activation(self):
         self.run_activation()
         old_config = self.config.read_bytes()

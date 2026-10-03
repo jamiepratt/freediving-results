@@ -276,6 +276,9 @@ def _restore_checkpoint(layout, command):
                 _regular(backup)
                 if backup.stat().st_mode & 0o077:
                     raise ValueError('prior activation backup is not private')
+        if (type(previous['service_active']) is not bool or
+                type(previous['service_enabled']) is not bool):
+            raise ValueError('invalid prior service state')
         if (previous['app'] is None) != (previous['snapshot'] is None):
             raise ValueError('incomplete prior activation')
         _config(path / 'before-config', os.geteuid(),
@@ -309,10 +312,11 @@ def _restore_checkpoint(layout, command):
             else:
                 target.unlink(missing_ok=True)
         command('systemctl', 'daemon-reload')
-        if previous['app'] is not None and previous['snapshot'] is not None:
+        if previous['service_active']:
             command('systemctl', 'restart', SERVICE)
         else:
             command('systemctl', 'stop', SERVICE)
+        command('systemctl', 'enable' if previous['service_enabled'] else 'disable', SERVICE)
         _checkpoint_status(path, 'failed', record['candidate'], previous)
     except Exception:
         try:
@@ -347,7 +351,12 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
              owner_uid=0, owner_gid=0):
     """Activate local inputs; raises with old links/unit restored on service failure."""
     bundle, source = Path(bundle), Path(source)
-    command = command or (lambda *args: subprocess.run(args, check=True))
+    if command is None:
+        def command(*args):
+            if args[0] == 'systemctl' and args[1] in ('is-active', 'is-enabled'):
+                return subprocess.run(args, check=False, capture_output=True).returncode == 0
+            subprocess.run(args, check=True)
+            return True
     if update_config_pin:
         _restore_checkpoint(layout, command)
     values = _config(layout.config, os.geteuid(), None if update_config_pin else expected)
@@ -356,9 +365,12 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
         raise ValueError('candidate pin requires a matching private source bundle')
     candidate_config = layout.config.read_bytes()
     if update_config_pin and prior_pin != expected:
-        candidate_config = candidate_config.replace(
-            ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + prior_pin).encode(),
-            ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + expected).encode())
+        prior_assignment = ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + prior_pin).encode()
+        new_assignment = ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + expected).encode()
+        candidate_config = b''.join(
+            line.replace(prior_assignment, new_assignment, 1)
+            if line.startswith(prior_assignment) else line
+            for line in candidate_config.splitlines(keepends=True))
     _inputs(bundle, source, expected)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
@@ -457,12 +469,15 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     layout.units.mkdir(parents=True, exist_ok=True)
     checkpoint = None
     if update_config_pin:
+        service_active = bool(command('systemctl', 'is-active', '--quiet', SERVICE))
+        service_enabled = bool(command('systemctl', 'is-enabled', '--quiet', SERVICE))
         previous = {
             'app': str(old_app) if old_app else None,
             'snapshot': str(old_snapshot) if old_snapshot else None,
             'roster': str(old_roster) if old_roster else None,
             'source': str(old_source) if old_source else None,
             'config': True, 'env': old_env is not None, 'unit': old_unit is not None,
+            'service_active': service_active, 'service_enabled': service_enabled,
         }
         _begin_checkpoint(layout, expected, previous)
         checkpoint = _checkpoint_dir(layout)

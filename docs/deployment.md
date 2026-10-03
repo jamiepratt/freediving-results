@@ -208,7 +208,7 @@ For a later candidate, keep the prior pin in this root-owned mode 0600 file.
 The guarded host helper verifies the candidate snapshot and matching private
 source bundle first, then atomically updates the pin during local activation.
 It restores the prior pin, service files, and active links if activation or health
-fails. It retains old staged snapshots. Its root-private
+fails, including the prior service active and enabled state. It retains old staged snapshots. Its root-private
 `/var/lib/freediving-owner-evidence/activation-checkpoint/status.json` records
 `pending`, `failed`, or `active` for the local host step. On a retry, a pending
 step first restores the prior local state; invalid recovery stops the private
