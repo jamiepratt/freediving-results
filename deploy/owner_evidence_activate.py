@@ -345,18 +345,20 @@ def _begin_checkpoint(layout, candidate, previous):
     _checkpoint_status(path, 'pending', candidate, previous)
 
 
+def _system_command(*args):
+    if args[0] == 'systemctl' and args[1] in ('is-active', 'is-enabled'):
+        return subprocess.run(args, check=False, capture_output=True).returncode == 0
+    subprocess.run(args, check=True)
+    return True
+
+
 def activate(bundle, source, expected, layout, *, roster_source=None, expected_roster_sha256=None,
              source_bundle=None, expected_source_manifest_sha256=None,
              update_config_pin=False, command=None, health=None,
              owner_uid=0, owner_gid=0):
     """Activate local inputs; raises with old links/unit restored on service failure."""
     bundle, source = Path(bundle), Path(source)
-    if command is None:
-        def command(*args):
-            if args[0] == 'systemctl' and args[1] in ('is-active', 'is-enabled'):
-                return subprocess.run(args, check=False, capture_output=True).returncode == 0
-            subprocess.run(args, check=True)
-            return True
+    command = command or _system_command
     if update_config_pin:
         _restore_checkpoint(layout, command)
     values = _config(layout.config, os.geteuid(), None if update_config_pin else expected)
@@ -547,7 +549,8 @@ def main():
                     Path('/var/lib/freediving-owner-evidence'),
                     Path('/etc/systemd/system'), Path('/etc/freediving/owner-evidence.env'))
     try:
-        _config(layout.config, 0, None)
+        _restore_checkpoint(layout, _system_command)
+        _config(layout.config, os.geteuid(), None)
         _inputs(args.bundle_dir, args.snapshot_source, args.expected_sha256)
         if bool(args.roster_source) != bool(args.expected_roster_sha256):
             raise ValueError('roster staging inputs incomplete')
@@ -555,7 +558,8 @@ def main():
             _roster_inputs(args.roster_source, args.expected_roster_sha256, args.expected_sha256)
         _source_bundle_inputs(args.bundle_dir, args.source_bundle,
                               args.expected_source_manifest_sha256, args.expected_sha256)
-    except (ValueError, OSError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError):
+    except (ValueError, OSError, KeyError, json.JSONDecodeError,
+            subprocess.CalledProcessError, RuntimeError):
         parser.exit(1, 'Private origin activation prerequisites missing or invalid\n')
     try:
         identity = pwd.getpwnam('freediving-evidence')

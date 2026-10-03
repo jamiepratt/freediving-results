@@ -212,7 +212,8 @@ fails, including the prior service active and enabled state. It retains old stag
 `/var/lib/freediving-owner-evidence/activation-checkpoint/status.json` records
 `pending`, `failed`, or `active` for the local host step. On a retry, a pending
 step first restores the prior local state; invalid recovery stops the private
-service. `active` confirms only the local host step, not transfer durability,
+service. This recovery runs even when candidate files are missing or corrupt.
+`active` confirms only the local host step, not transfer durability,
 Cloudflare activation, browser acceptance, or the full #64 handoff.
 Normal `deploy/release.sh` does not run this candidate pin transaction.
 

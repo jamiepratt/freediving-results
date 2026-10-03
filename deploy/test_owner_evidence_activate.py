@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from owner_evidence_activate import Layout, activate, _health
+from owner_evidence_activate import Layout, activate, main, _health
 
 
 class ActivationTests(unittest.TestCase):
@@ -161,6 +162,50 @@ class ActivationTests(unittest.TestCase):
         restart = calls.index(('systemctl', 'restart', 'freediving-owner-evidence.service'))
         self.assertLess(stop, restart)
         self.assertLess(disable, restart)
+
+    def test_cli_recovers_pending_activation_before_rejecting_missing_candidate(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        (private / 'objects' / digest).unlink()
+        argv = ['owner_evidence_activate.py', '--bundle-dir', str(self.bundle),
+                '--snapshot-source', str(self.source), '--expected-sha256', digest,
+                '--source-bundle', str(private),
+                '--expected-source-manifest-sha256', manifest_digest]
+        real_run = subprocess.run
+        commands = []
+        def local_run(args, **kwargs):
+            if args[0] == 'systemctl':
+                commands.append(tuple(args))
+                return SimpleNamespace(returncode=0)
+            return real_run(args, **kwargs)
+        identity = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(),
+                                   pw_dir='/nonexistent', pw_shell='/usr/sbin/nologin')
+        actual_euid = os.geteuid()
+        euid_calls = 0
+        def cli_euid():
+            nonlocal euid_calls
+            euid_calls += 1
+            return 0 if euid_calls == 1 else actual_euid
+        with (mock.patch('owner_evidence_activate.Layout', return_value=self.layout),
+              mock.patch('owner_evidence_activate.os.geteuid', side_effect=cli_euid),
+              mock.patch('owner_evidence_activate.pwd.getpwnam', return_value=identity),
+              mock.patch('owner_evidence_activate.subprocess.run', side_effect=local_run),
+              mock.patch.object(sys, 'argv', argv)):
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        self.assertIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), commands)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'failed')
 
     def test_candidate_health_failure_restores_config_and_prior_activation(self):
         self.run_activation()
