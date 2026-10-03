@@ -30,6 +30,10 @@ HOST_FILES = (
     'deploy/owner_evidence_activate.py', 'deploy/freediving-owner-evidence.service',
     'scripts/private_evidence_transfer.py', 'scripts/private_evidence_ssh.py',
     'scripts/unified_evidence_snapshot.py',
+    'scripts/local_evidence_run.py', 'scripts/evidence_presentation.py',
+    'scripts/private_evidence_remote.py', 'scripts/private_status_sync.py',
+    'scripts/macos_nordvpn.py', 'scripts/affiliate_name_query.py',
+    'scripts/owner_decision_export_adapter.py', 'scripts/owner_snapshot_binding.py',
 )
 FILES = OWNER_FILES + HOST_FILES
 
