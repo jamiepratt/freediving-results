@@ -12,7 +12,7 @@ class Element {
   get visibleText() { return [this.textContent, ...this.children.map(x => x.visibleText ?? x.textContent ?? '')].join(' '); }
 }
 
-function workspace(responses = {}) {
+function workspace(responses = {}, statuses = {}) {
   const nodes = new Map();
   const requests = [];
   const find = (element, id) => element.id === id ? element : element.children.map(child => find(child, id)).find(Boolean);
@@ -21,7 +21,7 @@ function workspace(responses = {}) {
     getElementById: id => { const nested = [...nodes.values()].map(node => find(node, id)).find(Boolean); if(nested) return nested; if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); },
     addEventListener() {},
   };
-  const context = vm.createContext({document, fetch: async (path, options) => { requests.push({path, options}); return {ok: true, status: 200, json: async () => responses[path]}; }, location: {origin: 'https://owner.example'}, crypto: {randomUUID: () => 'retry-key'}, URLSearchParams, FormData: class { *[Symbol.iterator]() {} }});
+  const context = vm.createContext({document, fetch: async (path, options) => { requests.push({path, options}); const status = statuses[path] || 200; return {ok: status >= 200 && status < 300, status, json: async () => responses[path]}; }, location: {origin: 'https://owner.example'}, crypto: {randomUUID: () => 'retry-key'}, URLSearchParams, FormData: class { *[Symbol.iterator]() {} }});
   vm.runInContext(fs.readFileSync('resources/evidence_workspace.js', 'utf8'), context);
   return {context, node: document.getElementById, requests};
 }
@@ -169,6 +169,27 @@ test('snapshot presents source positions and observation versions separately fro
   assert.match(text, /overlap/i);
   assert.match(text, /publisher revision direction/i);
   assert.match(text, /Source row counts are not attempt totals/);
+});
+
+test('owner status identifies remote active partial snapshot and leaves local handoff unknown', async () => {
+  const {context, node} = workspace({
+    '/api/overview': {coverage: 'partial', cutoff: '2026-10-03T04:00:00Z', snapshot_sha256: 'remote-new', counts: [], confirmed_distinct_attempts: null,
+      local: {status: 'complete', snapshot_sha256: 'stale-local'}, remote: {status: 'failed', pending: 'stale-local'}},
+    '/api/sources': [{source_name: 'restricted-source', status: 'excluded', reason: 'original inaccessible'}],
+  });
+  await vm.runInContext('loadOverview()', context);
+  const status = node('presentation-status').visibleText;
+  for (const phrase of ['Remote active snapshot', 'remote-new', '2026-10-03T04:00:00Z', 'partial', 'restricted-source', 'original inaccessible',
+    'Local completed revision: unavailable', 'Pending transfer: unavailable', 'Failed activation and retry: unavailable']) assert.ok(status.includes(phrase), phrase);
+  assert.doesNotMatch(status, /stale-local/);
+  assert.match(status, /accepted distinct attempts: unknown/i);
+});
+
+test('expired owner session does not present stale active status', async () => {
+  const {context, node} = workspace({}, {'/api/overview': 401});
+  await assert.rejects(vm.runInContext('loadOverview()', context), /authentication expired/i);
+  assert.match(node('presentation-status').visibleText, /authentication expired/i);
+  assert.doesNotMatch(node('presentation-status').visibleText, /Remote active snapshot/);
 });
 
 test('Eindhoven browse row keeps its session cell concise and clickable', async () => {
