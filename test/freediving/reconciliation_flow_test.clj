@@ -19,6 +19,45 @@
              :probabilities {:same-person 0.94 :different-person 0.04 :unknown 0.02}
              :model-version "jev-1.13.0"})
 
+(deftest source-derived-identity-awaits-verified-context-without-provider-call
+  (let [sha (apply str (repeat 64 "a"))
+        ids (mapv #(str "source-observation:" (apply str (repeat 64 %))) ["1" "2"])
+        refs (into {} (map (fn [id]
+                             [id {:kind "source-derived" :snapshot_sha256 sha
+                                  :snapshot_record_id (subs id (count "source-observation:"))
+                                  :source_sha256 sha :packet_sha256 sha
+                                  :source_name "synthetic"
+                                  :observation_version sha :adapter_version "synthetic/1"
+                                  :citation {:row id}}]) ids))
+        source (assoc (decision "source")
+                      :subject {:pair ids :target-id (first ids)
+                                :observation-versions refs}
+                      :candidates ids
+                      :evidence (mapv (fn [id]
+                                        {:evidence-id id :citation (refs id)
+                                         :fact "Same printed name"}) ids))
+        calls (atom 0)
+        opts {:config config :policy policy
+              :execute! (fn [_] (swap! calls inc) (throw (ex-info "unexpected call" {})))
+              :deterministic-results {"source" {:status :approve :rule-version "rule/forged"}}}
+        first-run (flow/run! (flow/empty-ledger) [source] opts)
+        rerun (flow/run! first-run [source] opts)
+        view (get (flow/inspect rerun [source] config) "source")]
+    (is (= 0 @calls))
+    (is (= (:events first-run) (:events rerun)))
+    (is (= :unresolved (:status view)))
+    (is (= :source-context-unverified (:reason view)))
+    (is (= "test/1" (:policy-version view)))
+    (is (= "source-identity/1" (:rule-version (last (:events rerun)))))
+    (is (= (set (vals refs))
+           (set (map :citation (:evidence (last (:events rerun)))))))
+    (let [corrected (flow/append-human-event rerun
+                                             {:id "signed-human-rejection" :decision-id "source"
+                                              :status :rejected :reason "different people"})]
+      (is (= :rejected (get-in (flow/inspect (flow/run! corrected [source] opts)
+                                             [source] config)
+                               ["source" :status]))))))
+
 (deftest retained-deterministic-and-jev-decisions-replay-without-http
   (let [calls (atom 0)
         execute! (fn [request] (swap! calls inc)
