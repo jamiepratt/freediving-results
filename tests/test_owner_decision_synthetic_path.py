@@ -261,6 +261,7 @@ def serve_integrated(metadata_path):
     print(json.dumps({'origin_port': origin.server_port, 'import_port': proxy.server_port,
                       'snapshot_sha256': digest,
                       'binding_revision': origin.decisions._binding()['revision'],
+                      'store_revision': origin.decisions.revision,
                       'canonical_binding': binding,
                       'decision_id': metadata['decision_id']}), flush=True)
     try:
