@@ -62,7 +62,7 @@ def test_verified_run_becomes_active_only_after_bound_owner_response(tmp_path):
     assert remote.calls == ['stage', 'activate', 'overview', 'overview']
 
 
-def test_bad_served_response_rolls_back_and_retains_retry(tmp_path, served):
+def assert_bad_served_response_rolls_back_and_retains_retry(tmp_path, served):
     run_dir, destination = prepared(tmp_path)
     remote = Remote(destination)
     previous = remote.active.copy()
@@ -91,6 +91,23 @@ def test_stale_receipt_rejected_before_activation(tmp_path):
                 vps_reachable=lambda: True)
     assert 'activate' not in remote.calls
     assert state(run_dir)['remote']['status'] == 'failed'
+
+
+def test_recorded_active_is_cleared_when_owner_route_disagrees(tmp_path):
+    run_dir, destination = prepared(tmp_path)
+    remote = Remote(destination)
+    present(run_dir, remote, publisher_requests_stopped=True,
+            vps_reachable=lambda: True)
+    binding = state(run_dir)['remote']['active']
+    remote.served = {'snapshot_sha256': 'c' * 64,
+                     'bundle_manifest_sha256': binding['bundle_manifest_sha256']}
+    with unittest.TestCase().assertRaisesRegex(ValueError, 'owner route mismatch'):
+        present(run_dir, remote, publisher_requests_stopped=True,
+                vps_reachable=lambda: True)
+    final = state(run_dir)['remote']
+    assert final['active'] is None
+    assert final['failed'] == binding
+    assert final['pending'] == binding
 
 
 def test_owner_route_transport_failure_rolls_back(tmp_path):
@@ -205,11 +222,15 @@ class PresentationTests(unittest.TestCase):
         ]
         for served in responses:
             with self.subTest(served=served), TemporaryDirectory() as root:
-                test_bad_served_response_rolls_back_and_retains_retry(Path(root), served)
+                assert_bad_served_response_rolls_back_and_retains_retry(Path(root), served)
 
     def test_stale_receipt(self):
         with TemporaryDirectory() as root:
             test_stale_receipt_rejected_before_activation(Path(root))
+
+    def test_recorded_active_mismatch(self):
+        with TemporaryDirectory() as root:
+            test_recorded_active_is_cleared_when_owner_route_disagrees(Path(root))
 
     def test_owner_route_failure(self):
         with TemporaryDirectory() as root:

@@ -40,7 +40,7 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
     if remote_state.get('active') == binding:
         if _served(remote, expected):
             return remote_state
-        remote_state.update(status='failed', failed=binding,
+        remote_state.update(status='failed', active=None, failed=binding,
                             pending=binding, error='owner route mismatch',
                             rollback_error=None)
         atomic_json(state_path, state)
