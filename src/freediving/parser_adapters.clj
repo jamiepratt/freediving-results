@@ -72,8 +72,14 @@
 (defn- scan-result [manifest]
   (when-not (and (string? manifest) (.isFile (io/file manifest)))
     (throw (ex-info "Missing retained scan manifest" {})))
-  (let [process (.start (ProcessBuilder. (into-array String
-                                                     ["python3" "scripts/scan_verification.py"
+  (let [resource (io/resource "freediving/parser_adapters.clj")
+        _ (when-not (and resource (= "file" (.getProtocol resource)))
+            (throw (ex-info "Retained scan replay needs a source checkout" {})))
+        source-file (io/file (.toURI resource))
+        repo-root (.getParentFile (.getParentFile (.getParentFile source-file)))
+        script (io/file repo-root "scripts/scan_verification.py")
+        process (.start (ProcessBuilder. (into-array String
+                                                     ["python3" (str script)
                                                       "replay-source" manifest])))
         output (slurp (.getInputStream process))
         error (slurp (.getErrorStream process))

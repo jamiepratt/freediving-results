@@ -226,6 +226,11 @@ def replay_scan_source(manifest):
                  and coverage.get("pass_id") == artifact["pass_id"], "coverage provenance mismatch")
         coverages.append(coverage)
     sections = coverages[0]["sections"]
+    _require(all(isinstance(item.get("rows_attempted"), int)
+                 and item["rows_attempted"] > 0
+                 and isinstance(item.get("rows_unexamined"), int)
+                 and item["rows_unexamined"] >= 0 for coverage in coverages
+                 for item in coverage["sections"]), "invalid section lengths")
     _require(len(sections) == len(coverages[1]["sections"]) == selected["sections"]
              and sum(item["rows_attempted"] for item in sections) == selected["positions"]
              and [item["rows_attempted"] for item in sections]
@@ -233,7 +238,7 @@ def replay_scan_source(manifest):
              and len(review["positions"]) == selected["positions"], "section coverage mismatch")
     ambiguous = sum(row["status"] == "unresolved" for row in review["positions"])
     family = stem.split("_")[1]
-    role = "aggregate-standing" if family == "combinata" else "individual-result"
+    role = "aggregate" if family == "combinata" else "individual-result"
     for section in sections:
         label = section["label"].upper()
         _require((family == "combinata" and "COMBINATA" in label)
@@ -248,6 +253,8 @@ def replay_scan_source(manifest):
     section_index = 0
     section_end = sections[0]["rows_attempted"]
     for index, row in enumerate(review["positions"]):
+        _require(row["position"] == f"row:{index + 1:03d}",
+                 "source row order differs from section coverage")
         while index >= section_end:
             section_index += 1
             section_end += sections[section_index]["rows_attempted"]

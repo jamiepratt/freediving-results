@@ -8,6 +8,8 @@ from scripts.scan_verification import verify_transcriptions
 
 SOURCE = "a" * 64
 REGIONS = {
+    "row:001": {"x1": 1, "y1": 2, "x2": 10, "y2": 12},
+    "row:002": {"x1": 1, "y1": 13, "x2": 10, "y2": 22},
     "p1-r1": {"x1": 1, "y1": 2, "x2": 10, "y2": 12},
     "p1-r2": {"x1": 1, "y1": 13, "x2": 10, "y2": 22},
     "p1-r3": {"x1": 1, "y1": 23, "x2": 10, "y2": 32},
@@ -182,14 +184,15 @@ class RetainedReplayTest(unittest.TestCase):
             (root / "blind-a").mkdir()
             (root / "blind-b").mkdir()
             (root / "review").mkdir()
-            source = root / "napoli_statica_maschile_2025.jpg"
+            source = root / "napoli_combinata_maschile_2025.jpg"
             source.write_bytes(b"synthetic jpg")
             sha = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
-            first = transcription("pass-1", "worker-1", {"p1-r1": "A", "p1-r2": "B"})
-            second = transcription("pass-2", "worker-2", {"p1-r1": "A", "p1-r2": None})
+            first = transcription("pass-1", "worker-1", {"row:001": "A", "row:002": "B"})
+            second = transcription("pass-2", "worker-2", {"row:001": "A", "row:002": None})
             for item in (first, second):
                 item["source_sha256"] = sha
-            checks = [inspection("p1-r1", "confirmed", "A"), inspection("p1-r2", "unresolved")]
+            checks = [inspection("row:001", "confirmed", "A"),
+                      inspection("row:002", "unresolved")]
             for check in checks:
                 check["source_sha256"] = sha
             review = verify_transcriptions(first, second, checks, sample_size=1)
@@ -201,7 +204,7 @@ class RetainedReplayTest(unittest.TestCase):
             b = save(root / "blind-b" / (stem + ".json"), second)
             v = save(root / "review" / (stem + ".verification.json"), review)
             coverage = {"schema": "scan-transcription-coverage/v1", "source_sha256": sha,
-                        "sections": [{"label": "STATICA maschile", "rows_attempted": 2,
+                        "sections": [{"label": "COMBINATA maschile", "rows_attempted": 2,
                                       "rows_unexamined": 0, "rows_ambiguous": 1}]}
             save(root / "blind-a" / (stem + ".coverage.json"), dict(coverage, pass_id="pass-1"))
             save(root / "blind-b" / (stem + ".coverage.json"), dict(coverage, pass_id="pass-2"))
@@ -226,7 +229,9 @@ class RetainedReplayTest(unittest.TestCase):
                 result = replay_scan_source(manifest)
             self.assertEqual(2, len(result["document"]["positions"]))
             self.assertEqual(1, len(result["candidates"]))
-            self.assertEqual("individual-result", result["candidates"][0]["evidence_role"])
+            self.assertEqual("aggregate", result["candidates"][0]["evidence_role"])
+            self.assertEqual("COMBINATA maschile",
+                             result["candidates"][0]["coordinates"]["section"])
             review["positions"][0]["accepted_reading"] = "forged"
             save(root / "review" / (stem + ".verification.json"), review)
             with patch("scripts.scan_verification.TRUSTED_REVIEW_SHA256", summary_sha):
