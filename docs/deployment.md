@@ -264,6 +264,8 @@ OWNER_EVIDENCE_STATUS_CLIENT_ID=<dedicated Cloudflare Access service client ID e
 
 Set Worker secret `OWNER_EVIDENCE_STATUS_CLIENT_ID` to that exact client ID. The writer sends a signed service assertion plus the separate status token; owner browser requests cannot write. Keep the status file outside snapshot versions so guarded activation and service restart retain it. The private code bundle must include `scripts/private_presentation_status.py` alongside `scripts/owner_evidence_origin.py`.
 
+Before enabling the status writer, create a dedicated Cloudflare Access service token and add exactly one Service Auth policy for that token to the existing owner evidence Access application. Keep the exact owner-email Allow policy. The guarded Cloudflare preflight resolves the configured status Client ID through the Access Service Tokens Read API and checks the token ID against that Service Auth policy. A read token without this permission, a missing service token, or a broader policy blocks activation. The preflight checks Worker secret names, not their hidden values; its guarded activation writes the verified Client ID binding. Keep the status token and service Client Secret outside Git and the private code archive.
+
 Do not reuse the public gateway secret. The origin reads only the pinned private
 SQLite snapshot, not PostgreSQL or review credentials. Retain the verified source
 snapshot and its manifest in a separate private backup before activation. Check
