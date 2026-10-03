@@ -6,8 +6,11 @@ an approved person, or a confirmed sporting attempt.
 """
 
 import hashlib
+import html
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     from scripts.issue55_aida_selected_html import build
@@ -17,7 +20,8 @@ except ModuleNotFoundError:
     from unified_evidence_query import SnapshotQuery
 
 
-ADAPTER_VERSION = 'aida-snapshot-observation/1'
+ADAPTER_VERSION = 'aida-snapshot-observation/2'
+LEGACY_ADAPTER_VERSION = 'aida-snapshot-observation/1'
 PACKET_SCHEMA = 'aida-selected-html-packet/v1'
 
 
@@ -59,7 +63,30 @@ def _verified_packet(input_data):
     _require(replay == packet, 'AIDA packet differs from source replay')
     _require(packet['summary']['source_positions'] == len(packet['positions']),
              'AIDA packet position count mismatch')
-    return packet, _sha(packet_bytes)
+    return packet, _sha(packet_bytes), source_path
+
+
+def _event_context(source_path, source):
+    """Read only page-specific event labels from the hash-verified original."""
+    source_bytes = source_path.read_bytes()
+    _require(_sha(source_bytes) == source['sha256'], 'AIDA original changed after packet replay')
+    page = re.sub(r'<!--.*?-->', '', source_bytes.decode('utf-8'), flags=re.S)
+    path = urlsplit(source['url']).path
+    if re.fullmatch(r'/EventPage/[0-9]+', path):
+        pattern = r'<div\b[^>]*class=["\'][^"\']*\bevent-title--description\b[^"\']*["\'][^>]*>(.*?)</div\s*>'
+        locator = 'div.event-title--description'
+    elif re.fullmatch(r'/Events/EventResults-[0-9]+', path):
+        pattern = (r'<h2\b[^>]*>\s*Event Results\s*</h2\s*>\s*'
+                   r'<p\b[^>]*class=["\'][^"\']*\bu-type--medium\b[^"\']*["\'][^>]*>(.*?)</p\s*>')
+        locator = 'h2[Event Results] + p.u-type--medium'
+    else:
+        raise ValueError('unsupported AIDA event URL')
+    values = [' '.join(html.unescape(re.sub(r'<[^>]*>', '', match)).split())
+              for match in re.findall(pattern, page, re.I | re.S)]
+    _require(len(values) <= 1 and all(values), 'ambiguous AIDA event heading')
+    if not values:
+        return None
+    return {'source_sha256': source['sha256'], 'locator': locator, 'value': values[0]}
 
 
 def _source_fields(row):
@@ -77,7 +104,7 @@ def _source_fields(row):
             'ot_raw': value('OT')}
 
 
-def load_source_observations(snapshot_dir, source_names):
+def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAPTER_VERSION):
     """Return exact supported positions and gaps for named AIDA snapshot views.
 
     Original HTML, browser receipt, packet and snapshot hashes are verified.
@@ -86,6 +113,8 @@ def load_source_observations(snapshot_dir, source_names):
     """
     _require(isinstance(source_names, (list, tuple)) and source_names
              and len(source_names) == len(set(source_names)), 'unique source names required')
+    _require(adapter_version in (ADAPTER_VERSION, LEGACY_ADAPTER_VERSION),
+             'unsupported AIDA observation adapter version')
     observations, gaps = [], []
     with SnapshotQuery(snapshot_dir) as snapshot:
         for name in source_names:
@@ -110,10 +139,12 @@ def load_source_observations(snapshot_dir, source_names):
                              'reason': 'retained-packet-missing'}
                             for row in rows)
                 continue
-            packet, packet_sha = verified
+            packet, packet_sha, source_path = verified
             _require(len(packet['positions']) == len(rows),
                      'AIDA packet and snapshot count mismatch')
             source = packet['source']
+            event_context = (_event_context(source_path, source)
+                             if adapter_version == ADAPTER_VERSION else None)
             packet_rows = {f'positions[{index}]': value
                            for index, value in enumerate(packet['positions'])}
             _require(len(packet_rows) == len(rows), 'AIDA duplicate position')
@@ -137,28 +168,34 @@ def load_source_observations(snapshot_dir, source_names):
                 fields = _source_fields(position)
                 _require(fields['name'] and fields['discipline_raw'],
                          'AIDA source name or discipline missing')
-                version = _sha(_canonical([ADAPTER_VERSION, source['sha256'],
-                                           packet_sha, row['record_id'], position]).encode())
+                version_input = [adapter_version, source['sha256'], packet_sha,
+                                 row['record_id'], position]
+                if adapter_version == ADAPTER_VERSION:
+                    version_input.append(event_context)
+                version = _sha(_canonical(version_input).encode())
                 reference = {
                     'kind': 'source-derived',
                     'snapshot_sha256': snapshot.manifest['snapshot_sha256'],
                     'snapshot_record_id': row['record_id'], 'source_name': name,
                     'source_sha256': source['sha256'], 'packet_sha256': packet_sha,
-                    'citation': citation, 'adapter_version': ADAPTER_VERSION,
+                    'citation': citation, 'adapter_version': adapter_version,
                     'observation_version': version}
+                if adapter_version == ADAPTER_VERSION:
+                    reference['event_context'] = event_context
                 observations.append({
                     'snapshot_record_id': row['record_id'], 'source_name': name,
                     'source_object_id': row['source_object_id'],
                     'source_sha256': source['sha256'], 'packet_sha256': packet_sha,
                     'source_url': source['url'], 'citation': citation,
-                    'event_date': row['event_date'], 'event_name': None,
+                    'event_date': row['event_date'],
+                    'event_name': event_context['value'] if event_context else None,
                     'session': None, 'category': None,
-                    'observation_version': version, 'adapter_version': ADAPTER_VERSION,
+                    'observation_version': version, 'adapter_version': adapter_version,
                     'source_observation_ref': reference,
                     'source_fields': fields, 'review_status': 'unreviewed',
                     'pg_observation_ref': None, 'confirmed_attempt_id': None,
                     'approved_athlete_id': None})
-    return {'schema': ADAPTER_VERSION,
+    return {'schema': adapter_version,
             'snapshot_sha256': snapshot.manifest['snapshot_sha256'],
             'observations': observations, 'gaps': gaps,
             'summary': {'supported': len(observations), 'source_gaps': len(gaps),
