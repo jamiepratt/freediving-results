@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
+from aida_snapshot_observations import load_source_observations
 
 
 def _digest(value):
@@ -31,12 +32,29 @@ def _source_hash(record):
     return raw.get('source_sha256') or record.get('source_sha256') or source_object.removeprefix('sha256:')
 
 
-def _verify_evidence(snapshot, item, binding):
+def _verify_evidence(snapshot, snapshot_directory, item, binding):
     revision = binding['observation_revision']
     _require(item['id'] == binding['snapshot_record_id'], 'snapshot record mapping changed')
     _require(item['version'] == revision, 'observation version changed')
     _require(item['citation']['evidence_id'] == binding['evidence_id'], 'source evidence ID changed')
     _require(item['citation']['observation_revision'] == revision, 'citation revision changed')
+    if isinstance(revision, dict) and revision.get('kind') == 'source-derived':
+        _require(revision.get('snapshot_sha256') == snapshot.manifest['snapshot_sha256'] and
+                 revision.get('snapshot_record_id') == item['id'] and
+                 isinstance(revision.get('source_name'), str),
+                 'source observation snapshot binding changed')
+        result = load_source_observations(snapshot_directory, [revision['source_name']])
+        matches = [observation for observation in result['observations']
+                   if observation['snapshot_record_id'] == item['id']]
+        _require(len(matches) == 1 and
+                 matches[0]['source_observation_ref'] == revision,
+                 'source observation differs from verified original')
+        citation = item['citation']['source_citation']
+        _require(isinstance(citation, dict) and
+                 citation.get('source-sha256') == revision['source_sha256'] and
+                 citation.get('locator') == revision['citation'],
+                 'source observation citation changed')
+        return
     record = snapshot.detail(item['id'])
     _require(record is not None, 'snapshot record absent')
     _require(record['kind'] == 'candidate_position', 'snapshot record is not a source position')
@@ -52,7 +70,7 @@ def _verify_evidence(snapshot, item, binding):
     _require(len(matches) == 1, 'snapshot lacks exact immutable observation reference')
 
 
-def _verify_proposal(snapshot, proposal, run_revision):
+def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision):
     binding = proposal['canonical_binding']
     _require(binding['decision_id'] == proposal['id'], 'decision identity changed')
     _require(binding['reconciliation_run_revision'] == run_revision and
@@ -68,7 +86,7 @@ def _verify_proposal(snapshot, proposal, run_revision):
     _require(len({entry['snapshot_record_id'] for entry in bindings}) == len(bindings),
              'duplicate snapshot record mapping')
     for item, entry in zip(evidence, bindings):
-        _verify_evidence(snapshot, item, entry)
+        _verify_evidence(snapshot, snapshot_directory, item, entry)
 
 
 def register_verified_export(store, snapshot_directory, envelope):
@@ -94,7 +112,8 @@ def register_verified_export(store, snapshot_directory, envelope):
         ids = [proposal['id'] for proposal in proposals]
         _require(len(ids) == len(set(ids)), 'duplicate proposal ID')
         for proposal in proposals:
-            _verify_proposal(snapshot, proposal, envelope.get('reconciliation_run_revision'))
+            _verify_proposal(snapshot, snapshot_directory, proposal,
+                             envelope.get('reconciliation_run_revision'))
     return store.register_batch(envelope['snapshot_sha256'], proposals,
                                 idempotency_key='reconciliation-export:' + _digest(proposals),
                                 expected_revision=envelope['store_revision'])

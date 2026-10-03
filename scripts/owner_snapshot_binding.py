@@ -6,8 +6,10 @@ import sys
 
 try:
     from scripts.unified_evidence_query import SnapshotQuery
+    from scripts.aida_snapshot_observations import load_source_observations
 except ModuleNotFoundError:
     from unified_evidence_query import SnapshotQuery
+    from aida_snapshot_observations import load_source_observations
 
 
 REVISION_KEYS = ('job_id', 'ordinal', 'candidate_id', 'artifact_sha256',
@@ -36,7 +38,7 @@ def _revision(value):
 
 
 def load_verified_bindings(directory, evidence_positions, observation_revisions):
-    """Return one exact candidate_position per evidence ID and PG observation.
+    """Return one exact candidate_position per evidence ID and observation.
 
     The caller obtains observation_revisions from immutable PostgreSQL rows.
     This function verifies the snapshot bytes before matching any position.
@@ -46,11 +48,33 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
     _require(isinstance(observation_revisions, list) and observation_revisions,
              'observation revisions required')
     revisions = {}
+    source_revisions = {}
     for supplied in observation_revisions:
-        revision = _revision(supplied)
-        position = (revision['job_id'], revision['ordinal'])
-        _require(position not in revisions, 'duplicate observation revision')
-        revisions[position] = revision
+        if isinstance(supplied, dict) and supplied.get('kind') == 'source-derived':
+            record_id = supplied.get('snapshot_record_id')
+            _require(_sha(record_id) and record_id not in source_revisions,
+                     'duplicate or invalid source observation revision')
+            source_revisions[record_id] = supplied
+        else:
+            revision = _revision(supplied)
+            position = (revision['job_id'], revision['ordinal'])
+            _require(position not in revisions, 'duplicate observation revision')
+            revisions[position] = revision
+    verified_sources = {}
+    if source_revisions:
+        names = sorted({ref.get('source_name') for ref in source_revisions.values()
+                        if isinstance(ref.get('source_name'), str)})
+        _require(len(names) == len({ref.get('source_name') for ref in source_revisions.values()}),
+                 'source observation name missing')
+        source_result = load_source_observations(directory, names)
+        verified_sources = {item['snapshot_record_id']: item
+                            for item in source_result['observations']}
+        _require(len(verified_sources) == len(source_result['observations']),
+                 'ambiguous source observation')
+        for record_id, reference in source_revisions.items():
+            _require(record_id in verified_sources and
+                     reference == verified_sources[record_id]['source_observation_ref'],
+                     'source observation revision differs from verified original')
     with SnapshotQuery(directory) as snapshot:
         records = []
         for row in snapshot.db.execute(
@@ -67,6 +91,25 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
         for evidence in evidence_positions:
             _require(isinstance(evidence, dict), 'invalid evidence position')
             evidence_id = evidence.get('evidence_id')
+            if 'source_observation_ref' in evidence:
+                reference = evidence['source_observation_ref']
+                record_id = reference.get('snapshot_record_id') if isinstance(reference, dict) else None
+                _require(isinstance(evidence_id, str) and evidence_id and
+                         evidence_id not in bindings and record_id in source_revisions and
+                         reference == source_revisions[record_id] and
+                         record_id not in used_records,
+                         'unbound source evidence position')
+                used_records.add(record_id)
+                observed = verified_sources[record_id]
+                bindings[evidence_id] = {'evidence-id': evidence_id,
+                                         'snapshot-record-id': record_id,
+                                         'observation-revision': reference}
+                verified[record_id] = {'record-id': record_id,
+                                       'source-name': observed['source_name'],
+                                       'source-sha256': observed['source_sha256'],
+                                       'source-observation-ref': reference,
+                                       'athlete-name': observed['source_fields']['name']}
+                continue
             position = (evidence.get('job_id'), evidence.get('ordinal'))
             _require(isinstance(evidence_id, str) and evidence_id and
                      evidence_id not in bindings and position in revisions,

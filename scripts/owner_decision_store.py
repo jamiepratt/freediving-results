@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
+from aida_snapshot_observations import load_source_observations
 
 
 ACCEPTED = {'automatic_approved', 'human_approved', 'human_corrected'}
@@ -174,6 +175,15 @@ class DecisionStore:
                                       (row['source_object_id'].removeprefix('sha256:')
                                        if 'source_object_id' in columns and row['source_object_id'] else None)),
                     'refs': raw.get('observation_refs') or raw.get('imported_observation_refs') or []}
+            aida_names = sorted(name for name, item in snapshot.manifest.get('inputs', {}).items()
+                                if item.get('source_schema') == 'aida-selected-html-packet/v1')
+            if aida_names:
+                source_result = load_source_observations(directory, aida_names)
+                for observation in source_result['observations']:
+                    record_id = observation['snapshot_record_id']
+                    if record_id not in observation_refs:
+                        raise ValueError('source observation absent from snapshot')
+                    observation_refs[record_id]['source_derived_ref'] = observation['source_observation_ref']
             digest = snapshot.manifest['snapshot_sha256']
         return self.bind_snapshot(digest, evidence_ids, expected_revision=expected_revision,
                                   idempotency_key=idempotency_key,
@@ -257,6 +267,11 @@ class DecisionStore:
         for item, evidence in zip(proposal['evidence'], evidence_bindings):
             revision = evidence.get('observation_revision')
             source = refs.get(item['id'])
+            if isinstance(revision, dict) and revision.get('kind') == 'source-derived':
+                if (evidence.get('snapshot_record_id') != item['id'] or
+                        not source or source.get('source_derived_ref') != revision):
+                    return False
+                continue
             if (not isinstance(revision, dict) or evidence.get('snapshot_record_id') != item['id']
                     or not source or source['source_sha256'] != revision.get('source_sha256')
                     or not any(all(ref.get(key) == revision.get(key) for key in

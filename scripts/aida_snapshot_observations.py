@@ -117,6 +117,8 @@ def load_source_observations(snapshot_dir, source_names):
             packet_rows = {f'positions[{index}]': value
                            for index, value in enumerate(packet['positions'])}
             _require(len(packet_rows) == len(rows), 'AIDA duplicate position')
+            citations = [_canonical(value.get('position')) for value in packet['positions']]
+            _require(len(citations) == len(set(citations)), 'AIDA duplicate citation')
             for row in rows:
                 raw = json.loads(row['raw_json'])
                 position = packet_rows.get(row['record_path'])
@@ -137,6 +139,13 @@ def load_source_observations(snapshot_dir, source_names):
                          'AIDA source name or discipline missing')
                 version = _sha(_canonical([ADAPTER_VERSION, source['sha256'],
                                            packet_sha, row['record_id'], position]).encode())
+                reference = {
+                    'kind': 'source-derived',
+                    'snapshot_sha256': snapshot.manifest['snapshot_sha256'],
+                    'snapshot_record_id': row['record_id'], 'source_name': name,
+                    'source_sha256': source['sha256'], 'packet_sha256': packet_sha,
+                    'citation': citation, 'adapter_version': ADAPTER_VERSION,
+                    'observation_version': version}
                 observations.append({
                     'snapshot_record_id': row['record_id'], 'source_name': name,
                     'source_object_id': row['source_object_id'],
@@ -145,6 +154,7 @@ def load_source_observations(snapshot_dir, source_names):
                     'event_date': row['event_date'], 'event_name': None,
                     'session': None, 'category': None,
                     'observation_version': version, 'adapter_version': ADAPTER_VERSION,
+                    'source_observation_ref': reference,
                     'source_fields': fields, 'review_status': 'unreviewed',
                     'pg_observation_ref': None, 'confirmed_attempt_id': None,
                     'approved_athlete_id': None})
