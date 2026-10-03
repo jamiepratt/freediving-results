@@ -344,7 +344,10 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             elif path == STATUS_PATH and not parsed.query:
                 active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
                           'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'], 'bundle_manifest_sha256': None}
-                result = (self.server.presentation_status.read(active) if self.server.presentation_status else
+                owner = self.server.decisions
+                result = (self.server.presentation_status.read(
+                    active, owner_revision=owner.revision if owner else None,
+                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None) if self.server.presentation_status else
                           {'status': 'unavailable', 'remote': {'active': active}})
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
@@ -509,7 +512,10 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length))
                 active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
                           'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else None
-                result = self.server.presentation_status.update(body, active)
+                owner = self.server.decisions
+                result = self.server.presentation_status.update(
+                    body, active, owner_revision=owner.revision if owner else None,
+                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None)
             except StatusConflict:
                 return self._reply(409)
             except (ValueError, TypeError, KeyError):

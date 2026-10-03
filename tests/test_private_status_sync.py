@@ -7,7 +7,103 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_evidence_origin import make_server
+from private_presentation_status import PrivatePresentationStatus, StatusConflict
 from test_unified_evidence_query import snapshot
+
+
+def test_reconciliation_status_is_hidden_after_owner_correction_or_snapshot_change(tmp_path):
+    store = PrivatePresentationStatus(tmp_path / 'status.json')
+    snap = 'a' * 64
+    active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+    summary = {'snapshot_sha256': snap, 'decision_revision': 3,
+               'owner_store_revision': 7,
+               'metrics': {'decision_denominator': 4, 'automatic_approved': 2,
+                           'unknown': 1, 'error': 1, 'conflict': 0,
+                           'pending_review': 2, 'source_gaps': 1,
+                           'provider_calls_recorded': 2, 'sampled_error': None,
+                           'accepted_athletes': None, 'distinct_attempts': None,
+                           'actual_monetary_cost': None}}
+    payload = {'schema': 'private-presentation-status/v2', 'run_id': 'run-1',
+               'revision': 1, 'expected_revision': 0,
+               'local': {'snapshot_sha256': snap, 'cutoff': '2026-10-03T00:00:00Z',
+                         'gap_count': 0},
+               'remote': {'status': 'active', 'pending': None, 'failed': None,
+                          'active': active}, 'reconciliation': summary}
+    with __import__('pytest').raises(StatusConflict):
+        store.update(payload, active, owner_revision=None, owner_snapshot=None)
+    store.update(payload, active, owner_revision=7, owner_snapshot=snap)
+    assert store.read(active, owner_revision=7, owner_snapshot=snap)['reconciliation'] == summary
+    assert store.read(active, owner_revision=8, owner_snapshot=snap)['status'] == 'stale'
+    assert store.read({'snapshot_sha256': 'c' * 64, 'bundle_manifest_sha256': 'd' * 64},
+                      owner_revision=7, owner_snapshot=snap)['status'] == 'stale'
+
+
+def test_owner_api_rejects_reconciliation_without_authoritative_decision_store(tmp_path):
+    snap = snapshot(tmp_path)
+    served = json.loads((snap / 'manifest.json').read_text())['snapshot_sha256']
+    env = {'OWNER_EVIDENCE_GATEWAY_SECRET': 'gateway-secret-long-enough',
+           'OWNER_EVIDENCE_EMAILS': 'owner@example.com',
+           'OWNER_EVIDENCE_SNAPSHOT_SHA256': served,
+           'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-private.alphacompose.com',
+           'OWNER_EVIDENCE_STATUS_FILE': str(tmp_path / 'status.json'),
+           'OWNER_EVIDENCE_STATUS_TOKEN': 'status-token-long-enough-private',
+           'OWNER_EVIDENCE_STATUS_CLIENT_ID': 'status-client.access'}
+    server = make_server(snap, env)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        payload = {'schema': 'private-presentation-status/v2', 'run_id': 'run-1',
+                   'revision': 1, 'expected_revision': 0,
+                   'local': {'snapshot_sha256': served, 'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+                   'remote': {'status': 'pending', 'pending': served, 'failed': None, 'active': None},
+                   'reconciliation': {'snapshot_sha256': served, 'decision_revision': 1,
+                                      'owner_store_revision': 1, 'metrics': {
+                                          'decision_denominator': 0, 'automatic_approved': 0,
+                                          'unknown': 0, 'error': 0, 'conflict': 0,
+                                          'pending_review': 0, 'source_gaps': 0,
+                                          'provider_calls_recorded': 0, 'sampled_error': None,
+                                          'accepted_athletes': None, 'distinct_attempts': None,
+                                          'actual_monetary_cost': None}}}
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('POST', '/owner-evidence/api/presentation-status', json.dumps(payload),
+                     {'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+                      'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET'],
+                      'X-Freediving-Owner-Machine': env['OWNER_EVIDENCE_STATUS_CLIENT_ID'],
+                      'X-Freediving-Status-Token': env['OWNER_EVIDENCE_STATUS_TOKEN'],
+                      'Content-Type': 'application/json'})
+        response = conn.getresponse()
+        assert response.status == 409
+        response.read(); conn.close()
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()
+    env['OWNER_EVIDENCE_DECISION_DB'] = str(tmp_path / 'decisions.sqlite')
+    server = make_server(snap, env)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        payload['reconciliation']['owner_store_revision'] = server.decisions.revision
+        headers = {'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+                   'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET'],
+                   'X-Freediving-Owner-Machine': env['OWNER_EVIDENCE_STATUS_CLIENT_ID'],
+                   'X-Freediving-Status-Token': env['OWNER_EVIDENCE_STATUS_TOKEN'],
+                   'Content-Type': 'application/json'}
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('POST', '/owner-evidence/api/presentation-status', json.dumps(payload), headers)
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['reconciliation']['decision_revision'] == 1
+        conn.close()
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('GET', '/owner-evidence/api/presentation-status', headers={
+            'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+            'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET'],
+            'X-Freediving-Owner-Email': env['OWNER_EVIDENCE_EMAILS']})
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['reconciliation']['metrics']['decision_denominator'] == 0
+        conn.close()
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()
 
 
 def test_private_status_is_persistent_ordered_and_owner_read_only():
