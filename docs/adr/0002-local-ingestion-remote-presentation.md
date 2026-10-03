@@ -1,8 +1,8 @@
 # ADR 0002: Local ingestion and automatic remote evidence presentation
 
 Date: 2026-10-02. Status: accepted owner decisions.
-Implementation: existing components only; the end-to-end coordinator is not
-implemented. Remaining work is tracked in
+Implementation: opt-in command wiring and synthetic coordinator checks exist;
+live remote and VPN validation remain. Remaining work is tracked in
 [issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
 
 ## Context
