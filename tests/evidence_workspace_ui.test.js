@@ -197,6 +197,53 @@ test('owner status shows synced local checkpoint and preserved remote active rev
   for (const phrase of ['local-new', '2026-10-03T00:00:00Z', '3', 'Pending transfer', 'Failed activation', 'remote-old']) assert.ok(status.includes(phrase), phrase);
 });
 
+test('owner reconciliation status shows bounded metrics and sample bias without implying publication', async () => {
+  const snap='a'.repeat(64);
+  const {context,node}=workspace({
+    '/api/overview': {coverage:'partial',cutoff:'2026-10-03T00:00:00Z',snapshot_sha256:snap,counts:[]},
+    '/api/sources': [],
+    '/api/presentation-status': {schema:'private-presentation-status/v2',run_id:'run-1',
+      local:{snapshot_sha256:snap,cutoff:'2026-10-03T00:00:00Z',gap_count:1},
+      remote:{status:'pending',pending:snap,failed:null,active:null},
+      reconciliation:{snapshot_sha256:snap,decision_revision:3,owner_store_revision:7,
+        metrics:{decision_denominator:4,automatic_approved:2,unknown:1,error:1,conflict:0,pending_review:2,
+          source_gaps:1,provider_calls_recorded:2,sampled_error:{sampling_frame:'owner selected approvals',
+            numerator:1,denominator:2,selection:'convenience',selection_bias:'biased selection'},
+          accepted_athletes:null,distinct_attempts:null,actual_monetary_cost:null}}},
+  });
+  await vm.runInContext('loadOverview()',context);
+  const text=node('presentation-status').visibleText;
+  for(const phrase of ['decision revision 3','owner store revision 7','2 of 4','1/2','owner selected approvals','biased selection','cost unknown','athletes unknown','attempts unknown']) assert.match(text,new RegExp(phrase,'i'));
+  assert.doesNotMatch(text,/published/i);
+});
+
+test('stale owner receipt is omitted after a correction or active snapshot change', async () => {
+  const {context,node}=workspace({
+    '/api/overview': {coverage:'partial',snapshot_sha256:'remote-new',counts:[]},
+    '/api/sources': [],
+    '/api/presentation-status': {status:'stale',reason:'owner decision or active snapshot changed',
+      remote:{active:{snapshot_sha256:'remote-new',bundle_manifest_sha256:'bundle-new'}}},
+  });
+  await vm.runInContext('loadOverview()',context);
+  const text=node('presentation-status').visibleText;
+  assert.match(text,/stale/i);
+  assert.doesNotMatch(text,/decision revision/i);
+});
+
+test('unreviewed run does not present a sampled error estimate', async () => {
+  const {context,node}=workspace({
+    '/api/overview': {coverage:'partial',snapshot_sha256:'snapshot',counts:[]},
+    '/api/sources': [],
+    '/api/presentation-status': {run_id:'run-1',local:{snapshot_sha256:'snapshot',cutoff:'2026-10-03T00:00:00Z',gap_count:0},
+      remote:{status:'pending',pending:'snapshot',failed:null,active:null},
+      reconciliation:{snapshot_sha256:'snapshot',decision_revision:0,owner_store_revision:0,
+        metrics:{decision_denominator:0,automatic_approved:0,unknown:0,error:0,conflict:0,pending_review:0,
+          source_gaps:0,provider_calls_recorded:0,sampled_error:null}}},
+  });
+  await vm.runInContext('loadOverview()',context);
+  assert.match(node('presentation-status').visibleText,/Review sample: none; measured accuracy unknown/i);
+});
+
 test('expired or denied owner session does not present stale active status', async () => {
   for (const responseStatus of [401, 403]) {
     const {context, node} = workspace({}, {'/api/overview': responseStatus});
