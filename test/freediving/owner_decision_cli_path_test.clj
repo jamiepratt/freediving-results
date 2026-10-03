@@ -149,7 +149,8 @@
           (let [initial (local-run! plan-path run-dir)]
             (is (= (:snapshot_sha256 service) (get-in initial [:local :snapshot_sha256])))
             (is (= 1 (get-in initial [:reconciliation :provider_calls])))
-            (is (= 0 (get-in initial [:reconciliation :remote_store_revision]))))
+            (is (= (:store_revision service)
+                   (get-in initial [:reconciliation :remote_store_revision]))))
           (let [action (browser! (:origin_port service) "ui-approve" (:id decision))]
             (is (= (:decision_id action) (:id decision)))
             (is (= [(str "Inspect " (:id decision)) "Preview approve" "Confirm approve"]
