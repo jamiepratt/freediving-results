@@ -231,6 +231,30 @@ def serve_integrated(metadata_path):
             self.wfile.write(payload)
             connection.close()
 
+        def do_POST(self):
+            if self.path != '/owner-evidence/api/decision-events/ack' or (
+                    self.headers.get('CF-Access-Client-Id') != 'synthetic.access' or
+                    self.headers.get('CF-Access-Client-Secret') != 'synthetic-service-secret'):
+                self.send_error(403)
+                return
+            body = self.rfile.read(int(self.headers['Content-Length']))
+            connection = http.client.HTTPConnection('127.0.0.1', origin.server_port, timeout=10)
+            connection.request('POST', self.path, body=body, headers={
+                'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+                'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET'],
+                'X-Freediving-Owner-Machine': env['OWNER_EVIDENCE_IMPORT_CLIENT_ID'],
+                'X-Freediving-Import-Token': self.headers.get('X-Freediving-Import-Token', ''),
+                'Content-Type': 'application/json',
+            })
+            response = connection.getresponse()
+            payload = response.read()
+            self.send_response(response.status)
+            self.send_header('Content-Type', response.getheader('Content-Type'))
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            connection.close()
+
     proxy = ThreadingHTTPServer(('127.0.0.1', 0), ImportProxy)
     proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     proxy_thread.start()
@@ -251,6 +275,9 @@ def serve_integrated(metadata_path):
                 origin.decisions.register(digest, child_proposal,
                                           idempotency_key='synthetic-register-dependent')
                 print(json.dumps({'registered': child}), flush=True)
+            elif line.strip() == 'checkpoints':
+                print(json.dumps({'checkpoints': origin.decisions.delivery_checkpoints()}),
+                      flush=True)
             elif line.strip() == 'stop':
                 break
     finally:

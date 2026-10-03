@@ -1,6 +1,7 @@
 (ns freediving.owner-decision-cli-path-test
   (:require [clojure.data.json :as json]
             [clojure.java.shell :as shell]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures run-tests]]
             [freediving.athlete-identity :as identity]
             [freediving.observations :as observations]
@@ -49,11 +50,12 @@
     (is (zero? (:exit result)) (:err result))
     (when (zero? (:exit result)) (json/read-str (:out result) :key-fn keyword))))
 
-(defn- deliver! [decision-db config-path]
-  (let [result (shell/sh "python3" "scripts/owner_decision_export_adapter.py" "deliver"
-                         "--decision-db" (str decision-db) "--config" (str config-path))]
+(defn- local-run! [plan-path run-dir]
+  (let [result (shell/sh "python3" "scripts/local_evidence_run.py" "run"
+                         "--plan" (str plan-path) "--run-dir" (str run-dir))]
     (is (zero? (:exit result)) (str (:out result) "\n" (:err result)))
-    (when (seq (:out result)) (json/read-str (:out result) :key-fn keyword))))
+    (when (zero? (:exit result))
+      (json/read-str (last (str/split-lines (:out result))) :key-fn keyword))))
 
 (deftest browser-owner-action-delivers-exact-synthetic-decision-to-postgresql
   (let [source (fixture/synthetic 1 "owner-cli-path/1")
@@ -67,8 +69,14 @@
         versions (mapv revisions [[job 0] [job 1]])
         temp (Files/createTempDirectory "owner-browser-pg" (make-array java.nio.file.attribute.FileAttribute 0))
         metadata-path (.resolve temp "metadata.json")
-        flow-path (.resolve temp "flow.edn")
-        config-path (.resolve temp "config.edn")]
+        flow-path (.resolve temp "local-run/reconciliation/flow.edn")
+        config-path (.resolve temp "config.edn")
+        plan-path (.resolve temp "plan.json")
+        spec-path (.resolve temp "spec.edn")
+        inventory-path (.resolve temp "inventory.json")
+        marker-path (.resolve temp "stage.marker")
+        run-dir (.resolve temp "local-run")
+        reversal-revision (atom nil)]
     (Files/writeString metadata-path
                        (json/write-str {:decision_id (:id decision)
                                         :observation_revisions versions :app_url app})
@@ -95,12 +103,53 @@
                       :current-bindings {(:id decision) binding}
                       :active-snapshot-sha256 (:snapshot_sha256 service)
                       :active-binding-revision (:binding_revision service)
-                      :reviewer-url reviewer}
-              db-path (.resolve temp "decisions.sqlite")]
+                      :reviewer-url reviewer}]
+          (is (= (:id decision) (:decision_id binding)))
+          (is (= versions (:observation_revisions binding)))
+          (is (= "original-flow" (:reconciliation_event_id binding)))
+          (is (= 1 (:reconciliation_run_revision binding)))
+          (is (every? #(= (:source_sha256 %) (get-in decision [:subject :observation-versions
+                                                               (str "local-observation:" job ":" (:ordinal %))
+                                                               :source-sha256])) versions))
+          (Files/createDirectories (.getParent flow-path)
+                                   (make-array java.nio.file.attribute.FileAttribute 0))
+          (Files/setPosixFilePermissions run-dir (PosixFilePermissions/fromString "rwx------"))
           (flow/save-ledger! flow-path (update (flow/empty-ledger) :events conj
                                                {:id "original-flow" :decision-id (:id decision)}))
           (Files/writeString config-path (pr-str config) (make-array java.nio.file.OpenOption 0))
           (Files/setPosixFilePermissions config-path (PosixFilePermissions/fromString "rw-------"))
+          (Files/writeString inventory-path (json/write-str {:sources []})
+                             (make-array java.nio.file.OpenOption 0))
+          (Files/writeString spec-path
+                             (pr-str {:config {:provider :jev :model "synthetic-jev"
+                                               :version "synthetic/1"}
+                                      :decisions [decision]
+                                      :synthetic-answers
+                                      {(:id decision) {:type "choice" :choice "unknown"
+                                                       :confidence 0.99
+                                                       :probabilities {"same_person" 0.005
+                                                                       "different_person" 0.005
+                                                                       "unknown" 0.99}}}})
+                             (make-array java.nio.file.OpenOption 0))
+          (Files/writeString plan-path
+                             (json/write-str
+                              {:schema "local-evidence-run-plan/v1"
+                               :cutoff "2026-10-02T00:00:00Z"
+                               :stages [{:name "synthetic" :command
+                                         ["python3" "-c" "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('ready')"
+                                          (str marker-path)]
+                                         :outputs [(str marker-path)]}]
+                               :inputs [{:name "synthetic"
+                                         :path (str (.resolve temp "synthetic-source.json"))}]
+                               :excluded [] :source_inventory (str inventory-path)
+                               :reconciliation {:mode "synthetic" :spec (str spec-path)
+                                                :name_evidence {:status "gap" :reason "synthetic"}
+                                                :owner_sync_config (str config-path)}})
+                             (make-array java.nio.file.OpenOption 0))
+          (let [initial (local-run! plan-path run-dir)]
+            (is (= (:snapshot_sha256 service) (get-in initial [:local :snapshot_sha256])))
+            (is (= 1 (get-in initial [:reconciliation :provider_calls])))
+            (is (= 0 (get-in initial [:reconciliation :remote_store_revision]))))
           (let [action (browser! (:origin_port service) "ui-approve" (:id decision))]
             (is (= (:decision_id action) (:id decision)))
             (is (= [(str "Inspect " (:id decision)) "Preview approve" "Confirm approve"]
@@ -114,7 +163,11 @@
             (is (= (:id decision)
                    (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
                            [:events 0 :decision_id]))))
-          (is (= "complete" (:status (deliver! db-path config-path))))
+          (let [state (local-run! plan-path run-dir)]
+            (is (= 3 (get-in state [:reconciliation :remote_store_revision])))
+            (is (= 0 (get-in state [:reconciliation :provider_calls]))))
+          (is (= binding (get-in (last (:events (flow/load-ledger! flow-path)))
+                                 [:remote-event :proposal :canonical_binding])))
           (is (= 1 (:accepted-group-count (identity/private-canonical-view app))))
           (is (= (:id decision)
                  (get-in (last (identity/private-history app))
@@ -133,6 +186,9 @@
                  (:effective_status (browser! (:origin_port service) "inspect"
                                               "synthetic-dependent"))))
           (let [action (browser! (:origin_port service) "ui-reverse" (:id decision))]
+            (reset! reversal-revision
+                    (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
+                            [:events 1 :store_revision]))
             (is (= [(str "Inspect " (:id decision)) "Preview reverse" "Confirm reverse"]
                    (get-in action [:ui :clicks])))
             (is (= "reversed" (get-in action [:ui :rendered_status])))
@@ -141,7 +197,11 @@
             (is (= (:id decision)
                    (get-in (json/read-str (get-in action [:feed :payload_json]) :key-fn keyword)
                            [:events 1 :decision_id]))))
-          (is (= "complete" (:status (deliver! db-path config-path))))
+          (let [state (local-run! plan-path run-dir)]
+            (is (= @reversal-revision (get-in state [:reconciliation :remote_store_revision])))
+            (is (= 0 (get-in state [:reconciliation :provider_calls]))))
+          (is (= binding (get-in (last (:events (flow/load-ledger! flow-path)))
+                                 [:remote-event :proposal :canonical_binding])))
           (is (= 0 (:accepted-group-count (identity/private-canonical-view app))))
           (is (= (:id decision)
                  (get-in (last (identity/private-history app))
@@ -152,7 +212,18 @@
           (is (= "invalidated"
                  (:effective_status (browser! (:origin_port service) "inspect"
                                               "synthetic-dependent"))))
-          (is (= "complete" (:status (deliver! db-path config-path)))))
+          (is (= 2 (count (filter #(= :human (:origin %))
+                                  (:events (flow/load-ledger! flow-path))))))
+          (is (= 2 (count (identity/private-history app))))
+          (let [unchanged (local-run! plan-path run-dir)]
+            (is (= @reversal-revision
+                   (get-in unchanged [:reconciliation :remote_store_revision])))
+            (is (= 0 (get-in unchanged [:reconciliation :provider_calls]))))
+          (let [writer (OutputStreamWriter. (.getOutputStream process) "UTF-8")]
+            (.write writer "checkpoints\n") (.flush writer)
+            (is (= {:flow-ledger @reversal-revision
+                    :postgresql @reversal-revision}
+                   (:checkpoints (json/read-str (.readLine reader) :key-fn keyword))))))
         (finally
           (when (.isAlive process)
             (with-open [writer (OutputStreamWriter. (.getOutputStream process) "UTF-8")]
