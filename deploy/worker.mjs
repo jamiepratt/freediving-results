@@ -6,6 +6,7 @@ const privatePath = (path) => path === '/owner-evidence' || path.startsWith('/ow
 const safePrivatePath = /^\/owner-evidence(?:\/[A-Za-z0-9._~-]+)*\/?$/;
 const decisionActionPath = /^\/owner-evidence\/api\/decisions\/[A-Za-z0-9_-]{1,128}\/actions$/;
 const decisionEventPath = '/owner-evidence/api/decision-events';
+const decisionAckPath = '/owner-evidence/api/decision-events/ack';
 const presentationStatusPath = '/owner-evidence/api/presentation-status';
 const decoder = new TextDecoder('utf-8', {fatal:true});
 function decodeSegment(value) {
@@ -63,15 +64,17 @@ async function privateRequest(request, url, env) {
   if (!safePrivatePath.test(url.pathname) || url.pathname.length > 2048 || url.search.length > 2048) return failure(404);
   const action = request.method === 'POST' && decisionActionPath.test(url.pathname) && !url.search;
   const statusWrite = request.method === 'POST' && url.pathname === presentationStatusPath && !url.search;
-  const machine = url.pathname === decisionEventPath ? 'import' : (statusWrite || url.pathname === presentationStatusPath && request.headers.has('X-Freediving-Status-Token')) ? 'status' : false;
+  const ackWrite = request.method === 'POST' && url.pathname === decisionAckPath && !url.search;
+  const machine = (url.pathname === decisionEventPath || url.pathname === decisionAckPath) ? 'import' : (statusWrite || url.pathname === presentationStatusPath && request.headers.has('X-Freediving-Status-Token')) ? 'status' : false;
   if (url.pathname === decisionEventPath && request.method !== 'GET') return failure(405);
-  if (request.method !== 'GET' && request.method !== 'HEAD' && !action && !statusWrite) return failure(405);
+  if (url.pathname === decisionAckPath && !ackWrite) return failure(405);
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !action && !statusWrite && !ackWrite) return failure(405);
   const origin = request.headers.get('Origin');
-  if ((origin && origin !== ORIGIN) || (action && origin !== ORIGIN) || (statusWrite && origin)) return failure(403);
-  if ((action || statusWrite) && request.headers.get('Content-Type') !== 'application/json') return failure(415);
+  if ((origin && origin !== ORIGIN) || (action && origin !== ORIGIN) || ((statusWrite || ackWrite) && origin)) return failure(403);
+  if ((action || statusWrite || ackWrite) && request.headers.get('Content-Type') !== 'application/json') return failure(415);
   const csrf = request.headers.get('X-Freediving-CSRF');
   if (action && (typeof csrf !== 'string' || !/^[A-Za-z0-9_-]{3,128}$/.test(csrf))) return failure(403);
-  if ((action || statusWrite) && Number(request.headers.get('Content-Length')) > (statusWrite ? 4096 : 16384)) return failure(413);
+  if ((action || statusWrite || ackWrite) && Number(request.headers.get('Content-Length')) > (statusWrite ? 4096 : ackWrite ? 8388608 : 16384)) return failure(413);
   const config = privateConfig(env);
   if (!config) return failure(503);
   if (machine && !(machine === 'status' ? config.statusClientId : config.importClientId)) return failure(503);
@@ -87,7 +90,7 @@ async function privateRequest(request, url, env) {
     headers.set(machine === 'status' ? 'X-Freediving-Status-Token' : 'X-Freediving-Import-Token',machineToken);
   } else headers.set('X-Freediving-Owner-Email',identity);
   let body;
-  if (action || statusWrite) {
+  if (action || statusWrite || ackWrite) {
     if (action) headers.set('Origin', ORIGIN);
     headers.set('Content-Type', 'application/json');
     if (action) headers.set('X-Freediving-CSRF', csrf);
@@ -98,7 +101,7 @@ async function privateRequest(request, url, env) {
       const {value, done} = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > (statusWrite ? 4096 : 16384)) { await reader.cancel(); return failure(413); }
+      if (size > (statusWrite ? 4096 : ackWrite ? 8388608 : 16384)) { await reader.cancel(); return failure(413); }
       chunks.push(value);
     }
     body = new Uint8Array(size); let offset = 0;

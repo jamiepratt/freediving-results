@@ -26,7 +26,9 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
            'session', 'discipline', 'category', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_ACTION = 16 * 1024
+MAX_EVENT_ACK = 8 * 1024 * 1024
 STATUS_PATH = '/owner-evidence/api/presentation-status'
+DECISION_ACK_PATH = '/owner-evidence/api/decision-events/ack'
 DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
 DECISION_PREVIEW_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/preview$')
 DECISION_ACTION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/actions$')
@@ -226,7 +228,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                     self.server.presentation_status is not None and machine is not None and
                     compare_digest(machine, self.server.status_client_id) and
                     token is not None and compare_digest(token, self.server.status_token))
-        if urlsplit(self.path).path == '/owner-evidence/api/decision-events':
+        if urlsplit(self.path).path in ('/owner-evidence/api/decision-events', DECISION_ACK_PATH):
             machine = self._one('X-Freediving-Owner-Machine')
             token = self._one('X-Freediving-Import-Token')
             return (not self.headers.get_all('X-Freediving-Owner-Email', []) and
@@ -471,6 +473,29 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             parsed = self._path()
         except ValueError:
             return self._reply(404)
+        if parsed.path == DECISION_ACK_PATH and not parsed.query:
+            if (self.server.decisions is None or self._one('Content-Type') != 'application/json'
+                    or self.headers.get_all('Origin', [])):
+                return self._reply(403)
+            lengths = self.headers.get_all('Content-Length', [])
+            if len(lengths) != 1 or not lengths[0].isdigit():
+                return self._reply(400)
+            length = int(lengths[0])
+            if not 0 < length <= MAX_EVENT_ACK:
+                return self._reply(413 if length > MAX_EVENT_ACK else 400)
+            try:
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict) or set(body) != {'target', 'event', 'receipt'}:
+                    raise ValueError('invalid owner event acknowledgement')
+                result = self.server.decisions.acknowledge_human_event(
+                    body['target'], body['event'], body['receipt'])
+            except ConflictError:
+                return self._reply(409)
+            except (ValueError, TypeError, UnicodeDecodeError):
+                return self._reply(400)
+            except (sqlite3.Error, OSError):
+                return self._reply(503)
+            return self._json(result)
         if parsed.path == STATUS_PATH and not parsed.query:
             if self._one('Content-Type') != 'application/json' or self.headers.get_all('Origin', []):
                 return self._reply(403)

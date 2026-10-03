@@ -34,6 +34,7 @@
                :proposal {:selected_option "same_person" :canonical_binding binding}}
         feed (atom {:events [] :store_revision 1 :next_revision 1})
         project (atom 0)
+        acks (atom [])
         calls (atom [])]
     (spit (str spec) (pr-str {:config {:provider :jev :model "synthetic" :version "sync/1"}
                               :decisions [decision]
@@ -51,10 +52,13 @@
                   (fn [_ after _]
                     (swap! calls conj after)
                     (signed "private-import-token-for-test"
-                            (if (pos? after)
+                            (if (> after 1)
                               {:events [] :store_revision (:store_revision @feed)
                                :next_revision after}
                               @feed)))
+                  application/ack-owner-review-event!
+                  (fn [target event receipt _]
+                    (swap! acks conj [target (:id event) receipt]))
                   identity/private-projection (fn [_] {:revision 0})
                   identity/private-history (fn [_] [])
                   owner-identity/record-imported-decision!
@@ -66,13 +70,14 @@
       (reset! feed {:events [event] :store_revision 2 :next_revision 2})
       (is (thrown? clojure.lang.ExceptionInfo
                    (local/run! (str spec) (str ledger) sha (str config))))
+      (is (= [:flow-ledger] (mapv first @acks)))
       (is (= 1 (count (filter #(= :human (:origin %))
                               (:events (flow/load-ledger! ledger))))))
       (let [result (local/run! (str spec) (str ledger) sha (str config))]
         (is (= 2 (:remote_store_revision result)))
         (is (= :reversed (:status (get (flow/inspect (flow/load-ledger! ledger)
                                                      [decision]) "identity"))))
-        (is (= [0 0 2] @calls))
+        (is (= [0 0 1 0 2] @calls))
         (is (= 1 (count (filter #(= :human (:origin %))
                                 (:events (flow/load-ledger! ledger))))))
         (let [before (count (:events (flow/load-ledger! ledger)))

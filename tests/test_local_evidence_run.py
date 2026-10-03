@@ -1,7 +1,10 @@
 import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'local_evidence_run.py'
@@ -93,6 +96,118 @@ def test_reconciliation_checkpoints_after_local_staging_and_replays_without_scor
     assert counter.read_text() == 'x'
     assert sha(target / 'reconciliation' / 'flow.edn') == ledger_hash
     assert json.loads((target / 'state.json').read_text())['reconciliation']['provider_calls'] == 1
+
+
+def test_cli_checkpoints_flow_ack_and_preserves_local_run_when_canonical_target_is_absent(tmp_path):
+    plan, packet, _, _ = fixture(tmp_path)
+    content = tmp_path / 'content.txt'
+    packet.write_text(content.read_text())
+    preflight = tmp_path / 'preflight'
+    built = subprocess.run([sys.executable, str(SCRIPT.parent / 'unified_evidence_snapshot.py'),
+                            'build', '--cutoff', '2026-10-03T00:00:00Z',
+                            '--input', f'packet={packet}', '--output-dir', str(preflight)],
+                           capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    snapshot_sha = json.loads((preflight / 'manifest.json').read_text())['snapshot_sha256']
+    token = 'synthetic-owner-import-token-12345'
+    binding = {'decision_id': 'different-people', 'evidence_bindings': []}
+    events = []
+    acknowledgements = []
+
+    class Owner(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def authorized(self):
+            return (self.headers.get('CF-Access-Client-Id') == 'synthetic.access'
+                    and self.headers.get('CF-Access-Client-Secret') == 'synthetic-secret'
+                    and self.headers.get('X-Freediving-Import-Token') == token)
+
+        def answer(self, status, data):
+            body = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if not self.authorized():
+                return self.answer(403, {})
+            after = int(self.path.split('after_revision=')[1])
+            selected = [item for item in events if item['store_revision'] > after]
+            payload = json.dumps({'events': selected, 'store_revision': events[-1]['store_revision'] if events else 0,
+                                  'next_revision': selected[-1]['store_revision'] if selected else after})
+            signature = hmac.new(token.encode(), payload.encode(), hashlib.sha256).hexdigest()
+            self.answer(200, {'payload_json': payload, 'signature': signature})
+
+        def do_POST(self):
+            if not self.authorized() or self.path != '/owner-evidence/api/decision-events/ack':
+                return self.answer(403, {})
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            acknowledgements.append((body['target'], body['event']['id']))
+            if len(acknowledgements) == 1:
+                self.close_connection = True  # owner commits, reply is lost
+                return
+            self.answer(200, {'target': body['target'], 'event_id': body['event']['id'],
+                              'checkpoints': {body['target']: body['event']['store_revision']}})
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Owner)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        spec = tmp_path / 'remote-reconciliation.edn'
+        spec.write_text('''{:config {:provider :jev :model "synthetic-jev" :version "synthetic/1"}
+ :decisions [{:id "different-people" :family :identity :action :different-person
+              :choices [:same-person :different-person :unknown]
+              :subject {:id "synthetic-pair"} :candidates ["person-a" "person-b"]
+              :dependencies [] :evidence-adequate? true
+              :evidence [{:evidence-id "synthetic-row" :citation {:source-sha256 "synthetic" :locator "row 1"}
+                          :fact "Two distinct synthetic people"}]}]
+ :synthetic-answers {"different-people" {:type "choice" :choice "different_person"
+   :confidence 0.99 :probabilities {"same_person" 0.005 "different_person" 0.99 "unknown" 0.005}}}}''')
+        owner = tmp_path / 'owner.edn'
+        owner.write_text(f'''{{:base-url "http://127.0.0.1:{server.server_port}"
+ :access-client-id "synthetic.access" :access-client-secret "synthetic-secret"
+ :allow-loopback-http? true :import-token "{token}"
+ :current-bindings {{"different-people" {{:decision_id "different-people" :evidence_bindings []}}}}
+ :active-snapshot-sha256 "{snapshot_sha}" :active-binding-revision 1}}''')
+        owner.chmod(0o600)
+        data = json.loads(plan.read_text())
+        data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec),
+                                  'name_evidence': {'status': 'gap', 'reason': 'synthetic'},
+                                  'owner_sync_config': str(owner)}
+        plan.write_text(json.dumps(data))
+        target = tmp_path / 'run'
+        initial = run(plan, target)
+        assert initial.returncode == 0, initial.stderr
+        assert json.loads((target / 'state.json').read_text())['reconciliation']['provider_calls'] == 1
+
+        def owner_event(revision, action):
+            return {'id': f'owner-store:{revision}', 'decision_id': 'different-people',
+                    'store_revision': revision, 'binding_revision': 1,
+                    'snapshot_sha256': snapshot_sha, 'action': action, 'actor': 'owner',
+                    'reason': 'synthetic review',
+                    'proposal': {'selected_option': 'different_person', 'canonical_binding': binding}}
+
+        events.append(owner_event(2, 'approve'))
+        approved = run(plan, target)
+        assert approved.returncode != 0
+        state = json.loads((target / 'state.json').read_text())
+        assert state['local']['status'] == 'complete'
+        assert state['remote']['status'] == 'pending'
+        assert state['reconciliation']['status'] == 'failed'
+        assert acknowledgements == [('flow-ledger', 'owner-store:2')]
+        ledger_hash = sha(target / 'reconciliation' / 'flow.edn')
+        retry = run(plan, target)
+        assert retry.returncode != 0
+        assert sha(target / 'reconciliation' / 'flow.edn') == ledger_hash
+        assert acknowledgements == [('flow-ledger', 'owner-store:2'),
+                                    ('flow-ledger', 'owner-store:2')]
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
 
 
 def test_deterministic_local_reconciliation_has_no_provider_dispatch(tmp_path):

@@ -331,6 +331,48 @@ class DecisionStore:
         found = {row['target']: row['revision'] for row in rows}
         return {target: found.get(target, 0) for target in DELIVERY_TARGETS}
 
+    def acknowledge_human_event(self, target, event, receipt):
+        """Checkpoint one exact, committed target event; safe after a lost reply."""
+        if target not in DELIVERY_TARGETS or not isinstance(event, dict):
+            raise ValueError('invalid owner event acknowledgement')
+        _text(receipt, 'commit_receipt')
+        revision = event.get('store_revision')
+        if (type(revision) is not int or revision < 1 or
+                event.get('id') != f'owner-store:{revision}'):
+            raise ValueError('invalid owner event acknowledgement')
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            current = self.human_events(after_revision=revision - 1, limit=1)['events']
+            if len(current) != 1 or current[0] != event:
+                raise ConflictError('owner event differs from durable outbox')
+            digest = _digest(event)
+            existing = self.db.execute('''SELECT event_sha256 FROM human_event_deliveries
+                                          WHERE target=? AND event_revision=?''',
+                                       (target, revision)).fetchone()
+            if existing:
+                if existing['event_sha256'] != digest:
+                    raise ConflictError('conflicting delivered owner event')
+            else:
+                cursor = self.delivery_checkpoints()[target]
+                pending = self.human_events(after_revision=cursor, limit=1)['events']
+                if not pending or pending[0]['store_revision'] != revision:
+                    raise ConflictError('owner event acknowledgement out of order')
+                if target == 'postgresql':
+                    flow = self.db.execute('''SELECT 1 FROM human_event_deliveries
+                                              WHERE target='flow-ledger' AND event_revision=?
+                                                AND event_sha256=?''', (revision, digest)).fetchone()
+                    if flow is None:
+                        raise ConflictError('flow ledger acknowledgement required first')
+                self.db.execute('''INSERT INTO human_event_deliveries VALUES (?,?,?,?,?)''',
+                                (target, revision, digest, receipt,
+                                 datetime.now(timezone.utc).isoformat()))
+            checkpoints = self.delivery_checkpoints()
+            self.db.execute('COMMIT')
+            return {'target': target, 'event_id': event['id'], 'checkpoints': checkpoints}
+        except Exception:
+            self.db.execute('ROLLBACK')
+            raise
+
     def deliver_human_events(self, targets, *, limit=100):
         """Resume ordered delivery to the flow ledger, then PostgreSQL.
 
