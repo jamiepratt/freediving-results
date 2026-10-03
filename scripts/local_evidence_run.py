@@ -61,6 +61,17 @@ def checked_plan(path):
     for item in plan['excluded']:
         if not item.get('reason'):
             raise ValueError('excluded input needs reason')
+    reconciliation = plan.get('reconciliation')
+    if reconciliation is not None:
+        if not isinstance(reconciliation, dict) or reconciliation.get('mode') != 'synthetic' or not reconciliation.get('spec'):
+            raise ValueError('reconciliation requires a synthetic specification')
+        name = reconciliation.get('name_evidence')
+        if not isinstance(name, dict) or name.get('status') not in ('gap', 'checked'):
+            raise ValueError('reconciliation requires checked affiliate names or an explicit gap')
+        if name['status'] == 'gap' and not name.get('reason'):
+            raise ValueError('affiliate name gap requires reason')
+        if name['status'] == 'checked' and not (name.get('path') and re.fullmatch(r'[0-9a-f]{64}', name.get('sha256', ''))):
+            raise ValueError('checked affiliate names require path and SHA-256')
     return plan
 
 
@@ -72,6 +83,8 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         publisher_requests_stopped=False, vps_reachable=None, remote_factory=None,
         status_access_jwt=None, status_token=None):
     plan = checked_plan(plan_path)
+    if plan.get('reconciliation') and remote_config is not None:
+        raise ValueError('synthetic reconciliation cannot activate remote presentation')
     plan_hash = digest(plan_path)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if run_dir.is_symlink() or (run_dir.stat().st_mode & 0o077):
@@ -84,6 +97,8 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
     else:
         state = {'schema': 'local-evidence-run/v1', 'run_id': str(uuid.uuid4()), 'plan_sha256': plan_hash, 'stages': {},
                  'local': {'status': 'pending'}, 'remote': {'status': 'pending', 'active': None, 'pending': None, 'failed': None}}
+        if plan.get('reconciliation'):
+            state['reconciliation'] = {'status': 'pending'}
         atomic_json(state_path, state)
     try:
         if state['local']['status'] == 'complete':
@@ -154,6 +169,15 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         atomic_json(state_path, state)
         raise
 
+    if plan.get('reconciliation'):
+        try:
+            reconcile_local(plan['reconciliation'], run_dir, state)
+            atomic_json(state_path, state)
+        except Exception as error:
+            state['reconciliation'] = {'status': 'failed', 'error': str(error)}
+            atomic_json(state_path, state)
+            raise
+
     if bool(status_access_jwt) != bool(status_token):
         raise ValueError('private status credentials incomplete')
     if status_access_jwt:
@@ -208,6 +232,46 @@ def verify_staging(run_dir, state):
     command([sys.executable, str(ROOT / 'private_source_bundle.py'), 'verify', '--bundle-dir', str(bundle)])
     if digest(snapshot / 'manifest.json') != state['local']['snapshot_manifest_sha256'] or digest(bundle / 'manifest.json') != state['local']['bundle_manifest_sha256']:
         raise ValueError('completed staging manifest changed')
+
+
+def reconcile_local(config, run_dir, state):
+    spec = Path(config['spec'])
+    if not spec.is_file() or spec.is_symlink():
+        raise ValueError('reconciliation specification unavailable')
+    spec_hash = digest(spec)
+    name = config['name_evidence']
+    gaps = []
+    if name['status'] == 'checked':
+        from affiliate_name_query import AffiliateNameQuery
+        from unified_evidence_query import SnapshotQuery
+        snapshot_dir = run_dir / 'snapshot'
+        AffiliateNameQuery(name['path'], name['sha256'], snapshot_dir,
+                           SnapshotQuery(snapshot_dir)).listing()
+    else:
+        gaps.append({'name': 'affiliate-names', 'reason': name['reason']})
+    completed = state.get('reconciliation', {})
+    ledger = run_dir / 'reconciliation' / 'flow.edn'
+    if ledger.is_symlink():
+        raise ValueError('reconciliation ledger must be a private file')
+    if completed.get('status') == 'complete':
+        if (completed.get('spec_sha256') != spec_hash
+                or completed.get('snapshot_sha256') != state['local']['snapshot_sha256']
+                or not ledger.is_file()
+                or digest(ledger) != completed.get('ledger_sha256')):
+            raise ValueError('completed reconciliation checkpoint changed')
+        return
+    ledger.parent.mkdir(mode=0o700, exist_ok=True)
+    state['reconciliation'] = {'status': 'running', 'spec_sha256': spec_hash}
+    atomic_json(run_dir / 'state.json', state)
+    result = subprocess.run(['clojure', '-M', '-m', 'freediving.local-reconciliation',
+                             str(spec), str(ledger), state['local']['snapshot_sha256']],
+                            cwd=ROOT.parent, capture_output=True, text=True, check=True)
+    if digest(spec) != spec_hash:
+        raise ValueError('reconciliation specification changed during run')
+    report = json.loads(result.stdout)
+    state['reconciliation'] = {**report, 'status': 'complete', 'mode': 'synthetic',
+                               'spec_sha256': spec_hash, 'ledger_sha256': digest(ledger),
+                               'gaps': gaps}
 
 
 def ssh_route_reachable(ssh, host):

@@ -22,6 +22,22 @@ Run `python3 scripts/local_evidence_run.py run --plan /private/plan.json --run-d
 
 The coordinator builds and verifies `snapshot/` before making it visible, then builds and verifies `bundle/`. It inserts `snapshot.sqlite` and `snapshot/manifest.json` into the bundle inventory as `snapshot.sqlite` and `snapshot-manifest.json`; those IDs are reserved. It checks their hashes against the bundle manifest. The run is locally complete only after both artifacts verify. `state.json` records a dated `verified_partial` coverage claim, explicit excluded gaps and unknown distinct-attempt count. A successful local run without remote configuration sets `remote.status` to `pending`. With remote configuration, the same command attempts presentation automatically after local verification. It records `remote.status: active` only after authenticated owner readback verifies the snapshot, source bundle and cited PDF rendering. A remote failure records `remote.status: failed`, retains the previous `remote.active` binding where rollback succeeds, and leaves `local.status: complete` plus snapshot and bundle files for retry. `coverage.cutoff` and `coverage.gaps` remain visible in every state. Local failure records `local.status: failed` and does not change a previously completed run directory.
 
+## Synthetic local reconciliation checkpoint
+
+An optional `reconciliation` plan entry exercises the existing Clojure reconciliation application after verified local staging. This first integration mode is limited to disposable synthetic decisions and never activates remote presentation:
+
+```json
+"reconciliation": {
+  "mode": "synthetic",
+  "spec": "/private/synthetic-decisions.edn",
+  "name_evidence": {"status": "gap", "reason": "no affiliate roster in this synthetic fixture"}
+}
+```
+
+The spec is trusted local EDN with `:config`, a vector of `:decisions`, optional `:deterministic-results`, and `:synthetic-answers` keyed by decision ID. Synthetic answers use the existing Jev batch response shape. There is no live provider or production import. A checked affiliate input may replace the gap with `{"status":"checked","path":"/private/affiliate-input.json","sha256":"..."}`; its snapshot binding, source bytes and receipts are verified with the existing affiliate query contract. Without either checked input or a reasoned gap, the plan fails before staging.
+
+The flow ledger lives at `reconciliation/flow.edn` under the private run directory. The application persists pending dispatch before synthetic scoring and routes supported decisions through its canonical application rules. `state.json` records a separate `reconciliation` checkpoint with snapshot binding, spec and ledger hashes, decision revision, flow status counts, local canonical outcomes, explicit name gap and synthetic provider calls. Completed matching runs skip scoring; a changed spec or ledger stops for inspection. `accepted_athletes` and `distinct_attempts` remain null. A reconciliation failure leaves `local.status: complete` and `remote.status: pending`. This checkpoint does not project decisions into the remote owner store or satisfy the retained 2025-2026 corpus run in issue #73.
+
 ## Private transfer staging
 
 After local completion, `python3 scripts/private_evidence_transfer.py stage --run-dir /private/run-20261003 --destination /private/remote-staging` copies the verified snapshot and matching source bundle into an owner-only destination directory. The destination must already exist with mode 0700. This path may be a disposable local stand-in; it is not an active presentation path. The command never changes an `active` link or updates `state.json` to presented.
