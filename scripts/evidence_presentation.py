@@ -20,7 +20,7 @@ def _served(remote, expected):
 
 
 def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
-            vpn_control=None, vpn_journal=None):
+            vpn_control=None, vpn_journal=None, status_sync=None):
     """Present one completed run, keeping the prior presentation on failure.
 
     remote must implement stage(run_dir), activate(receipt), owner_overview(),
@@ -49,6 +49,8 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
     remote_state.update(status='pending', pending=binding,
                         failed=None, error=None, rollback_error=None)
     atomic_json(state_path, state)
+    if status_sync:
+        status_sync()
     activated = False
 
     def deploy():
@@ -99,4 +101,9 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
         remote_state.update(status='failed', failed=binding,
                             pending=binding, error=str(error))
         atomic_json(state_path, state)
+        if status_sync:
+            try:
+                status_sync()
+            except Exception:
+                pass
         raise error

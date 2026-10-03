@@ -8,13 +8,15 @@ function heading(text) { const n=document.createElement('h3'); n.textContent=tex
 function jsonBlock(value) { const n=document.createElement('pre'); n.textContent=JSON.stringify(value,null,2); return n; }
 async function fetchJson(path) { const r=await fetch(path,{credentials:'same-origin',cache:'no-store'}); if(r.status===401||r.status===403){$('presentation-status').textContent='Owner authentication expired or denied. Sign in and reload to verify the active snapshot.';if(r.status===401)location.href='/login';throw new Error('Owner authentication expired or denied');} if(!r.ok)throw new Error(`HTTP ${r.status}`); return r.json(); }
 function entries(parent, object) { const dl=document.createElement('dl'); for(const [k,v] of Object.entries(object)){dl.append(cell(k,'dt'),cell(v==null?'unknown':typeof v==='object'?JSON.stringify(v):v,'dd'));} parent.append(dl); }
-function renderPresentationStatus(overview,sources){
+function renderPresentationStatus(overview,sources,sync){
   const area=$('presentation-status');area.replaceChildren();
   const remote=location.pathname==='/owner-evidence'||location.pathname?.startsWith('/owner-evidence/');
   area.append(heading(remote ? 'Remote presentation' : 'Local demo presentation'));
   const snapshot=remote ? `Remote active snapshot: ${overview.snapshot_sha256 || 'unknown'}` : `Local demo snapshot: ${overview.snapshot_sha256 || 'unknown'}. Remote active snapshot: unavailable`;
   area.append(cell(`${snapshot}. Verified cutoff: ${overview.cutoff || 'unknown'}. Coverage: ${overview.coverage || 'unknown'}. Accepted distinct attempts: ${overview.confirmed_distinct_attempts ?? 'unknown'}.`, 'p'));
-  area.append(cell(`Local completed revision: unavailable. Pending transfer: unavailable. Failed activation and retry: unavailable. ${remote ? 'This remote page has no private local checkpoint sync; check the local run state before retrying. A completed local run does not replace the remote active snapshot.' : 'This demo reads a snapshot directly; check the local run state and remote owner page for presentation status.'}`, 'p'));
+  if(sync?.local){
+    area.append(cell(`Synced local completed revision: ${sync.local.snapshot_sha256}. Run: ${sync.run_id}. Verified local cutoff: ${sync.local.cutoff}. Verified partial gaps: ${sync.local.gap_count}. Pending transfer: ${sync.remote?.pending || 'none'}. Failed activation and retry: ${sync.remote?.failed || 'none'}. Remote verified active revision: ${sync.remote?.active?.snapshot_sha256 || 'unavailable'}; bundle: ${sync.remote?.active?.bundle_manifest_sha256 || 'unavailable'}.`, 'p'));
+  }else area.append(cell(`Local completed revision: unavailable. Pending transfer: unavailable. Failed activation and retry: unavailable. ${remote ? 'Private local checkpoint sync is unavailable; check the local run state before retrying.' : 'This demo reads a snapshot directly; check the local run state and remote owner page for presentation status.'}`, 'p'));
   const gaps=sources.filter(source=>source.status!=='included');
   area.append(cell(gaps.length ? 'Explicit source gaps:' : 'No source gaps listed by this snapshot; coverage may still be partial.', 'p'));
   if(gaps.length){const list=document.createElement('ul');for(const source of gaps)list.append(cell(`${source.source_name}: ${source.status}${source.reason ? ' - '+source.reason : ''}`, 'li'));area.append(list);}
@@ -23,7 +25,9 @@ async function loadOverview(){
   $('presentation-status').textContent='Checking active snapshot...';
   const o=await fetchJson('/api/overview');
   const sources=await fetchJson('/api/sources');
-  renderPresentationStatus(o,sources);
+  const remote=location.pathname==='/owner-evidence'||location.pathname?.startsWith('/owner-evidence/');
+  const sync=remote ? await fetchJson('/api/presentation-status') : null;
+  renderPresentationStatus(o,sources,sync);
   const selectedDates=new Set(sources.filter(s=>s.source_schema==='aida-selected-html-packet/v1'||s.source_name.startsWith('aida-')).map(s=>s.source_name));
   const count=(predicate)=>o.counts.filter(predicate).reduce((total,row)=>total+row.records,0);
   const source=(name,collection,kind)=>count(row=>row.source_name===name&&row.collection===collection&&(!kind||row.kind===kind));

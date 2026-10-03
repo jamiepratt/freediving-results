@@ -210,3 +210,30 @@ test('decision event feed requires signed Access service identity and isolates m
     assert.equal(forwarded,1);
   } finally { globalThis.fetch=original; }
 });
+
+test('private status write requires dedicated service identity and token', async () => {
+  const path='/owner-evidence/api/presentation-status';
+  const machineId='status123.access';
+  const config={...privateEnv,OWNER_EVIDENCE_STATUS_CLIENT_ID:machineId};
+  const jwt=await token({email:undefined,common_name:machineId,sub:''});
+  const browserJwt=await token();
+  const original=globalThis.fetch;
+  let forwarded=0;
+  globalThis.fetch=async (url,options)=>{
+    if(url.endsWith('/cdn-cgi/access/certs')) return Response.json({keys:[jwk]});
+    forwarded++;
+    assert.equal(options.headers.get('X-Freediving-Status-Token'),'separate-status-token-for-tests');
+    assert.equal(options.headers.get('X-Freediving-Owner-Email'),null);
+    assert.equal(options.headers.get('X-Freediving-Owner-Machine'),machineId);
+    return Response.json({revision:1});
+  };
+  try{
+    const body='{}';
+    const headers={'Cf-Access-Jwt-Assertion':jwt,'X-Freediving-Status-Token':'separate-status-token-for-tests','Content-Type':'application/json'};
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'Cf-Access-Jwt-Assertion':browserJwt},body}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'X-Freediving-Status-Token':''},body}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,Origin:'https://poc.alphacompose.com'},body}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers,body}),config)).status,200);
+    assert.equal(forwarded,1);
+  }finally{globalThis.fetch=original;}
+});

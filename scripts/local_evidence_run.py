@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,7 +69,8 @@ def command(argv):
 
 
 def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
-        publisher_requests_stopped=False, vps_reachable=None, remote_factory=None):
+        publisher_requests_stopped=False, vps_reachable=None, remote_factory=None,
+        status_access_jwt=None, status_token=None):
     plan = checked_plan(plan_path)
     plan_hash = digest(plan_path)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -80,7 +82,7 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         if state['plan_sha256'] != plan_hash:
             raise ValueError('run plan changed; use a new run directory')
     else:
-        state = {'schema': 'local-evidence-run/v1', 'plan_sha256': plan_hash, 'stages': {},
+        state = {'schema': 'local-evidence-run/v1', 'run_id': str(uuid.uuid4()), 'plan_sha256': plan_hash, 'stages': {},
                  'local': {'status': 'pending'}, 'remote': {'status': 'pending', 'active': None, 'pending': None, 'failed': None}}
         atomic_json(state_path, state)
     try:
@@ -152,6 +154,12 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         atomic_json(state_path, state)
         raise
 
+    if bool(status_access_jwt) != bool(status_token):
+        raise ValueError('private status credentials incomplete')
+    if status_access_jwt:
+        from private_status_sync import sync_status
+        sync_status(run_dir, status_access_jwt, status_token)
+
     if remote_config is not None:
         from evidence_presentation import present
         from private_evidence_remote import PrivateEvidenceRemote
@@ -173,14 +181,22 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
                 **config, owner_access_jwt=owner_access_jwt)
             probe = vps_reachable or (lambda: ssh_route_reachable(config['ssh'], config['host']))
             present(run_dir, remote, publisher_requests_stopped=True,
-                    vps_reachable=probe)
+                    vps_reachable=probe,
+                    status_sync=(lambda: sync_status(run_dir, status_access_jwt, status_token)) if status_access_jwt else None)
         except Exception as error:
             state = json.loads(state_path.read_text())
             state['remote'].update(status='failed', pending=binding,
                                    failed=binding, error=str(error))
             atomic_json(state_path, state)
+            if status_access_jwt:
+                try:
+                    sync_status(run_dir, status_access_jwt, status_token)
+                except Exception:
+                    pass
             raise
         state = json.loads(state_path.read_text())
+    if status_access_jwt:
+        sync_status(run_dir, status_access_jwt, status_token)
     print(json.dumps(state, sort_keys=True))
     return state
 
@@ -214,11 +230,15 @@ def main():
     parser.add_argument('--remote-config', type=Path)
     parser.add_argument('--owner-access-jwt-env')
     parser.add_argument('--publisher-requests-stopped', action='store_true')
+    parser.add_argument('--status-access-jwt-env')
+    parser.add_argument('--status-token-env')
     args = parser.parse_args()
     try:
         run(args.plan, args.run_dir, remote_config=args.remote_config,
             owner_access_jwt=os.environ.get(args.owner_access_jwt_env) if args.owner_access_jwt_env else None,
-            publisher_requests_stopped=args.publisher_requests_stopped)
+            publisher_requests_stopped=args.publisher_requests_stopped,
+            status_access_jwt=os.environ.get(args.status_access_jwt_env) if args.status_access_jwt_env else None,
+            status_token=os.environ.get(args.status_token_env) if args.status_token_env else None)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f'local run: {error}', file=sys.stderr)
         return 1

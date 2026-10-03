@@ -22,7 +22,7 @@ import urllib.request
 
 
 SERVICE = 'freediving-owner-evidence.service'
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/owner_decision_store.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/owner_decision_store.py',
          'scripts/unified_evidence_query.py',
          'scripts/route_roster_query.py', 'scripts/owner_source_view.py',
          'scripts/private_source_bundle.py', 'scripts/vestico_safe_derivative.py',
@@ -65,7 +65,9 @@ def _config(path, owner_uid, expected):
             raise ValueError('invalid private environment file')
         values[match[1]] = match[2]
     if (not REQUIRED_ENV <= values.keys() or
-            set(values) - REQUIRED_ENV - {'OWNER_EVIDENCE_DECISION_API_ENABLED'} or
+            set(values) - REQUIRED_ENV - {'OWNER_EVIDENCE_DECISION_API_ENABLED',
+                                          'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
+                                          'OWNER_EVIDENCE_STATUS_CLIENT_ID'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             (expected is not None and values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected) or
             not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_SNAPSHOT_SHA256'])):
@@ -78,6 +80,11 @@ def _config(path, owner_uid, expected):
             emails and len(set(emails)) == len(emails) and
             all(re.fullmatch(r'[^\s,@]+@[^\s,@]+\.[^\s,@]+', e) and e == e.lower() for e in emails)):
         raise ValueError('invalid private environment')
+    status_keys = {'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
+                   'OWNER_EVIDENCE_STATUS_CLIENT_ID'}
+    if status_keys & values.keys():
+        if not status_keys <= values.keys() or values['OWNER_EVIDENCE_STATUS_FILE'] != '/var/lib/freediving-owner-evidence/status/presentation-status.json' or not 24 <= len(values['OWNER_EVIDENCE_STATUS_TOKEN']) <= 256 or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', values['OWNER_EVIDENCE_STATUS_CLIENT_ID']):
+            raise ValueError('invalid private status environment')
     return values
 
 
@@ -439,6 +446,12 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     decision_db = decision_dir / 'ledger.sqlite'
     if decision_db.is_symlink() or (decision_db.exists() and not decision_db.is_file()):
         raise ValueError('invalid durable decision DB')
+    status_dir = layout.state / 'status'
+    if status_dir.is_symlink() or (status_dir.exists() and not status_dir.is_dir()):
+        raise ValueError('invalid durable status directory')
+    status_dir.mkdir(exist_ok=True)
+    status_dir.chmod(0o700)
+    os.chown(status_dir, owner_uid, owner_gid)
     app = _stage_directory(app_parent, app_version,
                            [(name, bundle / name) for name in FILES], os.geteuid(),
                            os.getegid(), 0o644)

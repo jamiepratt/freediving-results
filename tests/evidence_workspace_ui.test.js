@@ -185,6 +185,18 @@ test('owner status identifies remote active partial snapshot and leaves local ha
   assert.match(status, /accepted distinct attempts: unknown/i);
 });
 
+test('owner status shows synced local checkpoint and preserved remote active revision', async () => {
+  const {context, node} = workspace({
+    '/api/overview': {coverage: 'partial', cutoff: '2026-10-01T00:00:00Z', snapshot_sha256: 'remote-old', counts: []},
+    '/api/sources': [],
+    '/api/presentation-status': {revision: 2, run_id: 'run-2', local: {snapshot_sha256: 'local-new', cutoff: '2026-10-03T00:00:00Z', gap_count: 3},
+      remote: {status: 'failed', pending: 'local-new', failed: 'local-new', active: {snapshot_sha256: 'remote-old', bundle_manifest_sha256: 'bundle-old'}}},
+  });
+  await vm.runInContext('loadOverview()', context);
+  const status = node('presentation-status').visibleText;
+  for (const phrase of ['local-new', '2026-10-03T00:00:00Z', '3', 'Pending transfer', 'Failed activation', 'remote-old']) assert.ok(status.includes(phrase), phrase);
+});
+
 test('expired or denied owner session does not present stale active status', async () => {
   for (const responseStatus of [401, 403]) {
     const {context, node} = workspace({}, {'/api/overview': responseStatus});

@@ -19,6 +19,7 @@ PrivateDevices=true
 RestrictAddressFamilies=AF_INET AF_UNIX
 ReadOnlyPaths=/var/lib/freediving-owner-evidence /opt/freediving/owner-evidence
 ReadWritePaths=/var/lib/freediving-owner-evidence/decisions
+ReadWritePaths=/var/lib/freediving-owner-evidence/status
 InaccessiblePaths=/etc/freediving/public.env /etc/freediving/migration.env
 MemoryMax=256M
 TasksMax=32
