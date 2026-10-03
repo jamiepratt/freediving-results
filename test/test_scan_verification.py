@@ -54,6 +54,51 @@ class ScanVerificationTest(unittest.TestCase):
         self.assertEqual(self.first["entries"][1], result["positions"][1]["first_pass"])
         self.assertEqual(self.second["entries"][1], result["positions"][1]["second_pass"])
 
+    def test_accepts_overlapping_independent_citations_and_inspection(self):
+        second = deepcopy(self.second)
+        second["entries"][1]["region_px"] = {"x1": 2, "y1": 14, "x2": 11, "y2": 23}
+        second["entries"][1]["citation"] = "second pass box for row 2"
+        checks = self.checks()
+        checks[1]["region_px"] = {"x1": 2, "y1": 13, "x2": 11, "y2": 22}
+        checks[1]["citation"] = "reviewer box for row 2"
+
+        result = verify_transcriptions(self.first, second, checks, sample_size=1)
+
+        row = result["positions"][1]
+        self.assertEqual("B", row["accepted_reading"])
+        self.assertEqual(self.first["entries"][1], row["first_pass"])
+        self.assertEqual(second["entries"][1], row["second_pass"])
+        self.assertEqual(checks[1], row["inspection"])
+
+    def test_rejects_pass_citations_that_do_not_identify_same_region(self):
+        for change in ({"region_px": {"x1": 8, "y1": 20, "x2": 17, "y2": 29}},
+                       {"page": 2}, {"region_px": {"x1": 11, "y1": 13, "x2": 20, "y2": 22}}):
+            second = deepcopy(self.second)
+            second["entries"][1].update(change)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "citation mismatch"):
+                verify_transcriptions(self.first, second, self.checks(), sample_size=1)
+
+    def test_rejects_inspection_not_overlapping_both_passes(self):
+        second = deepcopy(self.second)
+        second["entries"][1]["region_px"] = {"x1": 4, "y1": 13, "x2": 13, "y2": 22}
+        checks = self.checks()
+        checks[1]["region_px"] = {"x1": 1, "y1": 13, "x2": 7, "y2": 22}
+        with self.assertRaisesRegex(ValueError, "inspection citation mismatch"):
+            verify_transcriptions(self.first, second, checks, sample_size=1)
+
+    def test_rejects_invalid_or_source_mismatched_citations(self):
+        for change, message in (({"region_px": None}, "invalid region"),
+                                ({"citation": ""}, "missing citation"),
+                                ({"source_sha256": "b" * 64}, "citation source mismatch")):
+            second = deepcopy(self.second)
+            second["entries"][1].update(change)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message):
+                verify_transcriptions(self.first, second, self.checks(), sample_size=1)
+        checks = self.checks()
+        checks[1]["source_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "inspection source mismatch"):
+            verify_transcriptions(self.first, self.second, checks, sample_size=1)
+
     def test_replay_is_deterministic_and_retains_versions_without_changing_inputs(self):
         first, second, checks = deepcopy((self.first, self.second, self.checks()))
         result = verify_transcriptions(first, second, checks, sample_size=1)
@@ -105,7 +150,7 @@ class ScanVerificationTest(unittest.TestCase):
 
     def test_rejects_uncited_or_unresolved_acceptance(self):
         bad = self.checks()
-        bad[1]["region_px"] = {"x1": 2, "y1": 13, "x2": 10, "y2": 22}
+        bad[1]["region_px"] = {"x1": 11, "y1": 13, "x2": 20, "y2": 22}
         with self.assertRaisesRegex(ValueError, "citation mismatch"):
             verify_transcriptions(self.first, self.second, bad, sample_size=1)
         bad = self.checks()
