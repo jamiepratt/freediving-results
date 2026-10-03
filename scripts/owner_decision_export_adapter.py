@@ -13,7 +13,9 @@ import subprocess
 from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
-from aida_snapshot_observations import load_source_observations
+from aida_snapshot_observations import load_source_observations as load_aida
+from cmas_microplus_snapshot_observations import (
+    ADAPTER_VERSION as MICROPLUS_VERSION, load_source_observations as load_microplus)
 
 
 def _digest(value):
@@ -43,8 +45,9 @@ def _verify_evidence(snapshot, snapshot_directory, item, binding):
                  revision.get('snapshot_record_id') == item['id'] and
                  isinstance(revision.get('source_name'), str),
                  'source observation snapshot binding changed')
-        result = load_source_observations(snapshot_directory, [revision['source_name']],
-                                          adapter_version=revision.get('adapter_version'))
+        version = revision.get('adapter_version')
+        loader = load_microplus if version == MICROPLUS_VERSION else load_aida
+        result = loader(snapshot_directory, [revision['source_name']], adapter_version=version)
         matches = [observation for observation in result['observations']
                    if observation['snapshot_record_id'] == item['id']]
         _require(len(matches) == 1 and

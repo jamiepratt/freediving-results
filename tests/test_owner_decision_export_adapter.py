@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_decision_store import DecisionStore
 from owner_decision_export_adapter import register_verified_export, deliver_verified_owner_events, main
 from unified_evidence_snapshot import create_db
+from scripts.cmas_microplus_snapshot_observations import load_source_observations as load_microplus
+from tests.test_cmas_microplus_snapshot_observations import fixture as microplus_fixture
 
 SHA = 'a' * 64
 ARTIFACT = 'b' * 64
@@ -134,6 +136,54 @@ class ExportAdapterTest(unittest.TestCase):
         decision = self.store.inspect('decision-1')
         self.assertEqual('automatic_approved', decision['status'])
         self.assertEqual('invalidated', decision['effective_status'])
+
+    def test_microplus_export_rechecks_source_ref_before_registration(self):
+        microplus = self.root / 'microplus'
+        microplus.mkdir()
+        name, record_id, _ = microplus_fixture(microplus)
+        reference = load_microplus(microplus, [name])['observations'][0]['source_observation_ref']
+        store = DecisionStore(self.root / 'microplus-decisions.sqlite')
+        try:
+            binding = store.bind_verified_snapshot(microplus, expected_revision=0,
+                                                   idempotency_key='microplus-bind')
+            envelope = self.envelope()
+            envelope['snapshot_sha256'] = reference['snapshot_sha256']
+            envelope['binding_revision'] = binding['revision']
+            envelope['store_revision'] = store.revision
+            proposal = envelope['proposals'][0]
+            proposal['status'] = 'pending'
+            proposal['evidence'][0]['id'] = record_id
+            proposal['evidence'][0]['version'] = reference
+            proposal['evidence'][0]['citation'] = {
+                'evidence_id': 'source-row-1', 'observation_revision': reference,
+                'source_citation': {'source-sha256': reference['source_sha256'],
+                                    'locator': reference['citation']}}
+            canonical = proposal['canonical_binding']
+            canonical['observation_revisions'] = [reference]
+            canonical['evidence_bindings'][0]['snapshot_record_id'] = record_id
+            canonical['evidence_bindings'][0]['observation_revision'] = reference
+            register_verified_export(store, microplus, envelope)
+            self.assertEqual('pending', store.inspect('decision-1')['status'])
+            automatic = json.loads(json.dumps(envelope))
+            automatic['proposals'][0]['id'] = 'decision-auto'
+            automatic['proposals'][0]['canonical_binding']['decision_id'] = 'decision-auto'
+            automatic['proposals'][0]['status'] = 'automatic_approved'
+            automatic['store_revision'] = store.revision
+            with self.assertRaisesRegex(ValueError, 'source-derived observation has no canonical route'):
+                register_verified_export(store, microplus, automatic)
+            forged = json.loads(json.dumps(envelope))
+            fake = dict(reference, observation_version='0' * 64)
+            forged['proposals'][0]['id'] = 'decision-forged'
+            forged['proposals'][0]['canonical_binding']['decision_id'] = 'decision-forged'
+            forged['proposals'][0]['evidence'][0]['version'] = fake
+            forged['proposals'][0]['evidence'][0]['citation']['observation_revision'] = fake
+            forged['proposals'][0]['canonical_binding']['observation_revisions'] = [fake]
+            forged['proposals'][0]['canonical_binding']['evidence_bindings'][0]['observation_revision'] = fake
+            forged['store_revision'] = store.revision
+            with self.assertRaisesRegex(ValueError, 'source observation differs'):
+                register_verified_export(store, microplus, forged)
+        finally:
+            store.close()
 
     def test_export_from_before_human_correction_cannot_register(self):
         envelope = self.envelope()
