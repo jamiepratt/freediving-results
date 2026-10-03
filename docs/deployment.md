@@ -152,7 +152,10 @@ also makes its origin unavailable. Private data remains on the VPS/local archive
 `deploy/private_owner_preflight.py` prepares a code-only archive for a later,
 separately authorized private host setup. It is independent of `deploy/release.sh`.
 It reads one clean committed checkout, requires its exact HEAD SHA, and checks the
-tracked origin, workspace, activation, service and SSH transfer helper files.
+tracked origin, workspace, activation, service, SSH transfer and matching local
+reconciliation/presentation helper files. The archive does not contain a complete
+local Clojure runtime or source checkout; run reconciliation from the exact
+candidate checkout with its dependencies.
 The default invocation is read-only. It never connects to the VPS, database,
 Cloudflare or NordVPN and never includes snapshots, source objects or credentials.
 

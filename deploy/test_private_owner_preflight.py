@@ -9,6 +9,16 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name('private_owner_preflight.py')
+MATCHING_PRIVATE_HELPERS = {
+    'scripts/local_evidence_run.py',
+    'scripts/evidence_presentation.py',
+    'scripts/private_evidence_remote.py',
+    'scripts/private_status_sync.py',
+    'scripts/macos_nordvpn.py',
+    'scripts/affiliate_name_query.py',
+    'scripts/owner_decision_export_adapter.py',
+    'scripts/owner_snapshot_binding.py',
+}
 
 
 class PrivateOwnerPreflightCLI(unittest.TestCase):
@@ -62,6 +72,7 @@ class PrivateOwnerPreflightCLI(unittest.TestCase):
         self.assertEqual(ready.returncode, 0, ready.stderr)
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
         with tarfile.open(output) as tar:
+            self.assertTrue(MATCHING_PRIVATE_HELPERS <= set(tar.getnames()))
             self.assertEqual(set(tar.getnames()), set(module.FILES) | {'private-owner-manifest.json'})
             manifest = json.load(tar.extractfile('private-owner-manifest.json'))
             self.assertEqual(manifest['candidate'], candidate)
