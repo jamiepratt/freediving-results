@@ -22,4 +22,4 @@
     (public/migrate! url "reviews_owner" "reviews_public")
     (selections/migrate! url "reviews_owner")
     (batch-evidence/migrate! url "observations_app")
-    (println "Applied migrations 1-19; no records published.")))
+    (println "Applied migrations 1-20; no records published.")))
