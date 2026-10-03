@@ -11,6 +11,7 @@
            [java.nio.file.attribute PosixFilePermissions]))
 
 (def ledger-version "reconciliation-flow/1")
+(def source-identity-rule-version "source-identity/1")
 
 (defn- canonical [value]
   (cond
@@ -64,7 +65,8 @@
                    (dissoc probs (get-in event [:answer :outcome])))
    :evidence (:evidence decision) :candidates (:candidates decision)
    :dependencies (:dependencies decision) :policy (:assessment event)
-   :policy-version (:policy-version event) :reason (:reason event)
+   :policy-version (:policy-version event) :rule-version (:rule-version event)
+   :reason (:reason event)
    :request-hash (:request-hash event) :result-hash (:result-hash event)
    :receipt (:receipt event)})
 
@@ -150,6 +152,40 @@
 (defn- ready? [decision known]
   (every? #(= :approved (get known %)) (:dependencies decision)))
 
+(defn- source-derived-identity? [decision]
+  (and (= :identity (:family decision))
+       (or (some #(and (string? %) (.startsWith ^String % "source-observation:"))
+                 (get-in decision [:subject :pair]))
+           (some #(= "source-derived" (get-in % [:citation :kind]))
+                 (:evidence decision)))))
+
+(defn- source-identity-reason [decision]
+  (let [pair (get-in decision [:subject :pair])
+        versions (get-in decision [:subject :observation-versions])
+        citations (mapv :citation (:evidence decision))
+        refs (mapv #(get versions %) pair)
+        sha? #(and (string? %) (boolean (re-matches #"[0-9a-f]{64}" %)))]
+    (if-not (and (= :same-person (:action decision))
+                 (vector? pair) (= 2 (count pair)) (= 2 (count (set pair)))
+                 (= (set pair) (set (:candidates decision)))
+                 (= (set pair) (set (keys versions)))
+                 (= (set refs) (set citations)) (= 2 (count citations))
+                 (= 1 (count (set (map :snapshot_sha256 refs))))
+                 (every? (fn [[id ref]]
+                           (and (= "source-derived" (:kind ref))
+                                (= id (str "source-observation:" (:snapshot_record_id ref)))
+                                (every? sha? (map ref [:snapshot_sha256 :snapshot_record_id
+                                                       :source_sha256 :packet_sha256
+                                                       :observation_version]))
+                                (string? (:source_name ref))
+                                (string? (:adapter_version ref))
+                                (map? (:citation ref))))
+                         (map vector pair refs)))
+      :invalid-source-ref
+      ;; Source refs currently bind name and position, but no verified event,
+      ;; session or category context for the identity rule.
+      :source-context-unverified)))
+
 (defn run!
   "Resolve a bounded set of decisions. execute! is the only external boundary.
    Retained answers and deterministic outcomes bypass HTTP. Independent ready
@@ -177,6 +213,12 @@
                                     retained (get retained-answers id)]
                                 (cond
                                   human ledger
+                                  (source-derived-identity? decision)
+                                  (append-result ledger decision config
+                                                 {:status :unresolved :origin :deterministic
+                                                  :reason (source-identity-reason decision)
+                                                  :rule-version source-identity-rule-version
+                                                  :policy-version (:version policy)})
                                   (not (ready? decision known))
                                   (append-result ledger decision config
                                                  {:status :dependency-blocked :reason :dependency-unapproved
