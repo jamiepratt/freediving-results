@@ -41,7 +41,16 @@
                           nil)]
         (if (and input-bytes (not= (seq bytes) (seq input-bytes)))
           {:claims [] :unsupported-reasons [:archived-input-mismatch]}
-          (adapters/claims-for-document document input)))
+          (let [adapted (adapters/claims-for-document document input)
+                verified-path (:verified-source-path adapted)]
+            (if (and (= :image format) (seq (:claims adapted))
+                     (or (not (string? verified-path))
+                         (not (java.util.Arrays/equals
+                               bytes
+                               (java.nio.file.Files/readAllBytes
+                                (.toPath (io/file verified-path)))))))
+              {:claims [] :unsupported-reasons [:archived-input-mismatch]}
+              (dissoc adapted :verified-source-path)))))
       (catch Exception _
         {:claims [] :unsupported-reasons [:missing-or-invalid-archived-source]}))))
 

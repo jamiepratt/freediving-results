@@ -8,10 +8,12 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+from pathlib import Path
 
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _DECISIONS = {"confirmed", "resolved", "unresolved"}
+TRUSTED_REVIEW_SHA256 = "bda8637049bee3a8b99578c8927875c286c353680eade0f08c864b803f28b84b"
 
 
 def _require(condition, message):
@@ -162,3 +164,132 @@ def verify_transcriptions(first, second, inspections, *, sample_size):
                        for artifact in (first, second)],
             "sampling": {"method": "sha256(source_sha256:position) ascending", "size": sample_size},
             "sampled_agreements": sampled, "disagreements": disagreements, "positions": rows}
+
+
+def _read_bound(path, expected, label):
+    data = Path(path).read_bytes()
+    _require(hashlib.sha256(data).hexdigest() == expected, f"{label} digest mismatch")
+    return json.loads(data)
+
+
+def replay_scan_source(manifest):
+    """Rebuild a bounded source-position entry from retained private scan evidence.
+
+    The manifest supplies paths and an independently pinned summary digest. A
+    successful return is evidence routing input, never identity or review approval.
+    """
+    root = Path(manifest["bundle_root"])
+    _require(manifest["summary_sha256"] == TRUSTED_REVIEW_SHA256,
+             "untrusted review digest")
+    source_name = manifest["source"]
+    _require(re.fullmatch(r"napoli_(?:statica|dinamica|combinata)_(?:maschile|femminile)_2025\.jpg",
+                          source_name) is not None, "unsupported scan family")
+    stem = source_name[:-4]
+    summary = _read_bound(root / "review" / "summary.json", manifest["summary_sha256"], "summary")
+    _require(summary.get("schema") == "clear62-blind-scan-review/v1", "unsupported summary schema")
+    sources = [item for item in summary.get("sources", []) if item.get("source") == source_name]
+    _require(len(sources) == 1, "source absent or duplicate in summary")
+    selected = sources[0]
+    receipt = _read_bound(manifest["receipt_path"], summary["source_receipt_sha256"], "receipt")
+    _require(receipt.get("schema") == "issue55-san-mauro-jpg-receipts/v1", "unsupported receipt schema")
+    receipts = [item for item in receipt.get("sources", [])
+                if Path(item.get("path", "")).name == source_name]
+    _require(len(receipts) == 1, "source absent or duplicate in receipt")
+    acquired = receipts[0]
+    _require(acquired.get("sha256") == selected["source_sha256"]
+             and acquired.get("http_status") == 200
+             and acquired.get("content_type") == "image/jpeg"
+             and isinstance(acquired.get("retrieved_at"), str), "source acquisition mismatch")
+    source_path = Path(acquired["path"])
+    source_bytes = source_path.read_bytes()
+    _require(hashlib.sha256(source_bytes).hexdigest() == selected["source_sha256"]
+             and len(source_bytes) == acquired["bytes"], "source bytes mismatch")
+    if "headers_path" in acquired:
+        _require(hashlib.sha256(Path(acquired["headers_path"]).read_bytes()).hexdigest()
+                 == acquired["headers_sha256"], "headers digest mismatch")
+    first = _read_bound(root / "blind-a" / (stem + ".json"),
+                        selected["first_pass_sha256"], "first pass")
+    second = _read_bound(root / "blind-b" / (stem + ".json"),
+                         selected["second_pass_sha256"], "second pass")
+    review = _read_bound(root / "review" / (stem + ".verification.json"),
+                         selected["verification_sha256"], "review")
+    _require(review.get("schema") == "scan-verification/v1", "unsupported review schema")
+    inspections = [row["inspection"] for row in review["positions"] if row["inspection"]]
+    rebuilt = verify_transcriptions(first, second, inspections,
+                                    sample_size=review["sampling"]["size"])
+    _require(rebuilt == review, "stale or forged review")
+    coverages = []
+    for directory, artifact in (("blind-a", first), ("blind-b", second)):
+        coverage = json.loads((root / directory / (stem + ".coverage.json")).read_text())
+        _require(coverage.get("schema") == "scan-transcription-coverage/v1"
+                 and coverage.get("source_sha256") == selected["source_sha256"]
+                 and coverage.get("pass_id") == artifact["pass_id"], "coverage provenance mismatch")
+        coverages.append(coverage)
+    sections = coverages[0]["sections"]
+    _require(all(isinstance(item.get("rows_attempted"), int)
+                 and item["rows_attempted"] > 0
+                 and isinstance(item.get("rows_unexamined"), int)
+                 and item["rows_unexamined"] >= 0 for coverage in coverages
+                 for item in coverage["sections"]), "invalid section lengths")
+    _require(len(sections) == len(coverages[1]["sections"]) == selected["sections"]
+             and sum(item["rows_attempted"] for item in sections) == selected["positions"]
+             and [item["rows_attempted"] for item in sections]
+             == [item["rows_attempted"] for item in coverages[1]["sections"]]
+             and len(review["positions"]) == selected["positions"], "section coverage mismatch")
+    ambiguous = sum(row["status"] == "unresolved" for row in review["positions"])
+    family = stem.split("_")[1]
+    role = "aggregate" if family == "combinata" else "individual-result"
+    for section in sections:
+        label = section["label"].upper()
+        _require((family == "combinata" and "COMBINATA" in label)
+                 or (family == "statica" and "STATICA" in label)
+                 or (family == "dinamica" and "CLASSIFICA" in label),
+                 "section family mismatch")
+        _require(section["rows_unexamined"] == 0, "unexamined scan section")
+    _require(all(section["rows_unexamined"] == 0 for section in coverages[1]["sections"]),
+             "unexamined scan section")
+    positions = []
+    candidates = []
+    section_index = 0
+    section_end = sections[0]["rows_attempted"]
+    for index, row in enumerate(review["positions"]):
+        _require(row["position"] == f"row:{index + 1:03d}",
+                 "source row order differs from section coverage")
+        while index >= section_end:
+            section_index += 1
+            section_end += sections[section_index]["rows_attempted"]
+        source_citations = {"first_pass": row["first_pass"]["citation"],
+                            "second_pass": row["second_pass"]["citation"],
+                            "inspection": (row["inspection"] or {}).get("citation")}
+        position_id = row["position"]
+        citation = f"sha256:{selected['source_sha256']}#{position_id}"
+        coordinates = {"page": row["first_pass"]["page"],
+                       "region_px": row["first_pass"]["region_px"],
+                       "section": sections[section_index]["label"],
+                       "evidence_role": role}
+        positions.append({"id": position_id, "citation": citation,
+                          "coordinates": coordinates, "ambiguous": row["status"] == "unresolved"})
+        if row["status"] != "unresolved":
+            candidates.append({"id": position_id, "citation": citation,
+                               "coordinates": coordinates, "evidence_role": role,
+                               "parsed": {"source_reading": row["accepted_reading"]},
+                               "source_citations": source_citations,
+                               "verification_status": row["status"]})
+    _require(len(candidates) + ambiguous == len(positions), "position accounting mismatch")
+    return {"document": {"source_sha256": selected["source_sha256"], "format": "image",
+                         "positions": positions},
+            "candidates": candidates,
+            "source_path": str(source_path),
+            "parser_version": "scan-review/1",
+            "verification": {"source_sha256": selected["source_sha256"],
+                             "summary_sha256": manifest["summary_sha256"],
+                             "review_sha256": selected["verification_sha256"],
+                             "first_pass_sha256": selected["first_pass_sha256"],
+                             "second_pass_sha256": selected["second_pass_sha256"]}}
+
+
+if __name__ == "__main__":
+    import sys
+    _require(len(sys.argv) == 3 and sys.argv[1] == "replay-source", "usage: replay-source manifest.json")
+    with open(sys.argv[2], encoding="utf-8") as input_file:
+        print(json.dumps(replay_scan_source(json.load(input_file)), ensure_ascii=False))

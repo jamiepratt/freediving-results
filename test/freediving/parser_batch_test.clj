@@ -22,6 +22,16 @@
    :source-restriction {:sha256s #{sha} :formats #{:html}}
    :supported-positions positions :claimed-positions positions})
 
+(deftest clipped-scan-reading-remains-ambiguous-without-a-parser-claim
+  (let [document {:source-sha256 hash-a :format :image
+                  :positions [{:id "row:001" :citation (str "sha256:" hash-a "#row:001")
+                               :ambiguous? true}]}
+        replay (batch/replay-batch [{:document document :claims []}])]
+    (is (= 0 (get-in replay [:metrics :coverage :routed])))
+    (is (= 1 (get-in replay [:metrics :coverage :gaps])))
+    (is (= :unresolved-source-reading
+           (get-in replay [:documents 0 :gaps 0 :reason])))))
+
 (deftest retained-batch-replay-is-idempotent-and-versioned
   (let [first-entry {:document (document hash-a)
                      :claims [(claim hash-a "alpha" #{"row-1"})

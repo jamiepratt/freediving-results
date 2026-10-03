@@ -96,12 +96,13 @@
                                         (update positions id (fnil conj []) claim))
                                       result (:claimed-positions claim)))
                             {} accepted)
-        outcomes (mapv (fn [{:keys [id citation coordinates examined?]}]
+        outcomes (mapv (fn [{:keys [id citation coordinates examined? ambiguous?]}]
                          (let [contenders (get by-position id [])
                                base (cond-> {:position-id id :citation citation}
                                       (some? coordinates) (assoc :coordinates coordinates))]
                            (cond
                              (false? examined?) (assoc base :status :unexamined)
+                             ambiguous? (assoc base :status :ambiguous :reason :unresolved-source-reading)
                              (> (count contenders) 1)
                              (assoc base :status :ambiguous :contenders contenders)
                              (= (count contenders) 1)
