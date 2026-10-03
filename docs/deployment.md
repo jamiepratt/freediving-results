@@ -151,8 +151,8 @@ Accepted workflow, 2 October 2026: verified local ingestion runs should
 automatically update the private owner presentation. Failed transfer or validation
 must preserve the last working presentation and a resumable local result. This
 does not grant public result publication or owner review approval. The activation
-helper below supplies part of this behavior; the complete local-to-remote handoff
-is not implemented yet and remains in #64.
+helper below supplies part of this behavior. The opt-in local command now wires
+the tested handoff, while private host setup and live validation remain in #64.
 Automatic NordVPN switching is authorized when needed to reach the VPS, followed
 by restoration of the prior connection state. The recovery and verification
 boundary is recorded in [ADR 0002](adr/0002-local-ingestion-remote-presentation.md).
