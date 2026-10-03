@@ -1,4 +1,6 @@
 import unittest
+import json
+from unittest.mock import patch
 from copy import deepcopy
 
 from scripts.scan_verification import verify_transcriptions
@@ -167,6 +169,78 @@ class ScanVerificationTest(unittest.TestCase):
         second["entries"].pop()
         with self.assertRaisesRegex(ValueError, "coverage differs"):
             verify_transcriptions(self.first, second, self.checks(), sample_size=1)
+
+
+class RetainedReplayTest(unittest.TestCase):
+    def test_replay_requires_bound_summary_and_recomputed_review(self):
+        from scripts.scan_verification import replay_scan_source
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "blind-a").mkdir()
+            (root / "blind-b").mkdir()
+            (root / "review").mkdir()
+            source = root / "napoli_statica_maschile_2025.jpg"
+            source.write_bytes(b"synthetic jpg")
+            sha = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+            first = transcription("pass-1", "worker-1", {"p1-r1": "A", "p1-r2": "B"})
+            second = transcription("pass-2", "worker-2", {"p1-r1": "A", "p1-r2": None})
+            for item in (first, second):
+                item["source_sha256"] = sha
+            checks = [inspection("p1-r1", "confirmed", "A"), inspection("p1-r2", "unresolved")]
+            for check in checks:
+                check["source_sha256"] = sha
+            review = verify_transcriptions(first, second, checks, sample_size=1)
+            def save(path, value):
+                path.write_text(json.dumps(value), encoding="utf-8")
+                return __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+            stem = source.stem
+            a = save(root / "blind-a" / (stem + ".json"), first)
+            b = save(root / "blind-b" / (stem + ".json"), second)
+            v = save(root / "review" / (stem + ".verification.json"), review)
+            coverage = {"schema": "scan-transcription-coverage/v1", "source_sha256": sha,
+                        "sections": [{"label": "STATICA maschile", "rows_attempted": 2,
+                                      "rows_unexamined": 0, "rows_ambiguous": 1}]}
+            save(root / "blind-a" / (stem + ".coverage.json"), dict(coverage, pass_id="pass-1"))
+            save(root / "blind-b" / (stem + ".coverage.json"), dict(coverage, pass_id="pass-2"))
+            summary = {"schema": "clear62-blind-scan-review/v1", "source_receipt_sha256": "a" * 64,
+                       "sources": [{"source": source.name, "source_sha256": sha,
+                                    "first_pass_sha256": a, "second_pass_sha256": b,
+                                    "verification_sha256": v, "positions": 2, "sections": 1}],
+                       "counts": {"positions": 2, "sections": 1, "supported_positions": 1,
+                                  "ambiguous_positions": 1}}
+            summary_sha = save(root / "review" / "summary.json", summary)
+            receipt = {"schema": "issue55-san-mauro-jpg-receipts/v1",
+                       "sources": [{"path": str(source), "sha256": sha, "bytes": len(source.read_bytes()),
+                                    "http_status": 200, "content_type": "image/jpeg",
+                                    "retrieved_at": "2026-01-01T00:00:00+00:00"}]}
+            receipt_path = root / "receipt.json"
+            receipt_sha = save(receipt_path, receipt)
+            summary["source_receipt_sha256"] = receipt_sha
+            summary_sha = save(root / "review" / "summary.json", summary)
+            manifest = {"bundle_root": str(root), "receipt_path": str(receipt_path),
+                        "source": source.name, "summary_sha256": summary_sha}
+            with patch("scripts.scan_verification.TRUSTED_REVIEW_SHA256", summary_sha):
+                result = replay_scan_source(manifest)
+            self.assertEqual(2, len(result["document"]["positions"]))
+            self.assertEqual(1, len(result["candidates"]))
+            self.assertEqual("individual-result", result["candidates"][0]["evidence_role"])
+            review["positions"][0]["accepted_reading"] = "forged"
+            save(root / "review" / (stem + ".verification.json"), review)
+            with patch("scripts.scan_verification.TRUSTED_REVIEW_SHA256", summary_sha):
+                with self.assertRaisesRegex(ValueError, "review digest"):
+                    replay_scan_source(manifest)
+            summary["sources"][0]["verification_sha256"] = save(
+                root / "review" / (stem + ".verification.json"), review)
+            changed_summary_sha = save(root / "review" / "summary.json", summary)
+            manifest["summary_sha256"] = changed_summary_sha
+            with self.assertRaisesRegex(ValueError, "untrusted review digest"):
+                replay_scan_source(manifest)
+            with patch("scripts.scan_verification.TRUSTED_REVIEW_SHA256", changed_summary_sha):
+                with self.assertRaisesRegex(ValueError, "stale or forged review"):
+                    replay_scan_source(manifest)
 
 
 if __name__ == "__main__":

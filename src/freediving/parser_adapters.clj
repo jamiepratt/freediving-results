@@ -2,7 +2,9 @@
   "Source-bound bridges from retained extractor inputs to parser-routing claims.
    The JSON bridge is limited to one receipt-bound Microplus result route.
    Scan packets without independent verification remain explicit gaps."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [freediving.aida-html :as aida-html]
             [freediving.retained-json :as retained-json]
             [freediving.retained-workbook :as retained-workbook]
@@ -51,6 +53,65 @@
    :source-restriction {:sha256s #{(:source-sha256 document)}
                         :formats #{(:format document)}}
    :supported-positions ids :claimed-positions ids})
+
+(defn- scan-position [position]
+  {:id (:id position) :citation (:citation position)
+   :coordinates {:page (get-in position [:coordinates :page])
+                 :region_px (get-in position [:coordinates :region_px])
+                 :section (get-in position [:coordinates :section])
+                 :evidence-role (keyword (get-in position [:coordinates :evidence_role]))}
+   :ambiguous? (:ambiguous position)})
+
+(defn- scan-candidate [candidate]
+  {:id (:id candidate) :citation (:citation candidate)
+   :coordinates (:coordinates (scan-position candidate))
+   :source-citations (:source_citations candidate)
+   :verification-status (:verification_status candidate)
+   :parsed {:source-reading (get-in candidate [:parsed :source_reading])}})
+
+(defn- scan-result [manifest]
+  (when-not (and (string? manifest) (.isFile (io/file manifest)))
+    (throw (ex-info "Missing retained scan manifest" {})))
+  (let [process (.start (ProcessBuilder. (into-array String
+                                                     ["python3" "scripts/scan_verification.py"
+                                                      "replay-source" manifest])))
+        output (slurp (.getInputStream process))
+        error (slurp (.getErrorStream process))
+        exit (.waitFor process)]
+    (when-not (zero? exit)
+      (throw (ex-info "Scan verification failed" {:error error})))
+    (json/read-str output :key-fn keyword)))
+
+(defn- scan-document [result]
+  {:source-sha256 (get-in result [:document :source_sha256])
+   :format :image
+   :positions (mapv scan-position (get-in result [:document :positions]))})
+
+(defn retained-scan-entry
+  "Build a registered-batch entry from a pinned, independently reviewed scan.
+   This performs local verification and returns no authority beyond routing."
+  [manifest]
+  {:document (scan-document (scan-result manifest))
+   :retained-input {:scan-manifest manifest}})
+
+(defn- verified-scan [document retained-input]
+  (try
+    (let [result (scan-result (:scan-manifest retained-input))
+          generated (scan-document result)
+          _ (when-not (= document generated)
+              (throw (ex-info "Scan position inventory differs from verification" {})))
+          candidates (mapv scan-candidate (:candidates result))
+          ids (set (map :id candidates))]
+      {:claims (cond-> [] (seq ids)
+                       (conj (claim document "retained-scan-review" (:parser_version result)
+                                    "Retained independent blind passes and source review" ids)))
+       :unsupported-reasons [] :unsupported-formats []
+       :verified-source-path (:source_path result)
+       :source-verification (:verification result)
+       :extraction {:status :verified-partial :candidates candidates}})
+    (catch Exception _
+      {:claims [] :unsupported-reasons [:missing-or-invalid-independent-scan-verification]
+       :unsupported-formats [:image] :source-verification :failed :extraction nil})))
 
 (defn claims-for-document
   "Replay supported retained PDF/HTML input and produce route-document claims.
@@ -111,8 +172,10 @@
          :unsupported-formats [] :source-verification :unverified :extraction nil})
 
       :image
-      {:claims [] :unsupported-reasons [:missing-independent-scan-verification]
-       :unsupported-formats [:image] :source-verification :unverified :extraction nil}
+      (if (:scan-manifest retained-input)
+        (verified-scan document retained-input)
+        {:claims [] :unsupported-reasons [:missing-independent-scan-verification]
+         :unsupported-formats [:image] :source-verification :unverified :extraction nil})
 
       {:claims [] :unsupported-reasons [(keyword (str "no-checked-" (name format) "-replay-bridge"))]
        :unsupported-formats [format] :source-verification :unverified :extraction nil})))
