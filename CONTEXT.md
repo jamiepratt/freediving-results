@@ -117,9 +117,12 @@ bounded retained PDF, HTML, Microplus JSON and GIA individual workbook replay.
 The PDF bridge verifies archived bytes and derives local extracted pages. The
 workbook bridge checks the original XLSX, acquisition receipt and cited cells;
 its standings, combined scores and secondary scores remain aggregate evidence.
-The retained San Mauro JPG packet has no independent blind second pass or cited
-comparison, so image claims remain unsupported. `parser-batch.clj` routes
-retained inputs without acquisition or imports. Broad discovery of native-script
+The retained San Mauro JPG review now has two independently attested passes,
+cited inspections, and a pinned summary digest. Its checked image adapter routes
+supported source positions and leaves clipped readings as ambiguous gaps; the
+separate aggregate standings do not become result observations. The earlier
+unattested packet remains unsupported. `parser-batch.clj` routes retained inputs
+without acquisition or imports. Broad discovery of native-script
 name mappings and annual rankings is scope, not verified coverage.
 
 ## Working entry points
