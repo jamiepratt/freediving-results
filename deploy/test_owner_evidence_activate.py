@@ -4,15 +4,17 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from owner_evidence_activate import Layout, activate, _health
+from owner_evidence_activate import Layout, activate, main, _health
 
 
 class ActivationTests(unittest.TestCase):
@@ -65,6 +67,193 @@ class ActivationTests(unittest.TestCase):
         return activate(self.bundle, self.source, self.digest, self.layout,
                         command=self.command, health=lambda: None,
                         owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    def candidate_with_source_bundle(self):
+        data = b'candidate snapshot bytes'
+        digest = hashlib.sha256(data).hexdigest()
+        (self.source / 'snapshot.sqlite').write_bytes(data)
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': digest}))
+        private = Path(self.temp.name) / 'candidate-source-bundle'
+        (private / 'objects').mkdir(parents=True, mode=0o700)
+        private.chmod(0o700)
+        (private / 'objects' / digest).write_bytes(data)
+        (private / 'objects' / digest).chmod(0o600)
+        manifest = private / 'manifest.json'
+        manifest.write_text(json.dumps({'schema': 'private-source-bundle/v1', 'sources': [{
+            'id': 'sha256:' + digest, 'status': 'included', 'sha256': digest,
+            'bytes': len(data), 'content_type': 'application/vnd.sqlite3',
+            'object': 'objects/' + digest}]}))
+        manifest.chmod(0o600)
+        return digest, private, hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    def activate_candidate(self, digest, private, manifest_digest, **kwargs):
+        return activate(self.bundle, self.source, digest, self.layout,
+                        source_bundle=private, expected_source_manifest_sha256=manifest_digest,
+                        update_config_pin=True, command=kwargs.get('command', self.command),
+                        health=kwargs.get('health', lambda: None),
+                        owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    def test_candidate_pin_changes_only_after_private_inputs_match_and_converges(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        (private / 'objects' / digest).write_bytes(b'tampered')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.activate_candidate(digest, private, manifest_digest)
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        (private / 'objects' / digest).write_bytes(b'candidate snapshot bytes')
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        self.assertIn(digest.encode(), self.config.read_bytes())
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.layout.state / 'current').resolve(),
+                         (self.layout.state / 'snapshots' / digest).resolve())
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'unchanged')
+
+    def test_candidate_pin_preserves_secret_containing_prior_pin_assignment(self):
+        secret = 'prefixOWNER_EVIDENCE_SNAPSHOT_SHA256=' + self.digest + 'suffix'
+        self.config.write_text(self.config.read_text().replace(
+            'some-private-gateway-secret', secret))
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        self.activate_candidate(digest, private, manifest_digest)
+        self.assertIn('OWNER_EVIDENCE_GATEWAY_SECRET=' + secret + '\n', self.config.read_text())
+        self.assertIn('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + digest + '\n', self.config.read_text())
+
+    def test_failed_candidate_restores_inactive_disabled_service(self):
+        self.run_activation()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        calls = []
+        def inactive_service(*args):
+            calls.append(args)
+            if args[:2] == ('systemctl', 'is-active') or args[:2] == ('systemctl', 'is-enabled'):
+                return False
+            return True
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest,
+                                    command=inactive_service,
+                                    health=lambda: (_ for _ in ()).throw(RuntimeError('unhealthy')))
+        self.assertIn(('systemctl', 'stop', 'freediving-owner-evidence.service'), calls)
+        self.assertIn(('systemctl', 'disable', 'freediving-owner-evidence.service'), calls)
+        self.assertNotIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), calls[-3:])
+
+    def test_interrupted_candidate_restores_inactive_disabled_state_on_retry(self):
+        self.run_activation()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args[:2] in (('systemctl', 'is-active'), ('systemctl', 'is-enabled')):
+                return False
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        calls = []
+        def retry_command(*args):
+            calls.append(args)
+            if args[:2] in (('systemctl', 'is-active'), ('systemctl', 'is-enabled')):
+                return False
+            return True
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest,
+                                                 command=retry_command), 'activated')
+        stop = calls.index(('systemctl', 'stop', 'freediving-owner-evidence.service'))
+        disable = calls.index(('systemctl', 'disable', 'freediving-owner-evidence.service'))
+        restart = calls.index(('systemctl', 'restart', 'freediving-owner-evidence.service'))
+        self.assertLess(stop, restart)
+        self.assertLess(disable, restart)
+
+    def test_cli_recovers_pending_activation_before_rejecting_missing_candidate(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        (private / 'objects' / digest).unlink()
+        argv = ['owner_evidence_activate.py', '--bundle-dir', str(self.bundle),
+                '--snapshot-source', str(self.source), '--expected-sha256', digest,
+                '--source-bundle', str(private),
+                '--expected-source-manifest-sha256', manifest_digest]
+        real_run = subprocess.run
+        commands = []
+        def local_run(args, **kwargs):
+            if args[0] == 'systemctl':
+                commands.append(tuple(args))
+                return SimpleNamespace(returncode=0)
+            return real_run(args, **kwargs)
+        identity = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(),
+                                   pw_dir='/nonexistent', pw_shell='/usr/sbin/nologin')
+        actual_euid = os.geteuid()
+        euid_calls = 0
+        def cli_euid():
+            nonlocal euid_calls
+            euid_calls += 1
+            return 0 if euid_calls == 1 else actual_euid
+        with (mock.patch('owner_evidence_activate.Layout', return_value=self.layout),
+              mock.patch('owner_evidence_activate.os.geteuid', side_effect=cli_euid),
+              mock.patch('owner_evidence_activate.pwd.getpwnam', return_value=identity),
+              mock.patch('owner_evidence_activate.subprocess.run', side_effect=local_run),
+              mock.patch.object(sys, 'argv', argv)):
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        self.assertIn(('systemctl', 'restart', 'freediving-owner-evidence.service'), commands)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'failed')
+
+    def test_candidate_health_failure_restores_config_and_prior_activation(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_env = (self.layout.state / 'active.env').read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest,
+                                    health=lambda: (_ for _ in ()).throw(RuntimeError('unhealthy')))
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), old_env)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
+
+    def test_interrupted_candidate_recovers_before_same_candidate_retry(self):
+        self.run_activation()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'pending')
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'active')
+        self.assertTrue(old_snapshot.exists())
+
+    def test_missing_prior_snapshot_on_retry_stops_service_and_keeps_pending(self):
+        self.run_activation()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        shutil.rmtree(old_snapshot)
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest)
+        self.assertIn(('systemctl', 'stop', 'freediving-owner-evidence.service'), self.calls)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'pending')
 
     def test_stages_private_snapshot_and_idempotently_starts_dedicated_service(self):
         self.run_activation()

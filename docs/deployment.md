@@ -204,6 +204,19 @@ snapshot were not copied into the public release tar. Stage the code files,
 snapshot, and matching private source bundle on the VPS under root-only
 temporary directories outside `/opt/freediving/releases`:
 
+For a later candidate, keep the prior pin in this root-owned mode 0600 file.
+The guarded host helper verifies the candidate snapshot and matching private
+source bundle first, then atomically updates the pin during local activation.
+It restores the prior pin, service files, and active links if activation or health
+fails, including the prior service active and enabled state. It retains old staged snapshots. Its root-private
+`/var/lib/freediving-owner-evidence/activation-checkpoint/status.json` records
+`pending`, `failed`, or `active` for the local host step. On a retry, a pending
+step first restores the prior local state; invalid recovery stops the private
+service. This recovery runs even when candidate files are missing or corrupt.
+`active` confirms only the local host step, not transfer durability,
+Cloudflare activation, browser acceptance, or the full #64 handoff.
+Normal `deploy/release.sh` does not run this candidate pin transaction.
+
 ```sh
 # Run from the matching repository checkout with independently checked digests.
 SNAPSHOT_DIR=/absolute/path/to/private/snapshot
@@ -223,7 +236,8 @@ configuration before staging. It binds the source bundle to the selected snapsho
 stages both with owner-only permissions, and reads the embedded route roster.
 It starts a dedicated `freediving-evidence` service
 on loopback port 8081, checks both pinned responses, and restores previous
-links/unit if restart fails. Re-running unchanged inputs is idempotent. The
+pin, links/unit, and active environment if restart or health fails. Re-running
+unchanged inputs is idempotent. The
 private service has no public database credentials.
 
 From the same checkout, read-check Access policy, private origin positive and
