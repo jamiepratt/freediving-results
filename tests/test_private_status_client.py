@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -9,15 +10,24 @@ from private_status_sync import sync_status
 def test_reconciliation_receipt_requires_exact_binding_and_sends_only_summary(tmp_path):
     run = tmp_path / 'run'
     run.mkdir()
+    ledger = run / 'reconciliation' / 'flow.edn'
+    ledger.parent.mkdir()
+    ledger.write_text('{:events []}')
+    ledger_sha = hashlib.sha256(ledger.read_bytes()).hexdigest()
+    spec_sha = 'b' * 64
     snapshot = 'a' * 64
     state = {'run_id': 'run-1', 'local': {'status': 'complete', 'snapshot_sha256': snapshot},
              'coverage': {'cutoff': '2026-10-03T00:00:00Z', 'gaps': []},
              'remote': {'status': 'pending', 'pending': {'snapshot_sha256': snapshot}, 'failed': None},
              'reconciliation': {'status': 'complete', 'decision_revision': 3,
+                                'spec_sha256': spec_sha, 'ledger_sha256': ledger_sha,
                                 'remote_store_revision': 7, 'metrics': {
                                     'schema': 'local-reconciliation-metrics/v1',
                                     'binding': {'run_id': 'run-1', 'snapshot_sha256': snapshot,
-                                                'decision_revision': 3},
+                                                'decision_revision': 3,
+                                                'stage_checkpoint': 'reconciliation-complete',
+                                                'spec_sha256': spec_sha,
+                                                'ledger_sha256': ledger_sha},
                                     'coverage': {'decision_denominator': 4, 'automatic_approved': 2,
                                                  'unknown': 1, 'error': 1, 'conflict': 0,
                                                  'pending_review': 2},
@@ -53,6 +63,21 @@ def test_reconciliation_receipt_requires_exact_binding_and_sends_only_summary(tm
     (run / 'state.json').write_text(json.dumps(state))
     import pytest
     with pytest.raises(ValueError, match='metrics checkpoint binding'):
+        sync_status(run, 'jwt', 'token', opener=opener)
+    state['reconciliation']['metrics']['binding']['decision_revision'] = 3
+    (run / 'state.json').write_text(json.dumps(state))
+    ledger.write_text('{:events [{:changed true}]}')
+    with pytest.raises(ValueError, match='metrics checkpoint binding'):
+        sync_status(run, 'jwt', 'token', opener=opener)
+    ledger.write_text('{:events []}')
+    state['reconciliation']['metrics']['binding']['stage_checkpoint'] = 'running'
+    (run / 'state.json').write_text(json.dumps(state))
+    with pytest.raises(ValueError, match='metrics checkpoint binding'):
+        sync_status(run, 'jwt', 'token', opener=opener)
+    state['reconciliation']['metrics']['binding']['stage_checkpoint'] = 'reconciliation-complete'
+    state['reconciliation']['remote_store_revision'] = None
+    (run / 'state.json').write_text(json.dumps(state))
+    with pytest.raises(ValueError, match='authoritative owner decision revision unavailable'):
         sync_status(run, 'jwt', 'token', opener=opener)
 
 

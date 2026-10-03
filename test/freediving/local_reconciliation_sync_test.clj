@@ -32,7 +32,7 @@
                :binding_revision 1 :snapshot_sha256 sha :action "reverse"
                :actor "owner" :reason "synthetic reversal"
                :proposal {:selected_option "same_person" :canonical_binding binding}}
-        feed (atom {:events [] :store_revision 1 :next_revision 1})
+        feed (atom {:events [] :store_revision 3 :next_revision 1})
         project (atom 0)
         acks (atom [])
         calls (atom [])]
@@ -66,15 +66,16 @@
                     (if (= 1 (swap! project inc))
                       (throw (ex-info "synthetic canonical outage" {}))
                       {:accepted-group-count 0}))]
-      (local/run! (str spec) (str ledger) sha (str config))
-      (reset! feed {:events [event] :store_revision 2 :next_revision 2})
+      (is (= 3 (:remote_store_revision
+                (local/run! (str spec) (str ledger) sha (str config)))))
+      (reset! feed {:events [event] :store_revision 5 :next_revision 2})
       (is (thrown? clojure.lang.ExceptionInfo
                    (local/run! (str spec) (str ledger) sha (str config))))
       (is (= [:flow-ledger] (mapv first @acks)))
       (is (= 1 (count (filter #(= :human (:origin %))
                               (:events (flow/load-ledger! ledger))))))
       (let [result (local/run! (str spec) (str ledger) sha (str config))]
-        (is (= 2 (:remote_store_revision result)))
+        (is (= 5 (:remote_store_revision result)))
         (is (= 1 (get-in result [:metrics :reversals])))
         (is (= 1 (get-in result [:metrics :coverage :pending_review])))
         (is (= :reversed (:status (get (flow/inspect (flow/load-ledger! ledger)

@@ -66,7 +66,7 @@
             (when-not (> next-revision after)
               (throw (ex-info "Owner event feed made no progress" {})))
             (recur next-revision))
-          (remote-revision (flow/load-ledger! flow-path)))))))
+          (:store_revision feed))))))
 
 (defn run!
   ([spec-path flow-path snapshot-sha256]

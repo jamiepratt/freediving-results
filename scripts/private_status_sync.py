@@ -1,5 +1,6 @@
 """Publish one sanitized local checkpoint through the private status route."""
 import json
+import hashlib
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -7,7 +8,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 STATUS_URL = 'https://poc.alphacompose.com/owner-evidence/api/presentation-status'
 
 
-def _reconciliation_summary(state):
+def _reconciliation_summary(state, run_dir):
     run = state.get('reconciliation')
     if not run:
         return None
@@ -15,11 +16,21 @@ def _reconciliation_summary(state):
         raise ValueError('reconciliation is not complete')
     receipt = run.get('metrics') or {}
     binding = receipt.get('binding') or {}
+    ledger = Path(run_dir) / 'reconciliation' / 'flow.edn'
+    if ledger.is_symlink() or not ledger.is_file():
+        raise ValueError('metrics checkpoint binding changed')
+    ledger_sha256 = hashlib.sha256(ledger.read_bytes()).hexdigest()
     if (receipt.get('schema') != 'local-reconciliation-metrics/v1'
             or binding.get('run_id') != (state.get('run_id') or state['plan_sha256'])
+            or binding.get('stage_checkpoint') != 'reconciliation-complete'
             or binding.get('snapshot_sha256') != state['local']['snapshot_sha256']
-            or binding.get('decision_revision') != run.get('decision_revision')):
+            or binding.get('decision_revision') != run.get('decision_revision')
+            or binding.get('spec_sha256') != run.get('spec_sha256')
+            or binding.get('ledger_sha256') != run.get('ledger_sha256')
+            or binding.get('ledger_sha256') != ledger_sha256):
         raise ValueError('metrics checkpoint binding changed')
+    if type(run.get('remote_store_revision')) is not int or run['remote_store_revision'] < 0:
+        raise ValueError('authoritative owner decision revision unavailable')
     coverage = receipt['coverage']
     provider = receipt['provider']
     sample = receipt.get('sampled_error')
@@ -93,7 +104,7 @@ def sync_status(run_dir, jwt, token, *, url=STATUS_URL, opener=None):
     run_id = state.get('run_id') or state['plan_sha256']
     candidate = {'schema': 'private-presentation-status/v1', 'run_id': run_id,
                  'local': local, 'remote': remote}
-    reconciliation = _reconciliation_summary(state)
+    reconciliation = _reconciliation_summary(state, run_dir)
     if reconciliation is not None:
         candidate['schema'] = 'private-presentation-status/v2'
         candidate['reconciliation'] = reconciliation
