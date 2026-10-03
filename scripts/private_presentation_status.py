@@ -51,7 +51,8 @@ class PrivatePresentationStatus:
         else:
             self.current = None
 
-    def read(self, active, *, owner_revision=None, owner_snapshot=None):
+    def read(self, active, *, owner_revision=None, owner_snapshot=None,
+             include_stale_checkpoint=False):
         if self.current is None:
             return {'status': 'unavailable', 'remote': {'active': active}}
         if self.current['schema'] == 'private-presentation-status/v2':
@@ -59,8 +60,13 @@ class PrivatePresentationStatus:
             if (owner_revision != binding['owner_store_revision'] or
                     owner_snapshot != binding['snapshot_sha256'] or
                     (active if active and active.get('bundle_manifest_sha256') else None) != self.current['remote']['active']):
-                return {'status': 'stale', 'remote': {'active': active},
-                        'reason': 'owner decision or active snapshot changed'}
+                stale = {'status': 'stale', 'remote': {'active': active},
+                         'reason': 'owner decision or active snapshot changed'}
+                if include_stale_checkpoint:
+                    stale.update({'revision': self.current['revision'],
+                                  'run_id': self.current['run_id'],
+                                  'cutoff': self.current['local']['cutoff']})
+                return stale
         return {**self.current, 'remote': {**self.current['remote'], 'active': active}}
 
     def _validate(self, data, stored=False):
@@ -131,6 +137,12 @@ class PrivatePresentationStatus:
             raise StatusConflict('unverified active status')
         candidate = {key: value for key, value in data.items() if key != 'expected_revision'}
         current = self.current
+        if current and current['schema'] == 'private-presentation-status/v2' and self.read(
+                active, owner_revision=owner_revision, owner_snapshot=owner_snapshot)['status'] == 'stale':
+            if (data['schema'] != 'private-presentation-status/v2' or
+                    data['run_id'] == current['run_id'] or
+                    data['local']['cutoff'] <= current['local']['cutoff']):
+                raise StatusConflict('stale run cannot replace owner correction')
         if current == candidate:
             return self.read(active, owner_revision=owner_revision, owner_snapshot=owner_snapshot)
         revision = current['revision'] if current else 0

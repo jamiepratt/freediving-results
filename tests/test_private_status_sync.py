@@ -34,8 +34,24 @@ def test_reconciliation_status_is_hidden_after_owner_correction_or_snapshot_chan
     store.update(payload, active, owner_revision=7, owner_snapshot=snap)
     assert store.read(active, owner_revision=7, owner_snapshot=snap)['reconciliation'] == summary
     assert store.read(active, owner_revision=8, owner_snapshot=snap)['status'] == 'stale'
+    assert 'revision' not in store.read(active, owner_revision=8, owner_snapshot=snap)
+    machine = store.read(active, owner_revision=8, owner_snapshot=snap,
+                         include_stale_checkpoint=True)
+    assert (machine['revision'], machine['run_id'], machine['cutoff']) == (1, 'run-1', '2026-10-03T00:00:00Z')
+    assert 'local' not in machine and 'reconciliation' not in machine
+    stale_retry = {**payload, 'revision': 2, 'expected_revision': 1,
+                   'reconciliation': {**summary, 'owner_store_revision': 8}}
+    with __import__('pytest').raises(StatusConflict):
+        store.update(stale_retry, active, owner_revision=8, owner_snapshot=snap)
+    newer = {**stale_retry, 'run_id': 'run-2',
+             'local': {**payload['local'], 'cutoff': '2026-10-04T00:00:00Z'}}
+    legacy_replacement = {key: value for key, value in newer.items() if key != 'reconciliation'}
+    legacy_replacement['schema'] = 'private-presentation-status/v1'
+    with __import__('pytest').raises(StatusConflict):
+        store.update(legacy_replacement, active, owner_revision=8, owner_snapshot=snap)
+    assert store.update(newer, active, owner_revision=8, owner_snapshot=snap)['revision'] == 2
     assert store.read({'snapshot_sha256': 'c' * 64, 'bundle_manifest_sha256': 'd' * 64},
-                      owner_revision=7, owner_snapshot=snap)['status'] == 'stale'
+                      owner_revision=8, owner_snapshot=snap)['status'] == 'stale'
 
 
 def test_owner_api_rejects_reconciliation_without_authoritative_decision_store(tmp_path):
@@ -101,6 +117,38 @@ def test_owner_api_rejects_reconciliation_without_authoritative_decision_store(t
         response = conn.getresponse()
         assert response.status == 200
         assert json.loads(response.read())['reconciliation']['metrics']['decision_denominator'] == 0
+        conn.close()
+        server.decisions.bind_verified_snapshot(
+            snap, expected_revision=server.decisions.revision,
+            idempotency_key='synthetic-new-owner-binding')
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('GET', '/owner-evidence/api/presentation-status', headers={
+            'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+            'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET'],
+            'X-Freediving-Owner-Email': env['OWNER_EVIDENCE_EMAILS']})
+        owner_stale = json.loads(conn.getresponse().read())
+        assert owner_stale['status'] == 'stale'
+        assert 'revision' not in owner_stale and 'local' not in owner_stale
+        conn.close()
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('GET', '/owner-evidence/api/presentation-status', headers=headers)
+        machine_stale = json.loads(conn.getresponse().read())
+        assert (machine_stale['revision'], machine_stale['run_id']) == (1, 'run-1')
+        assert 'reconciliation' not in machine_stale
+        conn.close()
+        payload.update({'revision': 2, 'expected_revision': machine_stale['revision']})
+        payload['reconciliation']['owner_store_revision'] = server.decisions.revision
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('POST', '/owner-evidence/api/presentation-status', json.dumps(payload), headers)
+        assert conn.getresponse().status == 409
+        conn.close()
+        payload['run_id'] = 'run-2'
+        payload['local']['cutoff'] = '2026-10-04T00:00:00Z'
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        conn.request('POST', '/owner-evidence/api/presentation-status', json.dumps(payload), headers)
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['revision'] == 2
         conn.close()
     finally:
         server.shutdown(); thread.join(timeout=2); server.server_close()

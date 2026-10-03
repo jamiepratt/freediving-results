@@ -87,7 +87,12 @@ def sync_status(run_dir, jwt, token, *, url=STATUS_URL, opener=None):
         raise ValueError('local evidence is not complete')
     current = _request(opener or build_opener(_NoRedirect()), 'GET', url, jwt, token)
     if current.get('status') == 'stale':
-        raise RuntimeError('private status is stale after owner decision or active snapshot change')
+        if (type(current.get('revision')) is not int or current['revision'] < 1
+                or not isinstance(current.get('run_id'), str)
+                or not isinstance(current.get('cutoff'), str)
+                or current['run_id'] == (state.get('run_id') or state.get('plan_sha256'))
+                or state['coverage']['cutoff'] <= current['cutoff']):
+            raise RuntimeError('private status is stale after owner decision or active snapshot change')
     local = {'snapshot_sha256': state['local']['snapshot_sha256'],
              'cutoff': state['coverage']['cutoff'],
              'gap_count': len(state['coverage']['gaps'])}

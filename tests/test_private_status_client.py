@@ -7,6 +7,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from private_status_sync import sync_status
 
 
+def test_stale_checkpoint_requires_newer_run_before_compare_and_swap(tmp_path):
+    run = tmp_path / 'run'
+    run.mkdir()
+    ledger = run / 'reconciliation' / 'flow.edn'
+    ledger.parent.mkdir()
+    ledger.write_text('{:events []}')
+    ledger_sha = hashlib.sha256(ledger.read_bytes()).hexdigest()
+    state = {'run_id': 'run-1', 'local': {'status': 'complete', 'snapshot_sha256': 'a' * 64},
+             'coverage': {'cutoff': '2026-10-03T00:00:00Z', 'gaps': []},
+             'remote': {'status': 'pending', 'pending': {'snapshot_sha256': 'a' * 64}, 'failed': None},
+             'reconciliation': {'status': 'complete', 'decision_revision': 3,
+                                'remote_store_revision': 8, 'spec_sha256': 'b' * 64,
+                                'ledger_sha256': ledger_sha, 'metrics': {
+                                    'schema': 'local-reconciliation-metrics/v1',
+                                    'binding': {'run_id': 'run-1', 'snapshot_sha256': 'a' * 64,
+                                                'decision_revision': 3, 'stage_checkpoint': 'reconciliation-complete',
+                                                'spec_sha256': 'b' * 64, 'ledger_sha256': ledger_sha},
+                                    'coverage': {'decision_denominator': 0, 'automatic_approved': 0,
+                                                 'unknown': 0, 'error': 0, 'conflict': 0,
+                                                 'pending_review': 0},
+                                    'provider': {'calls_recorded': 0}, 'source_gaps': 0,
+                                    'sampled_error': None}}}
+    (run / 'state.json').write_text(json.dumps(state))
+    class Response:
+        status = 200
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def read(self, *_): return json.dumps(self.body).encode()
+    class Opener:
+        posted = None
+        def open(self, request, **_):
+            if request.get_method() == 'POST':
+                self.posted = json.loads(request.data)
+                return Response(self.posted)
+            return Response({'status': 'stale', 'revision': 4, 'run_id': 'run-1',
+                             'cutoff': '2026-10-03T00:00:00Z', 'remote': {'active': None}})
+    opener = Opener()
+    import pytest
+    with pytest.raises(RuntimeError, match='stale'):
+        sync_status(run, 'jwt', 'token', opener=opener)
+    assert opener.posted is None
+    state['run_id'] = 'run-2'
+    state['coverage']['cutoff'] = '2026-10-04T00:00:00Z'
+    state['reconciliation']['metrics']['binding']['run_id'] = 'run-2'
+    (run / 'state.json').write_text(json.dumps(state))
+    result = sync_status(run, 'jwt', 'token', opener=opener)
+    assert result['run_id'] == 'run-2'
+    assert opener.posted['expected_revision'] == 4
+    assert opener.posted['revision'] == 5
+    assert opener.posted['schema'] == 'private-presentation-status/v2'
+
+
 def test_reconciliation_receipt_requires_exact_binding_and_sends_only_summary(tmp_path):
     run = tmp_path / 'run'
     run.mkdir()

@@ -347,7 +347,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 owner = self.server.decisions
                 result = (self.server.presentation_status.read(
                     active, owner_revision=owner.revision if owner else None,
-                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None) if self.server.presentation_status else
+                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None,
+                    include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None) if self.server.presentation_status else
                           {'status': 'unavailable', 'remote': {'active': active}})
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
