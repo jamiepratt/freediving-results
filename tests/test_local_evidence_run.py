@@ -150,6 +150,24 @@ def test_reconciliation_requires_checked_affiliate_names_or_explicit_gap(tmp_pat
     assert not (tmp_path / 'run').exists()
 
 
+def test_owner_sync_requires_private_config_before_reconciliation(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    spec = tmp_path / 'synthetic.edn'
+    spec.write_text('{}')
+    owner = tmp_path / 'owner.edn'
+    owner.write_text('{:import-token "synthetic"}')
+    owner.chmod(0o644)
+    data = json.loads(plan.read_text())
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec),
+                              'name_evidence': {'status': 'gap', 'reason': 'synthetic'},
+                              'owner_sync_config': str(owner)}
+    plan.write_text(json.dumps(data))
+    result = run(plan, tmp_path / 'run')
+    assert result.returncode != 0
+    assert 'owner synchronization config must be an owner-only regular file' in result.stderr
+    assert not (tmp_path / 'run' / 'reconciliation' / 'flow.edn').exists()
+
+
 def test_interruption_resumes_and_keeps_prior_completed_run(tmp_path):
     plan, packet, counter, _ = fixture(tmp_path)
     prior = tmp_path / 'prior'

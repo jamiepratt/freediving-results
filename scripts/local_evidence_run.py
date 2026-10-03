@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,8 @@ def checked_plan(path):
             raise ValueError('affiliate name gap requires reason')
         if name['status'] == 'checked' and not (name.get('path') and re.fullmatch(r'[0-9a-f]{64}', name.get('sha256', ''))):
             raise ValueError('checked affiliate names require path and SHA-256')
+        if 'owner_sync_config' in reconciliation and not reconciliation['owner_sync_config']:
+            raise ValueError('owner synchronization config path required')
     return plan
 
 
@@ -251,6 +254,14 @@ def reconcile_local(config, run_dir, state):
         gaps.append({'name': 'affiliate-names', 'reason': name['reason']})
     completed = state.get('reconciliation', {})
     ledger = run_dir / 'reconciliation' / 'flow.edn'
+    owner_config = config.get('owner_sync_config')
+    if owner_config:
+        owner_config = Path(owner_config)
+        info = owner_config.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            raise ValueError('owner synchronization config must be an owner-only regular file')
+        owner_config = owner_config.resolve(strict=True)
     if ledger.is_symlink():
         raise ValueError('reconciliation ledger must be a private file')
     if completed.get('status') == 'complete':
@@ -259,12 +270,16 @@ def reconcile_local(config, run_dir, state):
                 or not ledger.is_file()
                 or digest(ledger) != completed.get('ledger_sha256')):
             raise ValueError('completed reconciliation checkpoint changed')
-        return
+        if not owner_config:
+            return
     ledger.parent.mkdir(mode=0o700, exist_ok=True)
     state['reconciliation'] = {'status': 'running', 'spec_sha256': spec_hash}
     atomic_json(run_dir / 'state.json', state)
-    result = subprocess.run(['clojure', '-M', '-m', 'freediving.local-reconciliation',
-                             str(spec), str(ledger), state['local']['snapshot_sha256']],
+    argv = ['clojure', '-M', '-m', 'freediving.local-reconciliation',
+            str(spec), str(ledger), state['local']['snapshot_sha256']]
+    if owner_config:
+        argv.append(str(owner_config))
+    result = subprocess.run(argv,
                             cwd=ROOT.parent, capture_output=True, text=True, check=True)
     if digest(spec) != spec_hash:
         raise ValueError('reconciliation specification changed during run')
