@@ -38,7 +38,7 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all 19 checksummed
+JAR dependencies. It takes a private database backup, applies all 20 checksummed
 migrations without seeding data, switches the release, verifies readiness, provisions
 the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations
@@ -54,6 +54,12 @@ evidence. The normal release installs its schema and restricted ingestion grant.
 It does not import retained evidence or add records to the legacy observation
 tables. Import is a separate local operation against a verified archive using
 `freediving.batch-evidence-db/import!`; see [private batch evidence import](batch-evidence-import.md).
+
+Migration 20 adds private immutable tables for source-derived identity observations
+and their snapshot reference. The normal release installs the schema and restricted
+role grants without registering a snapshot or importing observations. Source
+registration is a separate private operation; the migration alone changes no
+identity decision or public result.
 
 ## HTML publication policy checkpoint
 
@@ -182,8 +188,8 @@ action, the operator must verify and retain these root-private checkpoints:
 1. The exact candidate commit and archive manifest match the chosen host code,
    `private_evidence_transfer.py`/`private_evidence_ssh.py` protocol and local
    caller. Install the complete matching code and helpers outside public releases.
-2. The intended PostgreSQL database has every checksummed migration 1-19 applied,
-   including 19, before any private activation. Retain a verified database backup;
+2. The intended PostgreSQL database has every checksummed migration 1-20 applied,
+   including 20, before any private activation. Retain a verified database backup;
    a migration gap blocks activation. The normal release applies migrations but
    does not install this private archive.
 3. The root-owned 0600 `owner-evidence.env` has the gateway, snapshot pin, owner
