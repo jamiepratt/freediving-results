@@ -33,6 +33,22 @@ def _citation(entry, source_sha):
     return entry["page"], region, entry["citation"]
 
 
+def _same_source_position(left, right, source_sha):
+    """Require one page and at least 50% intersection over union of pixel boxes."""
+    left_page, left_region, _ = _citation(left, source_sha)
+    right_page, right_region, _ = _citation(right, source_sha)
+    if left_page != right_page:
+        return False
+    width = max(0, min(left_region["x2"], right_region["x2"])
+                - max(left_region["x1"], right_region["x1"]))
+    height = max(0, min(left_region["y2"], right_region["y2"])
+                 - max(left_region["y1"], right_region["y1"]))
+    intersection = width * height
+    left_area = (left_region["x2"] - left_region["x1"]) * (left_region["y2"] - left_region["y1"])
+    right_area = (right_region["x2"] - right_region["x1"]) * (right_region["y2"] - right_region["y1"])
+    return 2 * intersection >= left_area + right_area - intersection
+
+
 def _validate_pass(artifact):
     _require(isinstance(artifact, dict) and artifact.get("schema") == "scan-transcription/v1",
              "unsupported transcription schema")
@@ -74,7 +90,9 @@ def verify_transcriptions(first, second, inspections, *, sample_size):
 
     Every disagreement needs a source inspection. A deterministic sample of
     agreements also needs inspection. Null readings remain unresolved unless
-    an inspection explicitly resolves them. No attempt or identity is imported.
+    an inspection explicitly resolves them. Pass and inspection boxes must
+    overlap each other by at least 50% intersection over union on one page.
+    No attempt or identity is imported.
     """
     first_entries = _validate_pass(first)
     second_entries = _validate_pass(second)
@@ -86,7 +104,7 @@ def verify_transcriptions(first, second, inspections, *, sample_size):
     _require(set(first_entries) == set(second_entries), "pass position coverage differs")
     positions = sorted(first_entries)
     for position in positions:
-        _require(_citation(first_entries[position], source) == _citation(second_entries[position], source),
+        _require(_same_source_position(first_entries[position], second_entries[position], source),
                  f"citation mismatch at {position}")
 
     agreements = [position for position in positions
@@ -103,7 +121,8 @@ def verify_transcriptions(first, second, inspections, *, sample_size):
         position = inspection["position"]
         _require(position not in by_position, "duplicate inspection")
         _require(inspection.get("source_sha256") == source, "inspection source mismatch")
-        _require(_citation(inspection, source) == _citation(first_entries[position], source),
+        _require(_same_source_position(inspection, first_entries[position], source)
+                 and _same_source_position(inspection, second_entries[position], source),
                  "inspection citation mismatch")
         _require(isinstance(inspection.get("inspected_by"), str) and inspection["inspected_by"]
                  and isinstance(inspection.get("note"), str) and inspection["note"],
