@@ -13,13 +13,115 @@ from scripts.owner_decision_store import ConflictError, DecisionStore
 from scripts.owner_decision_export_adapter import register_verified_export
 
 
+def source_fixture(root, heading, url):
+    source = root / 'raw' / 'source.html'
+    source.parent.mkdir()
+    source.write_text('<html>' + heading +
+                      '<li class="active"><a class="days" id="day_1">2025-08-30</a></li>'
+                      '<table id="table_ajax"><thead><tr>' +
+                      ''.join(f'<th>{h}</th>' for h in
+                              ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline',
+                               'OT', 'AP', 'RP', 'Card', 'Points', 'Remarks')) +
+                      '</tr></thead><tbody id="body_ajax"><tr>' +
+                      ''.join(f'<td>{v}</td>' for v in
+                              ('1', 'Synthetic Athlete', 'GER', 'F', 'CWTB', '09:40',
+                               '25 m', '24 m', 'YELLOW', '19', 'Note')) +
+                      '</tr></tbody></table></html>')
+    body = source.read_bytes()
+    receipt = {'schema': 'aida-selected-html-browser-receipt/v1',
+               'requested_url': url, 'final_url': url, 'http_status': 200,
+               'content_type': 'text/html', 'response_time': '2026-09-28T18:43:07Z',
+               'selected_view': {'date': '2025-08-30', 'selector': 'day_1'},
+               'body': {'path': 'raw/source.html', 'bytes': len(body),
+                        'sha256': hashlib.sha256(body).hexdigest()},
+               'source_citation': {'url': url, 'selected_date': '2025-08-30',
+                                   'table': 'table_ajax', 'tbody': 'body_ajax'}}
+    receipt_path = root / 'receipt.json'
+    receipt_path.write_text(json.dumps(receipt))
+    from scripts.issue55_aida_selected_html import build
+    packet = build(source, receipt_path)
+    packet_path = root / 'packet.json'
+    packet_path.write_text(json.dumps(packet))
+    name = 'aida-synthetic-2025-08-30'
+    record_id = hashlib.sha256(f'{name}:positions[0]'.encode()).hexdigest()
+    db = sqlite3.connect(root / 'snapshot.sqlite')
+    db.execute('CREATE TABLE records (record_id TEXT, source_name TEXT, collection TEXT, '
+               'record_path TEXT, kind TEXT, raw_json TEXT, citation_json TEXT, '
+               'source_object_id TEXT, event_date TEXT, parser_version TEXT, '
+               'observation_version TEXT, event_name TEXT, session TEXT, category TEXT)')
+    row = packet['positions'][0]
+    db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+               (record_id, name, 'positions', 'positions[0]', 'candidate_position',
+                json.dumps(row), json.dumps(row['position']),
+                'sha256:' + packet['source']['sha256'], '2025-08-30',
+                None, None, None, None, None))
+    db.commit()
+    db.close()
+    digest = hashlib.sha256((root / 'snapshot.sqlite').read_bytes()).hexdigest()
+    (root / 'manifest.json').write_text(json.dumps({
+        'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': digest,
+        'inputs': {name: {'source_schema': 'aida-selected-html-packet/v1',
+                          'path': str(packet_path),
+                          'sha256': hashlib.sha256(packet_path.read_bytes()).hexdigest(),
+                          'collections': {'positions': 1}}}}))
+    return name, packet
+
+
 class AidaSnapshotObservationsTest(unittest.TestCase):
+    def test_event_results_heading_has_page_citation_and_generic_title_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, packet = source_fixture(root,
+                '<h1>Wrong template event</h1><h2>Event Results</h2>'
+                '<p class="u-type--medium u-type--delta">Synthetic Pool Open</p>',
+                'https://www.aidainternational.org/Events/EventResults-4464')
+            observed = load_source_observations(root, [name])['observations'][0]
+            self.assertEqual('Synthetic Pool Open', observed['event_name'])
+            self.assertEqual({'source_sha256': packet['source']['sha256'],
+                              'locator': 'h2[Event Results] + p.u-type--medium',
+                              'value': 'Synthetic Pool Open'},
+                             observed['source_observation_ref']['event_context'])
+            self.assertIsNone(observed['session'])
+            self.assertIsNone(observed['category'])
+
+    def test_conflicting_event_headings_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, _ = source_fixture(root,
+                '<div class="event-title--description">First event</div>'
+                '<div class="event-title--description">Second event</div>',
+                'https://www.aidainternational.org/EventPage/4408')
+            with self.assertRaisesRegex(ValueError, 'ambiguous AIDA event heading'):
+                load_source_observations(root, [name])
+
+    def test_commented_template_heading_is_ignored_and_legacy_revision_replays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, packet = source_fixture(root,
+                '<!--<div class="event-title--description">Wrong template</div>-->'
+                '<div class="event-title--description">Actual event</div>',
+                'https://www.aidainternational.org/EventPage/4408')
+            current = load_source_observations(root, [name])['observations'][0]
+            self.assertEqual('Actual event', current['event_name'])
+            legacy = load_source_observations(
+                root, [name], adapter_version='aida-snapshot-observation/1')['observations'][0]
+            self.assertIsNone(legacy['event_name'])
+            self.assertNotIn('event_context', legacy['source_observation_ref'])
+            self.assertEqual('aida-snapshot-observation/1', legacy['adapter_version'])
+            self.assertNotEqual(current['observation_version'], legacy['observation_version'])
+            old_ref = legacy['source_observation_ref']
+            bound = load_verified_bindings(root, [{'evidence_id': 'legacy-row',
+                'source_observation_ref': old_ref}], [old_ref])
+            self.assertEqual(old_ref,
+                             bound['evidence_bindings']['legacy-row']['observation-revision'])
+
     def test_exact_original_packet_and_snapshot_bind_without_pg_or_attempt_claims(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
             source = root / 'raw' / 'source.html'
             source.parent.mkdir()
-            source.write_text('<html><li class="active"><a class="days" id="day_1">2025-08-30</a></li>'
+            source.write_text('<html><div class="event-title--description">Synthetic Depth Open</div>'
+                              '<li class="active"><a class="days" id="day_1">2025-08-30</a></li>'
                               '<table id="table_ajax"><thead><tr>'
                               + ''.join(f'<th>{h}</th>' for h in
                                         ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline',
@@ -154,7 +256,10 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             self.assertEqual('Synthetic Athlete', observed['source_fields']['name'])
             self.assertEqual('GER', observed['source_fields']['representation_raw'])
             self.assertEqual('2025-08-30', observed['event_date'])
-            self.assertIsNone(observed['event_name'])
+            self.assertEqual('Synthetic Depth Open', observed['event_name'])
+            self.assertEqual({'source_sha256': packet['source']['sha256'],
+                              'locator': 'div.event-title--description',
+                              'value': 'Synthetic Depth Open'}, reference['event_context'])
             self.assertIsNone(observed['session'])
             self.assertIsNone(observed['category'])
             self.assertIsNone(observed['pg_observation_ref'])
