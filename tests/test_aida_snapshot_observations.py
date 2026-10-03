@@ -1,11 +1,16 @@
 import hashlib
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from scripts.aida_snapshot_observations import load_source_observations
+from scripts.owner_snapshot_binding import load_verified_bindings
+from scripts.owner_decision_store import ConflictError, DecisionStore
+from scripts.owner_decision_export_adapter import register_verified_export
 
 
 class AidaSnapshotObservationsTest(unittest.TestCase):
@@ -67,6 +72,70 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             self.assertEqual([], result['gaps'])
             observed = result['observations'][0]
             self.assertEqual(record_id, observed['snapshot_record_id'])
+            reference = observed['source_observation_ref']
+            self.assertEqual('source-derived', reference['kind'])
+            self.assertEqual(digest, reference['snapshot_sha256'])
+            self.assertEqual(row['position'], reference['citation'])
+            binding = load_verified_bindings(root, [{'evidence_id': 'source-row-1',
+                'source_observation_ref': reference}], [reference])
+            self.assertEqual(reference,
+                             binding['evidence_bindings']['source-row-1']['observation-revision'])
+            store = DecisionStore(root / 'decisions.sqlite')
+            self.addCleanup(store.close)
+            store.bind_verified_snapshot(root, expected_revision=0, idempotency_key='bind')
+            proposal = {'id': 'source-decision-1', 'type': 'identity',
+                        'subject_id': 'source-person-1', 'source_name': name,
+                        'original': {'athlete': 'unknown'},
+                        'proposed': {'athlete': 'source-person-1'},
+                        'selected_option': 'unknown', 'competing_options': ['same_person'],
+                        'evidence': [{'id': record_id, 'version': reference,
+                                      'citation': {'evidence_id': 'source-row-1',
+                                                   'source_citation': {'source-sha256':
+                                                                       reference['source_sha256'],
+                                                                       'locator': reference['citation']},
+                                                   'observation_revision': reference}}],
+                        'supporting_evidence': [], 'conflicting_evidence': [],
+                        'depends_on': [], 'groups': ['event:unknown'],
+                        'provider_confidence': None, 'score': None,
+                        'rule_version': 'source/1', 'model_version': None,
+                        'policy_version': 'source/1', 'status': 'pending',
+                        'canonical_binding': {'decision_id': 'source-decision-1',
+                            'reconciliation_run_revision': 1,
+                            'reconciliation_event_id': 'synthetic-run-1',
+                            'observation_revisions': [reference],
+                            'evidence_bindings': [{'evidence_id': 'source-row-1',
+                                'snapshot_record_id': record_id,
+                                'observation_revision': reference}]}}
+            envelope = {'snapshot_sha256': digest, 'binding_revision': store.revision,
+                        'store_revision': store.revision,
+                        'reconciliation_run_revision': 1, 'proposals': [proposal]}
+            forged = json.loads(json.dumps(proposal))
+            forged_reference = dict(reference, observation_version='0' * 64)
+            forged['evidence'][0]['version'] = forged_reference
+            forged['evidence'][0]['citation']['observation_revision'] = forged_reference
+            forged['canonical_binding']['observation_revisions'] = [forged_reference]
+            forged['canonical_binding']['evidence_bindings'][0]['observation_revision'] = forged_reference
+            with self.assertRaisesRegex(ValueError, 'verified original'):
+                register_verified_export(store, root, dict(envelope, proposals=[forged]))
+            with self.assertRaises(ConflictError):
+                store.register(digest, forged, idempotency_key='forged')
+            self.assertEqual(1, store.revision)
+            automatic = json.loads(json.dumps(proposal))
+            automatic['status'] = 'automatic_approved'
+            with self.assertRaisesRegex(ConflictError, 'canonical route'):
+                register_verified_export(store, root, dict(envelope, proposals=[automatic]))
+            self.assertEqual(1, store.revision)
+            registered = register_verified_export(store, root, envelope)
+            self.assertEqual('pending', registered[0]['status'])
+            for action, correction in [('approve', None), ('reject', None),
+                                       ('correct', {'action': 'same_person'})]:
+                before = store.revision
+                with self.assertRaisesRegex(ConflictError, 'canonical route'):
+                    store.act('source-decision-1', action=action,
+                              correction=correction, expected_revision=before,
+                              idempotency_key='source-' + action)
+                self.assertEqual(before, store.revision)
+            self.assertEqual([], store.human_events()['events'])
             self.assertEqual('Synthetic Athlete', observed['source_fields']['name'])
             self.assertEqual('GER', observed['source_fields']['representation_raw'])
             self.assertEqual('2025-08-30', observed['event_date'])
@@ -91,6 +160,9 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             packet_path.unlink()
             result = load_source_observations(root, [name])
             self.assertEqual(0, result['summary']['supported'])
+            with self.assertRaisesRegex(ValueError, 'verified original'):
+                load_verified_bindings(root, [{'evidence_id': 'source-row-1',
+                    'source_observation_ref': reference}], [reference])
             self.assertEqual([{'snapshot_record_id': record_id, 'source_name': name,
                                'citation': row['position'], 'event_date': '2025-08-30',
                                'source_object_id': 'sha256:' + packet['source']['sha256'],
