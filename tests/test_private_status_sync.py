@@ -1,0 +1,94 @@
+import http.client
+import json
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+from owner_evidence_origin import make_server
+from test_unified_evidence_query import snapshot
+
+
+def test_private_status_is_persistent_ordered_and_owner_read_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        snap = snapshot(root)
+        served = json.loads((snap / 'manifest.json').read_text())['snapshot_sha256']
+        env = {'OWNER_EVIDENCE_GATEWAY_SECRET': 'gateway-secret-long-enough',
+               'OWNER_EVIDENCE_EMAILS': 'owner@example.com',
+               'OWNER_EVIDENCE_SNAPSHOT_SHA256': served,
+               'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-private.alphacompose.com',
+               'OWNER_EVIDENCE_STATUS_FILE': str(root / 'status.json'),
+               'OWNER_EVIDENCE_STATUS_TOKEN': 'status-token-long-enough-private',
+               'OWNER_EVIDENCE_STATUS_CLIENT_ID': 'status-client.access'}
+
+        def request(server, method, body=None, machine=False, token=True):
+            conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+            headers = {'Host': env['OWNER_EVIDENCE_ORIGIN_HOST'],
+                       'X-Freediving-Owner-Gateway': env['OWNER_EVIDENCE_GATEWAY_SECRET']}
+            if machine:
+                headers['X-Freediving-Owner-Machine'] = env['OWNER_EVIDENCE_STATUS_CLIENT_ID']
+                if token:
+                    headers['X-Freediving-Status-Token'] = env['OWNER_EVIDENCE_STATUS_TOKEN']
+            else:
+                headers['X-Freediving-Owner-Email'] = env['OWNER_EVIDENCE_EMAILS']
+            if body is not None:
+                headers['Content-Type'] = 'application/json'
+                body = json.dumps(body).encode()
+                headers['Content-Length'] = str(len(body))
+            conn.request(method, '/owner-evidence/api/presentation-status', body=body, headers=headers)
+            response = conn.getresponse()
+            result = response.status, response.read()
+            conn.close()
+            return result
+
+        def start():
+            server = make_server(snap, env)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            return server, thread
+
+        def stop(server, thread):
+            server.shutdown(); thread.join(timeout=2); server.server_close()
+
+        server, thread = start()
+        try:
+            assert json.loads(request(server, 'GET')[1])['status'] == 'unavailable'
+            payload = {'schema': 'private-presentation-status/v1', 'run_id': 'run-1',
+                       'revision': 1, 'expected_revision': 0,
+                       'local': {'snapshot_sha256': 'a' * 64, 'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 2},
+                       'remote': {'status': 'pending', 'pending': 'a' * 64,
+                                  'failed': None, 'active': None}}
+            assert request(server, 'POST', payload, machine=True)[0] == 200
+            assert json.loads(request(server, 'GET', machine=True)[1])['revision'] == 1
+            assert request(server, 'POST', payload, machine=True)[0] == 200
+            assert request(server, 'POST', payload)[0] == 403
+            assert request(server, 'POST', payload, machine=True, token=False)[0] == 403
+            assert request(server, 'POST', {**payload, 'revision': 2, 'expected_revision': 0}, machine=True)[0] == 409
+            assert request(server, 'POST', {**payload, 'revision': 2, 'expected_revision': 1,
+                                            'local': {**payload['local'], 'snapshot_sha256': 'b' * 64}}, machine=True)[0] == 409
+            assert request(server, 'POST', {**payload, 'revision': 2, 'expected_revision': 1,
+                                            'remote': {**payload['remote'], 'status': 'active'}}, machine=True)[0] == 409
+            assert request(server, 'POST', {**payload, 'secret_path': '/private/file'}, machine=True)[0] == 400
+            visible = json.loads(request(server, 'GET')[1])
+            assert visible['revision'] == 1
+            assert visible['local']['gap_count'] == 2
+            assert visible['remote']['active']['snapshot_sha256'] == served
+        finally:
+            stop(server, thread)
+        server, thread = start()
+        try:
+            assert json.loads(request(server, 'GET')[1])['revision'] == 1
+            failed = {**payload, 'revision': 2, 'expected_revision': 1,
+                      'remote': {'status': 'failed', 'pending': 'a' * 64,
+                                 'failed': 'a' * 64, 'active': None}}
+            assert request(server, 'POST', failed, machine=True)[0] == 200
+            stale = {**failed, 'run_id': 'older-run', 'revision': 3, 'expected_revision': 2,
+                     'local': {**failed['local'], 'cutoff': '2026-10-02T00:00:00Z'}}
+            assert request(server, 'POST', stale, machine=True)[0] == 409
+            result = json.loads(request(server, 'GET')[1])
+            assert result['remote']['status'] == 'failed'
+            assert result['remote']['active']['snapshot_sha256'] == served
+        finally:
+            stop(server, thread)

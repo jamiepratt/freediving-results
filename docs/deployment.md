@@ -196,6 +196,16 @@ OWNER_EVIDENCE_EMAILS=<comma-separated lowercase owner email addresses>
 OWNER_EVIDENCE_SNAPSHOT_SHA256=<sha256 of snapshot.sqlite>
 ```
 
+For private local checkpoint status sync, add these three lines to the same root-owned file before activation:
+
+```text
+OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json
+OWNER_EVIDENCE_STATUS_TOKEN=<independent random ASCII token, 24 to 256 characters>
+OWNER_EVIDENCE_STATUS_CLIENT_ID=<dedicated Cloudflare Access service client ID ending in .access>
+```
+
+Set Worker secret `OWNER_EVIDENCE_STATUS_CLIENT_ID` to that exact client ID. The writer sends a signed service assertion plus the separate status token; owner browser requests cannot write. Keep the status file outside snapshot versions so guarded activation and service restart retain it. The private code bundle must include `scripts/private_presentation_status.py` alongside `scripts/owner_evidence_origin.py`.
+
 Do not reuse the public gateway secret. The origin reads only the pinned private
 SQLite snapshot, not PostgreSQL or review credentials. Retain the verified source
 snapshot and its manifest in a separate private backup before activation. Check
@@ -224,7 +234,7 @@ SOURCE_BUNDLE_DIR=/absolute/path/to/private/source-bundle
 SHA256=$(shasum -a 256 "$SNAPSHOT_DIR/snapshot.sqlite" | awk '{print $1}')
 SOURCE_MANIFEST_SHA256=$(shasum -a 256 "$SOURCE_BUNDLE_DIR/manifest.json" | awk '{print $1}')
 ssh bridge-vps 'sudo -n install -d -m 0700 /var/lib/freediving-owner-evidence/import/code /var/lib/freediving-owner-evidence/import/snapshot /var/lib/freediving-owner-evidence/import/source-bundle /var/lib/freediving-owner-evidence/import/source-bundle/objects'
-tar -cf - scripts/owner_evidence_origin.py scripts/unified_evidence_query.py scripts/route_roster_query.py scripts/owner_source_view.py scripts/private_source_bundle.py scripts/vestico_safe_derivative.py resources/evidence_workspace.html resources/evidence_workspace.js resources/evidence_workspace.css | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
+tar -cf - scripts/owner_evidence_origin.py scripts/private_presentation_status.py scripts/owner_decision_store.py scripts/unified_evidence_query.py scripts/route_roster_query.py scripts/owner_source_view.py scripts/private_source_bundle.py scripts/vestico_safe_derivative.py resources/evidence_workspace.html resources/evidence_workspace.js resources/evidence_workspace.css | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'
 tar -C "$SNAPSHOT_DIR" -cf - manifest.json snapshot.sqlite | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/snapshot'
 COPYFILE_DISABLE=1 tar -C "$SOURCE_BUNDLE_DIR" -cf - manifest.json objects | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/source-bundle'
 tar -cf - deploy/owner_evidence_activate.py deploy/freediving-owner-evidence.service | ssh bridge-vps 'sudo -n tar -xf - -C /var/lib/freediving-owner-evidence/import/code'

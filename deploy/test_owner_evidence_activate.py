@@ -14,7 +14,7 @@ from unittest import mock
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from owner_evidence_activate import Layout, activate, main, _health
+from owner_evidence_activate import Layout, activate, main, _health, _config
 
 
 class ActivationTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class ActivationTests(unittest.TestCase):
         self.bundle = root / 'bundle'
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
-        for name in ('owner_evidence_origin.py', 'unified_evidence_query.py', 'route_roster_query.py',
+        for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'unified_evidence_query.py', 'route_roster_query.py',
                      'owner_source_view.py', 'owner_decision_store.py', 'vestico_safe_derivative.py'):
             (self.bundle / 'scripts' / name).write_text('print("test")\n')
         (self.bundle / 'scripts/private_source_bundle.py').write_bytes(
@@ -62,6 +62,17 @@ class ActivationTests(unittest.TestCase):
         if args == ('systemctl', 'is-active', '--quiet', 'freediving-owner-evidence.service'):
             return True
         return True
+
+    def test_private_status_settings_survive_activation_config_validation(self):
+        text = self.config.read_text()
+        text += ('OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n'
+                 'OWNER_EVIDENCE_STATUS_TOKEN=separate-random-status-token-123456\n'
+                 'OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n')
+        self.config.write_text(text)
+        assert _config(self.config, os.getuid(), self.digest)['OWNER_EVIDENCE_STATUS_CLIENT_ID'] == 'status123.access'
+        self.config.write_text(text.replace('OWNER_EVIDENCE_STATUS_TOKEN=separate-random-status-token-123456\n', ''))
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
 
     def run_activation(self):
         return activate(self.bundle, self.source, self.digest, self.layout,

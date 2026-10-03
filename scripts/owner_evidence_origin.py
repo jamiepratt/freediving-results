@@ -17,6 +17,7 @@ from unified_evidence_query import SnapshotQuery
 from owner_source_view import OriginalSourceView, SourceViewError
 from route_roster_query import RouteRosterQuery
 from owner_decision_store import ConflictError
+from private_presentation_status import PrivatePresentationStatus, StatusConflict
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
@@ -25,6 +26,7 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
            'session', 'discipline', 'category', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_ACTION = 16 * 1024
+STATUS_PATH = '/owner-evidence/api/presentation-status'
 DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
 DECISION_PREVIEW_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/preview$')
 DECISION_ACTION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})/actions$')
@@ -138,6 +140,15 @@ class PrivateOrigin(HTTPServer):
             self.decisions = None
             self.import_token = env.get('OWNER_EVIDENCE_IMPORT_TOKEN')
             self.import_client_id = env.get('OWNER_EVIDENCE_IMPORT_CLIENT_ID')
+            status_file = env.get('OWNER_EVIDENCE_STATUS_FILE')
+            self.status_token = env.get('OWNER_EVIDENCE_STATUS_TOKEN')
+            self.status_client_id = env.get('OWNER_EVIDENCE_STATUS_CLIENT_ID')
+            if any((status_file, self.status_token, self.status_client_id)):
+                if not all((status_file, self.status_token, self.status_client_id)) or not Path(status_file).is_absolute() or Path(status_file).resolve().is_relative_to(Path(snapshot_dir).resolve()) or not isinstance(self.status_token, str) or not 24 <= len(self.status_token) <= 256 or not self.status_token.isascii() or any(c.isspace() for c in self.status_token) or not isinstance(self.status_client_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', self.status_client_id) or self.status_token == self.import_token:
+                    raise ValueError('invalid private status configuration')
+                self.presentation_status = PrivatePresentationStatus(status_file)
+            else:
+                self.presentation_status = None
             if self.import_token is not None and (len(self.import_token) < 24 or
                     len(self.import_token) > 256 or not self.import_token.isascii() or
                     any(char.isspace() for char in self.import_token)):
@@ -208,6 +219,13 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         gateway = self._one('X-Freediving-Owner-Gateway')
         if gateway is None or len(gateway) > 256 or not compare_digest(gateway, self.server.secret):
             return False
+        if urlsplit(self.path).path == STATUS_PATH and (self.command == 'POST' or self._one('X-Freediving-Status-Token') is not None):
+            machine = self._one('X-Freediving-Owner-Machine')
+            token = self._one('X-Freediving-Status-Token')
+            return (not self.headers.get_all('X-Freediving-Owner-Email', []) and
+                    self.server.presentation_status is not None and machine is not None and
+                    compare_digest(machine, self.server.status_client_id) and
+                    token is not None and compare_digest(token, self.server.status_token))
         if urlsplit(self.path).path == '/owner-evidence/api/decision-events':
             machine = self._one('X-Freediving-Owner-Machine')
             token = self._one('X-Freediving-Import-Token')
@@ -321,6 +339,11 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result['normalized_federation'] = 'unavailable in this snapshot'
                 if self.server.source_bundle_sha256:
                     result['bundle_manifest_sha256'] = self.server.source_bundle_sha256
+            elif path == STATUS_PATH and not parsed.query:
+                active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
+                          'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'], 'bundle_manifest_sha256': None}
+                result = (self.server.presentation_status.read(active) if self.server.presentation_status else
+                          {'status': 'unavailable', 'remote': {'active': active}})
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
             elif path == '/owner-evidence/api/source':
@@ -448,6 +471,27 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             parsed = self._path()
         except ValueError:
             return self._reply(404)
+        if parsed.path == STATUS_PATH and not parsed.query:
+            if self._one('Content-Type') != 'application/json' or self.headers.get_all('Origin', []):
+                return self._reply(403)
+            lengths = self.headers.get_all('Content-Length', [])
+            if len(lengths) != 1 or not lengths[0].isdigit():
+                return self._reply(400)
+            length = int(lengths[0])
+            if not 0 < length <= 4096:
+                return self._reply(413 if length > 4096 else 400)
+            try:
+                body = json.loads(self.rfile.read(length))
+                active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
+                          'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else None
+                result = self.server.presentation_status.update(body, active)
+            except StatusConflict:
+                return self._reply(409)
+            except (ValueError, TypeError, KeyError):
+                return self._reply(400)
+            except OSError:
+                return self._reply(503)
+            return self._json(result)
         match = DECISION_ACTION_PATH.fullmatch(parsed.path)
         if match is None or parsed.query:
             return self._unsupported()

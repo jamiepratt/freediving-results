@@ -6,6 +6,7 @@ const privatePath = (path) => path === '/owner-evidence' || path.startsWith('/ow
 const safePrivatePath = /^\/owner-evidence(?:\/[A-Za-z0-9._~-]+)*\/?$/;
 const decisionActionPath = /^\/owner-evidence\/api\/decisions\/[A-Za-z0-9_-]{1,128}\/actions$/;
 const decisionEventPath = '/owner-evidence/api/decision-events';
+const presentationStatusPath = '/owner-evidence/api/presentation-status';
 const decoder = new TextDecoder('utf-8', {fatal:true});
 function decodeSegment(value) {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) throw Error('Invalid JWT encoding');
@@ -13,7 +14,7 @@ function decodeSegment(value) {
   return Uint8Array.from(binary, c => c.charCodeAt(0));
 }
 function privateConfig(env) {
-  const {ACCESS_ISSUER, ACCESS_AUDIENCE, OWNER_EVIDENCE_EMAILS, OWNER_EVIDENCE_UPSTREAM, OWNER_EVIDENCE_GATEWAY_SECRET, OWNER_EVIDENCE_IMPORT_CLIENT_ID} = env;
+  const {ACCESS_ISSUER, ACCESS_AUDIENCE, OWNER_EVIDENCE_EMAILS, OWNER_EVIDENCE_UPSTREAM, OWNER_EVIDENCE_GATEWAY_SECRET, OWNER_EVIDENCE_IMPORT_CLIENT_ID, OWNER_EVIDENCE_STATUS_CLIENT_ID} = env;
   if (typeof ACCESS_ISSUER !== 'string' || !/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(ACCESS_ISSUER)) return null;
   if (typeof ACCESS_AUDIENCE !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(ACCESS_AUDIENCE)) return null;
   if (typeof OWNER_EVIDENCE_GATEWAY_SECRET !== 'string' || OWNER_EVIDENCE_GATEWAY_SECRET.length < 16) return null;
@@ -28,7 +29,9 @@ function privateConfig(env) {
       upstream.origin !== OWNER_EVIDENCE_UPSTREAM) return null;
   if (OWNER_EVIDENCE_IMPORT_CLIENT_ID !== undefined &&
       (typeof OWNER_EVIDENCE_IMPORT_CLIENT_ID !== 'string' || !/^[A-Za-z0-9_-]{8,128}\.access$/.test(OWNER_EVIDENCE_IMPORT_CLIENT_ID))) return null;
-  return {issuer:ACCESS_ISSUER,audience:ACCESS_AUDIENCE,emails:new Set(emails),upstream:upstream.origin,secret:OWNER_EVIDENCE_GATEWAY_SECRET,importClientId:OWNER_EVIDENCE_IMPORT_CLIENT_ID};
+  if (OWNER_EVIDENCE_STATUS_CLIENT_ID !== undefined &&
+      (typeof OWNER_EVIDENCE_STATUS_CLIENT_ID !== 'string' || !/^[A-Za-z0-9_-]{8,128}\.access$/.test(OWNER_EVIDENCE_STATUS_CLIENT_ID))) return null;
+  return {issuer:ACCESS_ISSUER,audience:ACCESS_AUDIENCE,emails:new Set(emails),upstream:upstream.origin,secret:OWNER_EVIDENCE_GATEWAY_SECRET,importClientId:OWNER_EVIDENCE_IMPORT_CLIENT_ID,statusClientId:OWNER_EVIDENCE_STATUS_CLIENT_ID};
 }
 async function verifiedOwner(token, config, machine=false) {
   if (typeof token !== 'string' || token.length > 8192) return null;
@@ -41,7 +44,7 @@ async function verifiedOwner(token, config, machine=false) {
     const now = Math.floor(Date.now()/1000);
     if (claims.iss !== config.issuer || !(claims.aud === config.audience || Array.isArray(claims.aud) && claims.aud.includes(config.audience)) ||
         claims.type !== 'app' ||
-        (machine ? !(config.importClientId && claims.common_name === config.importClientId && claims.sub === '' && !claims.email)
+        (machine ? !((machine === 'status' ? config.statusClientId : config.importClientId) && claims.common_name === (machine === 'status' ? config.statusClientId : config.importClientId) && claims.sub === '' && !claims.email)
                  : !(typeof claims.email === 'string' && config.emails.has(claims.email) && !claims.common_name)) ||
         !Number.isInteger(claims.exp) || claims.exp <= now || !Number.isInteger(claims.nbf) || claims.nbf > now ||
         !Number.isInteger(claims.iat) || claims.iat > now) return null;
@@ -59,32 +62,35 @@ async function verifiedOwner(token, config, machine=false) {
 async function privateRequest(request, url, env) {
   if (!safePrivatePath.test(url.pathname) || url.pathname.length > 2048 || url.search.length > 2048) return failure(404);
   const action = request.method === 'POST' && decisionActionPath.test(url.pathname) && !url.search;
-  const machine = url.pathname === decisionEventPath;
-  if (machine && request.method !== 'GET') return failure(405);
-  if (request.method !== 'GET' && request.method !== 'HEAD' && !action) return failure(405);
+  const statusWrite = request.method === 'POST' && url.pathname === presentationStatusPath && !url.search;
+  const machine = url.pathname === decisionEventPath ? 'import' : (statusWrite || url.pathname === presentationStatusPath && request.headers.has('X-Freediving-Status-Token')) ? 'status' : false;
+  if (url.pathname === decisionEventPath && request.method !== 'GET') return failure(405);
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !action && !statusWrite) return failure(405);
   const origin = request.headers.get('Origin');
-  if ((origin && origin !== ORIGIN) || (action && origin !== ORIGIN)) return failure(403);
-  if (action && request.headers.get('Content-Type') !== 'application/json') return failure(415);
+  if ((origin && origin !== ORIGIN) || (action && origin !== ORIGIN) || (statusWrite && origin)) return failure(403);
+  if ((action || statusWrite) && request.headers.get('Content-Type') !== 'application/json') return failure(415);
   const csrf = request.headers.get('X-Freediving-CSRF');
   if (action && (typeof csrf !== 'string' || !/^[A-Za-z0-9_-]{3,128}$/.test(csrf))) return failure(403);
-  if (action && Number(request.headers.get('Content-Length')) > 16384) return failure(413);
+  if ((action || statusWrite) && Number(request.headers.get('Content-Length')) > (statusWrite ? 4096 : 16384)) return failure(413);
   const config = privateConfig(env);
   if (!config) return failure(503);
-  if (machine && !config.importClientId) return failure(503);
+  if (machine && !(machine === 'status' ? config.statusClientId : config.importClientId)) return failure(503);
   const importToken = request.headers.get('X-Freediving-Import-Token');
-  if (machine && (typeof importToken !== 'string' || importToken.length < 24 || importToken.length > 256 || /\s/.test(importToken))) return failure(403);
+  const statusToken = request.headers.get('X-Freediving-Status-Token');
+  const machineToken = machine === 'status' ? statusToken : importToken;
+  if (machine && (typeof machineToken !== 'string' || machineToken.length < 24 || machineToken.length > 256 || /\s/.test(machineToken))) return failure(403);
   const identity = await verifiedOwner(request.headers.get('Cf-Access-Jwt-Assertion'),config,machine);
   if (!identity) return failure(403);
   const headers = new Headers({'X-Freediving-Owner-Gateway':config.secret});
   if (machine) {
     headers.set('X-Freediving-Owner-Machine',identity);
-    headers.set('X-Freediving-Import-Token',importToken);
+    headers.set(machine === 'status' ? 'X-Freediving-Status-Token' : 'X-Freediving-Import-Token',machineToken);
   } else headers.set('X-Freediving-Owner-Email',identity);
   let body;
-  if (action) {
-    headers.set('Origin', ORIGIN);
+  if (action || statusWrite) {
+    if (action) headers.set('Origin', ORIGIN);
     headers.set('Content-Type', 'application/json');
-    headers.set('X-Freediving-CSRF', csrf);
+    if (action) headers.set('X-Freediving-CSRF', csrf);
     const reader = request.body?.getReader();
     const chunks = []; let size = 0;
     if (!reader) return failure(400);
@@ -92,7 +98,7 @@ async function privateRequest(request, url, env) {
       const {value, done} = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > 16384) { await reader.cancel(); return failure(413); }
+      if (size > (statusWrite ? 4096 : 16384)) { await reader.cancel(); return failure(413); }
       chunks.push(value);
     }
     body = new Uint8Array(size); let offset = 0;
