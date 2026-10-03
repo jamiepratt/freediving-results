@@ -120,8 +120,22 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             with self.assertRaises(ConflictError):
                 store.register(digest, forged, idempotency_key='forged')
             self.assertEqual(1, store.revision)
+            automatic = json.loads(json.dumps(proposal))
+            automatic['status'] = 'automatic_approved'
+            with self.assertRaisesRegex(ConflictError, 'canonical route'):
+                register_verified_export(store, root, dict(envelope, proposals=[automatic]))
+            self.assertEqual(1, store.revision)
             registered = register_verified_export(store, root, envelope)
             self.assertEqual('pending', registered[0]['status'])
+            for action, correction in [('approve', None), ('reject', None),
+                                       ('correct', {'action': 'same_person'})]:
+                before = store.revision
+                with self.assertRaisesRegex(ConflictError, 'canonical route'):
+                    store.act('source-decision-1', action=action,
+                              correction=correction, expected_revision=before,
+                              idempotency_key='source-' + action)
+                self.assertEqual(before, store.revision)
+            self.assertEqual([], store.human_events()['events'])
             self.assertEqual('Synthetic Athlete', observed['source_fields']['name'])
             self.assertEqual('GER', observed['source_fields']['representation_raw'])
             self.assertEqual('2025-08-30', observed['event_date'])

@@ -235,6 +235,9 @@ class DecisionStore:
             raise ConflictError('proposal cites evidence absent from active snapshot')
         if not self._revisions_current(proposal, binding):
             raise ConflictError('proposal observation revisions absent from active snapshot')
+        if (proposal['status'] == 'automatic_approved' and
+                self._has_source_derived_revision(proposal)):
+            raise ConflictError('source-derived observation has no canonical route for approval')
         if self.db.execute('SELECT 1 FROM proposals WHERE id=?', (proposal['id'],)).fetchone():
             raise ConflictError('decision ID already registered')
         for row in self.db.execute('SELECT id FROM proposals'):
@@ -254,6 +257,14 @@ class DecisionStore:
             revision = self._next_revision()
             self._event(revision, proposal['id'], 'automatic_approve', 'system', '', None)
         return self.inspect(proposal['id'])
+
+    @staticmethod
+    def _has_source_derived_revision(proposal):
+        canonical = proposal.get('canonical_binding') or {}
+        revisions = list(canonical.get('observation_revisions') or [])
+        revisions.extend(item.get('version') for item in proposal.get('evidence', []))
+        return any(isinstance(revision, dict) and revision.get('kind') == 'source-derived'
+                   for revision in revisions)
 
     @staticmethod
     def _revisions_current(proposal, binding):
@@ -579,6 +590,8 @@ class DecisionStore:
             return old
         try:
             current = self.inspect(decision_id)
+            if self._has_source_derived_revision(current):
+                raise ConflictError('source-derived observation has no canonical route for owner action')
             status = current['effective_status']
             if action in ('approve', 'correct') and status not in ('pending', 'automatic_approved', 'human_approved', 'human_corrected'):
                 raise ConflictError('decision cannot be approved in current state')
