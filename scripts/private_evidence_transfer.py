@@ -159,16 +159,45 @@ def stage(run_dir, destination):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'remote-ssh':
+        from private_evidence_ssh import remote_command
+        try:
+            result = remote_command(json.loads(sys.argv[2]))
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError,
+                json.JSONDecodeError):
+            print('remote object mismatch', file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['stage'])
+    parser.add_argument('command', choices=['stage', 'ssh-stage'])
     parser.add_argument('--run-dir', type=Path, required=True)
-    parser.add_argument('--destination', type=Path, required=True)
+    parser.add_argument('--destination', type=Path)
+    parser.add_argument('--host')
+    parser.add_argument('--remote-root', type=Path)
+    parser.add_argument('--remote-script', type=Path)
+    parser.add_argument('--ssh', type=Path, default=Path('ssh'))
     args = parser.parse_args()
     try:
-        print(json.dumps(stage(args.run_dir, args.destination), sort_keys=True))
+        if args.command == 'stage':
+            if args.destination is None:
+                parser.error('--destination is required for stage')
+            result = stage(args.run_dir, args.destination)
+        else:
+            if not args.host or not args.remote_root or not args.remote_script:
+                parser.error('--host, --remote-root and --remote-script are required for ssh-stage')
+            from private_evidence_ssh import ssh_stage
+            result = ssh_stage(args.run_dir, args.host, args.remote_root, args.remote_script, args.ssh)
+        print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError,
             json.JSONDecodeError) as error:
-        print(f'private transfer: {error}', file=sys.stderr)
+        message = str(error) if args.command == 'stage' else 'SSH staging failed: ' + (
+            str(error) if str(error) in ('remote object mismatch', 'remote partial mismatch',
+                                       'remote receipt mismatch', 'remote offset mismatch',
+                                       'remote protocol mismatch', 'invalid SSH host',
+                                       'remote paths must be absolute', 'SSH transport command failed')
+            else 'invalid or unverified input')
+        print('private transfer: ' + message, file=sys.stderr)
         return 1
     return 0
 
