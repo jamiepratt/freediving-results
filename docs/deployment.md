@@ -147,6 +147,61 @@ also makes its origin unavailable. Private data remains on the VPS/local archive
 
 ## Owner evidence remote activation checkpoint
 
+### Candidate code checkpoint for private host setup
+
+`deploy/private_owner_preflight.py` prepares a code-only archive for a later,
+separately authorized private host setup. It is independent of `deploy/release.sh`.
+It reads one clean committed checkout, requires its exact HEAD SHA, and checks the
+tracked origin, workspace, activation, service and SSH transfer helper files.
+The default invocation is read-only. It never connects to the VPS, database,
+Cloudflare or NordVPN and never includes snapshots, source objects or credentials.
+
+```sh
+CANDIDATE=$(git rev-parse HEAD)
+python3 deploy/private_owner_preflight.py --candidate "$CANDIDATE"
+```
+
+After reviewing that commit and obtaining separate authorization for preparation,
+create a private directory outside the repository and package exactly that commit:
+
+```sh
+install -d -m 0700 /private/owner-code-checkpoint
+python3 deploy/private_owner_preflight.py --candidate "$CANDIDATE" \
+  --prepare --confirm "$CANDIDATE" \
+  --output /private/owner-code-checkpoint/owner-code.tar
+```
+
+The archive is mode 0600, includes per-file SHA-256 values and cannot overwrite an
+existing archive. Its `host_ready: false` output is intentional. Archive creation
+does not authorize installation or establish a live gate. Before a later host
+action, the operator must verify and retain these root-private checkpoints:
+
+1. The exact candidate commit and archive manifest match the chosen host code,
+   `private_evidence_transfer.py`/`private_evidence_ssh.py` protocol and local
+   caller. Install the complete matching code and helpers outside public releases.
+2. The intended PostgreSQL database has every checksummed migration 1-19 applied,
+   including 19, before any private activation. Retain a verified database backup;
+   a migration gap blocks activation. The normal release applies migrations but
+   does not install this private archive.
+3. The root-owned 0600 `owner-evidence.env` has the gateway, snapshot pin, owner
+   allowlist and separate status writer configuration needed by this candidate.
+   Obtain values from the approved secret store without writing them
+   into the archive, shell history, logs or Git. Check the separate Worker bindings.
+4. Read-check the exact Access app and owner-only policy for
+   `poc.alphacompose.com/owner-evidence*`, audience, issuer, owner allowlist and
+   service clients. A missing Access read credential or mismatched policy blocks
+   Worker activation. Capture current tunnel, DNS and Worker state and the prior
+   private pin as rollback targets before changing them.
+5. Stage a verified snapshot and matching source bundle, then use the guarded
+   host helper. Run `owner_evidence_cloudflare.py` without `--activate` first.
+   Only after all checks pass, separately authorize its explicit `--activate`.
+   Check the existing custom domain with an owner login, cited source and PDF
+   readback, an unauthenticated denial and public health. On failure follow the
+   rollback sequence below; keep the prior private presentation available.
+
+No automated workflow is wired to the repository or this checkpoint. A Git push
+or merge cannot run this script or activate the private infrastructure.
+
 Accepted workflow, 2 October 2026: verified local ingestion runs should
 automatically update the private owner presentation. Failed transfer or validation
 must preserve the last working presentation and a resumable local result. This
