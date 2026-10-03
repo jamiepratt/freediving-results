@@ -120,7 +120,8 @@
                                        (re-matches #"[A-Za-z0-9._-]{1,100}" id)))
                     (every? #(and (= :parsed (:parse-status (rows %)))
                                   (map? (:citation (rows %)))
-                                  (string? (get-in (rows %) [:citation :source-sha256]))
+                                  (string? (or (get-in (rows %) [:citation :source-sha256])
+                                               (get-in (rows %) [:citation :source_sha256])))
                                   (string? (:source-name (rows %)))) scope))
        (fail! "Identity question lacks complete current source evidence"
               {:target-id target-id :candidate-id candidate-id}))
@@ -378,6 +379,7 @@
       (let [pair (when (#{:accept :reject} (:action event)) (pair (:pair event)))
             prior (when (= :reverse (:action event))
                     (some #(when (= (:event-id event) (:id %)) %) events))
+            bound-pair (or pair (:pair prior))
             superseded-event (when-let [id (:supersedes event)]
                                (some #(when (= id (:id %)) %) events))
             superseded (cond-> (set (keep :supersedes events))
@@ -390,6 +392,17 @@
                                                            (not (superseded (:id e))))]
                                    (:pair (some #(when (= (:event-id e) (:id %)) %) events)))))
             groups (:groups (project ledger))]
+        (when (some #(str/starts-with? % "source-observation:") bound-pair)
+          (let [binding (:source-binding event)
+                refs (into {} (map (fn [id] [id (:citation (rows id))]) bound-pair))]
+            (when-not (and (= :human (:actor-kind event))
+                           (every? #(str/starts-with? % "source-observation:") bound-pair)
+                           (every? rows bound-pair)
+                           (= refs (:refs binding))
+                           (= 1 (count (set (map :snapshot_sha256 (vals refs)))))
+                           (= (:snapshot-sha256 binding)
+                              (:snapshot_sha256 (first (vals refs)))))
+              (fail! "Source identity event lacks exact current refs" {:id (:id event)}))))
         (when (and (= :model (:actor-kind event)) (= :accept (:action event))
                    (not (and (:request event) (not (model-current? rows event)))))
           (let [{:keys [decision flow-event dependency-events config approval-policy receipt]} (:model-proof event)
@@ -531,11 +544,81 @@
                           :artifact-sha256 (:artifact_sha256 row)
                           :coordinates (:coordinates payload)}})) raw)))
 
+(defn- source-rows [^Connection connection]
+  (mapv (comp edn/read-string :body_edn)
+        (query connection "SELECT body_edn FROM freediving.source_identity_observations ORDER BY observation_id")))
+
+(declare write-canonical-view!)
+
 (defn- read-ledger [^Connection connection]
-  (let [rows (observation-rows connection)
+  (let [rows (into (observation-rows connection) (source-rows connection))
         events (mapv (comp edn/read-string :body_edn)
                      (query connection "SELECT body_edn FROM freediving.athlete_identity_events ORDER BY revision"))]
     (replay rows events)))
+
+(defn- sha256? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
+
+(defn- valid-source-row? [snapshot row verified-ref]
+  (let [ref (:citation row)]
+    (and (map? row) (= :parsed (:parse-status row))
+         (string? (:source-name row)) (not (str/blank? (:source-name row)))
+         (map? ref) (= ref verified-ref (:source-observation-ref row))
+         (= "source-derived" (:kind ref))
+         (= snapshot (:snapshot_sha256 ref))
+         (sha256? (:snapshot_record_id ref))
+         (= (str "source-observation:" (:snapshot_record_id ref)) (:observation-id row))
+         (sha256? (:source_sha256 ref)) (sha256? (:packet_sha256 ref))
+         (sha256? (:observation_version ref))
+         (string? (:source_name ref)) (seq (:source_name ref))
+         (string? (:adapter_version ref)) (seq (:adapter_version ref))
+         (map? (:citation ref)) (seq (:citation ref))
+         (not-any? #(contains? row %) [:publisher-scope :publisher-athlete-id :publisher-id-kind]))))
+
+(defn register-source-observations!
+  "Register an immutable, caller-verified source snapshot in the private canonical ledger.
+   Caller must independently verify every supplied ref against the retained source."
+  [url {:keys [snapshot-sha256 rows verified-refs]}]
+  (when-not (and (sha256? snapshot-sha256) (vector? rows) (seq rows)
+                 (<= (count rows) 100000) (map? verified-refs)
+                 (= (set (map :observation-id rows)) (set (keys verified-refs)))
+                 (= (count rows) (count (set (map :observation-id rows))))
+                 (every? #(valid-source-row? snapshot-sha256 %
+                                             (get verified-refs (:observation-id %))) rows))
+    (fail! "Source observations lack exact verified immutable refs" {}))
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (query connection "SELECT pg_advisory_xact_lock(781246919)")
+      (let [active (:snapshot_sha256 (first (query connection
+                                                   "SELECT snapshot_sha256 FROM freediving.source_identity_snapshot WHERE singleton=true")))
+            existing (into {} (map (juxt :observation_id :body_edn)
+                                   (query connection "SELECT observation_id,body_edn FROM freediving.source_identity_observations")))]
+        (when (and active (not= active snapshot-sha256))
+          (fail! "Source identity snapshot changed" {}))
+        (when-not active
+          (with-open [statement (.prepareStatement connection
+                                                   "INSERT INTO freediving.source_identity_snapshot(singleton,snapshot_sha256) VALUES(true,?)")]
+            (.setString statement 1 snapshot-sha256)
+            (.executeUpdate statement)))
+        (doseq [row rows]
+          (let [id (:observation-id row)
+                canonical (select-keys row [:observation-id :source-name :parse-status :citation
+                                            :source-observation-ref])
+                body (binding [*print-length* nil *print-level* nil] (pr-str canonical))]
+            (if-let [prior (get existing id)]
+              (when-not (= canonical (edn/read-string prior))
+                (fail! "Conflicting source observation" {:observation-id id}))
+              (with-open [statement (.prepareStatement connection
+                                                       "INSERT INTO freediving.source_identity_observations(observation_id,snapshot_sha256,body_edn) VALUES(?,?,?)")]
+                (.setString statement 1 id)
+                (.setString statement 2 snapshot-sha256)
+                (.setString statement 3 body)
+                (.executeUpdate statement)))))
+        (let [result (write-canonical-view! connection (read-ledger connection))]
+          (.commit connection) result))
+      (catch Exception error (.rollback connection) (throw error)))))
 
 (defn- evidence-digest [ledger]
   (let [ordered (mapv (fn [id] [id (get-in ledger [:rows id])]) (sort (keys (:rows ledger))))]
@@ -616,6 +699,21 @@
          (.commit connection) result)
        (catch Exception error (.rollback connection) (throw error))))))
 
+(defn private-source-decision
+  "Construct a cited identity question scoped to the registered source snapshot."
+  ([url target-id candidate-id]
+   (private-source-decision url target-id candidate-id {}))
+  ([url target-id candidate-id opts]
+   (with-open [connection (DriverManager/getConnection url)]
+     (.setAutoCommit connection false)
+     (.setReadOnly connection true)
+     (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+     (try
+       (let [rows (source-rows connection)
+             result (jev-decision (empty-ledger rows) target-id candidate-id opts)]
+         (.commit connection) result)
+       (catch Exception error (.rollback connection) (throw error))))))
+
 (defn private-history
   "Return the inspectable append-only identity history, including database actor and time."
   [url]
@@ -665,7 +763,8 @@
         (when (and (nil? existing) (:owner-binding event))
           (let [[a b] (:pair event)
                 expected (:owner-canonical-decision event)
-                current (try (jev-decision ledger a b
+                current (try (jev-decision (if (:source-binding event)
+                                             (empty-ledger (source-rows connection)) ledger) a b
                                            {:id (:id expected)
                                             :dependencies (:dependencies expected)})
                              (catch clojure.lang.ExceptionInfo _ nil))]
@@ -738,6 +837,23 @@
                            (write-canonical-view! connection updated))]
             (.commit connection) result)))
       (catch Exception e (.rollback connection) (throw e)))))
+
+(defn record-source-event!
+  "Append one human source-derived identity action against registered exact refs."
+  [url event]
+  (when-not (and (= :human (:actor-kind event))
+                 (map? (:source-binding event))
+                 (sha256? (get-in event [:source-binding :snapshot-sha256]))
+                 (map? (get-in event [:source-binding :refs]))
+                 (= 2 (count (get-in event [:source-binding :refs])))
+                 (every? #(and (string? %) (str/starts-with? % "source-observation:"))
+                         (keys (get-in event [:source-binding :refs])))
+                 (or (= :reverse (:action event))
+                     (= (set (:pair event))
+                        (set (keys (get-in event [:source-binding :refs])))))
+                 (contains? event :base-revision))
+    (fail! "Source identity action requires a current human binding" {}))
+  (record-event! url event))
 
 (defn record-model-event!
   "Append one current model-backed identity approval through the canonical DB ledger.

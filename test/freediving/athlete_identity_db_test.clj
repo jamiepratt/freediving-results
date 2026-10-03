@@ -1,5 +1,6 @@
 (ns freediving.athlete-identity-db-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [clojure.java.io :as io]
             [freediving.athlete-identity :as identity]
             [freediving.observations :as observations]
             [freediving.observations-test :as fixture]
@@ -17,6 +18,78 @@
     (observations/migrate! admin "observations_app")
     (reviews/migrate! admin "observations_app" "reviews_owner")
     (f)))
+
+(defn- source-row [record-id name snapshot]
+  (let [ref {:kind "source-derived" :snapshot_sha256 snapshot
+             :snapshot_record_id record-id :source_name "synthetic-aida"
+             :source_sha256 (apply str (repeat 64 "a"))
+             :packet_sha256 (apply str (repeat 64 "b"))
+             :citation {:date "2026-01-01" :row record-id}
+             :adapter_version "test-adapter/1"
+             :observation_version (apply str (repeat 64 "c"))}]
+    {:observation-id (str "source-observation:" record-id)
+     :source-name name :parse-status :parsed :citation ref
+     :source-observation-ref ref}))
+
+(deftest source-observations-project-without-postgresql-observation-ids
+  (let [snapshot (apply str (repeat 64 "d"))
+        a (source-row (apply str (repeat 64 "1")) "Ada Diver" snapshot)
+        b (source-row (apply str (repeat 64 "2")) "Ada Diver" snapshot)
+        rows [a b]
+        registration {:snapshot-sha256 snapshot :rows rows
+                      :verified-refs (into {} (map (juxt :observation-id :citation) rows))}
+        pair [(:observation-id a) (:observation-id b)]
+        link {:id "source-link" :action :accept :actor-kind :human :pair pair
+              :base-revision 0 :reason "cited synthetic link"
+              :source-binding {:snapshot-sha256 snapshot
+                               :refs (into {} (map (juxt :observation-id :citation) rows))}}]
+    (is (= 2 (:provisional-record-count (identity/register-source-observations! reviewer registration))))
+    (is (thrown? Exception
+                 (fixture/sql! admin (slurp (io/resource "migrations/020-source-identity-observations.down.sql")))))
+    (is (= 2 (:provisional-record-count (identity/register-source-observations! reviewer registration))))
+    (is (= pair (get-in (identity/private-source-decision reviewer (first pair) (second pair))
+                        [:subject :pair])))
+    (is (= 1 (:accepted-group-count (identity/record-source-event! reviewer link))))
+    (is (= 1 (:accepted-group-count (identity/record-source-event! reviewer link))))
+    (is (= 0 (:accepted-group-count
+              (identity/record-source-event! reviewer
+                                             {:id "source-split" :action :reverse :actor-kind :human
+                                              :event-id "source-link" :base-revision 1
+                                              :reason "corrected source identity"
+                                              :source-binding (:source-binding link)}))))
+    (is (= 2 (:provisional-record-count (identity/private-canonical-view reviewer))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-source-event! reviewer
+                                                (assoc link :id "stale-revision" :base-revision 0))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-source-event! reviewer
+                                                (assoc link :id "missing-ref" :base-revision 2
+                                                       :source-binding (update (:source-binding link) :refs dissoc
+                                                                               (:observation-id b))))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! app
+                                         {:id "forged-source-auto" :action :accept :actor-kind :automatic
+                                          :pair pair :rule-version identity/rule-version})))
+    (is (= [{:pair pair :event-id "source-split" :actor-kind :human
+             :reason "corrected source identity"}]
+           (:negative-pairs (identity/private-projection reviewer))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-source-event! reviewer
+                                                (assoc link :id "human-relink" :base-revision 2))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/register-source-observations! reviewer
+                                                         (assoc registration :snapshot-sha256 (apply str (repeat 64 "e"))))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-source-event! reviewer
+                                                (assoc link :id "stale-ref" :base-revision 2
+                                                       :source-binding (assoc-in (:source-binding link)
+                                                                                 [:refs (:observation-id a) :observation_version]
+                                                                                 (apply str (repeat 64 "f")))))))))
+
+(deftest empty-source-schema-can-roll-back-and-reapply
+  (fixture/sql! admin (slurp (io/resource "migrations/020-source-identity-observations.down.sql")))
+  (reviews/migrate! admin "observations_app" "reviews_owner")
+  (is (zero? (:provisional-record-count (identity/private-projection reviewer)))))
 
 (deftest private-canonical-view-follows-links-and-recovers-from-new-evidence
   (let [source (fixture/synthetic 1 "canonical-view/1")

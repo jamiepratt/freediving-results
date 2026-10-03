@@ -477,6 +477,7 @@ class DecisionStore:
         p = self._base(decision_id)
         binding = self._binding()
         effective = p['status']
+        projection_status = 'unavailable'
         missing = []
         if binding:
             missing = [item['id'] for item in p['evidence'] if item['id'] not in binding['evidence_ids']]
@@ -488,11 +489,21 @@ class DecisionStore:
                 if self.inspect(dependency)['effective_status'] not in ACCEPTED:
                     effective = 'invalidated'
                     break
+        if self._has_source_derived_revision(p):
+            action = self.db.execute('''SELECT revision FROM events WHERE decision_id=?
+                                        AND action IN ('approve','correct','reject','reverse')
+                                        ORDER BY revision DESC LIMIT 1''', (decision_id,)).fetchone()
+            if action:
+                delivered = self.db.execute('''SELECT COUNT(DISTINCT target) FROM human_event_deliveries
+                                               WHERE event_revision=?''', (action['revision'],)).fetchone()[0]
+                projection_status = 'verified' if delivered == len(DELIVERY_TARGETS) else 'pending'
+                if delivered != len(DELIVERY_TARGETS) and effective != 'invalidated':
+                    effective = 'projection_pending'
         return p | {'active_snapshot_sha256': binding['snapshot_sha256'] if binding else None,
                     'binding_revision': binding['revision'] if binding else None,
                     'store_revision': self.revision, 'effective_status': effective,
                     'missing_evidence_ids': missing,
-                    'canonical_projection_status': 'unavailable'}
+                    'canonical_projection_status': projection_status}
 
     def queue(self, *, decision_type=None, status='pending', source_name=None, limit=50, offset=0):
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 100000:
@@ -590,8 +601,6 @@ class DecisionStore:
             return old
         try:
             current = self.inspect(decision_id)
-            if self._has_source_derived_revision(current):
-                raise ConflictError('source-derived observation has no canonical route for owner action')
             status = current['effective_status']
             if action in ('approve', 'correct') and status not in ('pending', 'automatic_approved', 'human_approved', 'human_corrected'):
                 raise ConflictError('decision cannot be approved in current state')

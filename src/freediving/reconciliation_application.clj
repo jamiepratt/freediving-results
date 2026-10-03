@@ -223,10 +223,16 @@
                (get-in opts [:current-bindings id])
                (nat-int? (get-in opts [:identity-revisions id])))
         {:status (if (= :reversed (:status view)) :reversed :materialized)
-         :projection (owner-identity/record-imported-decision!
-                      (:reviewer-url opts) ledger decision
-                      (get-in opts [:current-bindings id])
-                      (get-in opts [:identity-revisions id]))}
+         :projection (if (:source-registration opts)
+                       (owner-identity/record-imported-decision!
+                        (:reviewer-url opts) ledger decision
+                        (get-in opts [:current-bindings id])
+                        (get-in opts [:identity-revisions id])
+                        (:source-registration opts))
+                       (owner-identity/record-imported-decision!
+                        (:reviewer-url opts) ledger decision
+                        (get-in opts [:current-bindings id])
+                        (get-in opts [:identity-revisions id])))}
         (unresolved :missing-owner-identity-target))
 
       (and (= :human (:origin view)) (correction-statuses (:status view)))
