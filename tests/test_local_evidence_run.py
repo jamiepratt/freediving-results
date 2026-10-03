@@ -75,7 +75,9 @@ def test_reconciliation_checkpoints_after_local_staging_and_replays_without_scor
               :evidence [{:evidence-id "synthetic-row" :citation {:source-sha256 "synthetic" :locator "row 1"}
                           :fact "Two distinct synthetic people"}]}]
  :synthetic-answers {"different-people" {:type "choice" :choice "different_person"
-   :confidence 0.99 :probabilities {"same_person" 0.005 "different_person" 0.99 "unknown" 0.005}}}}''')
+   :confidence 0.99 :probabilities {"same_person" 0.005 "different_person" 0.99 "unknown" 0.005}}}
+ :review-sample {:frame "synthetic reviewed approvals" :reviewed 1 :errors 0
+                 :selection "owner-selected" :selection-bias "convenience sample"}}''')
     data = json.loads(plan.read_text())
     data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec), 'name_evidence': {'status': 'gap', 'reason': 'synthetic fixture has no affiliate roster'}}
     plan.write_text(json.dumps(data))
@@ -87,6 +89,20 @@ def test_reconciliation_checkpoints_after_local_staging_and_replays_without_scor
     assert state['reconciliation']['status'] == 'complete'
     assert state['reconciliation']['no_link'] == 1
     assert state['reconciliation']['provider_calls'] == 1
+    receipt = state['reconciliation']['metrics']
+    assert receipt['schema'] == 'local-reconciliation-metrics/v1'
+    assert receipt['binding']['snapshot_sha256'] == state['local']['snapshot_sha256']
+    assert receipt['binding']['decision_revision'] == state['reconciliation']['decision_revision']
+    assert receipt['coverage']['decision_denominator'] == 1
+    assert receipt['coverage']['by_family']['identity']['denominator'] == 1
+    assert receipt['coverage']['by_family']['identity']['automatic_approved'] == 1
+    assert receipt['provider']['calls_this_execution'] == 1
+    assert receipt['provider']['reported_usage'] is None
+    assert receipt['provider']['actual_monetary_cost'] is None
+    assert receipt['sampled_error'] == {'sampling_frame': 'synthetic reviewed approvals',
+                                        'numerator': 0, 'denominator': 1, 'selection': 'owner-selected',
+                                        'selection_bias': 'convenience sample', 'rate': 0.0}
+    assert receipt['latency_ms'] is None
     assert state['reconciliation']['gaps'] == [{'name': 'affiliate-names', 'reason': 'synthetic fixture has no affiliate roster'}]
     assert state['remote']['status'] == 'pending'
     assert state['coverage']['confirmed_distinct_attempts'] is None
@@ -96,6 +112,15 @@ def test_reconciliation_checkpoints_after_local_staging_and_replays_without_scor
     assert counter.read_text() == 'x'
     assert sha(target / 'reconciliation' / 'flow.edn') == ledger_hash
     assert json.loads((target / 'state.json').read_text())['reconciliation']['provider_calls'] == 1
+    queried = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
+                             capture_output=True, text=True)
+    assert queried.returncode == 0, queried.stderr
+    assert json.loads(queried.stdout)['provider']['calls_this_execution'] == 1
+    (target / 'reconciliation' / 'flow.edn').write_text('tampered')
+    stale = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
+                           capture_output=True, text=True)
+    assert stale.returncode != 0
+    assert 'metrics checkpoint binding changed' in stale.stderr
 
 
 def test_cli_checkpoints_flow_ack_and_preserves_local_run_when_canonical_target_is_absent(tmp_path):
@@ -232,10 +257,43 @@ def test_deterministic_local_reconciliation_has_no_provider_dispatch(tmp_path):
     state = json.loads((target / 'state.json').read_text())
     assert state['local']['status'] == 'complete'
     assert state['reconciliation']['provider_calls'] == 0
+    assert state['reconciliation']['metrics']['provider']['calls_recorded'] == 0
+    assert state['reconciliation']['metrics']['coverage']['automatic_approved'] == 1
     assert state['reconciliation']['flow_statuses'] == {'approved': 1}
     assert state['reconciliation']['unresolved'] == 1  # no canonical target for a rule-only identity decision
     assert state['reconciliation']['accepted_athletes'] is None
     assert state['reconciliation']['distinct_attempts'] is None
+
+
+def test_synthetic_timeout_is_reported_with_a_partial_source_gap(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    spec = tmp_path / 'timeout.edn'
+    spec.write_text('''{:config {:provider :jev :model "synthetic-jev" :version "synthetic/1"}
+ :decisions [{:id "identity-timeout" :family :identity :action :same-person
+              :choices [:same-person :different-person :unknown]
+              :subject {:id "synthetic-pair"} :candidates ["a" "b"]
+              :dependencies [] :evidence-adequate? true
+              :evidence [{:evidence-id "synthetic-row" :citation {:source-sha256 "synthetic" :locator "row 1"}
+                          :fact "Synthetic names"}]}]
+ :synthetic-answers {} :synthetic-errors {"identity-timeout" :timeout}}''')
+    data = json.loads(plan.read_text())
+    excluded = tmp_path / 'unsupported-page.json'
+    excluded.write_text('{}')
+    data['excluded'].append({'name': 'unsupported-page', 'path': str(excluded),
+                             'reason': 'synthetic unsupported section'})
+    data['reconciliation'] = {'mode': 'synthetic', 'spec': str(spec),
+                              'name_evidence': {'status': 'gap', 'reason': 'synthetic roster gap'}}
+    plan.write_text(json.dumps(data))
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode == 0, result.stderr
+    metrics = json.loads((target / 'state.json').read_text())['reconciliation']['metrics']
+    assert metrics['coverage']['decision_denominator'] == 1
+    assert metrics['coverage']['unknown'] == 1
+    assert metrics['coverage']['pending_review'] == 1
+    assert metrics['source_gaps'] == 2
+    assert metrics['provider']['calls_recorded'] == 1
+    assert metrics['provider']['reported_usage'] is None
 
 
 def test_synthetic_reconciliation_cannot_activate_remote_presentation(tmp_path):

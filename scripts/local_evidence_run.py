@@ -177,7 +177,8 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
             reconcile_local(plan['reconciliation'], run_dir, state)
             atomic_json(state_path, state)
         except Exception as error:
-            state['reconciliation'] = {'status': 'failed', 'error': str(error)}
+            state['reconciliation'] = {**state['reconciliation'], 'status': 'failed',
+                                       'error': str(error)}
             atomic_json(state_path, state)
             raise
 
@@ -273,7 +274,12 @@ def reconcile_local(config, run_dir, state):
         if not owner_config:
             return
     ledger.parent.mkdir(mode=0o700, exist_ok=True)
-    state['reconciliation'] = {'status': 'running', 'spec_sha256': spec_hash}
+    known_calls = completed.get('metrics', {}).get('provider', {}).get(
+        'calls_recorded', completed.get('calls_recorded_before_execution', 0))
+    interrupted = completed.get('prior_interrupted', False) or completed.get('status') in ('running', 'failed')
+    state['reconciliation'] = {'status': 'running', 'spec_sha256': spec_hash,
+                               'calls_recorded_before_execution': known_calls,
+                               'prior_interrupted': interrupted}
     atomic_json(run_dir / 'state.json', state)
     argv = ['clojure', '-M', '-m', 'freediving.local-reconciliation',
             str(spec), str(ledger), state['local']['snapshot_sha256']]
@@ -284,6 +290,13 @@ def reconcile_local(config, run_dir, state):
     if digest(spec) != spec_hash:
         raise ValueError('reconciliation specification changed during run')
     report = json.loads(result.stdout)
+    report['metrics']['provider']['calls_recorded'] = known_calls + report['provider_calls']
+    report['metrics']['provider']['interrupted_call_count_unknown'] = interrupted
+    report['metrics']['binding']['run_id'] = state['run_id']
+    report['metrics']['binding']['stage_checkpoint'] = 'reconciliation-complete'
+    report['metrics']['binding']['spec_sha256'] = spec_hash
+    report['metrics']['binding']['ledger_sha256'] = digest(ledger)
+    report['metrics']['source_gaps'] = len(state['coverage']['gaps']) + len(gaps)
     state['reconciliation'] = {**report, 'status': 'complete', 'mode': 'synthetic',
                                'spec_sha256': spec_hash, 'ledger_sha256': digest(ledger),
                                'gaps': gaps}
@@ -303,8 +316,8 @@ def ssh_route_reachable(ssh, host):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run'])
-    parser.add_argument('--plan', type=Path, required=True)
+    parser.add_argument('command', choices=['run', 'metrics'])
+    parser.add_argument('--plan', type=Path)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--remote-config', type=Path)
     parser.add_argument('--owner-access-jwt-env')
@@ -313,6 +326,21 @@ def main():
     parser.add_argument('--status-token-env')
     args = parser.parse_args()
     try:
+        if args.command == 'metrics':
+            state = json.loads((args.run_dir / 'state.json').read_text())
+            receipt = state['reconciliation']['metrics']
+            if (state['reconciliation']['status'] != 'complete'
+                    or receipt['binding']['run_id'] != state['run_id']
+                    or receipt['binding']['snapshot_sha256'] != state['local']['snapshot_sha256']
+                    or receipt['binding']['decision_revision'] != state['reconciliation']['decision_revision']
+                    or receipt['binding']['spec_sha256'] != state['reconciliation']['spec_sha256']
+                    or receipt['binding']['ledger_sha256'] != state['reconciliation']['ledger_sha256']
+                    or receipt['binding']['ledger_sha256'] != digest(args.run_dir / 'reconciliation' / 'flow.edn')):
+                raise ValueError('metrics checkpoint binding changed')
+            print(json.dumps(receipt, sort_keys=True))
+            return 0
+        if args.plan is None:
+            raise ValueError('--plan required for run')
         run(args.plan, args.run_dir, remote_config=args.remote_config,
             owner_access_jwt=os.environ.get(args.owner_access_jwt_env) if args.owner_access_jwt_env else None,
             publisher_requests_stopped=args.publisher_requests_stopped,

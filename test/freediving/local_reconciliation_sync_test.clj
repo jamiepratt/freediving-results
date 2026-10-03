@@ -75,6 +75,8 @@
                               (:events (flow/load-ledger! ledger))))))
       (let [result (local/run! (str spec) (str ledger) sha (str config))]
         (is (= 2 (:remote_store_revision result)))
+        (is (= 1 (get-in result [:metrics :reversals])))
+        (is (= 1 (get-in result [:metrics :coverage :pending_review])))
         (is (= :reversed (:status (get (flow/inspect (flow/load-ledger! ledger)
                                                      [decision]) "identity"))))
         (is (= [0 0 1 0 2] @calls))
