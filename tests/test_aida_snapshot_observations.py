@@ -127,15 +127,30 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             self.assertEqual(1, store.revision)
             registered = register_verified_export(store, root, envelope)
             self.assertEqual('pending', registered[0]['status'])
-            for action, correction in [('approve', None), ('reject', None),
-                                       ('correct', {'action': 'same_person'})]:
-                before = store.revision
-                with self.assertRaisesRegex(ConflictError, 'canonical route'):
-                    store.act('source-decision-1', action=action,
-                              correction=correction, expected_revision=before,
-                              idempotency_key='source-' + action)
-                self.assertEqual(before, store.revision)
-            self.assertEqual([], store.human_events()['events'])
+            before = store.revision
+            accepted = store.act('source-decision-1', action='approve',
+                                 expected_revision=before, idempotency_key='source-approve')
+            self.assertEqual('human_approved', accepted['status'])
+            self.assertEqual('projection_pending', accepted['effective_status'])
+            event = store.human_events()['events'][0]
+            self.assertEqual(accepted, store.act('source-decision-1', action='approve',
+                             expected_revision=before, idempotency_key='source-approve'))
+            with self.assertRaises(ConflictError):
+                store.act('source-decision-1', action='reverse',
+                          expected_revision=before, idempotency_key='stale-reverse')
+            store.acknowledge_human_event('flow-ledger', event, 'flow:committed')
+            self.assertEqual('projection_pending', store.inspect('source-decision-1')['effective_status'])
+            store.acknowledge_human_event('postgresql', event, 'pg:committed')
+            self.assertEqual('human_approved', store.inspect('source-decision-1')['effective_status'])
+            reversal = store.act('source-decision-1', action='reverse',
+                                 expected_revision=store.revision,
+                                 idempotency_key='source-reverse')
+            self.assertEqual('projection_pending', reversal['effective_status'])
+            reverse_event = store.human_events()['events'][-1]
+            store.acknowledge_human_event('flow-ledger', reverse_event, 'flow:reversed')
+            self.assertEqual('projection_pending', store.inspect('source-decision-1')['effective_status'])
+            store.acknowledge_human_event('postgresql', reverse_event, 'pg:reversed')
+            self.assertEqual('reversed', store.inspect('source-decision-1')['effective_status'])
             self.assertEqual('Synthetic Athlete', observed['source_fields']['name'])
             self.assertEqual('GER', observed['source_fields']['representation_raw'])
             self.assertEqual('2025-08-30', observed['event_date'])

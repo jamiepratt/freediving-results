@@ -160,6 +160,72 @@
       (is (= 2 (count @persisted)))
       (is (= 2 (count (:events (first @persisted))))))))
 
+(deftest signed-source-owner-action-projects-and-reverses-without-pg-observation
+  (let [sha (apply str (repeat 64 "d"))
+        rows (mapv (fn [record]
+                     (let [ref {:kind "source-derived" :snapshot_sha256 sha
+                                :snapshot_record_id record :source_name "synthetic-aida"
+                                :source_sha256 (apply str (repeat 64 "a"))
+                                :packet_sha256 (apply str (repeat 64 "b"))
+                                :citation {:date "2026-01-01" :row record}
+                                :adapter_version "test-adapter/1"
+                                :observation_version (apply str (repeat 64 "c"))}]
+                       {:observation-id (str "source-observation:" record)
+                        :source-name "Synthetic Diver" :parse-status :parsed
+                        :citation ref :source-observation-ref ref}))
+                   [(apply str (repeat 64 "1")) (apply str (repeat 64 "2"))])
+        refs (into {} (map (juxt :observation-id :citation) rows))
+        registration {:snapshot-sha256 sha :rows rows :verified-refs refs}
+        [a b] (mapv :observation-id rows)
+        decision (identity/jev-decision (identity/empty-ledger rows) a b)
+        binding {:decision_id (:id decision) :reconciliation_run_revision 1
+                 :reconciliation_event_id "original-flow"
+                 :observation_revisions (mapv refs [a b])
+                 :evidence_bindings (mapv (fn [item source-id]
+                                            {:evidence_id (:evidence-id item)
+                                             :snapshot_record_id (get-in refs [source-id :snapshot_record_id])
+                                             :observation_revision (refs source-id)})
+                                          (:evidence decision) [a b])}
+        owner {:id "owner-store:3" :store_revision 3 :binding_revision 2
+               :snapshot_sha256 sha :decision_id (:id decision) :action "approve"
+               :actor "owner" :reason "Source cited"
+               :proposal {:selected_option "same_person" :canonical_binding binding}}
+        base (update (flow/empty-ledger) :events conj
+                     {:id "original-flow" :decision-id (:id decision)})
+        opts {:config {:version "synthetic/1"} :policy {:version "synthetic/1"}
+              :persist-flow! (fn [_]) :import-token "private-import-token-for-test"
+              :current-bindings {(:id decision) binding}
+              :active-snapshot-sha256 sha :active-binding-revision 2
+              :reviewer-url reviewer :source-registration registration}
+        feed (signed-feed (:import-token opts)
+                          {:events [owner] :store_revision 3 :next_revision 3})
+        forged-ref (assoc (refs a) :observation_version (apply str (repeat 64 "f")))
+        forged-binding (-> binding
+                           (assoc-in [:observation_revisions 0] forged-ref)
+                           (assoc-in [:evidence_bindings 0 :observation_revision] forged-ref))
+        forged-owner (assoc-in owner [:proposal :canonical_binding] forged-binding)
+        forged (application/run-imported! base [decision]
+                                          (signed-feed (:import-token opts)
+                                                       {:events [forged-owner]
+                                                        :store_revision 3 :next_revision 3})
+                                          (assoc-in opts [:current-bindings (:id decision)]
+                                                    forged-binding))
+        approved (application/run-imported! base [decision] feed opts)]
+    (is (= :unresolved (get-in forged [:results (:id decision) :status])))
+    (is (= :materialized (get-in approved [:results (:id decision) :status])))
+    (is (= 1 (:accepted-group-count (identity/private-canonical-view reviewer))))
+    (is (= :materialized (get-in (application/run-imported! base [decision] feed opts)
+                                 [:results (:id decision) :status])))
+    (let [reverse-event (assoc owner :id "owner-store:4" :store_revision 4
+                               :action "reverse" :reason "Different people")
+          reversed (application/run-imported! (:flow-ledger approved) [decision]
+                                              (signed-feed (:import-token opts)
+                                                           {:events [reverse-event]
+                                                            :store_revision 4 :next_revision 4}) opts)]
+      (is (= :reversed (get-in reversed [:results (:id decision) :status])))
+      (is (= 0 (:accepted-group-count (identity/private-canonical-view reviewer))))
+      (is (= 1 (count (:negative-pairs (identity/private-projection reviewer))))))))
+
 (defn -main [& _]
   (let [result (clojure.test/run-tests 'freediving.owner-identity-route-test)]
     (shutdown-agents)
