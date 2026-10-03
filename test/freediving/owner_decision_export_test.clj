@@ -39,12 +39,13 @@
   (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
         result (export/export-proposals
                 ledger [decision]
-                {:snapshot-sha256 sha :binding-revision 7
+                {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                  :evidence-bindings {"source-row-1" mapping}
                  :observation-revisions {[job 0] observation}
                  :verified-snapshot-records verified-record})
         proposal (first (:proposals result))]
     (is (= 1 (:reconciliation_run_revision result)))
+    (is (= 11 (:store_revision result)))
     (is (= record (get-in proposal [:evidence 0 :id])))
     (is (= "source-row-1" (get-in proposal [:evidence 0 :citation :evidence_id])))
     (is (= (:citation (first (:evidence decision)))
@@ -63,7 +64,7 @@
                      (update :owner-proposal dissoc :subject_id :source_name :competing_options
                              :supporting_evidence :conflicting_evidence))
         ledger (assoc-in ledger [:events 0 :evidence] (:evidence decision))
-        opts {:snapshot-sha256 sha :binding-revision 7
+        opts {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
               :evidence-bindings {"source-row-1" mapping}
               :observation-revisions {[job 0] observation}
               :verified-snapshot-records verified-record}
@@ -76,7 +77,7 @@
 
 (deftest refuses-unverified-or-changed-observation-bindings
   (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
-        base {:snapshot-sha256 sha :binding-revision 7
+        base {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
               :evidence-bindings {"source-row-1" mapping}
               :observation-revisions {[job 0] observation}
               :verified-snapshot-records verified-record}]
@@ -86,12 +87,25 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (export/export-proposals ledger [decision] opts))))))
 
+(deftest requires-observed-owner-store-revision
+  (let [{:keys [ledger decision observation mapping verified-record]} (fixture)
+        opts {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
+              :evidence-bindings {"source-row-1" mapping}
+              :observation-revisions {[job 0] observation}
+              :verified-snapshot-records verified-record}]
+    (is (= 11 (:store_revision (export/export-proposals ledger [decision] opts))))
+    (doseq [changed [(dissoc opts :store-revision)
+                     (assoc opts :store-revision 6)
+                     (assoc opts :store-revision "11")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (export/export-proposals ledger [decision] changed))))))
+
 (deftest refuses-snapshot-record-for-a-different-observation
   (let [{:keys [ledger decision observation mapping]} (fixture)]
     (is (thrown? clojure.lang.ExceptionInfo
                  (export/export-proposals
                   ledger [decision]
-                  {:snapshot-sha256 sha :binding-revision 7
+                  {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                    :evidence-bindings {"source-row-1" mapping}
                    :observation-revisions {[job 0] observation}
                    :verified-snapshot-records
@@ -109,7 +123,7 @@
         proposal (first (:proposals
                          (export/export-proposals
                           ledger [decision]
-                          {:snapshot-sha256 sha :binding-revision 7
+                          {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                            :evidence-bindings {"source-row-1" mapping}
                            :observation-revisions {[job 0] observation}
                            :verified-snapshot-records
@@ -132,7 +146,7 @@
         proposal (first (:proposals
                          (export/export-proposals
                           ledger [decision]
-                          {:snapshot-sha256 sha :binding-revision 7
+                          {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                            :evidence-bindings {"source-row-1" mapping}
                            :observation-revisions {[job 0] observation}
                            :verified-snapshot-records record-value})))]
@@ -155,7 +169,7 @@
                         :field-binding binding)
         ledger (assoc-in ledger [:events 0 :action] :category)
         verified-record (assoc-in verified-record [record :source-value] "Women")
-        opts {:snapshot-sha256 sha :binding-revision 7
+        opts {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
               :evidence-bindings {"source-row-1" mapping}
               :observation-revisions {[job 0] observation}
               :verified-snapshot-records verified-record}
@@ -187,7 +201,7 @@
                         :field-binding binding)
         ledger (assoc-in ledger [:events 0 :action] :representation)
         verified-record (assoc-in verified-record [record :source-value] "AIN")
-        opts {:snapshot-sha256 sha :binding-revision 7
+        opts {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
               :evidence-bindings {"source-row-1" mapping}
               :observation-revisions {[job 0] observation}
               :verified-snapshot-records verified-record}]
@@ -209,7 +223,7 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (export/export-proposals
                   ledger [decision]
-                  {:snapshot-sha256 sha :binding-revision 7
+                  {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                    :evidence-bindings {"source-row-1" mapping}
                    :observation-revisions {[job 0] observation}
                    :verified-snapshot-records verified-record})))))
@@ -219,7 +233,7 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (export/export-proposals
                   ledger [(assoc decision :family :identity)]
-                  {:snapshot-sha256 sha :binding-revision 7
+                  {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
                    :evidence-bindings {"source-row-1" mapping}
                    :observation-revisions {[job 0] observation}
                    :verified-snapshot-records verified-record})))))
@@ -234,7 +248,7 @@
         decision (update decision :evidence conj second-evidence)
         ledger (assoc-in ledger [:events 0 :evidence] (:evidence decision))
         other-observation (assoc observation :job_id other-job :ordinal 1)
-        opts {:snapshot-sha256 sha :binding-revision 7
+        opts {:snapshot-sha256 sha :binding-revision 7 :store-revision 11
               :evidence-bindings {"source-row-1" mapping
                                   "source-row-2" {:evidence-id "source-row-2"
                                                   :snapshot-record-id other-record

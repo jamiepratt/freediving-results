@@ -252,18 +252,21 @@
   "Export store-compatible proposals only with verified snapshot IDs and exact
    PostgreSQL observation revisions. Caller supplies records read from a verified
    SnapshotQuery, including source values, and revisions read through
-   load-observation-revisions!. Nothing here verifies the snapshot itself or
-   mutates either decision store."
-  [ledger decisions {:keys [snapshot-sha256 binding-revision] :as opts}]
+   load-observation-revisions!. The caller also supplies the owner store revision
+   observed with the active binding. Nothing here verifies the snapshot itself
+   or mutates either decision store."
+  [ledger decisions {:keys [snapshot-sha256 binding-revision store-revision] :as opts}]
   (when-not (and (= flow/ledger-version (:version ledger)) (vector? (:events ledger))
                  (vector? decisions) (sha? snapshot-sha256)
-                 (pos-int? binding-revision)
+                 (pos-int? binding-revision) (pos-int? store-revision)
+                 (<= binding-revision store-revision)
                  (map? (:evidence-bindings opts)) (map? (:observation-revisions opts))
                  (map? (:verified-snapshot-records opts))
                  (= (count decisions) (count (set (map :id decisions)))))
     (invalid! "Invalid verified export inputs" {}))
   (let [run-revision (count (:events ledger))]
     {:snapshot_sha256 snapshot-sha256 :binding_revision binding-revision
+     :store_revision store-revision
      :reconciliation_run_revision run-revision
      :proposals
      (mapv (fn [decision]
