@@ -2,9 +2,10 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 from owner_evidence_cloudflare import (check_access, check_worker_bindings, main,
+                                       resolve_service_token_id,
                                        parse_origin_env, preflight, DOMAIN,
                                        WORKER_SECRETS)
-from cloudflare import ACCOUNT
+from cloudflare import ACCOUNT, PUBLIC_INGRESS, FALLBACK
 
 
 class PrivateActivationChecks(unittest.TestCase):
@@ -18,12 +19,64 @@ class PrivateActivationChecks(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 check_access(app, bad, ['owner@example.com'])
 
+    def test_status_service_auth_requires_exact_verified_token_policy(self):
+        app = {'type': 'self_hosted', 'domain': DOMAIN, 'aud': 'A'*32}
+        owner = {'decision': 'allow', 'include': [{'email': {'email': 'owner@example.com'}}]}
+        status = {'decision': 'non_identity',
+                  'include': [{'service_token': {'token_id': 'status-token-id'}}]}
+        self.assertEqual(check_access(app, [owner, status], ['owner@example.com'],
+                                      'status-token-id'), 'A'*32)
+        for policies, expected in (([owner], 'status-token-id'),
+                                   ([owner, status], None),
+                                   ([owner, {**status, 'decision': 'allow'}], 'status-token-id'),
+                                   ([owner, {**status, 'include': [{'any_valid_service_token': {}}]}], 'status-token-id'),
+                                   ([owner, {**status, 'include': [{'service_token': {'token_id': 'other'}}]}], 'status-token-id'),
+                                   ([owner, {**status, 'require': [{'ip': {'ip': '0.0.0.0/0'}}]}], 'status-token-id'),
+                                   ([owner, status, status], 'status-token-id')):
+            with self.subTest(policies=policies, expected=expected), self.assertRaises(ValueError):
+                check_access(app, policies, ['owner@example.com'], expected)
+
+    def test_status_client_id_resolves_to_one_enabled_cloudflare_token(self):
+        token_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        match = {'id': token_id, 'client_id': 'status123.access', 'enabled': True}
+        with patch('owner_evidence_cloudflare.api', return_value=[match]) as api:
+            self.assertEqual(resolve_service_token_id('status123.access', 'access-read-only'), token_id)
+            self.assertEqual(api.call_args.args[-1], 'access-read-only')
+        for tokens in ([], [match, match], [{**match, 'enabled': False}],
+                       [{**match, 'id': 'not-a-uuid'}],
+                       [{**match, 'client_id': 'other.access'}]):
+            with self.subTest(tokens=tokens), patch('owner_evidence_cloudflare.api', return_value=tokens), self.assertRaises(ValueError):
+                resolve_service_token_id('status123.access', 'access-read-only')
+
     def test_origin_configuration_must_be_complete(self):
         lines = "OWNER_EVIDENCE_GATEWAY_SECRET='1234567890123456'\nOWNER_EVIDENCE_ORIGIN_HOST='owner-origin.alphacompose.com'\nOWNER_EVIDENCE_EMAILS='owner@example.com'\nOWNER_EVIDENCE_SNAPSHOT_SHA256='" + 'a'*64 + "'\n"
         _, emails = parse_origin_env(lines)
         self.assertEqual(emails, ['owner@example.com'])
         with self.assertRaises(ValueError):
             parse_origin_env(lines.replace('owner-origin.alphacompose.com', 'poc-origin.alphacompose.com'))
+
+    def test_origin_configuration_accepts_complete_private_status_writer(self):
+        base = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+                "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+                "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+                f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n"
+                "OWNER_EVIDENCE_DECISION_API_ENABLED=1\n")
+        status = ("OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n"
+                  "OWNER_EVIDENCE_STATUS_TOKEN=abcdefghijklmnopqrstuvwxyz123456\n"
+                  "OWNER_EVIDENCE_STATUS_CLIENT_ID=abcdefgh.access\n")
+        values, emails = parse_origin_env(base + status)
+        self.assertEqual(emails, ['owner@example.com'])
+        self.assertEqual(values['OWNER_EVIDENCE_STATUS_CLIENT_ID'], 'abcdefgh.access')
+        for extra in ("OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n",
+                      status.replace('abcdefgh.access', 'invalid-client-id'),
+                      status.replace('abcdefghijklmnopqrstuvwxyz123456', 'short'),
+                      status.replace('presentation-status.json', 'other.json'),
+                      status + 'OWNER_EVIDENCE_UNKNOWN=unexpected\n'):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                parse_origin_env(base + extra)
+        with self.assertRaises(ValueError):
+            parse_origin_env(base.replace('OWNER_EVIDENCE_DECISION_API_ENABLED=1',
+                                          'OWNER_EVIDENCE_DECISION_API_ENABLED=0') + status)
 
     def test_missing_access_read_permission_stops_before_host_or_tunnel(self):
         with patch('owner_evidence_cloudflare.token_from_profile', return_value='token'), \
@@ -49,6 +102,62 @@ class PrivateActivationChecks(unittest.TestCase):
                 (f'accounts/{ACCOUNT}/access/apps/{app_id}/policies', 'access-read-only')])
             process.check_output.assert_not_called()
             process.run.assert_not_called()
+
+    def test_preflight_rejects_status_binding_without_matching_service_auth(self):
+        app_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        app = {'type': 'self_hosted', 'domain': DOMAIN, 'aud': 'A'*32}
+        owner = {'decision': 'allow', 'include': [{'email': {'email': 'owner@example.com'}}]}
+        env = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+               "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+               "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+               f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n"
+               "OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n"
+               "OWNER_EVIDENCE_STATUS_TOKEN=abcdefghijklmnopqrstuvwxyz123456\n"
+               "OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n")
+        token = {'id': app_id, 'client_id': 'status123.access', 'enabled': True}
+        with patch('owner_evidence_cloudflare.token_from_profile', return_value='oauth'), \
+             patch('owner_evidence_cloudflare.api', side_effect=[app, [owner], [token]]) as api, \
+             patch('owner_evidence_cloudflare.subprocess.check_output', return_value=env), \
+             patch('owner_evidence_cloudflare.subprocess.run') as run, \
+             patch('owner_evidence_cloudflare.check_worker_bindings',
+                   return_value={'GATEWAY_SECRET', 'OWNER_EVIDENCE_STATUS_CLIENT_ID'}):
+            with self.assertRaises(ValueError):
+                preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
+            self.assertEqual(api.call_count, 3)
+            run.assert_not_called()
+        with patch('owner_evidence_cloudflare.token_from_profile', return_value='oauth'), \
+             patch('owner_evidence_cloudflare.api', side_effect=[app, [owner]]) as api, \
+             patch('owner_evidence_cloudflare.subprocess.check_output',
+                   return_value=env.replace('OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n', '').replace('OWNER_EVIDENCE_STATUS_TOKEN=abcdefghijklmnopqrstuvwxyz123456\n', '').replace('OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n', '')), \
+             patch('owner_evidence_cloudflare.check_worker_bindings',
+                   return_value={'GATEWAY_SECRET', 'OWNER_EVIDENCE_STATUS_CLIENT_ID'}):
+            with self.assertRaises(ValueError):
+                preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
+            self.assertEqual(api.call_count, 2)
+
+    def test_preflight_prepares_exact_status_client_binding_for_activation(self):
+        app_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        app = {'type': 'self_hosted', 'domain': DOMAIN, 'aud': 'A'*32}
+        policies = [{'decision': 'allow', 'include': [{'email': {'email': 'owner@example.com'}}]},
+                    {'decision': 'non_identity', 'include': [{'service_token': {'token_id': app_id}}]}]
+        env = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+               "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+               "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+               f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n"
+               "OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n"
+               "OWNER_EVIDENCE_STATUS_TOKEN=abcdefghijklmnopqrstuvwxyz123456\n"
+               "OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n")
+        token = {'id': app_id, 'client_id': 'status123.access', 'enabled': True}
+        with patch('owner_evidence_cloudflare.token_from_profile', return_value='oauth'), \
+             patch('owner_evidence_cloudflare.api', side_effect=[app, policies, [token],
+                   [{'name': 'freediving-results-poc', 'id': 'tunnel-id'}],
+                   {'config': {'ingress': [PUBLIC_INGRESS, FALLBACK]}}, []]), \
+             patch('owner_evidence_cloudflare.subprocess.check_output', side_effect=[env, 'dns-token']), \
+             patch('owner_evidence_cloudflare.subprocess.run'), \
+             patch('owner_evidence_cloudflare.check_origin'), \
+             patch('owner_evidence_cloudflare.check_worker_bindings', return_value={'GATEWAY_SECRET'}):
+            result = preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
+        self.assertEqual(result[-1]['OWNER_EVIDENCE_STATUS_CLIENT_ID'], 'status123.access')
 
     def test_worker_requires_public_secret_and_no_partial_private_bindings(self):
         def check(names):
