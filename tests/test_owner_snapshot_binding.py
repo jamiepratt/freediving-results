@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 
 from scripts.owner_snapshot_binding import load_verified_bindings
+from scripts.cmas_microplus_snapshot_observations import load_source_observations as load_microplus
+from tests.test_cmas_microplus_snapshot_observations import fixture as microplus_fixture
 
 
 SHA = 'a' * 64
@@ -71,6 +73,24 @@ class OwnerSnapshotBindingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'snapshot hash mismatch'):
             load_verified_bindings(self.directory, [{'evidence_id': 'e1',
                 'job_id': JOB, 'ordinal': 0}], [self.revision()])
+
+    def test_microplus_source_ref_binds_and_forgery_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, record_id, _ = microplus_fixture(root)
+            observation = load_microplus(root, [name], source_dir=root)['observations'][0]
+            reference = observation['source_observation_ref']
+            evidence = [{'evidence_id': 'source-row-1',
+                         'source_observation_ref': reference}]
+            bound = load_verified_bindings(root, evidence, [reference])
+            self.assertEqual(reference,
+                             bound['evidence_bindings']['source-row-1']['observation-revision'])
+            self.assertEqual(record_id,
+                             bound['evidence_bindings']['source-row-1']['snapshot-record-id'])
+            forged = dict(reference, observation_version='0' * 64)
+            with self.assertRaisesRegex(ValueError, 'source observation revision differs'):
+                load_verified_bindings(root, [{'evidence_id': 'source-row-1',
+                    'source_observation_ref': forged}], [forged])
 
 
 if __name__ == '__main__':

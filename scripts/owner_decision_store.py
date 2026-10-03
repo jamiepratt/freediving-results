@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
-from aida_snapshot_observations import load_source_observations
+from aida_snapshot_observations import load_source_observations as load_aida
+from cmas_microplus_snapshot_observations import load_source_observations as load_microplus
 
 
 ACCEPTED = {'automatic_approved', 'human_approved', 'human_corrected'}
@@ -175,10 +176,17 @@ class DecisionStore:
                                       (row['source_object_id'].removeprefix('sha256:')
                                        if 'source_object_id' in columns and row['source_object_id'] else None)),
                     'refs': raw.get('observation_refs') or raw.get('imported_observation_refs') or []}
-            aida_names = sorted(name for name, item in snapshot.manifest.get('inputs', {}).items()
-                                if item.get('source_schema') == 'aida-selected-html-packet/v1')
-            if aida_names:
-                source_result = load_source_observations(directory, aida_names)
+            source_schemas = (
+                ('aida-selected-html-packet/v1', load_aida),
+                ('cmas-microplus-private-census/v1', load_microplus),
+                ('cmas-microplus-private-census/v2', load_microplus),
+            )
+            for schema, loader in source_schemas:
+                names = sorted(name for name, item in snapshot.manifest.get('inputs', {}).items()
+                               if item.get('source_schema') == schema)
+                if not names:
+                    continue
+                source_result = loader(directory, names)
                 for observation in source_result['observations']:
                     record_id = observation['snapshot_record_id']
                     if record_id not in observation_refs:

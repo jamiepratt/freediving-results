@@ -6,10 +6,14 @@ import sys
 
 try:
     from scripts.unified_evidence_query import SnapshotQuery
-    from scripts.aida_snapshot_observations import load_source_observations
+    from scripts.aida_snapshot_observations import load_source_observations as load_aida
+    from scripts.cmas_microplus_snapshot_observations import (
+        ADAPTER_VERSION as MICROPLUS_VERSION, load_source_observations as load_microplus)
 except ModuleNotFoundError:
     from unified_evidence_query import SnapshotQuery
-    from aida_snapshot_observations import load_source_observations
+    from aida_snapshot_observations import load_source_observations as load_aida
+    from cmas_microplus_snapshot_observations import (
+        ADAPTER_VERSION as MICROPLUS_VERSION, load_source_observations as load_microplus)
 
 
 REVISION_KEYS = ('job_id', 'ordinal', 'candidate_id', 'artifact_sha256',
@@ -73,7 +77,8 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
                      for ref in source_revisions.values()
                      if ref.get('adapter_version') == version}),
                      'source observation name missing')
-            source_result = load_source_observations(directory, names, adapter_version=version)
+            loader = load_microplus if version == MICROPLUS_VERSION else load_aida
+            source_result = loader(directory, names, adapter_version=version)
             for item in source_result['observations']:
                 record_id = item['snapshot_record_id']
                 if record_id in source_revisions and source_revisions[record_id]['adapter_version'] == version:
