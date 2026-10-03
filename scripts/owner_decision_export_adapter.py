@@ -88,12 +88,16 @@ def register_verified_export(store, snapshot_directory, envelope):
         _require(row is not None and row['revision'] == envelope.get('binding_revision') and
                  row['snapshot_sha256'] == envelope['snapshot_sha256'],
                  'decision store binding changed')
+        _require(type(envelope.get('store_revision')) is int and
+                 envelope['store_revision'] >= row['revision'],
+                 'decision store revision absent from export')
         ids = [proposal['id'] for proposal in proposals]
         _require(len(ids) == len(set(ids)), 'duplicate proposal ID')
         for proposal in proposals:
             _verify_proposal(snapshot, proposal, envelope.get('reconciliation_run_revision'))
     return store.register_batch(envelope['snapshot_sha256'], proposals,
-                                idempotency_key='reconciliation-export:' + _digest(proposals))
+                                idempotency_key='reconciliation-export:' + _digest(proposals),
+                                expected_revision=envelope['store_revision'])
 
 
 def deliver_verified_owner_events(store, config_path, *, limit=100):
@@ -114,8 +118,10 @@ def deliver_verified_owner_events(store, config_path, *, limit=100):
     def callback(target):
         def deliver(event):
             args = ['clojure', '-M', '-m', 'freediving.owner-event-delivery',
-                    '--config', str(config), '--target', target, '--event-id', event['id']]
+                    '--config', str(config), '--target', target, '--event-id', event['id'],
+                    '--expected-event-stdin']
             completed = subprocess.run(args, capture_output=True, text=True,
+                                       input=json.dumps(event, sort_keys=True),
                                        check=True, timeout=120,
                                        cwd=Path(__file__).resolve().parents[1])
             try:

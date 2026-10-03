@@ -194,7 +194,8 @@ class DecisionStore:
             self.db.execute('ROLLBACK')
             raise
 
-    def register_batch(self, snapshot_sha256, proposals, *, idempotency_key):
+    def register_batch(self, snapshot_sha256, proposals, *, idempotency_key,
+                       expected_revision=None):
         """Register a verified export as one ledger transaction, including retries."""
         _sha(snapshot_sha256)
         if not isinstance(proposals, list) or not proposals:
@@ -204,7 +205,8 @@ class DecisionStore:
         if len({p['id'] for p in proposals}) != len(proposals):
             raise ValueError('duplicate decision ID')
         old, fingerprint = self._begin(idempotency_key,
-                                       ['register_batch', snapshot_sha256, proposals])
+                                       ['register_batch', snapshot_sha256, proposals,
+                                        expected_revision], expected_revision)
         if old is not None:
             return old
         try:

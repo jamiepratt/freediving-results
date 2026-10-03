@@ -197,6 +197,7 @@ def serve_integrated(metadata_path):
     register_verified_export(origin.decisions, snapshot_dir, {
         'snapshot_sha256': digest,
         'binding_revision': origin.decisions._binding()['revision'],
+        'store_revision': origin.decisions.revision,
         'reconciliation_run_revision': 1, 'proposals': [proposal],
     })
     origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)

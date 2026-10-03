@@ -25,6 +25,15 @@ per-target checkpoints. A retry-required result exits with code 2; rerun with
 the same inputs after repairing its reported failed target. Keep this config,
 the flow ledger and decision database outside Git. The command does not enable
 the production decision API or establish retained-corpus authority.
+Each callback compares the complete outbox event with the signed feed or durable
+flow event before its target checkpoint advances. A verified reconciliation
+export includes the owner store revision observed when it was prepared; registration
+rejects an export if a later human action or binding changed that revision.
+Callers of `freediving.owner-decision-export/export-proposals` supply that
+observed revision as `:store-revision` alongside `:binding-revision`; the export
+emits `store_revision` for the private registration adapter. Read the current
+owner store revision when preparing the export, including intervening owner
+actions, rather than deriving it from the snapshot binding revision.
 
 Run `python3 scripts/owner_evidence_web.py --snapshot-dir PATH` with a verified private unified snapshot directory. Enter a local password at the terminal prompt, then open the printed loopback login URL. The process binds only to `127.0.0.1` on an ephemeral port. Stop it with Ctrl-C.
 
