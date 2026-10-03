@@ -72,6 +72,7 @@ class ExportAdapterTest(unittest.TestCase):
                         'evidence_bindings': [{'evidence_id': 'source-row-1',
                             'snapshot_record_id': RECORD, 'observation_revision': observation}]}}
         return {'snapshot_sha256': self.digest, 'binding_revision': self.revision,
+                'store_revision': self.store.revision,
                 'reconciliation_run_revision': 1, 'proposals': [proposal]}
 
     def test_registers_verified_proposal_once_and_preserves_revision_binding(self):
@@ -134,6 +135,30 @@ class ExportAdapterTest(unittest.TestCase):
         self.assertEqual('automatic_approved', decision['status'])
         self.assertEqual('invalidated', decision['effective_status'])
 
+    def test_export_from_before_human_correction_cannot_register(self):
+        envelope = self.envelope()
+        prior = self.envelope()['proposals'][0]
+        prior['id'] = 'decision-prior'
+        prior['subject_id'] = 'person-prior'
+        prior['canonical_binding']['decision_id'] = 'decision-prior'
+        self.store.register(self.digest, prior,
+                            idempotency_key='prior-decision')
+        self.store.act('decision-prior', action='correct', correction={'action': 'different_person'},
+                       expected_revision=self.store.revision, idempotency_key='human-correction')
+        before = self.store.revision
+        with self.assertRaises(ValueError):
+            register_verified_export(self.store, self.snapshot, envelope)
+        self.assertEqual(before, self.store.revision)
+
+    def test_export_from_before_new_snapshot_binding_cannot_register(self):
+        envelope = self.envelope()
+        self.store.bind_verified_snapshot(self.snapshot, expected_revision=self.store.revision,
+                                          idempotency_key='later-binding')
+        before = self.store.revision
+        with self.assertRaises(ValueError):
+            register_verified_export(self.store, self.snapshot, envelope)
+        self.assertEqual(before, self.store.revision)
+
     def test_trusted_delivery_checkpoints_each_target_and_recovers_after_commit(self):
         register_verified_export(self.store, self.snapshot, self.envelope())
         self.store.act('decision-1', action='correct', correction={'action': 'different_person'},
@@ -148,8 +173,10 @@ class ExportAdapterTest(unittest.TestCase):
             self.assertEqual(argv[:5], ['clojure', '-M', '-m', 'freediving.owner-event-delivery',
                                         '--config'])
             self.assertEqual(argv[5], str(config.resolve()))
-            self.assertEqual(argv[-2:], ['--event-id', event['id']])
-            target = argv[-3]
+            self.assertEqual(argv[-3:], ['--event-id', event['id'],
+                                          '--expected-event-stdin'])
+            self.assertEqual(json.loads(kwargs['input']), event)
+            target = argv[-4]
             calls.append(target)
             if target == 'postgresql' and calls.count(target) == 1:
                 raise subprocess.CalledProcessError(1, argv, stderr='synthetic crash')
@@ -206,7 +233,7 @@ class ExportAdapterTest(unittest.TestCase):
         event_id = self.store.human_events()['events'][0]['id']
 
         def run(argv, **kwargs):
-            target = argv[-3]
+            target = argv[-4]
             self.assertEqual(kwargs['cwd'], Path(__file__).resolve().parents[1])
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
                 'target': target, 'event_id': event_id, 'receipt': 'committed'}))

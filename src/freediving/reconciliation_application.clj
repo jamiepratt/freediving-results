@@ -617,7 +617,7 @@
   "Complete one durable target of the owner event outbox. Flow delivery fetches
    and verifies the signed feed. PostgreSQL delivery uses the persisted event and
    returns a receipt only after its canonical projection succeeds."
-  [target event-id decisions {:keys [flow-path base-url] :as opts}]
+  [target event-id decisions {:keys [flow-path base-url expected-event] :as opts}]
   (when-not (and (#{:flow-ledger :postgresql} target)
                  (string? event-id) (re-matches #"owner-store:[1-9][0-9]*" event-id)
                  flow-path (vector? decisions))
@@ -625,6 +625,10 @@
   (let [revision (parse-long (subs event-id (count "owner-store:")))
         ledger (flow/load-ledger! flow-path)
         existing (some #(when (= event-id (:id %)) %) (:events ledger))]
+    (when (and expected-event existing
+               (not= expected-event (:remote-event existing)))
+      (throw (ex-info "Owner outbox event differs from durable flow event"
+                      {:event-id event-id})))
     (case target
       :flow-ledger
       (do
@@ -632,7 +636,12 @@
           (let [envelope (fetch-owner-review-events base-url (dec revision) opts)
                 imported (import-remote-review-events
                           ledger decisions envelope
-                          (assoc opts :through-event-id event-id))]
+                          (assoc opts :through-event-id event-id))
+                recorded (some #(when (= event-id (:id %)) %) (:events imported))]
+            (when (and expected-event
+                       (not= expected-event (:remote-event recorded)))
+              (throw (ex-info "Owner outbox event differs from signed feed"
+                              {:event-id event-id})))
             (flow/save-ledger! flow-path imported)))
         (str "flow-ledger:" event-id))
 

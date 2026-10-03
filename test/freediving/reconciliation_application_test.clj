@@ -59,8 +59,19 @@
                     (if (= 1 (swap! projected inc))
                       (throw (ex-info "temporary projection failure" {}))
                       {:accepted-group-count 1}))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (application/deliver-owner-event! :flow-ledger "owner-store:1" [d]
+                                                     (assoc opts :expected-event
+                                                            (assoc owner :snapshot_sha256
+                                                                   (apply str (repeat 64 "b")))))))
+      (is (empty? (:events (flow/load-ledger! path))))
       (is (string? (application/deliver-owner-event! :flow-ledger
                                                      "owner-store:1" [d] opts)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (application/deliver-owner-event! :flow-ledger "owner-store:1" [d]
+                                                     (assoc opts :expected-event
+                                                            (assoc owner :snapshot_sha256
+                                                                   (apply str (repeat 64 "b")))))))
       (is (= 1 (count (:events (flow/load-ledger! path)))))
       (is (thrown? clojure.lang.ExceptionInfo
                    (application/deliver-owner-event! :postgresql
