@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,98 @@ class ActivationTests(unittest.TestCase):
         return activate(self.bundle, self.source, self.digest, self.layout,
                         command=self.command, health=lambda: None,
                         owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    def candidate_with_source_bundle(self):
+        data = b'candidate snapshot bytes'
+        digest = hashlib.sha256(data).hexdigest()
+        (self.source / 'snapshot.sqlite').write_bytes(data)
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': digest}))
+        private = Path(self.temp.name) / 'candidate-source-bundle'
+        (private / 'objects').mkdir(parents=True, mode=0o700)
+        private.chmod(0o700)
+        (private / 'objects' / digest).write_bytes(data)
+        (private / 'objects' / digest).chmod(0o600)
+        manifest = private / 'manifest.json'
+        manifest.write_text(json.dumps({'schema': 'private-source-bundle/v1', 'sources': [{
+            'id': 'sha256:' + digest, 'status': 'included', 'sha256': digest,
+            'bytes': len(data), 'content_type': 'application/vnd.sqlite3',
+            'object': 'objects/' + digest}]}))
+        manifest.chmod(0o600)
+        return digest, private, hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    def activate_candidate(self, digest, private, manifest_digest, **kwargs):
+        return activate(self.bundle, self.source, digest, self.layout,
+                        source_bundle=private, expected_source_manifest_sha256=manifest_digest,
+                        update_config_pin=True, command=kwargs.get('command', self.command),
+                        health=kwargs.get('health', lambda: None),
+                        owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    def test_candidate_pin_changes_only_after_private_inputs_match_and_converges(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        (private / 'objects' / digest).write_bytes(b'tampered')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.activate_candidate(digest, private, manifest_digest)
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        (private / 'objects' / digest).write_bytes(b'candidate snapshot bytes')
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        self.assertIn(digest.encode(), self.config.read_bytes())
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.layout.state / 'current').resolve(),
+                         (self.layout.state / 'snapshots' / digest).resolve())
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'unchanged')
+
+    def test_candidate_health_failure_restores_config_and_prior_activation(self):
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_env = (self.layout.state / 'active.env').read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest,
+                                    health=lambda: (_ for _ in ()).throw(RuntimeError('unhealthy')))
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), old_env)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
+
+    def test_interrupted_candidate_recovers_before_same_candidate_retry(self):
+        self.run_activation()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'pending')
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'active')
+        self.assertTrue(old_snapshot.exists())
+
+    def test_missing_prior_snapshot_on_retry_stops_service_and_keeps_pending(self):
+        self.run_activation()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        def interrupt(*args):
+            if args == ('systemctl', 'restart', 'freediving-owner-evidence.service'):
+                raise KeyboardInterrupt()
+            return True
+        with self.assertRaises(KeyboardInterrupt):
+            self.activate_candidate(digest, private, manifest_digest, command=interrupt)
+        shutil.rmtree(old_snapshot)
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest)
+        self.assertIn(('systemctl', 'stop', 'freediving-owner-evidence.service'), self.calls)
+        checkpoint = self.layout.state / 'activation-checkpoint' / 'status.json'
+        self.assertEqual(json.loads(checkpoint.read_text())['status'], 'pending')
 
     def test_stages_private_snapshot_and_idempotently_starts_dedicated_service(self):
         self.run_activation()

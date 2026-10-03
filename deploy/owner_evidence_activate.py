@@ -67,7 +67,8 @@ def _config(path, owner_uid, expected):
     if (not REQUIRED_ENV <= values.keys() or
             set(values) - REQUIRED_ENV - {'OWNER_EVIDENCE_DECISION_API_ENABLED'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
-            values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected):
+            (expected is not None and values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected) or
+            not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_SNAPSHOT_SHA256'])):
         raise ValueError('private environment does not match snapshot')
     secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
@@ -143,8 +144,15 @@ def _atomic_write(path, content, mode):
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.chmod(name, mode)
         os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -221,13 +229,136 @@ def _health(values, expected, roster_digest=None):
                 raise RuntimeError('private origin returned unexpected denial') from exc
 
 
+def _checkpoint_dir(layout):
+    path = layout.state / 'activation-checkpoint'
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ValueError('invalid activation checkpoint')
+    if path.exists() and (path.stat().st_uid != os.geteuid() or
+                          path.stat().st_mode & 0o077):
+        raise ValueError('activation checkpoint is not root-private')
+    return path
+
+
+def _checkpoint_status(path, status, candidate, previous):
+    _atomic_write(path / 'status.json', json.dumps({
+        'status': status, 'candidate': candidate, 'previous': previous,
+    }, sort_keys=True).encode(), 0o600)
+
+
+def _restore_checkpoint(layout, command):
+    try:
+        path = _checkpoint_dir(layout)
+        status_path = path / 'status.json'
+        if not status_path.exists():
+            return
+        _regular(status_path)
+        if status_path.stat().st_mode & 0o077:
+            raise ValueError('activation checkpoint is not root-private')
+        record = json.loads(status_path.read_text())
+        if record['status'] not in ('pending', 'failed', 'active'):
+            raise ValueError('unknown activation checkpoint status')
+        if record['status'] == 'pending' and not isinstance(record['previous'], dict):
+            raise ValueError('invalid activation checkpoint previous state')
+    except (ValueError, OSError, KeyError, json.JSONDecodeError):
+        command('systemctl', 'stop', SERVICE)
+        raise RuntimeError('private activation checkpoint invalid; service stopped')
+    if record['status'] != 'pending':
+        return
+    previous = record['previous']
+    try:
+        for name in ('app', 'snapshot', 'roster', 'source'):
+            target = previous[name]
+            if target is not None and (not Path(target).is_dir() or Path(target).is_symlink()):
+                raise ValueError('prior activation target missing')
+        for name in ('config', 'env', 'unit'):
+            if previous[name]:
+                backup = path / ('before-' + name)
+                _regular(backup)
+                if backup.stat().st_mode & 0o077:
+                    raise ValueError('prior activation backup is not private')
+        if (previous['app'] is None) != (previous['snapshot'] is None):
+            raise ValueError('incomplete prior activation')
+        _config(path / 'before-config', os.geteuid(),
+                Path(previous['snapshot']).name if previous['snapshot'] else None)
+        if previous['app'] is not None:
+            prior_app = Path(previous['app'])
+            prior_snapshot = Path(previous['snapshot'])
+            prior_digest = prior_snapshot.name
+            _inputs(prior_app, prior_snapshot, prior_digest)
+            if previous['roster']:
+                prior_roster = Path(previous['roster'])
+                _roster_inputs(prior_roster, prior_roster.name, prior_digest)
+            if previous['source']:
+                prior_source = Path(previous['source'])
+                _source_bundle_inputs(prior_app, prior_source, prior_source.name, prior_digest)
+        for name, link in (('app', layout.app / 'current'),
+                           ('snapshot', layout.state / 'current'),
+                           ('roster', layout.state / 'current-roster'),
+                           ('source', layout.state / 'current-source')):
+            target = previous[name]
+            if target is None:
+                link.unlink(missing_ok=True)
+            else:
+                _atomic_link(link, Path(target))
+        for name, target in (('config', layout.config),
+                             ('env', layout.state / 'active.env'),
+                             ('unit', layout.units / SERVICE)):
+            backup = path / ('before-' + name)
+            if previous[name]:
+                _atomic_write(target, backup.read_bytes(), 0o644 if name == 'unit' else 0o600)
+            else:
+                target.unlink(missing_ok=True)
+        command('systemctl', 'daemon-reload')
+        if previous['app'] is not None and previous['snapshot'] is not None:
+            command('systemctl', 'restart', SERVICE)
+        else:
+            command('systemctl', 'stop', SERVICE)
+        _checkpoint_status(path, 'failed', record['candidate'], previous)
+    except Exception:
+        try:
+            command('systemctl', 'stop', SERVICE)
+        finally:
+            raise RuntimeError('private activation recovery failed; checkpoint remains pending')
+
+
+def _begin_checkpoint(layout, candidate, previous):
+    path = _checkpoint_dir(layout)
+    path.mkdir(mode=0o700, exist_ok=True)
+    path.chmod(0o700)
+    parent_fd = os.open(layout.state, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    for name, target in (('config', layout.config), ('env', layout.state / 'active.env'),
+                         ('unit', layout.units / SERVICE)):
+        backup = path / ('before-' + name)
+        if previous[name]:
+            _regular(target)
+            _atomic_write(backup, target.read_bytes(), 0o600)
+        else:
+            backup.unlink(missing_ok=True)
+    _checkpoint_status(path, 'pending', candidate, previous)
+
+
 def activate(bundle, source, expected, layout, *, roster_source=None, expected_roster_sha256=None,
              source_bundle=None, expected_source_manifest_sha256=None,
-             command=None, health=None,
+             update_config_pin=False, command=None, health=None,
              owner_uid=0, owner_gid=0):
     """Activate local inputs; raises with old links/unit restored on service failure."""
     bundle, source = Path(bundle), Path(source)
-    values = _config(layout.config, os.geteuid(), expected)
+    command = command or (lambda *args: subprocess.run(args, check=True))
+    if update_config_pin:
+        _restore_checkpoint(layout, command)
+    values = _config(layout.config, os.geteuid(), None if update_config_pin else expected)
+    prior_pin = values['OWNER_EVIDENCE_SNAPSHOT_SHA256']
+    if update_config_pin and (not source_bundle or not expected_source_manifest_sha256):
+        raise ValueError('candidate pin requires a matching private source bundle')
+    candidate_config = layout.config.read_bytes()
+    if update_config_pin and prior_pin != expected:
+        candidate_config = candidate_config.replace(
+            ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + prior_pin).encode(),
+            ('OWNER_EVIDENCE_SNAPSHOT_SHA256=' + expected).encode())
     _inputs(bundle, source, expected)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
@@ -244,7 +375,6 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     unit_source = Path(__file__).with_name(SERVICE)
     _regular(unit_source)
     unit = unit_source.read_bytes()
-    command = command or (lambda *args: subprocess.run(args, check=True))
     health = health or (lambda: _health(values, expected, expected_roster_sha256))
     code_hash = hashlib.sha256()
     for name in FILES:
@@ -308,7 +438,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     old_unit = unit_path.read_bytes() if unit_path.exists() else None
     active_env = layout.state / 'active.env'
     old_env = active_env.read_bytes() if active_env.exists() else None
-    new_env = layout.config.read_bytes()
+    new_env = candidate_config
     if values.get('OWNER_EVIDENCE_DECISION_API_ENABLED') == '1':
         new_env += f'OWNER_EVIDENCE_DECISION_DB={decision_db}\n'.encode()
     if roster:
@@ -325,7 +455,20 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
             raise RuntimeError('private origin service inactive')
         return 'unchanged'
     layout.units.mkdir(parents=True, exist_ok=True)
+    checkpoint = None
+    if update_config_pin:
+        previous = {
+            'app': str(old_app) if old_app else None,
+            'snapshot': str(old_snapshot) if old_snapshot else None,
+            'roster': str(old_roster) if old_roster else None,
+            'source': str(old_source) if old_source else None,
+            'config': True, 'env': old_env is not None, 'unit': old_unit is not None,
+        }
+        _begin_checkpoint(layout, expected, previous)
+        checkpoint = _checkpoint_dir(layout)
     try:
+        if update_config_pin:
+            _atomic_write(layout.config, candidate_config, 0o600)
         _atomic_link(layout.app / 'current', app)
         _atomic_link(layout.state / 'current', snapshot)
         if roster:
@@ -342,7 +485,12 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
         command('systemctl', 'restart', SERVICE)
         health()
         command('systemctl', 'enable', SERVICE)
+        if checkpoint:
+            _checkpoint_status(checkpoint, 'active', expected, previous)
     except Exception:
+        if checkpoint:
+            _restore_checkpoint(layout, command)
+            raise
         for link, previous in ((layout.app / 'current', old_app),
                                (layout.state / 'current', old_snapshot),
                                (layout.state / 'current-roster', old_roster),
@@ -384,7 +532,7 @@ def main():
                     Path('/var/lib/freediving-owner-evidence'),
                     Path('/etc/systemd/system'), Path('/etc/freediving/owner-evidence.env'))
     try:
-        _config(layout.config, 0, args.expected_sha256)
+        _config(layout.config, 0, None)
         _inputs(args.bundle_dir, args.snapshot_source, args.expected_sha256)
         if bool(args.roster_source) != bool(args.expected_roster_sha256):
             raise ValueError('roster staging inputs incomplete')
@@ -409,6 +557,7 @@ def main():
                           expected_roster_sha256=args.expected_roster_sha256,
                           source_bundle=args.source_bundle,
                           expected_source_manifest_sha256=args.expected_source_manifest_sha256,
+                          update_config_pin=True,
                           owner_uid=identity.pw_uid, owner_gid=identity.pw_gid)
     except Exception as exc:
         parser.exit(1, f'Private origin activation refused or rolled back: {type(exc).__name__}\n')
