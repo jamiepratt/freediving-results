@@ -6,13 +6,15 @@ const routeAuthorities = new Map();
 function cell(text, tag='td') { const n=document.createElement(tag); n.textContent=text==null?'unknown':String(text); return n; }
 function heading(text) { const n=document.createElement('h3'); n.textContent=text; return n; }
 function jsonBlock(value) { const n=document.createElement('pre'); n.textContent=JSON.stringify(value,null,2); return n; }
-async function fetchJson(path) { const r=await fetch(path,{credentials:'same-origin',cache:'no-store'}); if(r.status===401){$('presentation-status').textContent='Owner authentication expired. Sign in and reload to verify the active snapshot.';location.href='/login';throw new Error('Owner authentication expired');} if(!r.ok)throw new Error(`HTTP ${r.status}`); return r.json(); }
+async function fetchJson(path) { const r=await fetch(path,{credentials:'same-origin',cache:'no-store'}); if(r.status===401||r.status===403){$('presentation-status').textContent='Owner authentication expired or denied. Sign in and reload to verify the active snapshot.';if(r.status===401)location.href='/login';throw new Error('Owner authentication expired or denied');} if(!r.ok)throw new Error(`HTTP ${r.status}`); return r.json(); }
 function entries(parent, object) { const dl=document.createElement('dl'); for(const [k,v] of Object.entries(object)){dl.append(cell(k,'dt'),cell(v==null?'unknown':typeof v==='object'?JSON.stringify(v):v,'dd'));} parent.append(dl); }
 function renderPresentationStatus(overview,sources){
   const area=$('presentation-status');area.replaceChildren();
-  area.append(heading('Remote presentation'));
-  area.append(cell(`Remote active snapshot: ${overview.snapshot_sha256 || 'unknown'}. Verified cutoff: ${overview.cutoff || 'unknown'}. Coverage: ${overview.coverage || 'unknown'}. Accepted distinct attempts: ${overview.confirmed_distinct_attempts ?? 'unknown'}.`, 'p'));
-  area.append(cell('Local completed revision: unavailable. Pending transfer: unavailable. Failed activation and retry: unavailable. This remote page has no private local checkpoint sync; check the local run state before retrying. A completed local run does not replace the remote active snapshot.', 'p'));
+  const remote=location.pathname==='/owner-evidence'||location.pathname?.startsWith('/owner-evidence/');
+  area.append(heading(remote ? 'Remote presentation' : 'Local demo presentation'));
+  const snapshot=remote ? `Remote active snapshot: ${overview.snapshot_sha256 || 'unknown'}` : `Local demo snapshot: ${overview.snapshot_sha256 || 'unknown'}. Remote active snapshot: unavailable`;
+  area.append(cell(`${snapshot}. Verified cutoff: ${overview.cutoff || 'unknown'}. Coverage: ${overview.coverage || 'unknown'}. Accepted distinct attempts: ${overview.confirmed_distinct_attempts ?? 'unknown'}.`, 'p'));
+  area.append(cell(`Local completed revision: unavailable. Pending transfer: unavailable. Failed activation and retry: unavailable. ${remote ? 'This remote page has no private local checkpoint sync; check the local run state before retrying. A completed local run does not replace the remote active snapshot.' : 'This demo reads a snapshot directly; check the local run state and remote owner page for presentation status.'}`, 'p'));
   const gaps=sources.filter(source=>source.status!=='included');
   area.append(cell(gaps.length ? 'Explicit source gaps:' : 'No source gaps listed by this snapshot; coverage may still be partial.', 'p'));
   if(gaps.length){const list=document.createElement('ul');for(const source of gaps)list.append(cell(`${source.source_name}: ${source.status}${source.reason ? ' - '+source.reason : ''}`, 'li'));area.append(list);}
