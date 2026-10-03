@@ -191,7 +191,7 @@ def _stage_directory(parent, name, files, uid, gid, mode):
     return destination
 
 
-def _health(values, expected, roster_digest=None):
+def _health(values, expected, roster_digest=None, source_digest=None):
     headers = {
         'Host': values['OWNER_EVIDENCE_ORIGIN_HOST'],
         'X-Freediving-Owner-Gateway': values['OWNER_EVIDENCE_GATEWAY_SECRET'],
@@ -202,7 +202,9 @@ def _health(values, expected, roster_digest=None):
     for attempt in range(20):
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
-                if response.status != 200 or json.load(response).get('snapshot_sha256') != expected:
+                overview = json.load(response)
+                if (response.status != 200 or overview.get('snapshot_sha256') != expected or
+                        (source_digest and overview.get('bundle_manifest_sha256') != source_digest)):
                     raise RuntimeError('private origin health check failed')
             break
         except urllib.error.HTTPError:
@@ -345,6 +347,25 @@ def _begin_checkpoint(layout, candidate, previous):
     _checkpoint_status(path, 'pending', candidate, previous)
 
 
+def rollback_candidate(layout, candidate, source_manifest_sha256, *, command=None):
+    """Restore the prior host version after external owner-route validation fails."""
+    command = command or _system_command
+    path = _checkpoint_dir(layout)
+    status_path = path / 'status.json'
+    _regular(status_path)
+    if status_path.stat().st_mode & 0o077:
+        raise ValueError('activation checkpoint is not root-private')
+    record = json.loads(status_path.read_text())
+    if (record.get('status') != 'active' or record.get('candidate') != candidate or
+            not re.fullmatch(r'[a-f0-9]{64}', candidate) or
+            not re.fullmatch(r'[a-f0-9]{64}', source_manifest_sha256) or
+            (layout.state / 'current').resolve().name != candidate or
+            (layout.state / 'current-source').resolve().name != source_manifest_sha256):
+        raise ValueError('active candidate differs from rollback request')
+    _checkpoint_status(path, 'pending', candidate, record['previous'])
+    _restore_checkpoint(layout, command)
+
+
 def _system_command(*args):
     if args[0] == 'systemctl' and args[1] in ('is-active', 'is-enabled'):
         return subprocess.run(args, check=False, capture_output=True).returncode == 0
@@ -389,7 +410,8 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     unit_source = Path(__file__).with_name(SERVICE)
     _regular(unit_source)
     unit = unit_source.read_bytes()
-    health = health or (lambda: _health(values, expected, expected_roster_sha256))
+    health = health or (lambda: _health(values, expected, expected_roster_sha256,
+                                       expected_source_manifest_sha256))
     code_hash = hashlib.sha256()
     for name in FILES:
         code_hash.update(name.encode())
@@ -535,19 +557,37 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--bundle-dir', type=Path, required=True)
-    parser.add_argument('--snapshot-source', type=Path, required=True)
-    parser.add_argument('--expected-sha256', required=True)
+    parser.add_argument('--bundle-dir', type=Path)
+    parser.add_argument('--snapshot-source', type=Path)
+    parser.add_argument('--expected-sha256')
     parser.add_argument('--roster-source', type=Path)
     parser.add_argument('--expected-roster-sha256')
-    parser.add_argument('--source-bundle', type=Path, required=True)
-    parser.add_argument('--expected-source-manifest-sha256', required=True)
+    parser.add_argument('--source-bundle', type=Path)
+    parser.add_argument('--expected-source-manifest-sha256')
+    parser.add_argument('--rollback-candidate-sha256')
+    parser.add_argument('--rollback-source-manifest-sha256')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('root required')
     layout = Layout(Path('/opt/freediving/owner-evidence/app'),
                     Path('/var/lib/freediving-owner-evidence'),
                     Path('/etc/systemd/system'), Path('/etc/freediving/owner-evidence.env'))
+    if args.rollback_candidate_sha256 or args.rollback_source_manifest_sha256:
+        if (not args.rollback_candidate_sha256 or not args.rollback_source_manifest_sha256 or
+                any((args.bundle_dir, args.snapshot_source, args.expected_sha256,
+                     args.source_bundle, args.expected_source_manifest_sha256,
+                     args.roster_source, args.expected_roster_sha256))):
+            parser.error('rollback requires only both rollback hashes')
+        try:
+            rollback_candidate(layout, args.rollback_candidate_sha256,
+                               args.rollback_source_manifest_sha256)
+        except (ValueError, OSError, KeyError, json.JSONDecodeError, RuntimeError):
+            parser.exit(1, 'Private origin rollback refused or incomplete\n')
+        print('rolled back')
+        return
+    if not all((args.bundle_dir, args.snapshot_source, args.expected_sha256,
+                args.source_bundle, args.expected_source_manifest_sha256)):
+        parser.error('activation requires bundle, snapshot and source-bundle inputs')
     try:
         _restore_checkpoint(layout, _system_command)
         _config(layout.config, os.geteuid(), None)

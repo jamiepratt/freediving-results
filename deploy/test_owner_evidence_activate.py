@@ -221,6 +221,21 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
         self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
 
+    def test_owner_route_failure_can_roll_back_completed_host_candidate(self):
+        from owner_evidence_activate import rollback_candidate
+        self.run_activation()
+        old_config = self.config.read_bytes()
+        old_snapshot = (self.layout.state / 'current').resolve()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            rollback_candidate(self.layout, digest, '0' * 64, command=self.command)
+        self.assertEqual((self.layout.state / 'current').resolve().name, digest)
+        rollback_candidate(self.layout, digest, manifest_digest, command=self.command)
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
+
     def test_interrupted_candidate_recovers_before_same_candidate_retry(self):
         self.run_activation()
         old_snapshot = (self.layout.state / 'current').resolve()

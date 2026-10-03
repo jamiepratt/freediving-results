@@ -69,6 +69,12 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['normalized_federation'], 'unavailable in this snapshot')
 
+    def test_overview_reports_verified_source_bundle_binding(self):
+        self.server.source_bundle_sha256 = 'd' * 64
+        status, _, body = self.request('/owner-evidence/api/overview')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['bundle_manifest_sha256'], 'd' * 64)
+
     def test_direct_origin_spoof_and_wrong_owner_get_no_private_bytes(self):
         for headers in ([('Host', HOST)],
                         [('Host', HOST), ('X-Freediving-Owner-Gateway', 'wrong'),
