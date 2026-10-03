@@ -62,15 +62,23 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
             revisions[position] = revision
     verified_sources = {}
     if source_revisions:
-        names = sorted({ref.get('source_name') for ref in source_revisions.values()
-                        if isinstance(ref.get('source_name'), str)})
-        _require(len(names) == len({ref.get('source_name') for ref in source_revisions.values()}),
-                 'source observation name missing')
-        source_result = load_source_observations(directory, names)
-        verified_sources = {item['snapshot_record_id']: item
-                            for item in source_result['observations']}
-        _require(len(verified_sources) == len(source_result['observations']),
-                 'ambiguous source observation')
+        versions = {ref.get('adapter_version') for ref in source_revisions.values()}
+        _require(all(isinstance(version, str) for version in versions),
+                 'source observation adapter version missing')
+        for version in sorted(versions):
+            names = sorted({ref.get('source_name') for ref in source_revisions.values()
+                            if ref.get('adapter_version') == version
+                            and isinstance(ref.get('source_name'), str)})
+            _require(names and len(names) == len({ref.get('source_name')
+                     for ref in source_revisions.values()
+                     if ref.get('adapter_version') == version}),
+                     'source observation name missing')
+            source_result = load_source_observations(directory, names, adapter_version=version)
+            for item in source_result['observations']:
+                record_id = item['snapshot_record_id']
+                if record_id in source_revisions and source_revisions[record_id]['adapter_version'] == version:
+                    _require(record_id not in verified_sources, 'ambiguous source observation')
+                    verified_sources[record_id] = item
         for record_id, reference in source_revisions.items():
             _require(record_id in verified_sources and
                      reference == verified_sources[record_id]['source_observation_ref'],

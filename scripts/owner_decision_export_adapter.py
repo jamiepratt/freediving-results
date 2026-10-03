@@ -43,7 +43,8 @@ def _verify_evidence(snapshot, snapshot_directory, item, binding):
                  revision.get('snapshot_record_id') == item['id'] and
                  isinstance(revision.get('source_name'), str),
                  'source observation snapshot binding changed')
-        result = load_source_observations(snapshot_directory, [revision['source_name']])
+        result = load_source_observations(snapshot_directory, [revision['source_name']],
+                                          adapter_version=revision.get('adapter_version'))
         matches = [observation for observation in result['observations']
                    if observation['snapshot_record_id'] == item['id']]
         _require(len(matches) == 1 and

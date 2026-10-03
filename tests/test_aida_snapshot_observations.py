@@ -109,6 +109,11 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             self.assertNotIn('event_context', legacy['source_observation_ref'])
             self.assertEqual('aida-snapshot-observation/1', legacy['adapter_version'])
             self.assertNotEqual(current['observation_version'], legacy['observation_version'])
+            old_ref = legacy['source_observation_ref']
+            bound = load_verified_bindings(root, [{'evidence_id': 'legacy-row',
+                'source_observation_ref': old_ref}], [old_ref])
+            self.assertEqual(old_ref,
+                             bound['evidence_bindings']['legacy-row']['observation-revision'])
 
     def test_exact_original_packet_and_snapshot_bind_without_pg_or_attempt_claims(self):
         with tempfile.TemporaryDirectory() as root:
