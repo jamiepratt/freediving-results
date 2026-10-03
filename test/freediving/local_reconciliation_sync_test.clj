@@ -87,6 +87,39 @@
           (is (= 0 (:provider_calls replay)))
           (is (= before (count (:events (flow/load-ledger! ledger))))))))))
 
+(deftest cached-policy-result-counts-only-on-the-execution-that-created-it
+  (let [root (java.nio.file.Files/createTempDirectory "local-cache-metrics"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        spec (.resolve root "spec.edn")
+        original (.resolve root "original.edn")
+        replay (.resolve root "replay.edn")
+        sha (apply str (repeat 64 "a"))
+        decision {:id "different" :family :identity :action :different-person
+                  :choices [:same-person :different-person :unknown]
+                  :subject {:id "pair"} :candidates ["a" "b"]
+                  :dependencies [] :evidence-adequate? true
+                  :evidence [{:evidence-id "e" :citation {:source-sha256 sha :locator "row 1"}
+                              :fact "Synthetic distinction"}]}]
+    (spit (str spec) (pr-str {:config {:provider :jev :model "synthetic" :version "cache/1"}
+                              :decisions [decision]
+                              :synthetic-answers {"different" {:type "choice" :choice "different_person"
+                                                               :confidence 0.99
+                                                               :probabilities {"same_person" 0.005
+                                                                               "different_person" 0.99
+                                                                               "unknown" 0.005}}}}))
+    (local/run! (str spec) (str original) sha)
+    (flow/save-ledger! replay
+                       (update (flow/load-ledger! original) :events
+                               #(mapv (fn [event]
+                                        (if (= :jev (:origin event))
+                                          (assoc event :policy-version "older-policy"
+                                                 :id (str "old-" (:id event))) event)) %)))
+    (let [first (local/run! (str spec) (str replay) sha)
+          second (local/run! (str spec) (str replay) sha)]
+      (is (= 1 (get-in first [:metrics :provider :cache_hits_this_execution])))
+      (is (= 0 (get-in second [:metrics :provider :cache_hits_this_execution])))
+      (is (= 1 (get-in second [:metrics :provider :cache_hits_recorded]))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.local-reconciliation-sync-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

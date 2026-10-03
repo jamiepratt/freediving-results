@@ -101,7 +101,8 @@
                        :answers (select-keys synthetic-answers ids)}))
          owner-revision (when owner-options
                           (sync-owner! flow-path decisions config owner-options))
-         result (application/run! (flow/load-ledger! flow-path) decisions
+         before-ledger (flow/load-ledger! flow-path)
+         result (application/run! before-ledger decisions
                                   (merge owner-options
                                          {:config config :policy policy/default-policy
                                           :persist-flow! persist! :execute! execute!
@@ -120,7 +121,11 @@
                             :model (:model config)}
                   :coverage (decision-metrics decisions views)
                   :provider {:calls_this_execution @calls
-                             :cache_hits (count (filter #(= :cached-jev (:origin %)) events))
+                             :cache_hits_this_execution
+                             (count (filter #(= :cached-jev (:origin %))
+                                            (drop (count (:events before-ledger)) events)))
+                             :cache_hits_recorded
+                             (count (filter #(= :cached-jev (:origin %)) events))
                              :reported_usage nil :actual_monetary_cost nil}
                   :reversals (count (filter #(and (= :human (:origin %))
                                                   (= :reversed (:status %))) events))
