@@ -112,3 +112,148 @@ def test_completed_run_rejects_corrupt_bound_bundle(tmp_path):
     (target / 'bundle' / entry['object']).write_bytes(b'corrupt')
     assert run(plan, target).returncode != 0
     assert json.loads((target / 'state.json').read_text())['remote']['status'] == 'pending'
+
+
+def test_configured_run_requires_stopped_publishers_after_local_completion(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    target = tmp_path / 'run'
+    config = tmp_path / 'remote.json'
+    config.write_text(json.dumps({'host': 'owner-vps'}))
+    result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--plan', str(plan),
+                             '--run-dir', str(target), '--remote-config', str(config),
+                             '--owner-access-jwt-env', 'UNSET_TEST_OWNER_JWT'],
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert 'publisher requests must stop' in result.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['remote']['status'] == 'failed'
+
+
+def test_completed_run_retries_configured_presentation_without_rerunning_local_stage(tmp_path):
+    import importlib.util
+    sys.path.insert(0, str(SCRIPT.parent))
+    spec = importlib.util.spec_from_file_location("local_evidence_run", SCRIPT)
+    local_run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(local_run)
+    plan, _, counter, _ = fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    source_sha = sha(tmp_path / 'source.pdf')
+    config = tmp_path / 'remote.json'
+    config.write_text(json.dumps({'host': 'owner-vps', 'root': '/private/staging',
+                                  'remote_script': '/opt/private_evidence_transfer.py',
+                                  'ssh': '/usr/bin/ssh', 'code_bundle': '/opt/code',
+                                  'activation_script': '/opt/activate.py',
+                                  'owner_url': 'https://poc.alphacompose.com/owner-evidence',
+                                  'cited_record_id': 'a' * 64,
+                                  'cited_source_sha256': source_sha}))
+    calls = []
+
+    class FakeRemote:
+        def __init__(self, **kwargs):
+            calls.append(('configured', kwargs['host']))
+
+        def stage(self, run_dir):
+            from private_evidence_ssh import receipt
+            local = json.loads((run_dir / 'state.json').read_text())['local']
+            calls.append(('staged', str(run_dir)))
+            return receipt(local)
+
+        def activate(self, staged):
+            return 'activated'
+
+        def owner_overview(self):
+            local = json.loads((target / 'state.json').read_text())['local']
+            return {'status': 200, 'snapshot_sha256': local['snapshot_sha256'],
+                    'bundle_manifest_sha256': local['bundle_manifest_sha256']}
+
+        def rollback(self, staged):
+            raise AssertionError('unexpected rollback')
+
+    local_run.run(plan, target, remote_config=config, owner_access_jwt='a.b.c',
+                  publisher_requests_stopped=True, vps_reachable=lambda: True,
+                  remote_factory=FakeRemote)
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['remote']['status'] == 'active'
+    assert state['coverage']['cutoff'] == '2026-10-03T00:00:00Z'
+    assert calls == [('configured', 'owner-vps'), ('staged', str(target))]
+    assert counter.read_text() == 'x'
+
+
+def test_missing_owner_identity_keeps_verified_local_artifacts_and_secret_off_disk(tmp_path):
+    plan, _, _, _ = fixture(tmp_path)
+    target = tmp_path / 'run'
+    config = tmp_path / 'remote.json'
+    config.write_text(json.dumps({'host': 'owner-vps'}))
+    secret = 'sensitive.header.signature'
+    result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--plan', str(plan),
+                             '--run-dir', str(target), '--remote-config', str(config),
+                             '--publisher-requests-stopped'], capture_output=True,
+                            text=True, env={**__import__('os').environ,
+                                            'UNRELATED_TEST_SECRET': secret})
+    assert result.returncode != 0
+    state_text = (target / 'state.json').read_text()
+    state = json.loads(state_text)
+    assert state['local']['status'] == 'complete'
+    assert state['remote']['status'] == 'failed'
+    assert (target / 'snapshot' / 'snapshot.sqlite').exists()
+    assert (target / 'bundle' / 'manifest.json').exists()
+    assert secret not in state_text + result.stdout + result.stderr
+
+
+def test_disposable_command_path_reaches_verified_active_without_network(tmp_path):
+    plan, _, counter, _ = fixture(tmp_path)
+    target = tmp_path / 'run'
+    config = tmp_path / 'remote.json'
+    config.write_text(json.dumps({'host': 'synthetic-vps', 'root': '/private/staging',
+                                  'remote_script': '/opt/private_evidence_transfer.py',
+                                  'ssh': '/usr/bin/ssh', 'code_bundle': '/opt/code',
+                                  'activation_script': '/opt/activate.py',
+                                  'owner_url': 'https://poc.alphacompose.com/owner-evidence',
+                                  'cited_record_id': 'a' * 64,
+                                  'cited_source_sha256': sha(tmp_path / 'source.pdf')}))
+    harness = tmp_path / 'disposable.py'
+    harness.write_text('''import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ['SCRIPTS_DIR'])
+import local_evidence_run as runner
+import private_evidence_remote
+from private_evidence_ssh import receipt
+run_dir = Path(os.environ['RUN_DIR'])
+class DisposableRemote:
+    def __init__(self, **kwargs):
+        assert kwargs['host'] == 'synthetic-vps'
+        assert kwargs['owner_access_jwt'] == os.environ['SYNTHETIC_ACCESS_JWT']
+    def stage(self, path):
+        return receipt(json.loads((path / 'state.json').read_text())['local'])
+    def activate(self, staged):
+        return 'activated'
+    def owner_overview(self):
+        local = json.loads((run_dir / 'state.json').read_text())['local']
+        return {'status': 200, 'snapshot_sha256': local['snapshot_sha256'],
+                'bundle_manifest_sha256': local['bundle_manifest_sha256']}
+    def rollback(self, staged):
+        raise AssertionError('unexpected rollback')
+private_evidence_remote.PrivateEvidenceRemote = DisposableRemote
+runner.ssh_route_reachable = lambda ssh, host: True
+sys.argv = [str(runner.__file__), 'run', '--plan', os.environ['PLAN'],
+            '--run-dir', str(run_dir), '--remote-config', os.environ['CONFIG'],
+            '--owner-access-jwt-env', 'SYNTHETIC_ACCESS_JWT',
+            '--publisher-requests-stopped']
+raise SystemExit(runner.main())
+''')
+    env = {**__import__('os').environ, 'SCRIPTS_DIR': str(SCRIPT.parent),
+           'RUN_DIR': str(target), 'PLAN': str(plan), 'CONFIG': str(config),
+           'SYNTHETIC_ACCESS_JWT': 'synthetic.header.signature'}
+    result = subprocess.run([sys.executable, str(harness)], capture_output=True,
+                            text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['remote']['status'] == 'active'
+    assert state['remote']['active'] == {'snapshot_sha256': state['local']['snapshot_sha256'],
+                                         'bundle_manifest_sha256': state['local']['bundle_manifest_sha256']}
+    assert counter.read_text() == 'x'
+    assert env['SYNTHETIC_ACCESS_JWT'] not in result.stdout + result.stderr + json.dumps(state)
