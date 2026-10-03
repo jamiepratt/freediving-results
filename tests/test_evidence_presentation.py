@@ -74,6 +74,10 @@ def test_bad_served_response_rolls_back_and_retains_retry(tmp_path, served):
     assert remote.calls[-1] == 'rollback'
     assert state(run_dir)['remote']['status'] == 'failed'
     assert state(run_dir)['remote']['active'] is None
+    assert state(run_dir)['remote']['pending'] == {
+        'snapshot_sha256': state(run_dir)['local']['snapshot_sha256'],
+        'bundle_manifest_sha256': state(run_dir)['local']['bundle_manifest_sha256']}
+    assert state(run_dir)['remote']['failed'] == state(run_dir)['remote']['pending']
     assert (run_dir / 'bundle' / 'manifest.json').is_file()
 
 
@@ -109,6 +113,9 @@ def test_pending_retry_repeats_safe_staging_after_interruption(tmp_path):
         present(run_dir, remote, publisher_requests_stopped=True,
                 vps_reachable=lambda: True)
     assert state(run_dir)['remote']['status'] == 'pending'
+    assert state(run_dir)['remote']['pending'] == {
+        'snapshot_sha256': state(run_dir)['local']['snapshot_sha256'],
+        'bundle_manifest_sha256': state(run_dir)['local']['bundle_manifest_sha256']}
     remote.activate = Remote.activate.__get__(remote)
     assert present(run_dir, remote, publisher_requests_stopped=True,
                    vps_reachable=lambda: True)['status'] == 'active'
@@ -121,6 +128,36 @@ def test_route_boundary_requires_stopped_publishers_and_skips_vpn_when_reachable
         present(run_dir, remote, publisher_requests_stopped=False,
                 vps_reachable=lambda: True)
     assert remote.calls == []
+
+    class NeverUseControl:
+        def snapshot(self):
+            raise AssertionError('VPN boundary used for reachable route')
+
+    assert present(run_dir, remote, publisher_requests_stopped=True,
+                   vps_reachable=lambda: True,
+                   vpn_control=NeverUseControl())['status'] == 'active'
+    assert not (tmp_path / 'vpn.json').exists()
+
+
+def test_rollback_failure_clears_unverified_active_claim(tmp_path):
+    run_dir, destination = prepared(tmp_path)
+    remote = Remote(destination)
+    previous = remote.active.copy()
+    current = state(run_dir)
+    current['remote']['active'] = previous
+    (run_dir / 'state.json').write_text(json.dumps(current))
+    remote.served = {'snapshot_sha256': 'c' * 64,
+                     'bundle_manifest_sha256': 'd' * 64}
+    remote.rollback = lambda receipt: (_ for _ in ()).throw(RuntimeError('rollback refused'))
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, 'remote rollback failed'):
+        present(run_dir, remote, publisher_requests_stopped=True,
+                vps_reachable=lambda: True)
+    final = state(run_dir)['remote']
+    assert final['status'] == 'failed'
+    assert final['active'] is None
+    assert 'rollback refused' in final['error']
+    assert final['rollback_error'] == 'rollback refused'
+    assert final['pending'] == final['failed']
 
 
 def test_blocked_route_uses_fake_vpn_after_local_completion_and_restores(tmp_path):
@@ -189,3 +226,7 @@ class PresentationTests(unittest.TestCase):
     def test_vpn_transition(self):
         with TemporaryDirectory() as root:
             test_blocked_route_uses_fake_vpn_after_local_completion_and_restores(Path(root))
+
+    def test_rollback_failure(self):
+        with TemporaryDirectory() as root:
+            test_rollback_failure_clears_unverified_active_claim(Path(root))

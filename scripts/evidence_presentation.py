@@ -33,20 +33,21 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
     state_path = run_dir / 'state.json'
     state = json.loads(state_path.read_text())
     remote_state = state['remote']
+    binding = {'snapshot_sha256': local['snapshot_sha256'],
+               'bundle_manifest_sha256': local['bundle_manifest_sha256']}
     if not publisher_requests_stopped:
         raise ValueError('publisher requests must stop before deployment')
-    if remote_state.get('active') == {
-            'snapshot_sha256': local['snapshot_sha256'],
-            'bundle_manifest_sha256': local['bundle_manifest_sha256']}:
+    if remote_state.get('active') == binding:
         if _served(remote, expected):
             return remote_state
-        remote_state.update(status='failed', failed=local['snapshot_sha256'],
-                            pending=local['snapshot_sha256'], error='owner route mismatch')
+        remote_state.update(status='failed', failed=binding,
+                            pending=binding, error='owner route mismatch',
+                            rollback_error=None)
         atomic_json(state_path, state)
         raise ValueError('owner route mismatch')
 
-    remote_state.update(status='pending', pending=local['snapshot_sha256'],
-                        failed=None, error=None)
+    remote_state.update(status='pending', pending=binding,
+                        failed=None, error=None, rollback_error=None)
     atomic_json(state_path, state)
     activated = False
 
@@ -56,26 +57,35 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
         if {key: staged.get(key) for key in expected} != expected:
             raise ValueError('staging receipt mismatch')
         result = remote.activate(expected)
+        activated = True
         if result not in ('activated', 'unchanged'):
             raise ValueError('activation receipt mismatch')
-        activated = True
         if not _served(remote, expected):
             raise ValueError('owner route mismatch')
 
     try:
-        if vpn_control is None:
-            if not vps_reachable():
-                raise ValueError('VPS route unavailable without verified VPN control')
+        reachable = vps_reachable()
+        if reachable:
             deploy()
         else:
+            if vpn_control is None:
+                raise ValueError('VPS route unavailable without verified VPN control')
             if vpn_journal is None:
                 raise ValueError('VPN restoration journal required')
-            deployment_route(vpn_control, vps_reachable, vpn_journal,
+            initial_probe = True
+
+            def route_probe():
+                nonlocal initial_probe
+                if initial_probe:
+                    initial_probe = False
+                    return False
+                return vps_reachable()
+
+            deployment_route(vpn_control, route_probe, vpn_journal,
                              publisher_requests_stopped=True, deploy=deploy)
         remote_state.update(status='active',
-                            active={'snapshot_sha256': local['snapshot_sha256'],
-                                    'bundle_manifest_sha256': local['bundle_manifest_sha256']},
-                            pending=None, failed=None, error=None)
+                            active=binding, pending=None, failed=None, error=None,
+                            rollback_error=None)
         atomic_json(state_path, state)
         return remote_state
     except Exception as error:
@@ -83,8 +93,10 @@ def present(run_dir, remote, *, publisher_requests_stopped, vps_reachable,
             try:
                 remote.rollback(expected)
             except Exception as rollback_error:
+                remote_state['active'] = None
+                remote_state['rollback_error'] = str(rollback_error)
                 error = RuntimeError(f'{error}; remote rollback failed: {rollback_error}')
-        remote_state.update(status='failed', failed=local['snapshot_sha256'],
-                            pending=local['snapshot_sha256'], error=str(error))
+        remote_state.update(status='failed', failed=binding,
+                            pending=binding, error=str(error))
         atomic_json(state_path, state)
         raise error
