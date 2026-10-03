@@ -13,37 +13,38 @@
 
 (defn- sync-owner! [flow-path decisions config owner-options]
   (let [opts (assoc owner-options :config config :policy policy/default-policy
-                    :persist-flow! #(flow/save-ledger! flow-path %))]
-    (loop [ledger (flow/load-ledger! flow-path)]
-      (let [human-ids (set (map :decision-id
-                                (filter #(and (= :human (:origin %)) (:remote-event %))
-                                        (:events ledger))))
-            recovered (when (seq human-ids)
-                        (application/run! ledger decisions (assoc opts :imported-only? true)))
-            incomplete (some (fn [id]
-                               (when-not (#{:materialized :no-link :reversed}
-                                          (get-in recovered [:results id :status]))
-                                 id)) human-ids)
-            _ (when incomplete
-                (throw (ex-info "Owner event canonical projection incomplete"
-                                {:decision-id incomplete})))
-            after (remote-revision ledger)
-            envelope (application/fetch-owner-review-events (:base-url opts) after opts)
-            verified (application/import-remote-review-events ledger decisions envelope opts)
+                    :flow-path flow-path)]
+    ;; The private ledger cursor advances only after both remote ACK responses.
+    ;; A lost response therefore retries the same idempotent event.
+    (loop [after (let [ledger (flow/load-ledger! flow-path)
+                       acked (or (:owner-acked-revision ledger) 0)]
+                   (when-not (and (nat-int? acked) (<= acked (remote-revision ledger)))
+                     (throw (ex-info "Invalid owner ACK checkpoint" {})))
+                   acked)]
+      (let [envelope (application/fetch-owner-review-events (:base-url opts) after opts)
             feed (json/read-str (:payload_json envelope) :key-fn keyword)
-            result (if (seq (:events feed))
-                     (application/run-imported! ledger decisions envelope opts)
-                     {:flow-ledger verified})
-            next-ledger (:flow-ledger result)
-            revision (remote-revision next-ledger)]
-        (when (:blocked-event-id result)
-          (throw (ex-info "Owner event canonical projection incomplete"
-                          {:event-id (:blocked-event-id result)})))
-        (when (and (seq (:events feed)) (<= revision after))
-          (throw (ex-info "Owner event feed made no progress" {})))
-        (if (seq (:events feed))
-          (recur next-ledger)
-          revision)))))
+            events (:events feed)]
+        (application/import-remote-review-events
+         (flow/load-ledger! flow-path) decisions envelope opts)
+        (doseq [event events]
+          (let [event-id (:id event)
+                flow-receipt (application/deliver-owner-event!
+                              :flow-ledger event-id decisions
+                              (assoc opts :expected-event event))]
+            (application/ack-owner-review-event! :flow-ledger event flow-receipt opts)
+            (let [canonical-receipt (application/deliver-owner-event!
+                                     :postgresql event-id decisions
+                                     (assoc opts :expected-event event))]
+              (application/ack-owner-review-event! :postgresql event canonical-receipt opts)
+              (flow/save-ledger! flow-path
+                                 (assoc (flow/load-ledger! flow-path)
+                                        :owner-acked-revision (:store_revision event))))))
+        (if (seq events)
+          (let [next-revision (:next_revision feed)]
+            (when-not (> next-revision after)
+              (throw (ex-info "Owner event feed made no progress" {})))
+            (recur next-revision))
+          (remote-revision (flow/load-ledger! flow-path)))))))
 
 (defn run!
   ([spec-path flow-path snapshot-sha256]

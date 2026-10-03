@@ -46,6 +46,32 @@ class DecisionStoreTest(unittest.TestCase):
         return self.store.bind_snapshot(digest, evidence, expected_revision=self.store.revision,
                                         idempotency_key='bind-' + digest)
 
+    def test_remote_outbox_ack_requires_exact_event_and_order(self):
+        self.bind()
+        self.store.register(SNAP_A, proposal('d1'), idempotency_key='register-d1')
+        self.store.act('d1', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-d1')
+        self.store.act('d1', action='reverse', expected_revision=self.store.revision,
+                       idempotency_key='reverse-d1')
+        first, second = self.store.human_events()['events']
+        with self.assertRaises(ConflictError):
+            self.store.acknowledge_human_event('postgresql', first, 'pg:committed')
+        with self.assertRaises(ConflictError):
+            self.store.acknowledge_human_event('flow-ledger', second, 'flow:committed')
+        changed = json.loads(json.dumps(first))
+        changed['action'] = 'reject'
+        with self.assertRaises(ConflictError):
+            self.store.acknowledge_human_event('flow-ledger', changed, 'flow:committed')
+        receipt = self.store.acknowledge_human_event('flow-ledger', first, 'flow:committed')
+        self.assertEqual(receipt['checkpoints']['flow-ledger'], first['store_revision'])
+        self.assertEqual(self.store.acknowledge_human_event('flow-ledger', first, 'flow:committed'), receipt)
+        self.store.close()
+        self.store = DecisionStore(self.path)
+        self.store.acknowledge_human_event('postgresql', first, 'pg:committed')
+        self.store.acknowledge_human_event('flow-ledger', second, 'flow:second')
+        self.store.acknowledge_human_event('postgresql', second, 'pg:second')
+        self.assertEqual(self.store.delivery_checkpoints()['postgresql'], second['store_revision'])
+
     def test_approval_survives_snapshot_replacement_with_same_evidence(self):
         self.bind()
         self.store.register(SNAP_A, proposal('d1'), idempotency_key='register-d1')

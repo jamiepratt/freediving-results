@@ -294,8 +294,10 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertTrue(decision_path.exists())
         self.assertFalse(decision_path.is_relative_to(self.snapshot_dir))
         evidence_id = server.query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
+        rich_proposal = proposal('decision-1', evidence=evidence_id, status='automatic_approved')
+        rich_proposal['supporting_evidence'] = ['synthetic citation ' + 'x' * 20000]
         server.decisions.register(self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'],
-                                  proposal('decision-1', evidence=evidence_id, status='automatic_approved'),
+                                  rich_proposal,
                                   idempotency_key='register-decision-1')
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -309,8 +311,11 @@ class PrivateOriginTest(unittest.TestCase):
                 headers['X-Freediving-Owner-Machine'] = import_client_id
                 headers['X-Freediving-Import-Token'] = import_token
             if method == 'POST':
-                headers.update({'Origin': 'https://poc.alphacompose.com',
-                                'Content-Type': 'application/json', 'X-Freediving-CSRF': csrf})
+                headers['Content-Type'] = 'application/json'
+                if not machine:
+                    headers['Origin'] = 'https://poc.alphacompose.com'
+                    if csrf is not None:
+                        headers['X-Freediving-CSRF'] = csrf
             connection.request(method, path, body=payload, headers=headers)
             response = connection.getresponse()
             result = response.status, response.read()
@@ -339,6 +344,17 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(event['action'], 'reverse')
         self.assertEqual(event['proposal']['id'], 'decision-1')
         self.assertEqual(event['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
+        ack_path = '/owner-evidence/api/decision-events/ack'
+        ack = json.dumps({'target': 'flow-ledger', 'event': event,
+                          'receipt': 'flow:committed'}).encode()
+        self.assertGreater(len(ack), 16384)
+        self.assertEqual(request(ack_path, method='POST', payload=ack)[0], 403)
+        self.assertEqual(request(ack_path, method='POST', payload=ack, machine=True)[0], 200)
+        self.assertEqual(request(ack_path, method='POST', payload=ack, machine=True)[0], 200)
+        pg = json.dumps({'target': 'postgresql', 'event': event,
+                         'receipt': 'pg:committed'}).encode()
+        self.assertEqual(request(ack_path, method='POST', payload=pg, machine=True)[0], 200)
+        self.assertEqual(server.decisions.delivery_checkpoints()['postgresql'], event['store_revision'])
         self.assertEqual(request('/owner-evidence/api/decisions/decision-1/actions',
                                  method='POST', payload=payload, csrf=listing['csrf_token'])[0], 200)
         stale = json.dumps({'action': 'approve', 'expected_revision': listing['revision'],

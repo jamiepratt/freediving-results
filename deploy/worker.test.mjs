@@ -211,6 +211,35 @@ test('decision event feed requires signed Access service identity and isolates m
   } finally { globalThis.fetch=original; }
 });
 
+test('decision ACK requires import service identity and forwards bounded JSON', async () => {
+  const path='/owner-evidence/api/decision-events/ack';
+  const machineId='abc12345.access';
+  const importToken='separate-owner-import-token-for-tests';
+  const config={...privateEnv,OWNER_EVIDENCE_IMPORT_CLIENT_ID:machineId};
+  const jwt=await token({email:undefined,common_name:machineId,sub:''});
+  const ackBody=JSON.stringify({target:'flow-ledger',event:{id:'owner-store:3',citation:'x'.repeat(20000)},receipt:'committed'});
+  const original=globalThis.fetch;
+  let forwarded=0;
+  globalThis.fetch=async (url, options) => {
+    if (url.endsWith('/cdn-cgi/access/certs')) return Response.json({keys:[jwk]});
+    forwarded++;
+    assert.equal(url,'https://owner-origin.alphacompose.com'+path);
+    assert.equal(options.headers.get('X-Freediving-Owner-Machine'),machineId);
+    assert.equal(options.headers.get('X-Freediving-Import-Token'),importToken);
+    assert.equal(options.headers.get('X-Freediving-Owner-Email'),null);
+    assert.equal(new TextDecoder().decode(options.body),ackBody);
+    return Response.json({target:'flow-ledger',event_id:'owner-store:3'});
+  };
+  try {
+    const headers={'Cf-Access-Jwt-Assertion':jwt,'X-Freediving-Import-Token':importToken,
+                   'Content-Type':'application/json'};
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,Origin:'https://evil.example'},body:'{}'}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'Cf-Access-Jwt-Assertion':await token()},body:'{}'}),config)).status,403);
+    assert.equal((await worker.fetch(req(path,{method:'POST',headers,body:ackBody}),config)).status,200);
+    assert.equal(forwarded,1);
+  } finally { globalThis.fetch=original; }
+});
+
 test('private status write requires dedicated service identity and token', async () => {
   const path='/owner-evidence/api/presentation-status';
   const machineId='status123.access';

@@ -57,6 +57,48 @@
       (try (json/read-str (String. bytes "UTF-8") :key-fn keyword)
            (catch Exception _ (throw (ex-info "Invalid owner event transport response" {})))))))
 
+(defn ack-owner-review-event!
+  "Acknowledge one target only after its durable callback returns a receipt."
+  [target event receipt {:keys [base-url access-client-id access-client-secret import-token
+                                allow-loopback-http?]}]
+  (when-not (and (#{:flow-ledger :postgresql} target)
+                 (map? event) (string? receipt) (seq receipt) (<= (count receipt) 512))
+    (throw (ex-info "Invalid owner event acknowledgement" {})))
+  (let [base (try (URI. base-url) (catch Exception _ nil))
+        scheme (some-> base .getScheme)
+        host (some-> base .getHost)
+        safe? (or (and (= scheme "https") (= host "poc.alphacompose.com"))
+                  (and allow-loopback-http? (= scheme "http") (= host "127.0.0.1")))
+        _ (when-not (and safe? (pos-int? (:store_revision event))
+                         (seq access-client-id) (seq access-client-secret) (seq import-token)
+                         (nil? (.getUserInfo base)) (nil? (.getQuery base))
+                         (nil? (.getFragment base)) (#{"" "/"} (.getPath base))
+                         (or (= host "127.0.0.1") (= -1 (.getPort base))))
+            (throw (ex-info "Invalid owner event transport configuration" {})))
+        url (URI. (str (if (= "/" (.getPath base))
+                         (subs base-url 0 (dec (count base-url))) base-url)
+                       "/owner-evidence/api/decision-events/ack"))
+        body (json/write-str {:target (name target) :event event :receipt receipt})
+        client (.build (.followRedirects (HttpClient/newBuilder) HttpClient$Redirect/NEVER))
+        request (.build (-> (HttpRequest/newBuilder url)
+                            (.timeout (Duration/ofSeconds 20))
+                            (.header "CF-Access-Client-Id" access-client-id)
+                            (.header "CF-Access-Client-Secret" access-client-secret)
+                            (.header "X-Freediving-Import-Token" import-token)
+                            (.header "Content-Type" "application/json")
+                            (.POST (java.net.http.HttpRequest$BodyPublishers/ofString body))))
+        response (.send client request (HttpResponse$BodyHandlers/ofByteArray))
+        bytes (.body response)]
+    (when-not (and (= 200 (.statusCode response)) (<= (alength bytes) 4096))
+      (throw (ex-info "Owner event acknowledgement failed" {:status (.statusCode response)})))
+    (let [result (json/read-str (String. bytes "UTF-8") :key-fn keyword)]
+      (when-not (and (= (name target) (:target result))
+                     (= (:id event) (:event_id result))
+                     (nat-int? (get-in result [:checkpoints target]))
+                     (<= (:store_revision event) (get-in result [:checkpoints target])))
+        (throw (ex-info "Invalid owner event acknowledgement receipt" {})))
+      result)))
+
 (defn- authenticated-feed [envelope secret]
   (let [{:keys [payload_json signature]} envelope]
     (when-not (and (string? secret) (<= 24 (count secret) 256)
