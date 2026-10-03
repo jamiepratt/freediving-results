@@ -29,6 +29,7 @@ Older references to an issue being open are historical, not current status.
 | --- | --- | --- |
 | Discovery | [Bounded discovery pass](docs/discovery-pass.md), `scripts/discovery_pass.py`, `scripts/discovery_frontier.py`, `scripts/discovery_refresh.py`, `scripts/discover_results.py`, `scripts/issue55_route_roster.py`, `scripts/fipsas_calendar.py`, `config/source-discovery.example.json` | Checking date limits, route states, refresh and coverage |
 | Acquisition/reuse | `scripts/acquire_source.py`, `scripts/source_acquisition.py`, `scripts/source_inventory.py`; `test/test_source_inventory.py`, `test/test_source_acquisition.py` | Avoiding repeat fetches, checking pacing or receipts |
+| Local evidence staging | [Local evidence run](docs/local-evidence-run.md), `scripts/local_evidence_run.py`; `tests/test_local_evidence_run.py` | Resuming local commands and binding a verified snapshot to its private bundle |
 | Browser evidence | `scripts/browser_acquisition.py`, `scripts/capture_browser.py`, `scripts/browser-selection.example.json` | Capturing response and selected view context |
 | Archive/PDF extraction | `src/freediving/archive.clj`, `src/freediving/extraction.clj`, adjacent parser modules; `test/freediving/` | Inspecting supported formats, hash guards, citations and replay |
 | HTML/JSON extraction | `src/freediving/aida_html.clj`, `src/freediving/cmas_2025_indoor_json.clj`, `src/freediving/cmas_2026_roatan_json.clj` | Comparing format-specific paths |
