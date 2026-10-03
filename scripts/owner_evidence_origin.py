@@ -126,6 +126,7 @@ class PrivateOrigin(HTTPServer):
             if bool(bundle_dir) != bool(bundle_sha):
                 raise ValueError('source bundle configuration incomplete')
             self.source_view = OriginalSourceView(bundle_dir, bundle_sha, expected_digest) if bundle_dir else None
+            self.source_bundle_sha256 = bundle_sha if self.source_view else None
             roster_dir = env.get('OWNER_EVIDENCE_ROSTER_DIR')
             roster_sha = env.get('OWNER_EVIDENCE_ROSTER_SHA256')
             if bool(roster_dir) != bool(roster_sha):
@@ -318,6 +319,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             if path == '/owner-evidence/api/overview' and not parsed.query:
                 result = query.overview()
                 result['normalized_federation'] = 'unavailable in this snapshot'
+                if self.server.source_bundle_sha256:
+                    result['bundle_manifest_sha256'] = self.server.source_bundle_sha256
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
             elif path == '/owner-evidence/api/source':
