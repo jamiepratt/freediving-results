@@ -15,6 +15,8 @@ from private_evidence_ssh import HOST, receipt, ssh_stage
 from private_evidence_transfer import verified_input
 
 SHA = re.compile(r'[0-9a-f]{64}\Z')
+ACCESS_JWT = re.compile(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z')
+PNG = b'\x89PNG\r\n\x1a\n'
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -24,7 +26,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class PrivateEvidenceRemote:
     def __init__(self, host, root, remote_script, ssh, code_bundle, activation_script,
-                 owner_url, access_id, access_secret, cited_record_id,
+                 owner_url, owner_access_jwt, cited_record_id,
                  cited_source_sha256, *, timeout=10, command=None, http=None):
         if not HOST.fullmatch(host) or host.startswith('-'):
             raise ValueError('invalid SSH host')
@@ -33,8 +35,8 @@ class PrivateEvidenceRemote:
             raise ValueError('remote paths must be absolute')
         if owner_url != 'https://poc.alphacompose.com/owner-evidence':
             raise ValueError('owner route must be the pinned custom domain')
-        if not access_id or not access_secret or any(c in access_id + access_secret for c in '\r\n'):
-            raise ValueError('Access credentials required')
+        if not isinstance(owner_access_jwt, str) or not ACCESS_JWT.fullmatch(owner_access_jwt):
+            raise ValueError('owner Access identity session required')
         if not SHA.fullmatch(cited_record_id) or not SHA.fullmatch(cited_source_sha256):
             raise ValueError('cited source binding required')
         if not isinstance(timeout, (int, float)) or not 0 < timeout <= 60:
@@ -42,7 +44,7 @@ class PrivateEvidenceRemote:
         self.host, self.root, self.remote_script, self.ssh = host, paths[0], paths[1], Path(ssh)
         self.code_bundle, self.activation_script = paths[2:]
         self.owner_url = owner_url
-        self.headers = {'CF-Access-Client-Id': access_id, 'CF-Access-Client-Secret': access_secret}
+        self.headers = {'Cookie': 'CF_Authorization=' + owner_access_jwt}
         self.record_id, self.source_sha256 = cited_record_id, cited_source_sha256
         self.timeout, self.command, self.http = timeout, command or self._command, http or self._http
         self.expected = None
@@ -97,30 +99,49 @@ class PrivateEvidenceRemote:
 
     def _http(self, path, headers, timeout):
         request = urllib.request.Request(self.owner_url + path, headers=headers)
+        is_page = '/page/' in path
         try:
             with urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout) as response:
                 if response.status != 200:
-                    return response.status, None
-                data = response.read(1024 * 1024 + 1)
-                if len(data) > 1024 * 1024:
+                    return response.status, response.headers.get_content_type(), None
+                content_type = response.headers.get_content_type()
+                limit = 2 * 1024 * 1024 if is_page else 1024 * 1024
+                data = response.read(limit + 1)
+                if len(data) > limit:
                     raise ValueError('owner response too large')
-                return response.status, json.loads(data)
+                return response.status, content_type, data if is_page else json.loads(data)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as error:
             raise ValueError('authenticated owner readback failed') from error
 
     def owner_overview(self):
         try:
-            status, overview = self.http('/api/overview', self.headers, self.timeout)
-            source_status, source = self.http('/api/source-view/' + self.record_id,
-                                              self.headers, self.timeout)
+            status, overview_type, overview = self.http('/api/overview', self.headers, self.timeout)
+            source_status, source_type, source = self.http('/api/source-view/' + self.record_id,
+                                                           self.headers, self.timeout)
         except Exception as error:
             raise ValueError('authenticated owner readback failed') from error
-        if (status != 200 or source_status != 200 or not isinstance(overview, dict) or
+        citation = source.get('citation') if isinstance(source, dict) else None
+        cited_page = (citation.get('page') if isinstance(citation, dict) else
+                      int(match.group(1)) if isinstance(citation, str) and
+                      (match := re.fullmatch(r'page ([1-9][0-9]{0,2}) line .+', citation)) else None)
+        if (status != 200 or overview_type != 'application/json' or
+                source_status != 200 or source_type != 'application/json' or
+                not isinstance(overview, dict) or
                 not isinstance(source, dict) or
                 source.get('snapshot_sha256') != overview.get('snapshot_sha256') or
                 source.get('source_sha256') != self.source_sha256 or
                 (self.source_bytes is not None and source.get('source_bytes') != self.source_bytes) or
-                source.get('format') not in ('pdf', 'json', 'jpeg') or
-                not source.get('citation')):
+                source.get('format') != 'pdf' or
+                type(source.get('page')) is not int or not 1 <= source['page'] <= 500 or
+                cited_page != source['page']):
             raise ValueError('owner source rendering mismatch')
+        try:
+            page_status, page_type, page = self.http(
+                '/api/source-view/' + self.record_id + '/page/' + str(source['page']),
+                self.headers, self.timeout)
+        except Exception as error:
+            raise ValueError('authenticated owner readback failed') from error
+        if (page_status != 200 or page_type != 'image/png' or not isinstance(page, bytes) or
+                not PNG == page[:len(PNG)] or not len(PNG) < len(page) <= 2 * 1024 * 1024):
+            raise ValueError('owner PDF page rendering mismatch')
         return {'status': status, **overview}
