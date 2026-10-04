@@ -1,0 +1,170 @@
+import copy
+import hashlib
+import json
+import unittest
+
+from scripts.retained_aida_owner_resync import verify_noop_resync
+
+
+def sha(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def document(value):
+    return (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()
+
+
+class RetainedOwnerResyncTest(unittest.TestCase):
+    def setUp(self):
+        self.snapshot = 'a' * 64
+        self.retained_bundle = None
+        self.production_bundle = None
+        self.source = 'd' * 64
+        self.row = {'observation-id': 'source-observation:' + 'e' * 64}
+        self.event = {'id': 'accept', 'action': 'accept', 'base-revision': 0}
+        self.target = {'schema': 'retained-aida-target-state/v1', 'snapshot_sha256': self.snapshot,
+                       'revision': 1, 'source_rows': [self.row],
+                       'events': [{'id': 'accept', 'request': self.event}], 'non_source_row_count': 0}
+        self.owner = {'snapshot_sha256': self.snapshot, 'store_revision': 3,
+                      'binding_revision': 1, 'proposal_count': 2, 'human_event_count': 2,
+                      'operation_count': 2, 'observation_refs': {}}
+        self.retained_manifest = {'schema': 'retained-aida-cohort-bundle/v1',
+                                  'snapshot': {'snapshot_sha256': self.snapshot},
+                                  'inputs': {'aida_packet': self.source,
+                                             'aida_receipt': 'f' * 64,
+                                             'aida_original': '1' * 64},
+                                  'recovered_packets': {}}
+        self.production_manifest = {'schema': 'private-source-bundle/v1', 'sources': [
+            {'id': 'packet', 'sha256': self.source, 'status': 'included'},
+            {'id': 'receipt', 'sha256': 'f' * 64, 'status': 'included'},
+            {'id': 'original', 'sha256': '1' * 64, 'status': 'restricted'}]}
+        self.retained_bundle = hashlib.sha256(document(self.retained_manifest)).hexdigest()
+        self.production_bundle = hashlib.sha256(document(self.production_manifest)).hexdigest()
+        self.status = {'schema': 'private-presentation-status/v3', 'revision': 2,
+                       'run_id': 'active-run',
+                       'local': {'snapshot_sha256': self.snapshot, 'cutoff': '2026-10-03T00:00:00Z',
+                                 'gap_count': 62},
+                       'remote': {'status': 'active', 'pending': None, 'failed': None,
+                                  'active': {'snapshot_sha256': self.snapshot,
+                                             'bundle_manifest_sha256': self.production_bundle}},
+                       'application': {'snapshot_sha256': self.snapshot, 'canonical_revision': 1,
+                                       'owner_store_revision': 3, 'pending_proposals': 2,
+                                       'unresolved_exclusions': 0, 'provider_calls_recorded': 0,
+                                       'publication_status': 'private'}}
+        self.retained = {'schema': 'retained-aida-private-status/v1', 'run_id': 'retained-run',
+                         'binding': {'snapshot_sha256': self.snapshot,
+                                     'source_bundle_sha256': self.retained_bundle},
+                         'cutoff': self.status['local']['cutoff'], 'source_gaps': 0,
+                         'provider_calls': 0, 'counts': {'source_rows': 1},
+                         'canonical': {'status': 'applied', 'identity_revision': 1}}
+        self.snapshot_manifest = {'snapshot_sha256': self.snapshot,
+                                  'inputs': {'aida': {'status': 'included', 'sha256': self.source,
+                                                       'source_schema': 'aida-selected-html-packet/v1'}}}
+        self.mapping = {'schema': 'retained-aida-production-source-map/v1',
+                        'snapshot_sha256': self.snapshot,
+                        'retained_bundle_sha256': self.retained_bundle,
+                        'production_bundle_sha256': self.production_bundle,
+                        'sources': [
+                            {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'packet', 'production_source_id': 'packet', 'sha256': self.source},
+                            {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'receipt', 'production_source_id': 'receipt', 'sha256': 'f' * 64},
+                            {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'original', 'production_source_id': 'original', 'sha256': '1' * 64}]}
+        self.pin = {'schema': 'retained-aida-owner-resync/v1', 'snapshot_sha256': self.snapshot,
+                    'cutoff': self.status['local']['cutoff'],
+                    'retained_bundle_sha256': self.retained_bundle,
+                    'production_bundle_sha256': self.production_bundle,
+                    'source_map_sha256': sha(self.mapping),
+                    'canonical_revision': 1, 'canonical_state_sha256': sha(self.target),
+                    'owner_revision': 3, 'owner_binding_revision': 1,
+                    'owner_state_sha256': sha(self.owner),
+                    'status_revision': 2, 'status_sha256': sha(self.status)}
+
+    def check(self):
+        return verify_noop_resync(self.pin, self.retained, document(self.retained_manifest),
+                                  self.snapshot_manifest, document(self.production_manifest),
+                                  self.mapping, self.status,
+                                  self.target, self.owner)
+
+    def test_exact_replay_is_an_unchanged_noop(self):
+        self.assertEqual(self.check()['outcome'], 'unchanged')
+
+    def test_replay_receipt_is_stable_after_interrupted_read(self):
+        first = self.check()
+        self.assertEqual(self.check(), first)
+        self.assertEqual(self.status['revision'], 2)
+        self.assertEqual(self.owner['proposal_count'], 2)
+        self.assertEqual(self.target['revision'], 1)
+
+    def test_stale_local_export_is_rejected(self):
+        self.retained['binding']['source_bundle_sha256'] = '9' * 64
+        with self.assertRaisesRegex(ValueError, 'retained bundle identity'):
+            self.check()
+
+    def test_new_human_correction_is_preserved(self):
+        self.owner['store_revision'] += 1
+        self.owner['human_event_count'] += 1
+        with self.assertRaisesRegex(ValueError, 'canonical, owner'):
+            self.check()
+        self.assertEqual(self.owner['store_revision'], 4)
+
+    def test_newer_status_wins(self):
+        self.status['revision'] += 1
+        with self.assertRaisesRegex(ValueError, 'remote status'):
+            self.check()
+        self.assertEqual(self.status['local']['gap_count'], 62)
+
+    def test_bundle_hashes_cannot_be_relabelled(self):
+        self.pin['production_bundle_sha256'] = self.retained_bundle
+        with self.assertRaisesRegex(ValueError, 'bundle manifest bytes'):
+            self.check()
+
+    def test_incomplete_mapping_rejects_restricted_original(self):
+        self.mapping['sources'].pop()
+        self.pin['source_map_sha256'] = sha(self.mapping)
+        with self.assertRaisesRegex(ValueError, 'mapping incomplete'):
+            self.check()
+
+    def test_changed_production_source_rejected(self):
+        self.production_manifest['sources'][-1]['sha256'] = '2' * 64
+        self.production_bundle = hashlib.sha256(document(self.production_manifest)).hexdigest()
+        self.pin['production_bundle_sha256'] = self.production_bundle
+        self.status['remote']['active']['bundle_manifest_sha256'] = self.production_bundle
+        self.mapping['production_bundle_sha256'] = self.production_bundle
+        self.pin['source_map_sha256'] = sha(self.mapping)
+        self.pin['status_sha256'] = sha(self.status)
+        with self.assertRaisesRegex(ValueError, 'retained source differs'):
+            self.check()
+
+    def test_historical_recovery_requires_its_own_exact_triple(self):
+        older = {'packet_sha256': '2' * 64, 'receipt_sha256': '3' * 64,
+                 'original_sha256': '4' * 64}
+        self.retained_manifest['recovered_packets']['older'] = older
+        self.retained_bundle = hashlib.sha256(document(self.retained_manifest)).hexdigest()
+        self.retained['binding']['source_bundle_sha256'] = self.retained_bundle
+        self.pin['retained_bundle_sha256'] = self.retained_bundle
+        self.mapping['retained_bundle_sha256'] = self.retained_bundle
+        self.snapshot_manifest['inputs']['older-snapshot'] = {
+            'status': 'included', 'source_schema': 'aida-selected-html-packet/v1',
+            'sha256': older['packet_sha256']}
+        for role in ('packet', 'receipt', 'original'):
+            self.production_manifest['sources'].append({
+                'id': 'older-' + role, 'sha256': older[role + '_sha256'],
+                'status': 'restricted' if role == 'original' else 'included'})
+            self.mapping['sources'].append({
+                'retained_source': 'older', 'snapshot_input': 'older-snapshot',
+                'role': role, 'production_source_id': 'older-' + role,
+                'sha256': older[role + '_sha256']})
+        self.production_bundle = hashlib.sha256(document(self.production_manifest)).hexdigest()
+        self.pin['production_bundle_sha256'] = self.production_bundle
+        self.mapping['production_bundle_sha256'] = self.production_bundle
+        self.status['remote']['active']['bundle_manifest_sha256'] = self.production_bundle
+        self.pin['status_sha256'] = sha(self.status)
+        self.pin['source_map_sha256'] = sha(self.mapping)
+        self.assertEqual(self.check()['outcome'], 'unchanged')
+        self.mapping['sources'].pop()
+        self.pin['source_map_sha256'] = sha(self.mapping)
+        with self.assertRaisesRegex(ValueError, 'mapping incomplete'):
+            self.check()
+
+
+if __name__ == '__main__':
+    unittest.main()
