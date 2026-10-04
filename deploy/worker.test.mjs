@@ -96,6 +96,7 @@ test('private gateway rejects invalid assertions and non-owner identities', asyn
       await token({aud:['b'.repeat(32)]}),
       await token({iss:'https://other.cloudflareaccess.com'}),
       await token({exp:now-1}),
+      await token({nbf:undefined}),
       await token({nbf:now+60}),
       await token({},otherPair.privateKey)
     ]) {
@@ -263,6 +264,30 @@ test('private status write requires dedicated service identity and token', async
     assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,'X-Freediving-Status-Token':''},body}),config)).status,403);
     assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,Origin:'https://poc.alphacompose.com'},body}),config)).status,403);
     assert.equal((await worker.fetch(req(path,{method:'POST',headers,body}),config)).status,200);
+    assert.equal(forwarded,1);
+  }finally{globalThis.fetch=original;}
+});
+
+test('status reader accepts a signed service assertion without nbf and rejects future nbf', async () => {
+  const path='/owner-evidence/api/presentation-status';
+  const machineId='status123.access';
+  const config={...privateEnv,OWNER_EVIDENCE_STATUS_CLIENT_ID:machineId};
+  const headers={'X-Freediving-Status-Token':'separate-status-token-for-tests'};
+  const original=globalThis.fetch;
+  let forwarded=0;
+  globalThis.fetch=async (url,options)=>{
+    if(url.endsWith('/cdn-cgi/access/certs')) return Response.json({keys:[jwk]});
+    forwarded++;
+    assert.equal(url,'https://owner-origin.alphacompose.com'+path);
+    assert.equal(options.headers.get('X-Freediving-Owner-Machine'),machineId);
+    return Response.json({revision:1});
+  };
+  try{
+    const identity={email:undefined,common_name:machineId,sub:''};
+    const valid=await token({...identity,nbf:undefined});
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,'Cf-Access-Jwt-Assertion':valid}}),config)).status,200);
+    const future=await token({...identity,nbf:Math.floor(Date.now()/1000)+60});
+    assert.equal((await worker.fetch(req(path,{headers:{...headers,'Cf-Access-Jwt-Assertion':future}}),config)).status,403);
     assert.equal(forwarded,1);
   }finally{globalThis.fetch=original;}
 });

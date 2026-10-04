@@ -43,11 +43,12 @@ async function verifiedOwner(token, config, machine=false) {
     const claims = JSON.parse(decoder.decode(decodeSegment(parts[1])));
     if (header.alg !== 'RS256' || typeof header.kid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(header.kid)) return null;
     const now = Math.floor(Date.now()/1000);
+    const validNbf = claims.nbf === undefined ? Boolean(machine) : Number.isInteger(claims.nbf) && claims.nbf <= now;
     if (claims.iss !== config.issuer || !(claims.aud === config.audience || Array.isArray(claims.aud) && claims.aud.includes(config.audience)) ||
         claims.type !== 'app' ||
         (machine ? !((machine === 'status' ? config.statusClientId : config.importClientId) && claims.common_name === (machine === 'status' ? config.statusClientId : config.importClientId) && claims.sub === '' && !claims.email)
                  : !(typeof claims.email === 'string' && config.emails.has(claims.email) && !claims.common_name)) ||
-        !Number.isInteger(claims.exp) || claims.exp <= now || !Number.isInteger(claims.nbf) || claims.nbf > now ||
+        !Number.isInteger(claims.exp) || claims.exp <= now || !validNbf ||
         !Number.isInteger(claims.iat) || claims.iat > now) return null;
     const keysResponse = await fetch(`${config.issuer}/cdn-cgi/access/certs`, {redirect:'manual',signal:AbortSignal.timeout(5000),cf:{cacheTtl:0,cacheEverything:false}});
     if (!keysResponse.ok) return null;
