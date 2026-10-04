@@ -141,7 +141,10 @@ class HostStores:
         with tempfile.TemporaryDirectory(dir=self.directory) as temporary:
             path = Path(temporary) / 'target.json'
             self._clojure('target-state', self.snapshot, path)
-            return json.loads(path.read_text())
+            state = json.loads(path.read_text())
+            if not hasattr(self, 'initial_target'):
+                self.initial_target = state
+            return state
 
     def canonical_readback_digest(self, expected):
         with tempfile.TemporaryDirectory(dir=self.directory) as temporary:
@@ -160,8 +163,10 @@ class HostStores:
     def backup_postgres(self, directory):
         jdbc = os.getenv('FREEDIVING_REVIEW_URL', '')
         match = re.fullmatch(r'jdbc:postgresql://([^/?#]+)/([^?]+)(?:\?.*)?', jdbc)
+        host_port = match.group(1).split(':', 1) if match else []
         need(match is not None and os.getenv('PGDATABASE') == match.group(2)
-             and os.getenv('PGUSER') and os.getenv('PGHOST')
+             and os.getenv('PGUSER') and os.getenv('PGHOST') == host_port[0]
+             and os.getenv('PGPORT', '5432') == (host_port[1] if len(host_port) == 2 else '5432')
              and not any(os.getenv(name) for name in ('PGSERVICE', 'PGDATABASE_OVERRIDE')),
              'PostgreSQL backup target must match canonical target')
         path = directory / 'postgres.dump'
@@ -172,7 +177,10 @@ class HostStores:
             expected = {'backup_sha256': digest(path),
                         'target': hashlib.sha256((match.group(1) + '/' + match.group(2)
                                                   + '/' + os.environ['PGUSER']).encode()).hexdigest()}
-            need(json.loads(marker.read_text()) == expected,
+            recorded = json.loads(marker.read_text())
+            need(all(recorded.get(key) == value for key, value in expected.items())
+                 and isinstance(recorded.get('target_state_sha256'), str)
+                 and SHA.fullmatch(recorded['target_state_sha256']),
                  'PostgreSQL backup target or bytes changed')
             return path.name
         fd, temporary = tempfile.mkstemp(prefix='.postgres-', dir=directory)
@@ -186,7 +194,9 @@ class HostStores:
             receipt(directory, 'pg-backup.json',
                     {'backup_sha256': digest(path),
                      'target': hashlib.sha256((match.group(1) + '/' + match.group(2)
-                                               + '/' + os.environ['PGUSER']).encode()).hexdigest()})
+                                               + '/' + os.environ['PGUSER']).encode()).hexdigest(),
+                     'target_state_sha256': hashlib.sha256(json.dumps(
+                         self.initial_target, sort_keys=True).encode()).hexdigest()})
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -230,7 +240,9 @@ class HostStores:
             value = json.loads(marker.read_text())
             expected['target_state_sha256'] = value.get('target_state_sha256')
             need(value == expected and value['target_state_sha256'] ==
-                 hashlib.sha256(json.dumps(readback(), sort_keys=True).encode()).hexdigest(),
+                 hashlib.sha256(json.dumps(readback(), sort_keys=True).encode()).hexdigest()
+                 and value['target_state_sha256'] == json.loads(
+                     (directory / 'pg-backup.json').read_text())['target_state_sha256'],
                  'PostgreSQL restore drill receipt changed')
             return True
         env = os.environ.copy()
@@ -241,6 +253,9 @@ class HostStores:
         need(completed.returncode == 0, 'PostgreSQL restore drill failed')
         expected['target_state_sha256'] = hashlib.sha256(
             json.dumps(readback(), sort_keys=True).encode()).hexdigest()
+        backup_marker = json.loads((directory / 'pg-backup.json').read_text())
+        need(expected['target_state_sha256'] == backup_marker['target_state_sha256'],
+             'restored PostgreSQL target differs from backup checkpoint')
         receipt(directory, marker.name, expected)
         return True
 
