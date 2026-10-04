@@ -286,8 +286,22 @@ function identityDecisionState(item){
   if(effective==='pending')return 'Pending owner review; no canonical edge';
   if(effective==='projection_pending')return 'Owner decision recorded; canonical delivery pending';
   if(['automatic_approved','human_approved','human_corrected'].includes(effective))
-    return item.canonical_projection_status==='verified'?'Accepted canonical edge':'Owner approval recorded; canonical edge unverified';
+    return item.canonical_projection_status==='verified'?'Accepted canonical edge':
+      effective==='automatic_approved'?'Automatic approval recorded; canonical edge unverified':'Owner approval recorded; canonical edge unverified';
   return 'No accepted canonical edge';
+}
+function supersededDecisions(history){
+  if(!Array.isArray(history))return [];
+  const labels=[];
+  for(const [index,event] of history.entries()){
+    if(!['automatic_approve','approve','correct'].includes(event?.action))continue;
+    const later=history.slice(index+1).find(next=>['correct','reverse'].includes(next?.action));
+    if(!later)continue;
+    const prior=event.action==='automatic_approve'?'Automatic approval':event.action==='approve'?'Human approval':'Human correction';
+    const replacement=later.action==='correct'?'human correction':'reversal';
+    labels.push(`${prior}${event.revision == null?'':` at revision ${event.revision}`} superseded by ${replacement}${later.revision == null?'':` at revision ${later.revision}`}.`);
+  }
+  return labels;
 }
 function decisionCard(item){
   const card=document.createElement('article');card.className='decision-card';
@@ -344,6 +358,8 @@ function renderDecisionDetail(item){
   const area=$('decision-detail');area.replaceChildren(heading(`Decision ${item.id}`));
   entries(area,{type:item.type,subject_id:item.subject_id,source:item.source_name || item.source,status:item.status,effective_status:item.effective_status,provider_confidence:item.provider_confidence,rule_version:item.rule_version,model_version:item.model_version,policy_version:item.policy_version,snapshot_sha256:item.snapshot_sha256,active_snapshot_sha256:item.active_snapshot_sha256,binding_revision:item.binding_revision,store_revision:item.store_revision,canonical_projection_status:item.canonical_projection_status});
   if(identityDecisionState(item))area.append(cell(identityDecisionState(item),'p'));
+  const superseded=supersededDecisions(item.history);
+  if(superseded.length)area.append(heading('Superseded decisions'),...superseded.map(label=>cell(label,'p')));
   for(const [label,value] of [['Original evidence',item.original],['Proposed value',item.proposed],['Selected option',item.selected_option],['Competing options',item.competing_options],['Supporting and conflicting evidence',item.evidence],['Dependencies',item.depends_on],['Missing evidence',item.missing_evidence_ids],['Correction',item.correction],['Decision history',item.history]])area.append(heading(label),jsonBlock(value ?? null));
   for(const evidence of item.evidence || []){
     if(typeof evidence.id!=='string' || !/^[a-f0-9]{64}$/.test(evidence.id))continue;
