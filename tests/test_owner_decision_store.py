@@ -4,6 +4,7 @@ import unittest
 import sqlite3
 import json
 import hashlib
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -212,7 +213,9 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertEqual(self.store.delivery_checkpoints()['postgresql'], second['store_revision'])
 
     def test_approval_survives_snapshot_replacement_with_same_evidence(self):
+        self.assertIsNone(self.store.active_snapshot_sha256)
         self.bind()
+        self.assertEqual(self.store.active_snapshot_sha256, SNAP_A)
         self.store.register(SNAP_A, proposal('d1'), idempotency_key='register-d1')
         approved = self.store.act('d1', action='approve', expected_revision=self.store.revision,
                                   idempotency_key='approve-d1')
@@ -220,6 +223,7 @@ class DecisionStoreTest(unittest.TestCase):
         self.store.close()
         self.store = DecisionStore(self.path)
         self.bind(SNAP_B)
+        self.assertEqual(self.store.active_snapshot_sha256, SNAP_B)
         inspected = self.store.inspect('d1')
         self.assertEqual(inspected['status'], 'human_approved')
         self.assertEqual(inspected['snapshot_sha256'], SNAP_A)
@@ -235,6 +239,43 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertEqual([p['id'] for p in queue['scoreless_items']], ['gap'])
         self.assertIn('uncalibrated', queue['score_note'])
         self.assertEqual(self.store.queue(decision_type='same_attempt', source_name='Other')['total'], 0)
+
+    def test_source_derived_owner_views_fit_worker_deadline_at_207_proposals(self):
+        evidence = [f'row-{i}' for i in range(16000)]
+        refs = {ident: {'source_sha256': 'c' * 64, 'refs': [],
+                        'source_derived_ref': {'kind': 'source-derived',
+                                               'source_sha256': 'c' * 64,
+                                               'citation': {'row': i}}}
+                for i, ident in enumerate(evidence)}
+        self.store.bind_snapshot(SNAP_A, evidence, expected_revision=0,
+                                 idempotency_key='large-bind', _observation_refs=refs)
+        proposals = []
+        for i in range(207):
+            ident = f'row-{i}'
+            revision = refs[ident]['source_derived_ref']
+            p = proposal(f'candidate-{i}', evidence=ident, score=i / 207)
+            p['evidence'][0] = {'id': ident, 'version': revision,
+                                'citation': {'source_citation': {'source-sha256': 'c' * 64,
+                                                                 'locator': revision['citation']},
+                                             'observation_revision': revision}}
+            p['canonical_binding'] = {
+                'decision_id': p['id'], 'observation_revisions': [revision],
+                'evidence_bindings': [{'snapshot_record_id': ident,
+                                       'observation_revision': revision}]}
+            proposals.append(p)
+        self.store.register_batch(SNAP_A, proposals, idempotency_key='large-register')
+        started = time.monotonic()
+        queue = self.store.queue(limit=50)
+        projection = self.store.projection()
+        elapsed = time.monotonic() - started
+        self.assertEqual(queue['total'], 207)
+        self.assertEqual([item['id'] for item in queue['items']],
+                         [f'candidate-{i}' for i in range(50)])
+        self.assertEqual(queue['items'][0]['evidence'][0]['citation']['source_citation']['locator'],
+                         {'row': 0})
+        self.assertEqual(projection['snapshot_sha256'], SNAP_A)
+        self.assertEqual(projection['active_decisions'], [])
+        self.assertLess(elapsed, 1.5, f'owner views took {elapsed:.2f}s')
 
     def test_reversal_invalidates_dependent_chain_and_keeps_independent_fact(self):
         self.bind()

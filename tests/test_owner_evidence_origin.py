@@ -231,6 +231,7 @@ class PrivateOriginTest(unittest.TestCase):
     def test_decision_routes_require_store_and_return_private_queue(self):
         self.assertEqual(self.request('/owner-evidence/api/decisions')[0], 503)
         class Decisions:
+            active_snapshot_sha256 = 'a' * 64
             def queue(self, **filters):
                 self.filters = filters
                 return {'revision': 1, 'items': [{'id': 'decision-1'}], 'total': 1,
@@ -239,7 +240,6 @@ class PrivateOriginTest(unittest.TestCase):
                 return {'id': decision_id, 'store_revision': 1, 'history': []}
             def preview(self, decision_id, action):
                 return {'id': decision_id, 'action': action, 'affected': []}
-            def projection(self): return {'snapshot_sha256': 'a' * 64}
             def audit_sample(self, *, limit): return {'items': [], 'sample_size': 0, 'blocking': False}
         self.server.decisions = Decisions()
         status, _, body = self.request('/owner-evidence/api/decisions?type=identity&status=pending&source=meet&limit=2')
@@ -256,11 +256,54 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=invalid')[0], 400)
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/audit-sample')[2])['blocking'], False)
 
+    def test_queue_and_status_use_current_owner_binding_without_full_projection(self):
+        class Decisions:
+            revision = 209
+            active_snapshot_sha256 = 'a' * 64
+
+            def queue(self, **_):
+                return {'revision': self.revision, 'items': [], 'total': 207,
+                        'scoreless_items': [], 'scoreless_total': 207}
+
+            def projection(self):
+                raise AssertionError('full projection is unnecessary for owner binding')
+
+        class Status:
+            def read(self, active, *, owner_revision, owner_snapshot,
+                     include_stale_checkpoint=False):
+                return {'owner_revision': owner_revision, 'owner_snapshot': owner_snapshot}
+
+            def update(self, body, active, *, owner_revision, owner_snapshot):
+                return {'owner_revision': owner_revision, 'owner_snapshot': owner_snapshot}
+
+        self.server.decisions = Decisions()
+        self.server.presentation_status = Status()
+        self.server.status_token = 'private-status-token-for-tests'
+        self.server.status_client_id = 'status-client.access'
+        queue_status, _, queue_body = self.request('/owner-evidence/api/decisions')
+        self.assertEqual(queue_status, 200)
+        self.assertEqual(json.loads(queue_body)['active_snapshot_sha256'], 'a' * 64)
+        status_code, _, status_body = self.request('/owner-evidence/api/presentation-status')
+        self.assertEqual(status_code, 200)
+        self.assertEqual(json.loads(status_body)['owner_revision'], 209)
+        self.assertEqual(json.loads(status_body)['owner_snapshot'], 'a' * 64)
+        machine_headers = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                           ('X-Freediving-Owner-Machine', self.server.status_client_id),
+                           ('X-Freediving-Status-Token', self.server.status_token),
+                           ('Content-Type', 'application/json')]
+        payload = b'{}'
+        post_code, _, post_body = self.request('/owner-evidence/api/presentation-status',
+                                              method='POST',
+                                              headers=machine_headers + [('Content-Length', str(len(payload)))],
+                                              body=payload)
+        self.assertEqual(post_code, 200)
+        self.assertEqual(json.loads(post_body)['owner_snapshot'], 'a' * 64)
+
     def test_decision_action_checks_origin_csrf_revision_and_body(self):
         class Decisions:
+            active_snapshot_sha256 = 'a' * 64
             def queue(self, **_): return {'revision': 3, 'items': [], 'total': 0,
                                           'scoreless_items': [], 'scoreless_total': 0}
-            def projection(self): return {'snapshot_sha256': 'a' * 64}
             def act(self, *args, **kwargs):
                 self.call = (args, kwargs)
                 return {'revision': 4, 'status': 'reversed'}
@@ -314,9 +357,9 @@ class PrivateOriginTest(unittest.TestCase):
 
     def test_owner_correction_requires_explicit_option_and_same_csrf(self):
         class Decisions:
+            active_snapshot_sha256 = 'a' * 64
             def queue(self, **_): return {'revision': 3, 'items': [], 'total': 0,
                                           'scoreless_items': [], 'scoreless_total': 0}
-            def projection(self): return {'snapshot_sha256': 'a' * 64}
             def inspect(self, _): return {'selected_option': 'same-person',
                                           'competing_options': ['different-person', 'unknown']}
             def act(self, *args, **kwargs):
