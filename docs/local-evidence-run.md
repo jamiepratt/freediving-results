@@ -1,5 +1,21 @@
 # Local evidence run
 
+## Retained AIDA recovery input
+
+For the private `retained` command, a frozen AIDA packet missing from its original manifest path can be supplied in the retained plan's optional `recovered_packets` list:
+
+```json
+"recovered_packets": [{
+  "source_name": "aida-source-name",
+  "path": "/private/recovery/packet.json",
+  "sha256": "<frozen packet SHA-256>",
+  "receipt_sha256": "<receipt SHA-256>",
+  "original_sha256": "<original HTML SHA-256>"
+}]
+```
+
+Use a new private run directory after changing the plan. The packet path must be a regular `packet.json` with adjacent regular `receipt.json`; the receipt's relative `body.path` locates the original. The runner checks all three hashes, requires the packet hash to match the frozen snapshot manifest, then stages and rechecks the three files in `cohort-bundle/recovered-packets/`. Staging rejects symlink paths. The bundle manifest and completed checkpoint bind their hashes; `metrics` rechecks staged recovery bytes. Source replay still verifies the packet against the receipt and original and requires every position to match the frozen snapshot and observations. Missing packets without an explicit recovery remain reported gaps. The command has no remote presentation step.
+
 `scripts/local_evidence_run.py` coordinates existing local commands and the private snapshot and source-bundle builders. It does not fetch by itself. With an explicit remote configuration, the same `run` command presents the verified snapshot and bundle remotely after local completion. Keep the plan, run directory, source inventory and all outputs outside Git, under private storage. Commands in the plan run locally with the invoking user's privileges. Use absolute paths and only trusted plans.
 
 A plan declares a UTC cutoff, ordered command stages, hash-checked outputs, snapshot packet inputs, explicit excluded packets, and a source inventory for `private_source_bundle.py`. Discovery, acquisition and parser CLIs can be stage commands. For example:
