@@ -4,7 +4,7 @@
             [clojure.string :as str])
   (:import [java.security MessageDigest]))
 
-(def template-version "reconciliation-jev/1")
+(def template-version "reconciliation-jev/2")
 (def ^:private guidance
   (str "Compare cited freediving evidence only. Names can collide; original spelling, diacritics, transliteration, name order, omitted components, OCR and wrapping can differ. "
        "A distinctive full name and compatible context can support identity; a common name alone is weak. Rank, performance, discipline, age category and representation can change. "
@@ -36,7 +36,13 @@
                    :unknown "Row meaning remains uncertain"}})
 (def ^:private family-scope
   {:identity "Decide whether cited records refer to one person; do not merge observations."
-   :same-attempt "Decide whether cited positions refer to one real dive; repeated exports are not extra dives."
+   :same-attempt (str "Decide whether cited positions refer to one real dive; repeated exports are not extra dives. "
+                      "In the same competition, athlete and discipline, identical performance is a strong, rebuttable prior for the same attempt: "
+                      "divers usually make few attempts, and separate dives at the same depth, static apnea duration or pool distance or other relevant result metric are rare. "
+                      "Rebut this with conflicting session, day, round, attempt ID, status, penalty or source semantics when supplied. "
+                      "A PDF date range encompassing a specific unit day, with a missing PDF row day, is not a contradiction. "
+                      "Sources with shared upstream timing are not independent corroboration, though they may describe the same result. "
+                      "Choose unknown for genuine uncertainty. Invent no facts.")
    :source-revision "Assess source/version direction using cited publication and acquisition facts; never infer chronology from row order alone."
    :category-representation "Follow the source's own labels. A category is not a represented country or organization; do not infer citizenship."
    :row-semantics "Distinguish a dive from an aggregate, ranking or non-result using cited source structure."})
