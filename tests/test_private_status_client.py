@@ -47,13 +47,13 @@ def test_stale_checkpoint_requires_newer_run_before_compare_and_swap(tmp_path):
     opener = Opener()
     import pytest
     with pytest.raises(RuntimeError, match='stale'):
-        sync_status(run, 'jwt', 'token', opener=opener)
+        sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     assert opener.posted is None
     state['run_id'] = 'run-2'
     state['coverage']['cutoff'] = '2026-10-04T00:00:00Z'
     state['reconciliation']['metrics']['binding']['run_id'] = 'run-2'
     (run / 'state.json').write_text(json.dumps(state))
-    result = sync_status(run, 'jwt', 'token', opener=opener)
+    result = sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     assert result['run_id'] == 'run-2'
     assert opener.posted['expected_revision'] == 4
     assert opener.posted['revision'] == 5
@@ -107,7 +107,7 @@ def test_reconciliation_receipt_requires_exact_binding_and_sends_only_summary(tm
                 return Response(self.posted)
             return Response({'status': 'unavailable', 'remote': {'active': None}})
     opener = Opener()
-    result = sync_status(run, 'jwt', 'token', opener=opener)
+    result = sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     assert result['reconciliation']['owner_store_revision'] == 7
     assert result['reconciliation']['metrics']['sampled_error']['denominator'] == 2
     assert 'PRIVATE' not in json.dumps(opener.posted)
@@ -116,22 +116,22 @@ def test_reconciliation_receipt_requires_exact_binding_and_sends_only_summary(tm
     (run / 'state.json').write_text(json.dumps(state))
     import pytest
     with pytest.raises(ValueError, match='metrics checkpoint binding'):
-        sync_status(run, 'jwt', 'token', opener=opener)
+        sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     state['reconciliation']['metrics']['binding']['decision_revision'] = 3
     (run / 'state.json').write_text(json.dumps(state))
     ledger.write_text('{:events [{:changed true}]}')
     with pytest.raises(ValueError, match='metrics checkpoint binding'):
-        sync_status(run, 'jwt', 'token', opener=opener)
+        sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     ledger.write_text('{:events []}')
     state['reconciliation']['metrics']['binding']['stage_checkpoint'] = 'running'
     (run / 'state.json').write_text(json.dumps(state))
     with pytest.raises(ValueError, match='metrics checkpoint binding'):
-        sync_status(run, 'jwt', 'token', opener=opener)
+        sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
     state['reconciliation']['metrics']['binding']['stage_checkpoint'] = 'reconciliation-complete'
     state['reconciliation']['remote_store_revision'] = None
     (run / 'state.json').write_text(json.dumps(state))
     with pytest.raises(ValueError, match='authoritative owner decision revision unavailable'):
-        sync_status(run, 'jwt', 'token', opener=opener)
+        sync_status(run, 'machine.access', 'access-secret', 'token', opener=opener)
 
 
 def test_checkpoint_sync_sends_only_safe_fields_and_skips_identical_retry(tmp_path):
@@ -167,14 +167,21 @@ def test_checkpoint_sync_sends_only_safe_fields_and_skips_identical_retry(tmp_pa
             return Response(self.current)
 
     opener = Opener()
-    result = sync_status(run, 'machine-jwt', 'private-status-token', opener=opener)
+    result = sync_status(run, 'machine.access', 'access-secret', 'private-status-token', opener=opener)
     assert result['revision'] == 1
     assert result['remote']['active']['snapshot_sha256'] == 'c' * 64
     assert len(opener.calls) == 2
+    assert [request.get_header('User-agent') for request in opener.calls] == [
+        'freediving-status-sync/1.0', 'freediving-status-sync/1.0']
+    assert [request.get_header('Cf-access-client-id') for request in opener.calls] == [
+        'machine.access', 'machine.access']
+    assert [request.get_header('Cf-access-client-secret') for request in opener.calls] == [
+        'access-secret', 'access-secret']
+    assert all(request.get_header('Cf-access-jwt-assertion') is None for request in opener.calls)
     payload = opener.calls[-1].data.decode()
     assert '/secret/path' not in payload
     assert 'secret athlete' not in payload
     assert 'private/path' not in payload
     assert result['local']['gap_count'] == 1
-    sync_status(run, 'machine-jwt', 'private-status-token', opener=opener)
+    sync_status(run, 'machine.access', 'access-secret', 'private-status-token', opener=opener)
     assert len(opener.calls) == 3
