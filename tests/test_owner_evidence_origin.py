@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 import threading
@@ -74,6 +75,63 @@ class PrivateOriginTest(unittest.TestCase):
         status, _, body = self.request('/owner-evidence/api/overview')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['bundle_manifest_sha256'], 'd' * 64)
+
+    def test_idle_origin_connection_does_not_block_authorized_overview(self):
+        idle = socket.create_connection(('127.0.0.1', self.server.server_port), timeout=1)
+        self.addCleanup(idle.close)
+        idle.sendall(b'GET /owner-evidence HTTP/1.1\r\nHost: ' + HOST.encode())
+        status, _, body = self.request('/owner-evidence/api/overview')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
+
+    def test_authorized_decision_actions_do_not_overlap(self):
+        import hmac
+        from hashlib import sha256
+        first_entered = threading.Event()
+        second_entered = threading.Event()
+        release_first = threading.Event()
+
+        class Decisions:
+            def __init__(self):
+                self.calls = 0
+
+            def act(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    first_entered.set()
+                    release_first.wait(timeout=2)
+                else:
+                    second_entered.set()
+                return {'revision': self.calls}
+
+        self.server.decisions = Decisions()
+        csrf = hmac.new(SECRET.encode(), ('decision-csrf-v1:' + EMAIL).encode(), sha256).hexdigest()
+        path = '/owner-evidence/api/decisions/decision-1/actions'
+        results = []
+
+        def action(number):
+            body = json.dumps({'action': 'reverse', 'expected_revision': number,
+                               'idempotency_key': f'action-{number}', 'reason': 'owner review',
+                               'csrf_token': csrf}).encode()
+            headers = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                       ('X-Freediving-Owner-Email', EMAIL), ('Origin', 'https://poc.alphacompose.com'),
+                       ('Content-Type', 'application/json'), ('X-Freediving-CSRF', csrf),
+                       ('Content-Length', str(len(body)))]
+            results.append(self.request(path, method='POST', headers=headers, body=body)[0])
+
+        first = threading.Thread(target=action, args=(1,))
+        second = threading.Thread(target=action, args=(2,))
+        first.start()
+        try:
+            self.assertTrue(first_entered.wait(timeout=1))
+            second.start()
+            self.assertFalse(second_entered.wait(timeout=0.5))
+        finally:
+            release_first.set()
+            first.join(timeout=3)
+            if second.ident is not None:
+                second.join(timeout=3)
+        self.assertEqual(results, [200, 200])
 
     def test_direct_origin_spoof_and_wrong_owner_get_no_private_bytes(self):
         for headers in ([('Host', HOST)],
