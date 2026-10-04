@@ -588,7 +588,8 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
                                            'binding': {'snapshot_sha256': json.loads((snapshot / 'manifest.json').read_text())['snapshot_sha256'],
                                                        'observations_sha256': inputs['aida_observations']['sha256'],
                                                        'plan_sha256': inputs['aida_plan']['sha256']},
-                                           'counts': {'candidate_edges': 0}, 'events': []}))
+                                           'counts': {'source_rows': 0, 'source_gaps': 0,
+                                                      'candidate_edges': 0}, 'events': []}))
 
     target = tmp_path / 'retained-run'
     first = runner.run_retained(retained, target, adapter=adapter)
@@ -626,11 +627,39 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     assert replayed['canonical']['owner_correction_revision'] == 1
     assert replayed['canonical']['accepted_group_count'] == 0
     assert calls == [1]
+    checkpoint = subprocess.run([sys.executable, str(SCRIPT), 'retained-status',
+                                 '--run-dir', str(target)], capture_output=True, text=True)
+    assert checkpoint.returncode == 0, checkpoint.stderr
+    status = json.loads(checkpoint.stdout)
+    assert status['schema'] == 'retained-aida-private-status/v1'
+    assert status['binding']['snapshot_manifest_sha256'] == sha(snapshot / 'manifest.json')
+    assert status['binding']['source_bundle_sha256'] == sha(target / 'cohort-bundle/manifest.json')
+    assert status['binding']['export_sha256'] == sha(target / 'reconciliation/aida-cohort.json')
+    assert status['canonical']['receipt_sha256'] == sha(target / 'reconciliation/canonical-receipt.json')
+    assert status['canonical']['human_correction_revision'] == 1
+    assert status['provider_calls'] == 0
+    assert status['remote'] == {'status': 'pending', 'verified': False}
+    assert status['canonical']['current_revision_verified'] is False
+    assert status['publication_authority'] == 'unverified'
+    assert str(tmp_path) not in checkpoint.stdout
+    rejected_status = subprocess.run([sys.executable, str(SCRIPT), 'retained-status',
+                                      '--run-dir', str(target), '--remote-config', str(tmp_path / 'remote')],
+                                     capture_output=True, text=True)
+    assert rejected_status.returncode != 0
+    staged_dump = target / 'cohort-bundle' / 'pg_dump'
+    staged_dump.write_text('changed')
+    stale_status = subprocess.run([sys.executable, str(SCRIPT), 'retained-status',
+                                   '--run-dir', str(target)], capture_output=True, text=True)
+    assert stale_status.returncode != 0
+    staged_dump.write_bytes((tmp_path / 'pg_dump').read_bytes())
     measured = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
                               capture_output=True, text=True)
     assert measured.returncode == 0, measured.stderr
     assert json.loads(measured.stdout)['provider_calls'] == 0
     (target / 'reconciliation' / 'canonical-receipt.json').write_text('{}')
+    stale_status = subprocess.run([sys.executable, str(SCRIPT), 'retained-status',
+                                   '--run-dir', str(target)], capture_output=True, text=True)
+    assert stale_status.returncode != 0
     stale_receipt = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
                                    capture_output=True, text=True)
     assert stale_receipt.returncode != 0
