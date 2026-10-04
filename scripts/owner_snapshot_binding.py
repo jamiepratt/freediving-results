@@ -41,7 +41,8 @@ def _revision(value):
     return {key: value[key] for key in REVISION_KEYS}
 
 
-def load_verified_bindings(directory, evidence_positions, observation_revisions):
+def load_verified_bindings(directory, evidence_positions, observation_revisions, *,
+                           recovered_packet_paths=None):
     """Return one exact candidate_position per evidence ID and observation.
 
     The caller obtains observation_revisions from immutable PostgreSQL rows.
@@ -64,6 +65,13 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
             position = (revision['job_id'], revision['ordinal'])
             _require(position not in revisions, 'duplicate observation revision')
             revisions[position] = revision
+    recovered_packet_paths = ({} if recovered_packet_paths is None
+                              else recovered_packet_paths)
+    aida_names = {ref.get('source_name') for ref in source_revisions.values()
+                  if ref.get('adapter_version') != MICROPLUS_VERSION}
+    _require(isinstance(recovered_packet_paths, dict)
+             and set(recovered_packet_paths) <= aida_names,
+             'unknown AIDA recovered packet source')
     verified_sources = {}
     if source_revisions:
         versions = {ref.get('adapter_version') for ref in source_revisions.values()}
@@ -78,7 +86,13 @@ def load_verified_bindings(directory, evidence_positions, observation_revisions)
                      if ref.get('adapter_version') == version}),
                      'source observation name missing')
             loader = load_microplus if version == MICROPLUS_VERSION else load_aida
-            source_result = loader(directory, names, adapter_version=version)
+            if loader is load_aida:
+                source_result = loader(directory, names, adapter_version=version,
+                                       recovered_packet_paths={name: recovered_packet_paths[name]
+                                                               for name in names
+                                                               if name in recovered_packet_paths})
+            else:
+                source_result = loader(directory, names, adapter_version=version)
             for item in source_result['observations']:
                 record_id = item['snapshot_record_id']
                 if record_id in source_revisions and source_revisions[record_id]['adapter_version'] == version:

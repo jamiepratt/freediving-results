@@ -46,8 +46,8 @@ def _receipt_path(packet_path):
                                  else 'receipt-' + name[len('packet-'):])
 
 
-def _verified_packet(input_data):
-    path = Path(input_data['path'])
+def _verified_packet(input_data, recovered_path=None):
+    path = Path(recovered_path) if recovered_path is not None else Path(input_data['path'])
     if not path.is_file():
         return None
     packet_bytes = path.read_bytes()
@@ -104,17 +104,30 @@ def _source_fields(row):
             'ot_raw': value('OT')}
 
 
-def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAPTER_VERSION):
+def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAPTER_VERSION,
+                             recovered_packet_paths=None):
     """Return exact supported positions and gaps for named AIDA snapshot views.
 
     Original HTML, browser receipt, packet and snapshot hashes are verified.
-    Missing retained packets create explicit per-position gaps. Any conflicting
-    available evidence fails the whole operation.
+    Missing retained packets create explicit per-position gaps. An exact copy
+    at a new path may recover a missing packet; its frozen hash still applies.
+    Any conflicting available evidence fails the whole operation.
     """
     _require(isinstance(source_names, (list, tuple)) and source_names
              and len(source_names) == len(set(source_names)), 'unique source names required')
     _require(adapter_version in (ADAPTER_VERSION, LEGACY_ADAPTER_VERSION),
              'unsupported AIDA observation adapter version')
+    recovered_packet_paths = ({} if recovered_packet_paths is None
+                              else recovered_packet_paths)
+    _require(isinstance(recovered_packet_paths, dict)
+             and set(recovered_packet_paths) <= set(source_names),
+             'unknown AIDA recovered packet source')
+    _require(all(isinstance(path, (str, Path)) for path in recovered_packet_paths.values()),
+             'invalid AIDA recovered packet path')
+    recovered_paths = {name: Path(path).resolve()
+                       for name, path in recovered_packet_paths.items()}
+    _require(len(set(recovered_paths.values())) == len(recovered_paths),
+             'duplicate AIDA recovered packet path')
     observations, gaps = [], []
     with SnapshotQuery(snapshot_dir) as snapshot:
         for name in source_names:
@@ -130,7 +143,12 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
                     and row['collection'] == 'positions']
             _require(len(rows) == item['collections']['positions'] and rows,
                      'AIDA snapshot position count mismatch')
-            verified = _verified_packet(item)
+            recovered_path = recovered_paths.get(name)
+            if recovered_path is not None:
+                _require(not Path(item['path']).is_file(),
+                         'AIDA manifest packet already present')
+                _require(recovered_path.is_file(), 'AIDA recovered packet missing')
+            verified = _verified_packet(item, recovered_path)
             if verified is None:
                 gaps.extend({'snapshot_record_id': row['record_id'],
                              'source_name': name, 'citation': json.loads(row['citation_json']),
