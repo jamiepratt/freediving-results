@@ -63,6 +63,9 @@
         (is (not= (get-in (identity/private-projection reviewer) [:athletes a :group-id])
                   (get-in (identity/private-projection reviewer) [:athletes b :group-id]))))
       (is (= split (apply-route/apply-cohort! reviewer app input)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (apply-route/apply-cohort!
+                    reviewer app (assoc-in input [:events 0 :id] "stale-export-relink"))))
       (is (= 3 (count (identity/private-history reviewer))))
       (is (= (:groups (identity/private-projection reviewer))
              (:groups (identity/rebuild-private-canonical-view! reviewer)))))))
