@@ -588,8 +588,10 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
                                            'binding': {'snapshot_sha256': json.loads((snapshot / 'manifest.json').read_text())['snapshot_sha256'],
                                                        'observations_sha256': inputs['aida_observations']['sha256'],
                                                        'plan_sha256': inputs['aida_plan']['sha256']},
-                                           'counts': {'source_rows': 0, 'source_gaps': 0,
-                                                      'candidate_edges': 0}, 'events': []}))
+                                           'counts': {'source_rows': 1, 'source_gaps': 0,
+                                                      'candidate_edges': 0},
+                                           'registration': {'rows': [{'observation_id': 'source-observation:synthetic'}]},
+                                           'events': []}))
 
     target = tmp_path / 'retained-run'
     first = runner.run_retained(retained, target, adapter=adapter)
@@ -642,6 +644,39 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     assert status['canonical']['current_revision_verified'] is False
     assert status['publication_authority'] == 'unverified'
     assert str(tmp_path) not in checkpoint.stdout
+    def readback_command(argv):
+        assert argv[4] == 'readback'
+        Path(argv[-1]).write_text(json.dumps({
+            'schema': 'retained-aida-canonical-readback/v1',
+            'database': 'isolated_test',
+            'snapshot-sha256': status['binding']['snapshot_sha256'],
+            'source-rows': [{'observation-id': 'source-observation:synthetic'}],
+            'non-source-row-count': 0,
+            'events': [{'id': f'event-{index}'} for index in range(13)],
+            'projection': {'revision': 13},
+            'human-correction-revision': 1}))
+
+    original_command = runner.command
+    monkeypatch.setattr(runner, 'command', readback_command)
+    handoff = runner.retained_handoff(target, tmp_path / 'private-handoff', 'isolated_test')
+    assert handoff['identity_revision'] == 13
+    assert handoff['authority_scope'] == 'selected_isolated_store_only'
+    assert handoff['publication_authority'] == 'unverified'
+    assert sha(Path(handoff['path'])) == handoff['sha256']
+    assert Path(handoff['path']).stat().st_mode & 0o777 == 0o600
+    with __import__('pytest').raises(ValueError, match='store or receipt mismatch'):
+        runner.retained_handoff(target, tmp_path / 'private-handoff', 'wrong_store')
+    def mixed_corpus_command(argv):
+        readback_command(argv)
+        output = Path(argv[-1])
+        mixed = json.loads(output.read_text())
+        mixed['non-source-row-count'] = 1
+        output.write_text(json.dumps(mixed))
+
+    monkeypatch.setattr(runner, 'command', mixed_corpus_command)
+    with __import__('pytest').raises(ValueError, match='store or receipt mismatch'):
+        runner.retained_handoff(target, tmp_path / 'private-handoff', 'isolated_test')
+    monkeypatch.setattr(runner, 'command', original_command)
     rejected_status = subprocess.run([sys.executable, str(SCRIPT), 'retained-status',
                                       '--run-dir', str(target), '--remote-config', str(tmp_path / 'remote')],
                                      capture_output=True, text=True)
@@ -675,6 +710,37 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     with __import__('pytest').raises(ValueError, match='retained input changed'):
         runner.run_retained(retained, target, adapter=adapter)
     assert calls == [1]
+
+
+def test_bound_retained_handoff_requires_historical_event_file(tmp_path, monkeypatch):
+    import importlib.util
+    import pytest
+    spec = importlib.util.spec_from_file_location('local_evidence_run', SCRIPT)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    run_dir = tmp_path / 'run'
+    (run_dir / 'reconciliation').mkdir(parents=True)
+    cohort = run_dir / 'reconciliation' / 'aida-cohort.json'
+    cohort.write_text(json.dumps({
+        'binding': {'identity_revision': 1, 'history_event_ids': ['prior']},
+        'registration': {'rows': [{'observation_id': 'row-1'}]}}))
+    status = {'canonical': {'status': 'applied', 'identity_revision': 2,
+                            'human_correction_revision': 0},
+              'binding': {'snapshot_sha256': 'a' * 64, 'export_sha256': sha(cohort)}}
+    monkeypatch.setenv('FREEDIVING_REVIEW_URL', 'jdbc:postgresql://private/review')
+    monkeypatch.setattr(runner, 'retained_status', lambda _: status)
+
+    def readback_command(argv):
+        Path(argv[-1]).write_text(json.dumps({
+            'schema': 'retained-aida-canonical-readback/v1',
+            'database': 'isolated_test', 'snapshot-sha256': 'a' * 64,
+            'source-rows': [{'observation-id': 'row-1'}], 'non-source-row-count': 0,
+            'events': [{'id': 'prior'}, {'id': 'new'}],
+            'projection': {'revision': 2}, 'human-correction-revision': 0}))
+
+    monkeypatch.setattr(runner, 'command', readback_command)
+    with pytest.raises(ValueError, match='historical event file missing'):
+        runner.retained_handoff(run_dir, tmp_path / 'private-handoff', 'isolated_test')
 
 
 def test_retained_aida_rejects_unverified_corpus_inputs(tmp_path):

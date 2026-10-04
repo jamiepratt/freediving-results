@@ -561,6 +561,102 @@ def retained_status(run_dir):
             'publication_authority': 'unverified'}
 
 
+def retained_handoff(run_dir, output_dir, database):
+    """Bind one selected, current isolated canonical store to a private run."""
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,63}', database):
+        raise ValueError('explicit canonical database name required')
+    if not os.environ.get('FREEDIVING_REVIEW_URL'):
+        raise ValueError('canonical readback JDBC environment incomplete')
+    status = retained_status(run_dir)
+    if status['canonical']['status'] != 'applied':
+        raise ValueError('canonical checkpoint not applied')
+    if output_dir.resolve().is_relative_to(ROOT.parent):
+        raise ValueError('private handoff must be outside repository')
+    if any(part.is_symlink() for part in (output_dir, *output_dir.parents)):
+        raise ValueError('private handoff directory is a symlink')
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        raise ValueError('private handoff directory invalid')
+    output_dir.chmod(0o700)
+    cohort = run_dir / 'reconciliation' / 'aida-cohort.json'
+    applied = run_dir / 'reconciliation' / 'canonical-receipt.json'
+    with tempfile.TemporaryDirectory(prefix='.canonical-readback-', dir=output_dir) as scratch:
+        path = Path(scratch) / 'readback.json'
+        command(['clojure', '-M', '-m', 'freediving.retained-aida-apply', 'readback',
+                 str(cohort), status['binding']['export_sha256'], str(applied), str(path)])
+        readback = json.loads(path.read_text())
+    projection = readback.get('projection') or {}
+    if (readback.get('schema') != 'retained-aida-canonical-readback/v1'
+            or readback.get('database') != database
+            or readback.get('snapshot-sha256') != status['binding']['snapshot_sha256']
+            or projection.get('revision') != status['canonical']['identity_revision']
+            or readback.get('human-correction-revision') != status['canonical']['human_correction_revision']
+            or not isinstance(readback.get('events'), list)
+            or len(readback['events']) != projection['revision']
+            or not isinstance(readback.get('source-rows'), list)
+            or readback.get('non-source-row-count') != 0):
+        raise ValueError('canonical readback store or receipt mismatch')
+    cohort_doc = json.loads(cohort.read_text())
+    registration = cohort_doc.get('registration') or {}
+    expected_ids = {row.get('observation_id') for row in registration.get('rows', [])}
+    current_ids = {row.get('observation-id') for row in readback['source-rows']}
+    if (None in expected_ids or None in current_ids or expected_ids != current_ids
+            or len(expected_ids) != len(registration.get('rows', []))
+            or len(current_ids) != len(readback['source-rows'])):
+        raise ValueError('canonical source observation set mismatch')
+    history_path = run_dir / 'reconciliation' / 'canonical-history.json'
+    binding = cohort_doc.get('binding') or {}
+    if binding.get('identity_revision') is not None:
+        if history_path.is_symlink() or not history_path.is_file():
+            raise ValueError('canonical historical event file missing or unsafe')
+        history = json.loads(history_path.read_text())
+        prior = history.get('events')
+        events = readback['events']
+        if (history.get('schema') != 'retained-aida-canonical-history/v1'
+                or history.get('snapshot_sha256') != status['binding']['snapshot_sha256']
+                or not isinstance(prior, list) or len(prior) != history.get('revision')
+                or history['revision'] != binding['identity_revision']
+                or binding.get('history_event_ids') != [event.get('id') for event in prior]
+                or len(prior) > len(events)):
+            raise ValueError('canonical historical event binding mismatch')
+        for expected, actual in zip(prior, events):
+            fields = {'id': 'id', 'action': 'action', 'actor_kind': 'actor-kind',
+                      'pair': 'pair', 'event_id': 'event-id'}
+            if any(expected.get(source) != actual.get(target)
+                   for source, target in fields.items()):
+                raise ValueError('canonical historical event changed')
+    handoff = {'schema': 'retained-aida-isolated-handoff/v1',
+               'authority_scope': 'selected_isolated_store_only',
+               'database': database, 'as_of_readback': datetime.now(timezone.utc).isoformat(),
+               'freshness': 'recheck_current_revision_and_digest_before_activation',
+               'status': status, 'canonical_readback': readback,
+               'remote_delivery': 'pending', 'publication_authority': 'unverified'}
+    body = (json.dumps(handoff, sort_keys=True, separators=(',', ':')) + '\n').encode()
+    content_hash = hashlib.sha256(body).hexdigest()
+    target = output_dir / f'canonical-handoff-{content_hash}.json'
+    if target.exists():
+        verified_file(target, content_hash)
+    else:
+        fd, name = tempfile.mkstemp(prefix='.handoff-', dir=output_dir)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(name, 0o600)
+            os.replace(name, target)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    return {'schema': 'retained-aida-isolated-handoff-result/v1',
+            'path': str(target), 'sha256': content_hash,
+            'database': database, 'identity_revision': projection['revision'],
+            'human_correction_revision': readback['human-correction-revision'],
+            'authority_scope': 'selected_isolated_store_only',
+            'freshness': 'recheck_current_revision_and_digest_before_activation',
+            'remote_delivery': 'pending', 'publication_authority': 'unverified'}
+
+
 def command(argv):
     subprocess.run(argv, check=True)
 
@@ -799,7 +895,7 @@ def ssh_route_reachable(ssh, host):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'retained', 'metrics', 'retained-status'])
+    parser.add_argument('command', choices=['run', 'retained', 'metrics', 'retained-status', 'retained-handoff'])
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--remote-config', type=Path)
@@ -809,12 +905,24 @@ def main():
     parser.add_argument('--status-client-secret-env')
     parser.add_argument('--status-token-env')
     parser.add_argument('--canonical-apply', action='store_true')
+    parser.add_argument('--handoff-dir', type=Path)
+    parser.add_argument('--canonical-database')
     args = parser.parse_args()
     try:
+        if args.command == 'retained-handoff':
+            if (args.plan is not None or args.remote_config is not None or args.canonical_apply
+                    or args.owner_access_jwt_env or args.publisher_requests_stopped
+                    or args.status_client_id_env or args.status_client_secret_env or args.status_token_env
+                    or args.handoff_dir is None or args.canonical_database is None):
+                raise ValueError('retained handoff requires --run-dir, --handoff-dir and --canonical-database')
+            print(json.dumps(retained_handoff(args.run_dir, args.handoff_dir,
+                                              args.canonical_database), sort_keys=True))
+            return 0
         if args.command == 'retained-status':
             if (args.plan is not None or args.remote_config is not None
                     or args.owner_access_jwt_env or args.publisher_requests_stopped
-                    or args.status_client_id_env or args.status_client_secret_env or args.status_token_env or args.canonical_apply):
+                    or args.status_client_id_env or args.status_client_secret_env or args.status_token_env
+                    or args.canonical_apply or args.handoff_dir or args.canonical_database):
                 raise ValueError('retained status accepts only --run-dir')
             print(json.dumps(retained_status(args.run_dir), sort_keys=True))
             return 0
