@@ -537,3 +537,90 @@ raise SystemExit(runner.main())
                                          'bundle_manifest_sha256': state['local']['bundle_manifest_sha256']}
     assert counter.read_text() == 'x'
     assert env['SYNTHETIC_ACCESS_JWT'] not in result.stdout + result.stderr + json.dumps(state)
+
+
+def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_calls(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('local_evidence_run', SCRIPT)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    source_plan, _, _, _ = fixture(tmp_path)
+    assert run(source_plan, tmp_path / 'source-run').returncode == 0
+    snapshot = tmp_path / 'source-run' / 'snapshot'
+    inputs = {}
+    for name, content in [('aida_plan', '{}'), ('aida_observations', '{}'),
+                          ('decision_store', 'immutable store'), ('name_evidence', '{}'),
+                          ('pg_export', '{}'), ('pg_dump', 'private PG dump'),
+                          ('ledger', '[]'), ('owner_corrections', '{}')]:
+        path = tmp_path / name
+        path.write_text(content)
+        inputs[name] = {'name': name, 'path': str(path), 'sha256': sha(path)}
+    retained = tmp_path / 'retained-plan.json'
+    retained.write_text(json.dumps({
+        'schema': 'retained-aida-local-run-plan/v1',
+        'snapshot': {'path': str(snapshot), 'manifest_sha256': sha(snapshot / 'manifest.json'),
+                     'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                     'snapshot_sha256': json.loads((snapshot / 'manifest.json').read_text())['snapshot_sha256']},
+        'inputs': list(inputs.values()), 'decision_revision': 1,
+        'owner_correction_revision': 0, 'ledger_revision': 0,
+        'scope': 'AIDA source observations'}))
+    calls = []
+
+    def adapter(snapshot_path, observations_path, plan_path, output_path):
+        calls.append(1)
+        assert snapshot_path == target / 'snapshot'
+        assert plan_path.read_bytes() == (tmp_path / 'aida_plan').read_bytes()
+        assert observations_path.read_bytes() == (tmp_path / 'aida_observations').read_bytes()
+        output_path.write_text(json.dumps({'schema': 'retained-aida-cohort/v1',
+                                           'binding': {'snapshot_sha256': json.loads((snapshot / 'manifest.json').read_text())['snapshot_sha256'],
+                                                       'observations_sha256': inputs['aida_observations']['sha256'],
+                                                       'plan_sha256': inputs['aida_plan']['sha256']},
+                                           'counts': {'candidate_edges': 0}, 'events': []}))
+
+    target = tmp_path / 'retained-run'
+    first = runner.run_retained(retained, target, adapter=adapter)
+    assert first['reconciliation']['status'] == 'complete'
+    assert first['reconciliation']['decision_revision'] == 1
+    assert first['reconciliation']['owner_correction_revision'] == 0
+    assert first['reconciliation']['ledger_revision'] == 0
+    assert first['reconciliation']['provider_calls'] == 0
+    assert first['reconciliation']['ledger_sha256'] == inputs['ledger']['sha256']
+    assert calls == [1]
+    assert runner.run_retained(retained, target, adapter=adapter) == first
+    assert calls == [1]
+    monkeypatch.setenv('FREEDIVING_REVIEW_URL', 'jdbc:postgresql://private/review')
+    monkeypatch.setenv('FREEDIVING_APP_URL', 'jdbc:postgresql://private/app')
+    correction = [0]
+
+    def canonical(cohort, cohort_sha, receipt):
+        assert cohort_sha == sha(cohort)
+        receipt.write_text(json.dumps({'schema': 'retained-aida-canonical-receipt/v1',
+                                       'cohort-sha256': cohort_sha,
+                                       'identity-revision': 12 + correction[0],
+                                       'human-correction-revision': correction[0],
+                                       'accepted-group-count': 1 - correction[0],
+                                       'human-negative-pair-count': correction[0],
+                                       'provider-calls': 0}))
+
+    applied = runner.run_retained(retained, target, adapter=adapter,
+                                  canonical_apply=True, canonical=canonical)
+    assert applied['canonical']['owner_correction_revision'] == 0
+    correction[0] = 1  # Human reversal in canonical store after the first apply.
+    replayed = runner.run_retained(retained, target, adapter=adapter,
+                                   canonical_apply=True, canonical=canonical)
+    assert replayed['canonical']['owner_correction_revision'] == 1
+    assert replayed['canonical']['accepted_group_count'] == 0
+    assert calls == [1]
+    measured = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
+                              capture_output=True, text=True)
+    assert measured.returncode == 0, measured.stderr
+    assert json.loads(measured.stdout)['provider_calls'] == 0
+    (target / 'reconciliation' / 'canonical-receipt.json').write_text('{}')
+    stale_receipt = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
+                                   capture_output=True, text=True)
+    assert stale_receipt.returncode != 0
+    assert 'canonical checkpoint binding changed' in stale_receipt.stderr
+    (tmp_path / 'aida_plan').write_text('{"stale":true}')
+    with __import__('pytest').raises(ValueError, match='retained input changed'):
+        runner.run_retained(retained, target, adapter=adapter)
+    assert calls == [1]
