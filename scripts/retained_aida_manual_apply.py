@@ -347,6 +347,10 @@ def rebind_verified_owner(args):
          and owner['store_revision'] in (args.expected_owner_revision,
                                          args.expected_owner_revision + 1),
          'owner revision changed before rebind')
+    if owner['store_revision'] == args.expected_owner_revision:
+        need(all((owner['observation_refs'].get(row['snapshot_record_id']) or {})
+                 .get('source_derived_ref') is None for row in loaded['observations']),
+             'owner already has source refs at expected pre-rebind revision')
     backup = directory / 'owner-pre-rebind.sqlite'
     if owner['store_revision'] == args.expected_owner_revision:
         source = activation.open_owner(args.owner_db)
