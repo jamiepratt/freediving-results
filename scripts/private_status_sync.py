@@ -141,7 +141,9 @@ def _request(opener, method, url, client_id, client_secret, token, payload=None)
             raise ValueError('status payload too large')
         headers['Content-Type'] = 'application/json'
     try:
-        with opener.open(Request(url, data=data, headers=headers, method=method), timeout=10) as response:
+        # The private origin rebuilds owner projection before answering; a
+        # retained batch can take longer than the small empty-store timeout.
+        with opener.open(Request(url, data=data, headers=headers, method=method), timeout=90) as response:
             if response.status != 200:
                 raise RuntimeError('private status sync unavailable')
             body = response.read(4097)
