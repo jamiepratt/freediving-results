@@ -135,3 +135,45 @@ owner revision, guarded synchronization, authenticated browser review, and
 separate publication authority.
 Track that remaining work in [#72](https://github.com/jamiepratt/freediving-results/issues/72)
 and [#73](https://github.com/jamiepratt/freediving-results/issues/73).
+
+## Guarded private preparation checkpoint
+
+`scripts/retained_aida_activation_checkpoint.py` is a manually run, read-only
+preparation gate. It accepts a freshly generated promotion preflight, its
+pending-only owner envelope, a fresh target-state readback, the current owner
+SQLite store, the frozen snapshot, and any recovered AIDA packet path. Hashes
+for all JSON inputs are mandatory. Its target must have revision zero, no
+events, no source rows, and the exact frozen snapshot ID. The owner binding and
+revision must match the preflight and envelope, with no proposals or human
+events. The adapter replays each AIDA packet against its receipt and original.
+
+Run this only on the private host after obtaining `target-state` with the
+target PostgreSQL connection as shown above. Generate the preflight from that
+exact target readback, then regenerate the flow export and pending owner
+envelope from the new preflight. Make an owner-only output directory outside
+the repository. Substitute actual SHA-256 values from the files, never hashes
+copied from an earlier target check:
+
+```sh
+mkdir -m 700 /private/aida-activation
+FREEDIVING_REVIEW_URL='jdbc:postgresql://localhost/TARGET_DB?user=reviews_owner' \
+  clojure -M -m freediving.retained-aida-apply target-state \
+  SNAPSHOT_SHA256 /private/aida-activation/target-state.json
+python3 scripts/retained_aida_activation_checkpoint.py \
+  --preflight /private/promotion-preflight.json --preflight-sha256 PREFLIGHT_SHA256 \
+  --envelope /private/pending-envelope.json --envelope-sha256 ENVELOPE_SHA256 \
+  --target /private/aida-activation/target-state.json --target-sha256 TARGET_SHA256 \
+  --owner-db /private/owner-decisions.sqlite --snapshot-dir /private/snapshot \
+  --recovered-packet aida-source-name=/private/recovered/packet.json \
+  --output-dir /private/aida-activation
+```
+
+The output has phase receipts, a SQLite backup, a separate restore drill, and
+`checkpoint.json`, all owner-only. A repeat with unchanged inputs must return
+the same checkpoint. A changed target, owner history, packet, source ref, or
+envelope stops before a completion checkpoint. Preserve the whole directory.
+This gate does not write to PostgreSQL or register proposals. A PostgreSQL
+backup and proven prefix recovery across PostgreSQL and SQLite remain the
+next live apply checkpoint in [#73](https://github.com/jamiepratt/freediving-results/issues/73).
+Do not treat the 207 pending proposals as approved, or the two human-correction
+exclusions as accepted.
