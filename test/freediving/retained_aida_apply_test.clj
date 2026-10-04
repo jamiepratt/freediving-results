@@ -179,6 +179,43 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (apply-route/target-state reviewer (apply str (repeat 64 "f")))))))
 
+(deftest bound-replay-preserves-human-reversal-and-readback
+  (let [initial (cohort)
+        first-edge (first (:events initial))
+        reversal {:id "human-reversal-1" :action :reverse :actor-kind :human
+                  :event-id (:id first-edge) :reason "synthetic owner correction"
+                  :source-binding (:source-binding first-edge)}
+        input (assoc initial :binding {:identity_revision 0 :history_event_ids []}
+                     :events (conj (:events initial) reversal))
+        interrupted (assoc input :events (vec (take 2 (:events input))))
+        _ (apply-route/apply-cohort! reviewer app interrupted)
+        applied (apply-route/apply-cohort! reviewer app input)
+        history (identity/private-history reviewer)]
+    (is (= 3 (:identity-revision applied)))
+    (is (= 1 (:human-negative-pair-count applied)))
+    (is (= (:id first-edge) (get-in history [2 :request :event-id])))
+    (is (= "synthetic owner correction" (get-in history [2 :request :reason])))
+    (is (= 3 (:revision (:projection (apply-route/canonical-readback reviewer input applied)))))
+    (is (= applied (apply-route/apply-cohort! reviewer app input)))
+    (is (= 3 (count (identity/private-history reviewer))))))
+
+(deftest bound-replay-requires-cited-human-reversal
+  (let [initial (cohort)
+        first-edge (first (:events initial))
+        input (assoc initial :binding {:identity_revision 0 :history_event_ids []}
+                     :events (conj (:events initial)
+                                   {:id "human-reversal-1" :action :reverse
+                                    :actor-kind :human :event-id (:id first-edge)
+                                    :source-binding (:source-binding first-edge)}))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reason"
+                          (apply-route/apply-cohort! reviewer app input)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"actor"
+                          (apply-route/apply-cohort! reviewer app
+                                                     (-> input
+                                                         (assoc-in [:events 2 :reason] "correction")
+                                                         (assoc-in [:events 2 :actor-kind] :automatic)))))
+    (is (= 0 (count (identity/private-history reviewer))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-aida-apply-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
