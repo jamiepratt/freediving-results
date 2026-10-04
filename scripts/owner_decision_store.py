@@ -569,8 +569,10 @@ class DecisionStore:
                     'missing_evidence_ids': missing,
                     'canonical_projection_status': projection_status}
 
-    def queue(self, *, decision_type=None, status='pending', source_name=None, limit=50, offset=0):
-        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 100000:
+    def queue(self, *, decision_type=None, status='pending', source_name=None, limit=50, offset=0,
+              summary=False):
+        if (type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int
+                or not 0 <= offset <= 100000 or type(summary) is not bool):
             raise ValueError('invalid page')
         binding = self._binding()
         items = [self._inspect(row['id'], binding) for row in self.db.execute('SELECT id FROM proposals')]
@@ -581,9 +583,17 @@ class DecisionStore:
                         key=lambda p: (p['provider_confidence'], p['id']))
         scoreless = sorted((p for p in items if p['provider_confidence'] is None),
                            key=lambda p: p['id'])
-        return {'revision': self.revision, 'items': scored[offset:offset + limit],
+        def page(values):
+            values = values[offset:offset + limit]
+            if not summary:
+                return values
+            fields = ('id', 'type', 'source_name', 'status', 'effective_status',
+                      'canonical_projection_status', 'provider_confidence', 'proposed')
+            return [{key: item[key] for key in fields} for item in values]
+
+        return {'revision': self.revision, 'items': page(scored),
                 'total': len(items), 'scoreless_total': len(scoreless),
-                'scoreless_items': scoreless[offset:offset + limit],
+                'scoreless_items': page(scoreless),
                 'score_note': 'Provider confidence is uncalibrated and is not measured accuracy.'}
 
     def audit_sample(self, *, limit=10):

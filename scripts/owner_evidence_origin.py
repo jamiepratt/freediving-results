@@ -374,7 +374,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             elif path == '/owner-evidence/api/decisions':
                 if self.server.decisions is None:
                     return self._reply(503)
-                result = self.server.decisions.queue(**self._decision_filters(parsed.query))
+                result = self.server.decisions.queue(**self._decision_filters(parsed.query), summary=True)
                 result['csrf_token'] = self._csrf()
                 result['active_snapshot_sha256'] = self.server.decisions.active_snapshot_sha256
                 result['canonical_projection_status'] = 'unavailable'
