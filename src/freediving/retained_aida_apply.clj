@@ -48,14 +48,30 @@
    :publisher-id-kind (keyword (field row :publisher_id_kind))})
 
 (defn- source-event [event revision]
-  (let [binding (field event :source_binding)]
-    {:id (field event :id) :action (keyword (field event :action))
-     :actor-kind (keyword (field event :actor_kind))
-     :pair (field event :pair) :rule-version (field event :rule_version)
-     :base-revision revision
-     :source-binding {:snapshot-sha256 (field binding :snapshot_sha256)
-                      :refs (into {} (map (fn [[id ref]] [id (keywordize ref)])
-                                          (field binding :refs)))}}))
+  (let [binding (field event :source_binding)
+        action (keyword (field event :action))
+        actor (keyword (field event :actor_kind))
+        request {:id (field event :id) :action action
+                 :actor-kind actor
+                 :base-revision revision
+                 :source-binding {:snapshot-sha256 (field binding :snapshot_sha256)
+                                  :refs (into {} (map (fn [[id ref]] [id (keywordize ref)])
+                                                      (field binding :refs)))}}]
+    (case action
+      :accept (do
+                (when-not (= :automatic actor)
+                  (fail! "Retained AIDA acceptance requires automatic actor"))
+                (assoc request :pair (field event :pair)
+                       :rule-version (field event :rule_version)))
+      :reverse (let [event-id (field event :event_id)
+                     reason (field event :reason)]
+                 (when-not (= :human actor)
+                   (fail! "Retained AIDA reversal requires human actor"))
+                 (when-not (and (string? event-id) (seq event-id)
+                                (string? reason) (not (str/blank? reason)))
+                   (fail! "Human reversal requires an event ID and reason"))
+                 (assoc request :event-id event-id :reason reason))
+      (fail! "Unsupported retained AIDA event action"))))
 
 (defn- receipt [reviewer-url projection]
   {:schema "retained-aida-canonical-receipt/v1"
@@ -185,6 +201,8 @@
                    (= (set (map :observation-id rows)) (set (keys refs)))
                    (= (count events) (count (set (map #(field % :id) events)))))
       (fail! "Incomplete retained AIDA registration or duplicate events"))
+    (doseq [[index event] (map-indexed vector events)]
+      (source-event event (+ (or (field binding :identity_revision) 0) index)))
     (when bound? (bound-history reviewer-url binding events))
     (identity/register-source-observations! reviewer-url registration)
     (doseq [[index event] (map-indexed vector events)]
@@ -199,7 +217,8 @@
           (when-not (= (:request existing)
                        (assoc request :base-revision (get-in existing [:request :base-revision])))
             (fail! "Conflicting retained AIDA event replay"))
-          (identity/record-source-event! app-url request))))
+          (identity/record-source-event!
+           (if (= :human (:actor-kind request)) reviewer-url app-url) request))))
     (when bound?
       (let [applied (bound-history reviewer-url binding events)]
         (when-not (= applied (count events))
