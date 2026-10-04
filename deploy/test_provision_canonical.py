@@ -20,6 +20,29 @@ def load():
 
 
 class ProvisionCanonicalTests(unittest.TestCase):
+    def test_migration_seed_and_new_merged_release_can_resume_original_intent(self):
+        module = load()
+        def query(_, sql, __):
+            if 'FROM pg_tables' in sql:
+                return 'evaluation_corpus\npublication_policy_events\nschema_migrations'
+            if 'SELECT mode' in sql:
+                return 'real'
+            if 'SELECT policy_version' in sql:
+                return 'extraction-publication/1'
+            if 'evaluation_corpus' in sql:
+                return '1'
+            if 'publication_policy_events' in sql:
+                return '1'
+            return '20'
+        with mock.patch.object(module, 'query', side_effect=query):
+            self.assertTrue(module.target_empty('freediving_canonical', '5432'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module.ensure_intent(root, 'public_release', '5432', 'a' * 40,
+                                 {'migration.env': 'x', 'public.env': 'y'})
+            module.ensure_intent(root, 'public_release', '5432', 'b' * 40,
+                                 {'migration.env': 'x', 'public.env': 'y'})
+
     def test_public_target_and_unmarked_existing_database_refuse_before_mutation(self):
         module = load()
         with tempfile.TemporaryDirectory() as tmp:

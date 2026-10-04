@@ -81,8 +81,7 @@ def verify_target_versions(actual, expected):
 
 
 def target_empty(database, port):
-    # All base tables, including non-canonical review/publication tables, must
-    # be empty. Migration 003 inserts one policy default into its own table.
+    # Only the two migration-owned singleton rows may exist.
     rows = query(database, "SELECT tablename FROM pg_tables WHERE schemaname='freediving' ORDER BY tablename", port)
     for table in rows.splitlines():
         if not re.fullmatch(r'[a-z_][a-z0-9_]*', table):
@@ -90,7 +89,14 @@ def target_empty(database, port):
         if table == 'schema_migrations':
             continue
         count = int(query(database, 'SELECT count(*) FROM freediving.' + table, port))
-        if count != (1 if table == 'publication_policy_events' else 0):
+        if count != (1 if table in ('publication_policy_events', 'evaluation_corpus') else 0):
+            return False
+        if table == 'evaluation_corpus' and query(
+                database, 'SELECT mode FROM freediving.evaluation_corpus', port) != 'real':
+            return False
+        if table == 'publication_policy_events' and query(
+                database, 'SELECT policy_version FROM freediving.publication_policy_events', port
+        ) != 'extraction-publication/1':
             return False
     return True
 
@@ -151,7 +157,11 @@ def ensure_intent(backup_dir, public_database, port, revision, public_digests):
     intent = {'schema': MARKER, 'target': NAME, 'public_database': public_database,
               'port': port, 'release_revision': revision, 'public_config_sha256': public_digests}
     if path.exists():
-        if path.is_symlink() or path.stat().st_mode & 0o077 or json.loads(path.read_text()) != intent:
+        old = json.loads(path.read_text())
+        if (path.is_symlink() or path.stat().st_mode & 0o077
+                or not re.fullmatch(r'[a-f0-9]{40}', old.get('release_revision', ''))
+                or {key: value for key, value in old.items() if key != 'release_revision'}
+                != {key: value for key, value in intent.items() if key != 'release_revision'}):
             raise ValueError('Canonical provisioning intent changed')
     else:
         with path.open('x') as output:

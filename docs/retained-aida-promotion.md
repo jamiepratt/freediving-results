@@ -22,10 +22,12 @@ The wrapper pins the audited public database name
 `freediving_release_20260924_11` and stages the exact committed release on
 `bridge-vps`. Its root-only helper creates `freediving_canonical` with no PUBLIC
 database access, applies the existing checksummed migrations 1-20, and verifies
-an empty `target-state` at revision zero. It keeps a root-private intent and a
+an empty `target-state` at revision zero. The migration-owned policy and corpus
+singleton rows are checked separately. It keeps a root-private intent and a
 custom dump under `/var/backups/freediving/canonical`; a disposable restore is
 checked before migration. An interrupted setup can resume only against that
-intent and the verified migration transaction prefix. The helper checks that
+intent and the verified migration transaction prefix, including a later merged
+repair commit with identical migration hashes. The helper checks that
 public counts, config, service, site and owner snapshot/status stay unchanged.
 It does not change the public release link or Worker.
 
