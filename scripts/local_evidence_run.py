@@ -467,6 +467,100 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
     return state
 
 
+def retained_status(run_dir):
+    """Recheck and summarize a private retained run without release authority."""
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise ValueError('retained run directory invalid')
+    state_path = run_dir / 'state.json'
+    if state_path.is_symlink() or not state_path.is_file():
+        raise ValueError('retained checkpoint missing')
+    state = json.loads(state_path.read_text())
+    receipt = state.get('reconciliation', {})
+    if (state.get('schema') != 'retained-aida-local-run/v1'
+            or receipt.get('status') != 'complete' or receipt.get('mode') != 'retained_aida'
+            or receipt.get('canonical_status') not in ('pending', 'applied')
+            or state.get('remote') != {'status': 'pending'}):
+        raise ValueError('retained checkpoint incomplete or remote state unverified')
+    snapshot = run_dir / 'snapshot'
+    bundle = run_dir / 'cohort-bundle'
+    manifest = json.loads((bundle / 'manifest.json').read_text())
+    if manifest.get('schema') != 'retained-aida-cohort-bundle/v1':
+        raise ValueError('retained source bundle invalid')
+    verified_file(bundle / 'manifest.json', receipt['source_bundle_sha256'])
+    snapshot_binding = manifest['snapshot']
+    for name in ('manifest.json', 'snapshot.sqlite'):
+        verified_file(snapshot / name, snapshot_binding[name])
+    snapshot_manifest = json.loads((snapshot / 'manifest.json').read_text())
+    if (snapshot_manifest.get('snapshot_sha256') != snapshot_binding['snapshot_sha256']
+            or receipt['snapshot_sha256'] != snapshot_binding['snapshot_sha256']):
+        raise ValueError('retained snapshot binding changed')
+    for name, expected in manifest['inputs'].items():
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+            raise ValueError('invalid retained input name')
+        verified_file(bundle / name, expected)
+    verified_staged_recovery(bundle, manifest.get('recovered_packets', {}))
+    export_path = run_dir / 'reconciliation' / 'aida-cohort.json'
+    export = json.loads(verified_file(export_path, receipt['export_sha256']).read_text())
+    expected_binding = {'snapshot_sha256': snapshot_binding['snapshot_sha256'],
+                        'observations_sha256': manifest['inputs']['aida_observations'],
+                        'plan_sha256': manifest['inputs']['aida_plan']}
+    if (export.get('schema') != 'retained-aida-cohort/v1'
+            or any(export.get('binding', {}).get(k) != v for k, v in expected_binding.items())
+            or export.get('counts') != receipt.get('counts')
+            or receipt.get('ledger_sha256') != manifest['inputs']['ledger']
+            or receipt.get('provider_calls') != 0):
+        raise ValueError('retained export binding changed')
+    counts = receipt['counts']
+    if (not isinstance(counts, dict) or not all(type(value) is int and value >= 0
+            for value in counts.values()) or 'source_gaps' not in counts
+            or 'source_rows' not in counts):
+        raise ValueError('retained counts invalid')
+    canonical_state = state.get('canonical')
+    canonical_path = run_dir / 'reconciliation' / 'canonical-receipt.json'
+    if receipt['canonical_status'] == 'applied':
+        if not isinstance(canonical_state, dict) or canonical_state.get('status') != 'complete':
+            raise ValueError('canonical checkpoint incomplete')
+        canonical_receipt = json.loads(verified_file(
+            canonical_path, canonical_state['receipt_sha256']).read_text())
+        fields = {'cohort-sha256': receipt['export_sha256'],
+                  'identity-revision': canonical_state['identity_revision'],
+                  'human-correction-revision': canonical_state['owner_correction_revision'],
+                  'accepted-group-count': canonical_state['accepted_group_count'],
+                  'human-negative-pair-count': canonical_state['human_negative_pair_count'],
+                  'provider-calls': canonical_state['provider_calls']}
+        if (canonical_receipt.get('schema') != 'retained-aida-canonical-receipt/v1'
+                or canonical_state['cohort_sha256'] != receipt['export_sha256']
+                or any(canonical_receipt.get(key) != value for key, value in fields.items())
+                or canonical_state['provider_calls'] != 0):
+            raise ValueError('canonical checkpoint binding changed')
+        canonical = {'status': 'applied', 'receipt_sha256': canonical_state['receipt_sha256'],
+                     'identity_revision': canonical_state['identity_revision'],
+                     'human_correction_revision': canonical_state['owner_correction_revision'],
+                     'accepted_group_count': canonical_state['accepted_group_count'],
+                     'human_negative_pair_count': canonical_state['human_negative_pair_count'],
+                     'current_revision_verified': False}
+    elif canonical_state is not None or canonical_path.exists():
+        raise ValueError('canonical checkpoint incomplete')
+    else:
+        canonical = {'status': 'pending'}
+    return {'schema': 'retained-aida-private-status/v1', 'run_id': state['run_id'],
+            'scope': 'AIDA source observations',
+            'binding': {'plan_sha256': state['plan_sha256'],
+                        'snapshot_sha256': snapshot_binding['snapshot_sha256'],
+                        'snapshot_manifest_sha256': snapshot_binding['manifest.json'],
+                        'snapshot_sqlite_sha256': snapshot_binding['snapshot.sqlite'],
+                        'source_bundle_sha256': receipt['source_bundle_sha256'],
+                        'input_sha256': manifest['inputs'],
+                        'export_sha256': receipt['export_sha256']},
+            'cutoff': snapshot_manifest['cutoff'], 'counts': counts,
+            'source_gaps': counts['source_gaps'],
+            'isolated_decision_revision': receipt['decision_revision'],
+            'isolated_owner_correction_revision': receipt['owner_correction_revision'],
+            'canonical': canonical, 'provider_calls': 0,
+            'remote': {'status': 'pending', 'verified': False},
+            'publication_authority': 'unverified'}
+
+
 def command(argv):
     subprocess.run(argv, check=True)
 
@@ -705,7 +799,7 @@ def ssh_route_reachable(ssh, host):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'retained', 'metrics'])
+    parser.add_argument('command', choices=['run', 'retained', 'metrics', 'retained-status'])
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--remote-config', type=Path)
@@ -716,6 +810,13 @@ def main():
     parser.add_argument('--canonical-apply', action='store_true')
     args = parser.parse_args()
     try:
+        if args.command == 'retained-status':
+            if (args.plan is not None or args.remote_config is not None
+                    or args.owner_access_jwt_env or args.publisher_requests_stopped
+                    or args.status_access_jwt_env or args.status_token_env or args.canonical_apply):
+                raise ValueError('retained status accepts only --run-dir')
+            print(json.dumps(retained_status(args.run_dir), sort_keys=True))
+            return 0
         if args.command == 'metrics':
             state = json.loads((args.run_dir / 'state.json').read_text())
             if state.get('schema') == 'retained-aida-local-run/v1':

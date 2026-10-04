@@ -1,5 +1,13 @@
 # Local evidence run
 
+## Retained AIDA private status
+
+After a completed retained AIDA run, `python3 scripts/local_evidence_run.py retained-status --run-dir /private/retained-run` prints a sanitized JSON checkpoint. It rechecks staged snapshot files, every staged bundle input and recovered source, the cohort export, and any applied canonical receipt against their recorded hashes. The checkpoint binds the frozen cutoff, snapshot and bundle hashes, input role hashes, export hash, source rows and gaps, isolated decision revision, provider call count, and the canonical receipt's identity and human correction revisions when applied. It contains no local paths, source rows, athlete fields, or credentials.
+
+An applied canonical receipt records what the local canonical apply reported at that moment. `current_revision_verified` remains false because this read-only command does not query the authoritative store again. The isolated DecisionStore revision and isolated owner correction revision are separate from canonical release revisions. Remote status remains pending and unverified; this command neither syncs the normal presentation-status record nor activates a host. It rejects normal run and remote activation flags. A changed staged input or incomplete canonical checkpoint stops with an error. Keep the full run and printed checkpoint private until a guarded activation and owner-route readback can establish a live presentation.
+
+`counts.candidate_edges` counts edges in this retained export, including only incremental edges on a correction-preserving rerun. It is not the total automatic decision history. `canonical.accepted_group_count` is the canonical receipt's grouping count at apply time; neither count is a global athlete count.
+
 ## Retained AIDA recovery input
 
 For the private `retained` command, a frozen AIDA packet missing from its original manifest path can be supplied in the retained plan's optional `recovered_packets` list:
