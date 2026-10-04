@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -20,7 +21,8 @@ except ModuleNotFoundError:
     from unified_evidence_query import SnapshotQuery
 
 
-ADAPTER_VERSION = 'aida-snapshot-observation/2'
+ADAPTER_VERSION = 'aida-snapshot-observation/3'
+EVENT_ADAPTER_VERSION = 'aida-snapshot-observation/2'
 LEGACY_ADAPTER_VERSION = 'aida-snapshot-observation/1'
 PACKET_SCHEMA = 'aida-selected-html-packet/v1'
 
@@ -104,6 +106,55 @@ def _source_fields(row):
             'ot_raw': value('OT')}
 
 
+class _Anchors(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.anchors = []
+        self.active = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            if self.active is not None:
+                self.anchors.append(None)
+            self.active = {'attrs': dict(attrs), 'text': []}
+
+    def handle_data(self, data):
+        if self.active is not None:
+            self.active['text'].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.active is not None:
+            self.anchors.append(self.active)
+            self.active = None
+
+
+def _publisher_person(row, source_url):
+    """A source-row athlete link is eligible only when it uniquely names this diver."""
+    diver = row['cells'].get('Diver')
+    if not isinstance(diver, dict) or not isinstance(diver.get('source_html'), str):
+        return None
+    parser = _Anchors()
+    parser.feed(diver['source_html'])
+    if parser.active is not None or len(parser.anchors) != 1 or parser.anchors[0] is None:
+        return None
+    anchor = parser.anchors[0]
+    href = anchor['attrs'].get('href')
+    if not isinstance(href, str) or ' '.join(''.join(anchor['text']).split()) != diver.get('value'):
+        return None
+    url = urlsplit(href)
+    source = urlsplit(source_url)
+    if url.scheme or url.netloc:
+        if url.scheme != 'https' or url.netloc != source.netloc:
+            return None
+    if url.query or url.fragment:
+        return None
+    match = re.fullmatch(r'/Athletes/Profile-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})',
+                         url.path)
+    if match is None:
+        return None
+    return {'scope': 'AIDA', 'id': match.group(1), 'id_kind': 'person', 'href': href}
+
+
 def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAPTER_VERSION,
                              recovered_packet_paths=None):
     """Return exact supported positions and gaps for named AIDA snapshot views.
@@ -115,7 +166,7 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
     """
     _require(isinstance(source_names, (list, tuple)) and source_names
              and len(source_names) == len(set(source_names)), 'unique source names required')
-    _require(adapter_version in (ADAPTER_VERSION, LEGACY_ADAPTER_VERSION),
+    _require(adapter_version in (ADAPTER_VERSION, EVENT_ADAPTER_VERSION, LEGACY_ADAPTER_VERSION),
              'unsupported AIDA observation adapter version')
     recovered_packet_paths = ({} if recovered_packet_paths is None
                               else recovered_packet_paths)
@@ -162,7 +213,7 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
                      'AIDA packet and snapshot count mismatch')
             source = packet['source']
             event_context = (_event_context(source_path, source)
-                             if adapter_version == ADAPTER_VERSION else None)
+                             if adapter_version != LEGACY_ADAPTER_VERSION else None)
             packet_rows = {f'positions[{index}]': value
                            for index, value in enumerate(packet['positions'])}
             _require(len(packet_rows) == len(rows), 'AIDA duplicate position')
@@ -184,11 +235,13 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
                 _require(position.get('disposition') == 'parsed',
                          'AIDA unparsed position cannot form observation')
                 fields = _source_fields(position)
+                if adapter_version == ADAPTER_VERSION:
+                    fields['publisher_person'] = _publisher_person(position, source['url'])
                 _require(fields['name'] and fields['discipline_raw'],
                          'AIDA source name or discipline missing')
                 version_input = [adapter_version, source['sha256'], packet_sha,
                                  row['record_id'], position]
-                if adapter_version == ADAPTER_VERSION:
+                if adapter_version != LEGACY_ADAPTER_VERSION:
                     version_input.append(event_context)
                 version = _sha(_canonical(version_input).encode())
                 reference = {
@@ -198,8 +251,10 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
                     'source_sha256': source['sha256'], 'packet_sha256': packet_sha,
                     'citation': citation, 'adapter_version': adapter_version,
                     'observation_version': version}
-                if adapter_version == ADAPTER_VERSION:
+                if adapter_version != LEGACY_ADAPTER_VERSION:
                     reference['event_context'] = event_context
+                if adapter_version == ADAPTER_VERSION and fields['publisher_person'] is not None:
+                    reference['publisher_person'] = fields['publisher_person']
                 observations.append({
                     'snapshot_record_id': row['record_id'], 'source_name': name,
                     'source_object_id': row['source_object_id'],

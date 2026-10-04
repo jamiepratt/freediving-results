@@ -86,6 +86,35 @@
                                                                                  [:refs (:observation-id a) :observation_version]
                                                                                  (apply str (repeat 64 "f")))))))))
 
+(deftest cited-aida-profiles-register-and-approve-source-identity
+  (let [snapshot (apply str (repeat 64 "d"))
+        profile-id "123e4567-e89b-12d3-a456-426614174000"
+        person {:scope "AIDA" :id profile-id :id_kind "person"
+                :href (str "/Athletes/Profile-" profile-id)}
+        row (fn [id]
+              (let [base (source-row (apply str (repeat 64 id)) "Synthetic Diver" snapshot)
+                    ref (assoc (:citation base) :adapter_version "aida-snapshot-observation/3"
+                               :publisher_person person)]
+                (assoc base :citation ref :source-observation-ref ref
+                       :publisher-scope "AIDA" :publisher-athlete-id profile-id
+                       :publisher-id-kind :person)))
+        rows [(row "1") (row "2") (row "3")]
+        refs (into {} (map (juxt :observation-id :citation) rows))
+        registration {:snapshot-sha256 snapshot :rows rows :verified-refs refs}
+        pair (fn [a b] [(:observation-id (rows a)) (:observation-id (rows b))])
+        event (fn [id a b revision]
+                (let [pair (pair a b)]
+                  {:id id :action :accept :actor-kind :automatic :pair pair
+                   :rule-version identity/rule-version :base-revision revision
+                   :source-binding {:snapshot-sha256 snapshot :refs (select-keys refs pair)}}))]
+    (is (= 3 (:provisional-record-count (identity/register-source-observations! reviewer registration))))
+    (is (= 1 (:accepted-group-count (identity/record-source-event! app (event "first" 0 1 0)))))
+    (is (= 1 (:accepted-group-count (identity/record-source-event! app (event "second" 0 2 1)))))
+    (is (= 1 (:accepted-group-count (identity/record-source-event! app (event "first" 0 1 0)))))
+    (is (= 1 (count (:groups (identity/private-projection reviewer)))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-source-event! app (event "redundant" 1 2 2))))))
+
 (deftest empty-source-schema-can-roll-back-and-reapply
   (fixture/sql! admin (slurp (io/resource "migrations/020-source-identity-observations.down.sql")))
   (reviews/migrate! admin "observations_app" "reviews_owner")
