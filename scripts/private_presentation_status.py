@@ -64,7 +64,8 @@ class PrivatePresentationStatus:
                 stale = {'status': 'stale', 'remote': {'active': active},
                          'reason': 'owner decision or active snapshot changed'}
                 if include_stale_checkpoint:
-                    stale.update({'revision': self.current['revision'],
+                    stale.update({'schema': self.current['schema'],
+                                  'revision': self.current['revision'],
                                   'run_id': self.current['run_id'],
                                   'cutoff': self.current['local']['cutoff']})
                 return stale
@@ -164,7 +165,17 @@ class PrivatePresentationStatus:
         current = self.current
         if current and current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3') and self.read(
                 active, owner_revision=owner_revision, owner_snapshot=owner_snapshot).get('status') == 'stale':
-            if (data['schema'] not in ('private-presentation-status/v2', 'private-presentation-status/v3') or
+            applying_same_run = (
+                current['schema'] == 'private-presentation-status/v2'
+                and data['schema'] == 'private-presentation-status/v3'
+                and data['run_id'] == current['run_id']
+                and data['local'] == current['local']
+                and current['remote']['active'] == active
+                and data['remote']['active'] == active
+                and data['remote']['status'] == 'active'
+                and current['reconciliation']['snapshot_sha256'] == data['application']['snapshot_sha256']
+                and owner_revision > current['reconciliation']['owner_store_revision'])
+            if not applying_same_run and (data['schema'] not in ('private-presentation-status/v2', 'private-presentation-status/v3') or
                     data['run_id'] == current['run_id'] or
                     data['local']['cutoff'] <= current['local']['cutoff']):
                 raise StatusConflict('stale run cannot replace owner correction')

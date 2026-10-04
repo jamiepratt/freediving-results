@@ -61,6 +61,40 @@ def test_private_apply_status_rejects_unverified_or_public_claims(tmp_path):
     assert not store.path.exists()
 
 
+def test_stale_v2_may_transition_to_same_run_private_apply_only(tmp_path):
+    store = PrivatePresentationStatus(tmp_path / 'status.json')
+    snap = 'a' * 64
+    active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+    local = {'snapshot_sha256': snap, 'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0}
+    metrics = {'decision_denominator': 0, 'automatic_approved': 0,
+               'unknown': 0, 'error': 0, 'conflict': 0, 'pending_review': 0,
+               'source_gaps': 0, 'provider_calls_recorded': 0, 'sampled_error': None,
+               'accepted_athletes': None, 'distinct_attempts': None,
+               'actual_monetary_cost': None}
+    prior = {'schema': 'private-presentation-status/v2', 'run_id': 'run-1',
+             'revision': 1, 'expected_revision': 0, 'local': local,
+             'remote': {'status': 'active', 'pending': None, 'failed': None, 'active': active},
+             'reconciliation': {'snapshot_sha256': snap, 'decision_revision': 3,
+                                'owner_store_revision': 7, 'metrics': metrics}}
+    store.update(prior, active, owner_revision=7, owner_snapshot=snap)
+    application = {'snapshot_sha256': snap, 'canonical_revision': 211,
+                   'canonical_readback_sha256': 'c' * 64,
+                   'owner_store_revision': 12, 'pending_proposals': 207,
+                   'unresolved_exclusions': 2, 'provider_calls_recorded': 0,
+                   'publication_status': 'private'}
+    update = {'schema': 'private-presentation-status/v3', 'run_id': 'run-1',
+              'revision': 2, 'expected_revision': 1, 'local': local,
+              'remote': prior['remote'], 'application': application}
+    assert store.read(active, owner_revision=12, owner_snapshot=snap)['status'] == 'stale'
+    for changed in ({'run_id': 'another-run'}, {'local': {**local, 'gap_count': 1}},
+                    {'remote': {**prior['remote'], 'active': None}}):
+        with __import__('pytest').raises(StatusConflict):
+            store.update({**update, **changed}, active, owner_revision=12, owner_snapshot=snap)
+    with __import__('pytest').raises(StatusConflict):
+        store.update(update, active, owner_revision=13, owner_snapshot=snap)
+    assert store.update(update, active, owner_revision=12, owner_snapshot=snap)['revision'] == 2
+
+
 def test_reconciliation_status_is_hidden_after_owner_correction_or_snapshot_change(tmp_path):
     store = PrivatePresentationStatus(tmp_path / 'status.json')
     snap = 'a' * 64

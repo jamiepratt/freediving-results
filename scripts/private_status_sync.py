@@ -139,13 +139,18 @@ def sync_application_status(run_dir, application, client_id, client_secret, toke
         raise ValueError('application snapshot binding mismatch')
     opener = opener or build_opener(_NoRedirect())
     current = _request(opener, 'GET', url, client_id, client_secret, token)
-    if current.get('status') == 'stale':
+    run_id = state.get('run_id') or state['plan_sha256']
+    if current.get('status') == 'stale' and not (
+            current.get('schema') == 'private-presentation-status/v2'
+            and current.get('run_id') == run_id
+            and current.get('cutoff') == local['cutoff']
+            and type(current.get('revision')) is int
+            and current['revision'] >= 1):
         raise RuntimeError('private status is stale after owner decision or active snapshot change')
     active = current.get('remote', {}).get('active')
     if (not isinstance(active, dict) or active.get('snapshot_sha256') != local['snapshot_sha256']
             or not active.get('bundle_manifest_sha256')):
         raise ValueError('active snapshot binding mismatch')
-    run_id = state.get('run_id') or state['plan_sha256']
     candidate = {'schema': 'private-presentation-status/v3', 'run_id': run_id,
                  'local': local, 'remote': {'status': 'active', 'pending': None,
                                            'failed': None, 'active': active},
