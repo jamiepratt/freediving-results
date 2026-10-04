@@ -203,6 +203,7 @@ class HostStores:
         need(os.getenv('FREEDIVING_REVIEW_URL'), 'FREEDIVING_REVIEW_URL required')
         env = os.environ.copy()
         if command == 'apply' and not self.isolated_rehearsal:
+            sys.path.insert(0, str(REPO))
             from deploy.prepare_database import endpoint
             reviewer = os.getenv('FREEDIVING_AIDA_REVIEW_URL', '')
             ingest = os.getenv('FREEDIVING_AIDA_APP_URL', '')
