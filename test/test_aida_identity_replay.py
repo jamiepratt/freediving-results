@@ -55,6 +55,7 @@ class AidaIdentityReplayTest(unittest.TestCase):
             lambda row: row['source_observation_ref']['publisher_person'].update(id=PERSON_TWO),
             lambda row: row['source_observation_ref'].update(observation_version='b' * 64),
             lambda row: row['source_fields']['publisher_person'].update(scope='Other'),
+            lambda row: row['source_fields']['publisher_person'].update(href='/Athletes/Profile-other'),
             lambda row: (row['source_fields']['publisher_person'].update(id='not-a-profile'),
                          row['source_observation_ref']['publisher_person'].update(id='not-a-profile')),
         ):

@@ -44,7 +44,7 @@ def _person(observation, snapshot):
     person = tuple(source_person.get(key) for key in PERSON_KEYS)
     _need(person[0] == 'AIDA' and person[2] == 'person'
           and isinstance(person[1], str) and PROFILE.fullmatch(person[1])
-          and all(cited_person.get(key) == value for key, value in zip(PERSON_KEYS, person)),
+          and source_person == cited_person,
           'conflicting AIDA publisher person')
     _need(isinstance(fields.get('name'), str) and bool(fields['name'].strip()),
           'missing AIDA printed name')
