@@ -36,7 +36,7 @@
         scope (get-in body ["questions" "d0" "instructions" "scope"])
         other-scopes (map #(get-in body ["questions" (str "d" %) "instructions" "scope"])
                           (range 1 4))]
-    (is (= "reconciliation-jev/2" (:template-version request)))
+    (is (= "reconciliation-jev/3" (:template-version request)))
     (is (= 1 (count (jev/prepare-batches config decisions))))
     (is (<= (count (.getBytes ^String (:body request) "UTF-8")) 49152))
     (is (every? #(str/includes? scope %)
@@ -48,6 +48,25 @@
                  "unknown" "Invent no facts"]))
     (is (every? #(not (str/includes? % "strong, rebuttable prior")) other-scopes))
     (is (contains? (set (keys (get-in body ["questions" "d0" "criteria"]))) "unknown"))))
+
+(deftest source-revision-question-separates-source-version-from-row-change
+  (let [request (first (jev/prepare-batches config [(decision "revision" :source-revision)]))
+        scope (get-in (json/read-str (:body request))
+                      ["questions" "revision" "instructions" "scope"])]
+    (is (= "reconciliation-jev/3" (:template-version request)))
+    (is (every? #(str/includes? scope %)
+                ["correction" "republication" "same sporting attempt"
+                 "publication" "acquisition" "retrieval order"
+                 "each row changed" "unknown"]))))
+
+(deftest row-semantics-question-distinguishes-alternate-views-from-attempts
+  (let [request (first (jev/prepare-batches config [(decision "role" :row-semantics)]))
+        scope (get-in (json/read-str (:body request))
+                      ["questions" "role" "instructions" "scope"])]
+    (is (every? #(str/includes? scope %)
+                ["start list" "ranking" "aggregate" "repeated export"
+                 "status" "penalty" "another representation"
+                 "explicit identifiers" "unknown"]))))
 
 (deftest independent-questions-batch-and-dependencies-wait
   (let [nine (mapv #(decision (str "d" %) :identity) (range 9))]

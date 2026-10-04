@@ -4,7 +4,7 @@
             [clojure.string :as str])
   (:import [java.security MessageDigest]))
 
-(def template-version "reconciliation-jev/2")
+(def template-version "reconciliation-jev/3")
 (def ^:private guidance
   (str "Compare cited freediving evidence only. Names can collide; original spelling, diacritics, transliteration, name order, omitted components, OCR and wrapping can differ. "
        "A distinctive full name and compatible context can support identity; a common name alone is weak. Rank, performance, discipline, age category and representation can change. "
@@ -43,9 +43,17 @@
                       "A PDF date range encompassing a specific unit day, with a missing PDF row day, is not a contradiction. "
                       "Sources with shared upstream timing are not independent corroboration, though they may describe the same result. "
                       "Choose unknown for genuine uncertainty. Invent no facts.")
-   :source-revision "Assess source/version direction using cited publication and acquisition facts; never infer chronology from row order alone."
+   :source-revision (str "Assess source/version direction using cited publication and acquisition evidence. "
+                         "A result correction or republication can be a new source version describing the same sporting attempt; "
+                         "a document revision does not prove each row changed or establish a same-attempt link. "
+                         "Require cited evidence for chronology; retrieval order, row order and different bytes alone cannot establish revision direction. "
+                         "Choose unknown when direction or relationship remains uncertain.")
    :category-representation "Follow the source's own labels. A category is not a represented country or organization; do not infer citizenship."
-   :row-semantics "Distinguish a dive from an aggregate, ranking or non-result using cited source structure."})
+   :row-semantics (str "Use cited source structure, headings and explicit identifiers to distinguish one sporting attempt "
+                       "from an aggregate, ranking or non-result. A start list may contain no completed attempt; "
+                       "a ranking, repeated export, or status or penalty view may be another representation of an attempt "
+                       "rather than an additional attempt. Do not infer an attempt from matching values alone. "
+                       "Choose unknown when the row meaning is unresolved.")})
 
 (defn- invalid! [reason] (throw (ex-info "Invalid reconciliation Jev request" {:reason reason})))
 (defn- utf8-bytes [x] (alength (.getBytes ^String x "UTF-8")))
