@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 STATUS_URL = 'https://poc.alphacompose.com/owner-evidence/api/presentation-status'
+STATUS_USER_AGENT = 'freediving-status-sync/1.0'
 
 
 def _reconciliation_summary(state, run_dir):
@@ -57,8 +58,11 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _request(opener, method, url, jwt, token, payload=None):
-    headers = {'Cf-Access-Jwt-Assertion': jwt, 'X-Freediving-Status-Token': token}
+def _request(opener, method, url, client_id, client_secret, token, payload=None):
+    headers = {'CF-Access-Client-Id': client_id,
+               'CF-Access-Client-Secret': client_secret,
+               'X-Freediving-Status-Token': token,
+               'User-Agent': STATUS_USER_AGENT}
     data = None
     if payload is not None:
         data = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -79,13 +83,13 @@ def _request(opener, method, url, jwt, token, payload=None):
         raise RuntimeError('private status sync unavailable') from error
 
 
-def sync_status(run_dir, jwt, token, *, url=STATUS_URL, opener=None):
-    if url != STATUS_URL or not jwt or not token:
+def sync_status(run_dir, client_id, client_secret, token, *, url=STATUS_URL, opener=None):
+    if url != STATUS_URL or not client_id or not client_secret or not token:
         raise ValueError('private status credentials or URL missing')
     state = json.loads((Path(run_dir) / 'state.json').read_text(encoding='utf-8'))
     if state['local']['status'] != 'complete':
         raise ValueError('local evidence is not complete')
-    current = _request(opener or build_opener(_NoRedirect()), 'GET', url, jwt, token)
+    current = _request(opener or build_opener(_NoRedirect()), 'GET', url, client_id, client_secret, token)
     if current.get('status') == 'stale':
         if (type(current.get('revision')) is not int or current['revision'] < 1
                 or not isinstance(current.get('run_id'), str)
@@ -117,4 +121,4 @@ def sync_status(run_dir, jwt, token, *, url=STATUS_URL, opener=None):
         return current
     payload = {**candidate, 'revision': current.get('revision', 0) + 1,
                'expected_revision': current.get('revision', 0)}
-    return _request(opener or build_opener(_NoRedirect()), 'POST', url, jwt, token, payload)
+    return _request(opener or build_opener(_NoRedirect()), 'POST', url, client_id, client_secret, token, payload)

@@ -567,7 +567,7 @@ def command(argv):
 
 def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         publisher_requests_stopped=False, vps_reachable=None, remote_factory=None,
-        status_access_jwt=None, status_token=None):
+        status_client_id=None, status_client_secret=None, status_token=None):
     plan = checked_plan(plan_path)
     if plan.get('reconciliation') and remote_config is not None:
         raise ValueError('synthetic reconciliation cannot activate remote presentation')
@@ -665,11 +665,11 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
             atomic_json(state_path, state)
             raise
 
-    if bool(status_access_jwt) != bool(status_token):
+    if len([value for value in (status_client_id, status_client_secret, status_token) if value]) not in (0, 3):
         raise ValueError('private status credentials incomplete')
-    if status_access_jwt:
+    if status_client_id:
         from private_status_sync import sync_status
-        sync_status(run_dir, status_access_jwt, status_token)
+        sync_status(run_dir, status_client_id, status_client_secret, status_token)
 
     if remote_config is not None:
         from evidence_presentation import present
@@ -693,21 +693,21 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
             probe = vps_reachable or (lambda: ssh_route_reachable(config['ssh'], config['host']))
             present(run_dir, remote, publisher_requests_stopped=True,
                     vps_reachable=probe,
-                    status_sync=(lambda: sync_status(run_dir, status_access_jwt, status_token)) if status_access_jwt else None)
+                    status_sync=(lambda: sync_status(run_dir, status_client_id, status_client_secret, status_token)) if status_client_id else None)
         except Exception as error:
             state = json.loads(state_path.read_text())
             state['remote'].update(status='failed', pending=binding,
                                    failed=binding, error=str(error))
             atomic_json(state_path, state)
-            if status_access_jwt:
+            if status_client_id:
                 try:
-                    sync_status(run_dir, status_access_jwt, status_token)
+                    sync_status(run_dir, status_client_id, status_client_secret, status_token)
                 except Exception:
                     pass
             raise
         state = json.loads(state_path.read_text())
-    if status_access_jwt:
-        sync_status(run_dir, status_access_jwt, status_token)
+    if status_client_id:
+        sync_status(run_dir, status_client_id, status_client_secret, status_token)
     print(json.dumps(state, sort_keys=True))
     return state
 
@@ -805,7 +805,8 @@ def main():
     parser.add_argument('--remote-config', type=Path)
     parser.add_argument('--owner-access-jwt-env')
     parser.add_argument('--publisher-requests-stopped', action='store_true')
-    parser.add_argument('--status-access-jwt-env')
+    parser.add_argument('--status-client-id-env')
+    parser.add_argument('--status-client-secret-env')
     parser.add_argument('--status-token-env')
     parser.add_argument('--canonical-apply', action='store_true')
     args = parser.parse_args()
@@ -813,7 +814,7 @@ def main():
         if args.command == 'retained-status':
             if (args.plan is not None or args.remote_config is not None
                     or args.owner_access_jwt_env or args.publisher_requests_stopped
-                    or args.status_access_jwt_env or args.status_token_env or args.canonical_apply):
+                    or args.status_client_id_env or args.status_client_secret_env or args.status_token_env or args.canonical_apply):
                 raise ValueError('retained status accepts only --run-dir')
             print(json.dumps(retained_status(args.run_dir), sort_keys=True))
             return 0
@@ -848,7 +849,7 @@ def main():
         if args.plan is None:
             raise ValueError('--plan required for run')
         if args.command == 'retained':
-            if args.remote_config is not None or args.status_access_jwt_env or args.status_token_env:
+            if args.remote_config is not None or args.status_client_id_env or args.status_client_secret_env or args.status_token_env:
                 raise ValueError('retained cohort is local only')
             print(json.dumps(run_retained(args.plan, args.run_dir,
                                           canonical_apply=args.canonical_apply), sort_keys=True))
@@ -856,7 +857,8 @@ def main():
         run(args.plan, args.run_dir, remote_config=args.remote_config,
             owner_access_jwt=os.environ.get(args.owner_access_jwt_env) if args.owner_access_jwt_env else None,
             publisher_requests_stopped=args.publisher_requests_stopped,
-            status_access_jwt=os.environ.get(args.status_access_jwt_env) if args.status_access_jwt_env else None,
+            status_client_id=os.environ.get(args.status_client_id_env) if args.status_client_id_env else None,
+            status_client_secret=os.environ.get(args.status_client_secret_env) if args.status_client_secret_env else None,
             status_token=os.environ.get(args.status_token_env) if args.status_token_env else None)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f'local run: {error}', file=sys.stderr)
