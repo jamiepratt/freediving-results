@@ -37,10 +37,38 @@ class MigrationOnlyTests(unittest.TestCase):
                 module.verify_versions(actual, expected,
                                        (set(range(1, 8)), set(range(1, 21))))
 
+    def test_private_backup_is_streamed_to_postgres_without_exposing_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / 'private'
+            private.mkdir(mode=0o700)
+            backup = private / 'backup.dump'
+            backup.write_bytes(b'synthetic archive')
+            backup.chmod(0o600)
+            observed = []
+
+            def fake_run(argv, **kwargs):
+                observed.append((argv, kwargs['input_stream'].read()))
+                return b''
+
+            with mock.patch.object(module, 'run', side_effect=fake_run):
+                module.postgres_restore(backup, '--list')
+            self.assertEqual(observed, [
+                (['runuser', '-u', 'postgres', '--', 'pg_restore', '--list'],
+                 b'synthetic archive')])
+            with backup.open('rb') as stream:
+                self.assertEqual(module.run(
+                    [sys.executable, '-c',
+                     'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'],
+                    input_stream=stream), b'synthetic archive')
+            self.assertEqual(private.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+
     def test_disposable_restore_checks_rows_and_drops_only_its_generated_database(self):
         expected = {n: 'digest' for n in range(1, 8)}
         commands = []
         with mock.patch.object(module, 'postgres', side_effect=lambda *a: commands.append(a)), \
+             mock.patch.object(module, 'postgres_restore',
+                               side_effect=lambda backup, *a: commands.append(('pg_restore', backup, *a))), \
              mock.patch.object(module, 'version_state', return_value=expected), \
              mock.patch.object(module, 'counts', return_value=(1, 2, 3, 4, 5, 6, 7)):
             module.restore_drill(Path('/private/backup.dump'), 'production', '5432', expected)
@@ -48,16 +76,19 @@ class MigrationOnlyTests(unittest.TestCase):
         disposable = commands[0][-1]
         self.assertTrue(disposable.startswith('freediving_migration_drill_'))
         self.assertNotEqual(disposable, 'production')
-        self.assertEqual(commands[1][-1], '/private/backup.dump')
+        self.assertEqual(commands[1][1], Path('/private/backup.dump'))
+        self.assertEqual(commands[1][-1], disposable)
         self.assertEqual(commands[2][-1], disposable)
 
     def test_failed_restore_still_drops_disposable_database(self):
         commands = []
         def postgres(*args):
             commands.append(args)
-            if args[0] == 'pg_restore':
-                raise OSError('synthetic restore failure')
+        def postgres_restore(backup, *args):
+            commands.append(('pg_restore', backup, *args))
+            raise OSError('synthetic restore failure')
         with mock.patch.object(module, 'postgres', side_effect=postgres), \
+             mock.patch.object(module, 'postgres_restore', side_effect=postgres_restore), \
              self.assertRaises(OSError):
             module.restore_drill(Path('/private/backup.dump'), 'production', '5432', {})
         self.assertEqual([args[0] for args in commands], ['createdb', 'pg_restore', 'dropdb'])
@@ -99,11 +130,14 @@ class MigrationOnlyTests(unittest.TestCase):
                 def __enter__(self): return self
                 def __exit__(self, *args): pass
             with mock.patch.object(module, 'run', return_value=b'active\n') as run, \
-                 mock.patch.object(module.urllib.request, 'urlopen', return_value=Response()):
+                 mock.patch.object(module.urllib.request, 'urlopen', return_value=Response()) as urlopen:
                 before = module.deployment_state(current, owner, status, 'https://poc.alphacompose.com')
                 status.write_text('{"changed": true}')
                 after = module.deployment_state(current, owner, status, 'https://poc.alphacompose.com')
             self.assertNotEqual(before, after)
+            request = urlopen.call_args.args[0]
+            self.assertIsInstance(request, module.urllib.request.Request)
+            self.assertEqual(request.get_header('User-agent'), 'freediving-deploy-health/1.0')
             self.assertEqual([call.args[0][0] for call in run.call_args_list], ['systemctl', 'systemctl'])
             self.assertEqual(os.readlink(current), str(snapshot))
 
@@ -139,6 +173,10 @@ class MigrationOnlyTests(unittest.TestCase):
                 events.append(tuple(argv))
                 return b''
 
+            def fake_postgres_restore(backup, *argv):
+                events.append(('pg_restore', backup, *argv))
+                return b''
+
             def fake_drill(*argv):
                 events.append(('restore_drill',))
                 self.assertEqual(argv[-1], versions)
@@ -161,6 +199,7 @@ class MigrationOnlyTests(unittest.TestCase):
                  mock.patch.object(module, 'ensure_private_dir', side_effect=fake_private_dir), \
                  mock.patch.object(module, 'restore_drill', side_effect=fake_drill), \
                  mock.patch.object(module, 'postgres', side_effect=fake_postgres), \
+                 mock.patch.object(module, 'postgres_restore', side_effect=fake_postgres_restore), \
                  mock.patch.object(module, 'run', side_effect=fake_run), \
                  mock.patch.dict(os.environ, {'PGHOST': 'attacker'}):
                 module.migrate(args)

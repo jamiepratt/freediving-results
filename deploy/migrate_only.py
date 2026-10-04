@@ -24,17 +24,24 @@ ROLES = ('freediving_migrator', 'observations_app', 'reviews_owner',
          'reviews_public', 'corrections_submit')
 
 
-def run(argv, *, env=None, output=None, cwd=None):
+def run(argv, *, env=None, output=None, cwd=None, input_stream=None):
     if env is None:
         env = {key: value for key, value in os.environ.items() if not key.startswith('PG')}
     with open(os.devnull, 'wb') as null:
-        return subprocess.run(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
+        return subprocess.run(argv, env=env, cwd=cwd,
+                              stdin=input_stream if input_stream is not None else subprocess.DEVNULL,
                               stdout=output or subprocess.PIPE, stderr=null,
                               check=True).stdout
 
 
 def postgres(*args):
     return run(['runuser', '-u', 'postgres', '--', *args])
+
+
+def postgres_restore(backup, *args):
+    with backup.open('rb') as stream:
+        return run(['runuser', '-u', 'postgres', '--', 'pg_restore', *args],
+                   input_stream=stream)
 
 
 def query(database, sql, port):
@@ -110,7 +117,9 @@ def deployment_state(public_current, owner_current, owner_status, public_origin)
     service = run(['systemctl', 'is-active', 'freediving-public.service']).decode().strip()
     if service != 'active':
         raise ValueError('Public service inactive')
-    with urllib.request.urlopen(public_origin + '/', timeout=10) as response:
+    health_request = urllib.request.Request(
+        public_origin + '/', headers={'User-Agent': 'freediving-deploy-health/1.0'})
+    with urllib.request.urlopen(health_request, timeout=10) as response:
         if response.status != 200:
             raise ValueError('Public site unhealthy')
     return public_target, owner
@@ -149,8 +158,8 @@ def restore_drill(backup, database, port, versions):
     try:
         postgres('createdb', '-h', '/var/run/postgresql', '-p', port, '-T', 'template0', disposable)
         created = True
-        postgres('pg_restore', '--exit-on-error', '-h', '/var/run/postgresql', '-p', port,
-                 '-d', disposable, str(backup))
+        postgres_restore(backup, '--exit-on-error', '-h', '/var/run/postgresql', '-p', port,
+                         '-d', disposable)
         if version_state(disposable, port) != versions:
             raise ValueError('Disposable restore schema differs from source')
         if counts(disposable, port, PUBLIC_TABLES) != counts(database, port, PUBLIC_TABLES):
@@ -209,7 +218,7 @@ def migrate(args):
         backup.unlink(missing_ok=True)
         raise
     try:
-        postgres('pg_restore', '--list', str(backup))
+        postgres_restore(backup, '--list')
         restore_drill(backup, database, port, before)
     except Exception:
         print('Dump retained for inspection: ' + str(backup), flush=True)
