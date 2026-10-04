@@ -74,6 +74,8 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
                   and owner['proposal_count'] == count
                   and stores.verify_owner(envelope))),
          'owner revision, human action, or proposal state changed')
+    stores.verify_status_retry_state(target, owner, cohort,
+                                     expected_revision + count, count)
     phase = {'schema': 'retained-aida-manual-apply-phase/v1', 'pins': pins,
              'snapshot_sha256': preflight['snapshot_sha256']}
     receipt(directory, 'phase-inputs.json', phase | {'phase': 'inputs_verified'})
@@ -185,6 +187,17 @@ class HostStores:
                     'publication_status': 'private'}
         need(all(application.get(key) == value for key, value in expected.items()),
              'existing private application differs')
+
+    def verify_status_retry_state(self, target, owner, cohort,
+                                  owner_revision, pending_count):
+        if not self.status_from_current or self.status_pin['schema'] != 'private-presentation-status/v3':
+            return
+        need(target['revision'] == len(cohort['events'])
+             and target['source_rows'] == cohort['registration']['rows']
+             and owner['store_revision'] == owner_revision
+             and owner['proposal_count'] == pending_count
+             and owner['human_event_count'] == pending_count,
+             'existing private application requires completed stores')
 
     def _clojure(self, command, *args):
         need(os.getenv('FREEDIVING_REVIEW_URL'), 'FREEDIVING_REVIEW_URL required')

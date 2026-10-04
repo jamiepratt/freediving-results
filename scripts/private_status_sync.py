@@ -17,9 +17,11 @@ def _status_credentials(client_id, client_secret, token, url):
 
 
 def _active_provenance(current, snapshot, bundle):
+    if not isinstance(current, dict) or current.get('status') == 'stale':
+        raise ValueError('authenticated active status provenance changed')
     active = {'snapshot_sha256': snapshot, 'bundle_manifest_sha256': bundle}
-    local = current.get('local') if isinstance(current, dict) else None
-    remote = current.get('remote') if isinstance(current, dict) else None
+    local = current.get('local')
+    remote = current.get('remote')
     try:
         cutoff = datetime.fromisoformat(local['cutoff'].replace('Z', '+00:00'))
     except (KeyError, AttributeError, TypeError, ValueError):
@@ -54,17 +56,7 @@ def pin_active_status(snapshot, bundle, client_id, client_secret, token,
 
 
 def assert_status_pin(pinned, current):
-    if current.get('status') == 'stale' and pinned['schema'] == 'private-presentation-status/v2':
-        if (current.get('revision') == pinned['revision']
-                and current.get('run_id') == pinned['run_id']
-                and current.get('cutoff') == pinned['local']['cutoff']
-                and current.get('remote', {}).get('active') == pinned['remote']['active']):
-            return
-    if (current.get('revision') != pinned['revision']
-            or current.get('run_id') != pinned['run_id']
-            or current.get('local') != pinned['local']
-            or current.get('schema') != pinned['schema']
-            or current.get('remote') != pinned['remote']):
+    if current != pinned:
         raise RuntimeError('private status revision changed')
 
 

@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_evidence_origin import make_server
 from private_presentation_status import PrivatePresentationStatus, StatusConflict
-from private_status_sync import pin_active_status, sync_application_from_pin
+from private_status_sync import pin_active_status, sync_application_from_pin, assert_status_pin
 from test_unified_evidence_query import snapshot
 
 
@@ -63,7 +63,7 @@ def test_current_status_provenance_rejects_changed_binding_and_fake_local():
                                   'id', 'secret', 'token')
 
 
-def test_v2_provenance_survives_expected_owner_revision_staleness():
+def test_v2_provenance_rejects_stale_transition_at_same_revision():
     snap = 'a' * 64
     active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
     current = {'schema': 'private-presentation-status/v2', 'revision': 3,
@@ -80,15 +80,30 @@ def test_v2_provenance_survives_expected_owner_revision_staleness():
                    'owner_store_revision': 209, 'pending_proposals': 207,
                    'unresolved_exclusions': 2, 'provider_calls_recorded': 0,
                    'publication_status': 'private'}
-    with patch('private_status_sync._request', side_effect=[current, stale,
-                                                               {**current, 'schema': 'private-presentation-status/v3',
-                                                                'revision': 4, 'application': application}]) as request:
+    with patch('private_status_sync._request', side_effect=[current, stale]) as request:
         pinned = pin_active_status(snap, active['bundle_manifest_sha256'],
                                    'id', 'secret', 'token')
-        assert sync_application_from_pin(pinned, application, 'id', 'secret', 'token')['revision'] == 4
-    assert request.call_args_list[-1].args[1] == 'POST'
-    assert request.call_args_list[-1].args[5] == 'token'
-    assert request.call_args_list[-1].args[6]['expected_revision'] == 3
+        with __import__('pytest').raises(RuntimeError, match='revision changed'):
+            sync_application_from_pin(pinned, application, 'id', 'secret', 'token')
+    assert [call.args[1] for call in request.call_args_list] == ['GET', 'GET']
+    with patch('private_status_sync._request', return_value=stale):
+        with __import__('pytest').raises(ValueError):
+            pin_active_status(snap, active['bundle_manifest_sha256'],
+                              'id', 'secret', 'token')
+
+
+def test_pinned_v3_rejects_changed_application_at_same_revision():
+    snap = 'a' * 64
+    pinned = {'schema': 'private-presentation-status/v3', 'revision': 2,
+              'run_id': 'completed-run',
+              'local': {'snapshot_sha256': snap,
+                        'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+              'remote': {'status': 'active', 'pending': None, 'failed': None,
+                         'active': {'snapshot_sha256': snap,
+                                    'bundle_manifest_sha256': 'b' * 64}},
+              'application': {'canonical_revision': 211}}
+    with __import__('pytest').raises(RuntimeError, match='revision changed'):
+        assert_status_pin(pinned, {**pinned, 'application': {'canonical_revision': 212}})
 
 
 def test_private_apply_status_commits_exact_readback_and_stales_on_owner_change(tmp_path):

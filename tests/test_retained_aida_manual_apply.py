@@ -41,6 +41,9 @@ class SyntheticStores:
     def verify_status_application_expectation(self, *_):
         pass
 
+    def verify_status_retry_state(self, *_):
+        pass
+
     def target_state(self):
         return copy.deepcopy(self.target)
 
@@ -244,6 +247,15 @@ class ManualApplyTest(unittest.TestCase):
             host.verify_active()
             with self.assertRaisesRegex(ValueError, 'existing private application differs'):
                 host.verify_status_application_expectation(2, 2, 1)
+
+    def test_existing_v3_cannot_authorize_fresh_canonical_or_owner_writes(self):
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          self.stores.snapshot, self.directory, None, 0, False,
+                          'b' * 64, status_from_current=True)
+        host.status_pin = {'schema': 'private-presentation-status/v3'}
+        with self.assertRaisesRegex(ValueError, 'existing private application requires completed stores'):
+            host.verify_status_retry_state(self.stores.target, self.stores.owner,
+                                           {'events': self.stores.events}, 1, 1)
 
 
 if __name__ == '__main__':
