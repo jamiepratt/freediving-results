@@ -60,14 +60,32 @@ def public_checkpoint(args, public_database, port):
                              PUBLIC_ORIGIN))
 
 
-def intent_file(directory):
-    return directory / 'aida-drill-intent.json'
+def intent_file(directory, database):
+    legacy = directory / 'aida-drill-intent.json'
+    named = directory / ('aida-drill-intent-' + database + '.json')
+    if legacy.exists() or legacy.is_symlink():
+        value = private_intent_value(legacy)
+        if value.get('schema') != MARKER or not re.fullmatch(
+                r'aida_drill_[a-z0-9_]{1,52}', value.get('database', '')):
+            raise ValueError('Legacy drill intent changed')
+        if value['database'] == database:
+            if named.exists() or named.is_symlink():
+                raise ValueError('Duplicate drill intents')
+            return legacy
+    return named
+
+
+def private_intent_value(path):
+    if not path.is_file() or path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_mode & 0o077:
+        raise ValueError('Drill intent is not root-private')
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError('Drill intent format changed')
+    return value
 
 
 def read_intent(path, expected):
-    if not path.is_file() or path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_mode & 0o077:
-        raise ValueError('Drill intent is not root-private')
-    if json.loads(path.read_text()) != expected:
+    if private_intent_value(path) != expected:
         raise ValueError('Drill intent binding changed')
 
 
@@ -89,7 +107,7 @@ def provision(args):
     intent = {'schema': MARKER, 'database': args.database, 'target': TARGET,
               'public_database': public_database, 'port': port,
               'public_config_sha256': dict(zip(('migration.env', 'public.env'), before[2]))}
-    path = intent_file(args.intent_dir)
+    path = intent_file(args.intent_dir, args.database)
     exists = database_exists(args.database, port)
     if exists and not path.exists():
         raise ValueError('Unmarked existing drill database')

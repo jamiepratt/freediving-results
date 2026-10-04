@@ -227,7 +227,7 @@ From a clean checkout equal to merged `origin/main`, provision the empty drill
 database before either stage:
 
 ```sh
-bash deploy/provision_aida_drill.sh aida_drill_OPERATOR_RUN
+bash deploy/provision_aida_drill.sh aida_drill_REBIND_RUN
 ```
 
 The root-only helper stages the merged release on `bridge-vps`, checks the
@@ -235,9 +235,12 @@ dedicated canonical and public bindings, then creates a `template0` database
 owned by `freediving_migrator`. It revokes PUBLIC database access and keeps an
 exact root-private intent in `/var/backups/freediving/aida-drill`. A retry
 accepts only that marked, still-empty database with matching config, owner,
-and private CONNECT ACL. Use its name for `FREEDIVING_PG_DRILL_DATABASE`.
-The manual apply fills it during the restore drill, so do not rerun the
-provisioner after that restore.
+and private CONNECT ACL. Intents are per database; the original
+`aida-drill-intent.json` remains valid for its recorded database. Use the
+provisioned name for `FREEDIVING_PG_DRILL_DATABASE`. The rebind restore fills
+that database. Provision a distinct empty `aida_drill_APPLY_RUN` database and
+set `FREEDIVING_PG_DRILL_DATABASE` to it before apply. Never reset or drop a
+filled drill to reuse its name.
 
 When the active owner store lacks source-derived AIDA refs, first run the
 `rebind` stage with its current owner revision. It verifies every original and
@@ -274,6 +277,13 @@ python3 scripts/retained_aida_manual_apply.py \
   --recovered-packet aida-source-name=/private/recovered/packet.json \
   --run-dir /private/completed-run --phase-dir /private/aida-manual-apply
 ```
+
+If the completed local run is unavailable, use `--status-from-current` in
+place of `--run-dir`. It pins the authenticated current private status,
+including its revision, run ID, local snapshot, cutoff, gap count, and active
+binding; the apply checks that pin before the v3 compare-and-swap commit.
+An exact matching v3 status supports retry. Keep the same status credentials
+in the environment. This route does not reconstruct a local run file.
 
 The apply stage accepts only an empty or exact canonical event prefix with
 all-or-empty matching source rows. It registers source rows, replays the exact
