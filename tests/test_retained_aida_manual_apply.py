@@ -1,9 +1,11 @@
 import copy
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.retained_aida_manual_apply import run_manual_apply
+from scripts.retained_aida_manual_apply import HostStores, run_manual_apply
 
 
 class SyntheticStores:
@@ -26,6 +28,14 @@ class SyntheticStores:
                       'human_event_count': 0}
         self.fail_at = None
         self.status = None
+        self.active = True
+        self.active_checks = 0
+        self.expire_active_on_check = None
+
+    def verify_active(self):
+        self.active_checks += 1
+        if not self.active or self.active_checks == self.expire_active_on_check:
+            raise ValueError('active snapshot binding changed')
 
     def target_state(self):
         return copy.deepcopy(self.target)
@@ -154,6 +164,35 @@ class ManualApplyTest(unittest.TestCase):
         self.stores.owner['human_event_count'] += 1
         with self.assertRaisesRegex(ValueError, 'owner revision'):
             self.run_apply()
+
+    def test_changed_active_binding_stops_before_canonical_write(self):
+        self.stores.active = False
+        with self.assertRaisesRegex(ValueError, 'active snapshot'):
+            self.run_apply()
+        self.assertEqual(self.stores.target['revision'], 0)
+        self.assertEqual(self.stores.owner['proposal_count'], 0)
+
+    def test_active_binding_expiring_after_backups_stops_write(self):
+        self.stores.expire_active_on_check = 2
+        with self.assertRaisesRegex(ValueError, 'active snapshot'):
+            self.run_apply()
+        self.assertEqual(self.stores.target['revision'], 0)
+        self.assertEqual(self.stores.owner['proposal_count'], 0)
+
+    def test_isolated_active_binding_is_hash_pinned(self):
+        path = self.directory / 'active.json'
+        path.write_text(json.dumps({'snapshot_sha256': self.stores.snapshot,
+                                    'bundle_manifest_sha256': 'b' * 64}))
+        path.chmod(0o600)
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          self.stores.snapshot, self.directory, None, 0, True,
+                          'b' * 64, path, sha)
+        host.verify_active()
+        path.write_text(json.dumps({'snapshot_sha256': self.stores.snapshot,
+                                    'bundle_manifest_sha256': 'c' * 64}))
+        with self.assertRaisesRegex(ValueError, 'input file changed'):
+            host.verify_active()
 
 
 if __name__ == '__main__':

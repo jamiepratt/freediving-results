@@ -44,6 +44,7 @@ def receipt(directory, name, value):
 def run_manual_apply(stores, preflight, envelope, pins, directory):
     """Apply one pinned package. Store methods are the host boundary for integration tests."""
     directory = private_directory(directory)
+    stores.verify_active()
     need(all(isinstance(value, str) and SHA.fullmatch(value) for value in pins.values())
          and {'preflight_sha256', 'envelope_sha256', 'flow_sha256',
               'checkpoint_sha256'} <= set(pins), 'hash pins missing')
@@ -87,6 +88,7 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
     need(stores.target_state() == target and stores.owner_state() == owner,
          'target or owner changed after backup')
     if target['revision'] != len(cohort['events']) or not target['source_rows']:
+        stores.verify_active()
         stores.apply_canonical(cohort)
     final_target = stores.target_state()
     need(verify_target_prefix(final_target, preflight['source_rows'],
@@ -95,6 +97,7 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
     receipt(directory, 'phase-canonical.json', phase | {'phase': 'canonical_verified',
              'revision': final_target['revision']})
     if owner['proposal_count'] == 0:
+        stores.verify_active()
         stores.register_owner(envelope)
     final_owner = stores.owner_state()
     need(final_owner['snapshot_sha256'] == preflight['snapshot_sha256']
@@ -107,6 +110,7 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
              'owner_revision': final_owner['store_revision'], 'pending_count': count})
     need(stores.target_state() == final_target and stores.owner_state() == final_owner,
          'target or owner changed before status')
+    stores.verify_active()
     remote_status = stores.commit_status(final_target, final_owner, envelope)
     need(isinstance(remote_status, dict), 'private status commit missing')
     result = phase | {'status': 'complete', 'canonical_revision': final_target['revision'],
@@ -119,7 +123,8 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
 
 class HostStores:
     def __init__(self, owner_db, snapshot_dir, recovered, snapshot, directory, run_dir,
-                 unresolved_exclusions, isolated_rehearsal=False):
+                 unresolved_exclusions, isolated_rehearsal=False, bundle_sha256=None,
+                 active_binding_path=None, active_binding_sha256=None):
         self.owner_db = Path(owner_db)
         self.snapshot_dir = Path(snapshot_dir)
         self.recovered = recovered
@@ -128,6 +133,31 @@ class HostStores:
         self.run_dir = Path(run_dir) if run_dir is not None else None
         self.unresolved_exclusions = unresolved_exclusions
         self.isolated_rehearsal = isolated_rehearsal
+        self.bundle_sha256 = bundle_sha256
+        self.active_binding_path = active_binding_path
+        self.active_binding_sha256 = active_binding_sha256
+
+    def verify_active(self):
+        need(isinstance(self.bundle_sha256, str) and SHA.fullmatch(self.bundle_sha256),
+             'active bundle SHA256 required')
+        if self.isolated_rehearsal:
+            active = activation.checked_json(self.active_binding_path,
+                                             self.active_binding_sha256)
+        else:
+            sys.path.insert(0, str(REPO / 'scripts'))
+            from private_status_sync import STATUS_URL, _NoRedirect, _request
+            from urllib.request import build_opener
+            credentials = [os.getenv('CF_ACCESS_CLIENT_ID'),
+                           os.getenv('CF_ACCESS_CLIENT_SECRET'),
+                           os.getenv('OWNER_EVIDENCE_STATUS_TOKEN')]
+            need(all(credentials), 'private active status credentials missing')
+            current = _request(build_opener(_NoRedirect()), 'GET', STATUS_URL,
+                               *credentials)
+            active = current.get('remote', {}).get('active')
+        need(isinstance(active, dict)
+             and active.get('snapshot_sha256') == self.snapshot
+             and active.get('bundle_manifest_sha256') == self.bundle_sha256,
+             'active snapshot or bundle binding changed')
 
     def _clojure(self, command, *args):
         need(os.getenv('FREEDIVING_REVIEW_URL'), 'FREEDIVING_REVIEW_URL required')
@@ -334,7 +364,10 @@ def rebind_verified_owner(args):
     need(not loaded.get('gaps') and loaded['snapshot_sha256'] == args.snapshot_sha256,
          'verified recovered packet required')
     stores = HostStores(args.owner_db, args.snapshot_dir, recovered,
-                        args.snapshot_sha256, directory, None, 0, True)
+                        args.snapshot_sha256, directory, None, 0,
+                        args.isolated_rehearsal, args.bundle_sha256,
+                        args.active_binding, args.active_binding_sha256)
+    stores.verify_active()
     target = stores.target_state()
     need(target['schema'] == 'retained-aida-target-state/v1'
          and target['snapshot_sha256'] == args.snapshot_sha256
@@ -381,6 +414,7 @@ def rebind_verified_owner(args):
              'backup_sha256': digest(directory / pg_name)})
     need(stores.target_state() == target and stores.owner_state() == owner,
          'target or owner changed before rebind')
+    stores.verify_active()
     key = 'retained-aida-rebind:' + args.snapshot_sha256
     store = DecisionStore(args.owner_db)
     try:
@@ -420,7 +454,17 @@ def main(argv=None):
         parser.add_argument('--expected-owner-revision', type=int, required=True)
         parser.add_argument('--recovered-packet', action='append', default=[])
         parser.add_argument('--phase-dir', type=Path, required=True)
+        parser.add_argument('--bundle-sha256', required=True)
+        parser.add_argument('--active-binding', type=Path)
+        parser.add_argument('--active-binding-sha256')
+        parser.add_argument('--isolated-rehearsal', action='store_true')
         args = parser.parse_args(argv[1:])
+        need(not args.isolated_rehearsal or
+             (args.active_binding is not None and args.active_binding_sha256
+              and os.getenv('FREEDIVING_PG_ISOLATED') == '1'
+              and os.getenv('PGDATABASE', '').startswith('aida_rehearsal_')
+              and os.getenv('FREEDIVING_PG_DRILL_DATABASE', '').startswith('aida_drill_')),
+             'isolated active binding input required')
         print(json.dumps(rebind_verified_owner(args), sort_keys=True))
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
@@ -433,13 +477,17 @@ def main(argv=None):
     parser.add_argument('--phase-dir', type=Path, required=True)
     parser.add_argument('--run-dir', type=Path)
     parser.add_argument('--isolated-rehearsal', action='store_true')
+    parser.add_argument('--bundle-sha256', required=True)
+    parser.add_argument('--active-binding', type=Path)
+    parser.add_argument('--active-binding-sha256')
     args = parser.parse_args(argv)
     need(args.isolated_rehearsal or args.run_dir is not None,
          'private status run directory required')
     if args.isolated_rehearsal:
         need(os.getenv('FREEDIVING_PG_ISOLATED') == '1'
              and os.getenv('PGDATABASE', '').startswith('aida_rehearsal_')
-             and os.getenv('FREEDIVING_PG_DRILL_DATABASE', '').startswith('aida_drill_'),
+             and os.getenv('FREEDIVING_PG_DRILL_DATABASE', '').startswith('aida_drill_')
+             and args.active_binding is not None and args.active_binding_sha256,
              'isolated rehearsal requires disposable databases')
     directory = private_directory(args.phase_dir)
     paths = {name: getattr(args, name) for name in ('preflight', 'envelope', 'flow', 'checkpoint')}
@@ -493,7 +541,9 @@ def main(argv=None):
     need(rebuilt == envelope, 'pending owner envelope differs from flow')
     stores = HostStores(args.owner_db, args.snapshot_dir, recovered,
                         preflight['snapshot_sha256'], directory, args.run_dir,
-                        envelope['counts']['unresolved'], args.isolated_rehearsal)
+                        envelope['counts']['unresolved'], args.isolated_rehearsal,
+                        args.bundle_sha256, args.active_binding,
+                        args.active_binding_sha256)
     result = run_manual_apply(stores, preflight, envelope, pins, directory)
     print(json.dumps(result, sort_keys=True))
     return 0
