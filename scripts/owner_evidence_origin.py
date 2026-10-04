@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
@@ -108,6 +109,7 @@ def _config(env):
 
 class PrivateOrigin(ThreadingHTTPServer):
     def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
+        self.request_lock = threading.Lock()
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
         self.canonical_reader = canonical_reader
         self.assets = _assets()
@@ -181,6 +183,14 @@ class PrivateOrigin(ThreadingHTTPServer):
         sock, address = super().get_request()
         sock.settimeout(5)
         return sock, address
+
+
+def _serialized_request(method):
+    def run(self):
+        # Parse sockets concurrently, then keep shared SQLite operations sequential.
+        with self.server.request_lock:
+            return method(self)
+    return run
 
 
 class PrivateOriginHandler(BaseHTTPRequestHandler):
@@ -322,6 +332,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
     def _json(self, value):
         self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
 
+    @_serialized_request
     def do_GET(self):
         if not self._authorized():
             return self._reply(403)
@@ -469,6 +480,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._reply(405)
 
+    @_serialized_request
     def do_POST(self):
         if not self._authorized(body=True):
             return self._reply(403)
