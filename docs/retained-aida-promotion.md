@@ -60,6 +60,17 @@ checkpoint fails without writing a package. A repeated command accepts only
 byte-identical output. Standard output contains counts and a package hash,
 not athlete rows.
 
+For a frozen AIDA packet whose manifest path is missing, a trusted private
+operator can explicitly rebind the same snapshot with
+`DecisionStore.bind_verified_snapshot(..., recovered_packet_paths={source_name:
+packet_path}, expected_revision=current_revision, idempotency_key=unique_key)`.
+The recovered packet must match the frozen manifest hash and replay against
+its receipt and original HTML. The rebind requires zero AIDA source gaps and
+appends a new binding revision; it does not change snapshot record membership.
+The owner origin does not perform this rebind automatically. A changed owner
+revision, snapshot, packet, receipt, or original fails the operation. Reread
+the owner binding and store revisions before running the preflight above.
+
 There is no apply command for this package. Before any host replay, reread
 the target and owner revisions, snapshot, source refs, and event prefix;
 invalidate the package on any change. Exact canonical replay must preserve

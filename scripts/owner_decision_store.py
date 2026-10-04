@@ -154,11 +154,14 @@ class DecisionStore:
             self.db.execute('ROLLBACK')
             raise
 
-    def bind_verified_snapshot(self, directory, *, expected_revision, idempotency_key):
+    def bind_verified_snapshot(self, directory, *, expected_revision, idempotency_key,
+                               recovered_packet_paths=None):
         """Bind only record IDs from a hash-verified immutable snapshot.
 
         This is the production binding entry point. Decision proposals must cite
-        these exact record IDs. The private publisher has no access to this DB.
+        these exact record IDs. Recovered AIDA packets must replay against their
+        frozen manifest hash and original source before source refs are bound.
+        The private publisher has no access to this DB.
         """
         with SnapshotQuery(directory) as snapshot:
             columns = {row[1] for row in snapshot.db.execute('PRAGMA table_info(records)')}
@@ -181,12 +184,24 @@ class DecisionStore:
                 ('cmas-microplus-private-census/v1', load_microplus),
                 ('cmas-microplus-private-census/v2', load_microplus),
             )
+            if recovered_packet_paths is not None:
+                aida_names = {name for name, item in snapshot.manifest.get('inputs', {}).items()
+                              if item.get('source_schema') == 'aida-selected-html-packet/v1'}
+                if (not isinstance(recovered_packet_paths, dict)
+                        or not set(recovered_packet_paths) <= aida_names):
+                    raise ValueError('unknown AIDA recovered packet source')
             for schema, loader in source_schemas:
                 names = sorted(name for name, item in snapshot.manifest.get('inputs', {}).items()
                                if item.get('source_schema') == schema)
                 if not names:
                     continue
-                source_result = loader(directory, names)
+                if schema == 'aida-selected-html-packet/v1':
+                    source_result = loader(directory, names,
+                                           recovered_packet_paths=recovered_packet_paths)
+                    if recovered_packet_paths is not None and source_result['gaps']:
+                        raise ValueError('AIDA recovered binding has source gaps')
+                else:
+                    source_result = loader(directory, names)
                 for observation in source_result['observations']:
                     record_id = observation['snapshot_record_id']
                     if record_id not in observation_refs:
@@ -278,17 +293,37 @@ class DecisionStore:
     def _revisions_current(proposal, binding):
         refs = binding['observation_refs']
         canonical = proposal.get('canonical_binding')
+        if (DecisionStore._has_source_derived_revision(proposal) and
+                (refs is None or not isinstance(canonical, dict))):
+            return False
         if refs is None or canonical is None:
             return True
         evidence_bindings = canonical.get('evidence_bindings')
-        if not isinstance(evidence_bindings, list) or len(evidence_bindings) != len(proposal['evidence']):
+        if (not isinstance(evidence_bindings, list)
+                or len(evidence_bindings) != len(proposal['evidence'])
+                or any(not isinstance(entry, dict) for entry in evidence_bindings)):
+            return False
+        if (DecisionStore._has_source_derived_revision(proposal) and
+                canonical.get('observation_revisions') != [entry.get('observation_revision')
+                                                           for entry in evidence_bindings]):
             return False
         for item, evidence in zip(proposal['evidence'], evidence_bindings):
             revision = evidence.get('observation_revision')
             source = refs.get(item['id'])
+            if (isinstance(item.get('version'), dict)
+                    and item['version'].get('kind') == 'source-derived'
+                    and item['version'] != revision):
+                return False
             if isinstance(revision, dict) and revision.get('kind') == 'source-derived':
+                citation = item.get('citation')
+                source_citation = citation.get('source_citation') if isinstance(citation, dict) else None
                 if (evidence.get('snapshot_record_id') != item['id'] or
-                        not source or source.get('source_derived_ref') != revision):
+                        item.get('version') != revision or
+                        not source or source.get('source_derived_ref') != revision or
+                        not isinstance(source_citation, dict) or
+                        citation.get('observation_revision') != revision or
+                        source_citation.get('source-sha256') != revision.get('source_sha256') or
+                        source_citation.get('locator') != revision.get('citation')):
                     return False
                 continue
             if (not isinstance(revision, dict) or evidence.get('snapshot_record_id') != item['id']

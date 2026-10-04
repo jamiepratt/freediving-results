@@ -9,6 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 from owner_decision_store import ConflictError, DecisionStore
+from aida_snapshot_observations import load_source_observations
+from issue55_aida_selected_html import build as build_aida_packet
 
 
 SNAP_A = 'a' * 64
@@ -45,6 +47,143 @@ class DecisionStoreTest(unittest.TestCase):
     def bind(self, digest=SNAP_A, evidence=('row-1', 'row-2', 'row-3')):
         return self.store.bind_snapshot(digest, evidence, expected_revision=self.store.revision,
                                         idempotency_key='bind-' + digest)
+
+    def recovered_aida_snapshot(self):
+        root = Path(self.tmp.name)
+        recovered = root / 'recovered'
+        (recovered / 'raw').mkdir(parents=True)
+        source = recovered / 'raw' / 'source.html'
+        source.write_text('<html><div class="event-title--description">Synthetic Open</div>'
+                          '<li class="active"><a class="days" id="day_1">2025-08-30</a></li>'
+                          '<table id="table_ajax"><thead><tr>'
+                          + ''.join(f'<th>{h}</th>' for h in
+                                    ('Start', 'Diver', 'Nationality', 'Gender', 'Discipline',
+                                     'OT', 'AP', 'RP', 'Card', 'Points', 'Remarks'))
+                          + '</tr></thead><tbody id="body_ajax"><tr>'
+                          + ''.join(f'<td>{v}</td>' for v in
+                                    ('1', 'Synthetic Athlete', 'GER', 'F', 'CWTB', '09:40',
+                                     '25 m', '24 m', 'YELLOW', '19', 'Note'))
+                          + '</tr></tbody></table></html>')
+        url = 'https://www.aidainternational.org/EventPage/4408'
+        body = source.read_bytes()
+        receipt = {'schema': 'aida-selected-html-browser-receipt/v1',
+                   'requested_url': url, 'final_url': url, 'http_status': 200,
+                   'content_type': 'text/html', 'response_time': '2026-09-28T18:43:07Z',
+                   'selected_view': {'date': '2025-08-30', 'selector': 'day_1'},
+                   'body': {'path': 'raw/source.html', 'bytes': len(body),
+                            'sha256': hashlib.sha256(body).hexdigest()},
+                   'source_citation': {'url': url, 'selected_date': '2025-08-30',
+                                       'table': 'table_ajax', 'tbody': 'body_ajax'}}
+        receipt_path = recovered / 'receipt.json'
+        receipt_path.write_text(json.dumps(receipt))
+        packet = build_aida_packet(source, receipt_path)
+        packet_path = recovered / 'packet.json'
+        packet_path.write_text(json.dumps(packet))
+        name = 'aida-synthetic-2025-08-30'
+        record_id = hashlib.sha256(f'{name}:positions[0]'.encode()).hexdigest()
+        snapshot = root / 'snapshot'
+        snapshot.mkdir()
+        db_path = snapshot / 'snapshot.sqlite'
+        db = sqlite3.connect(db_path)
+        db.execute('CREATE TABLE records (record_id TEXT, source_name TEXT, collection TEXT, '
+                   'record_path TEXT, kind TEXT, raw_json TEXT, citation_json TEXT, '
+                   'source_object_id TEXT, event_date TEXT, parser_version TEXT, '
+                   'observation_version TEXT, event_name TEXT, session TEXT, category TEXT)')
+        row = packet['positions'][0]
+        db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                   (record_id, name, 'positions', 'positions[0]', 'candidate_position',
+                    json.dumps(row), json.dumps(row['position']),
+                    'sha256:' + packet['source']['sha256'], '2025-08-30',
+                    None, None, None, None, None))
+        db.commit()
+        db.close()
+        digest = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        (snapshot / 'manifest.json').write_text(json.dumps({
+            'schema': 'unified-evidence-snapshot/v1', 'snapshot_sha256': digest,
+            'inputs': {name: {'source_schema': 'aida-selected-html-packet/v1',
+                              'path': str(snapshot / 'missing-packet.json'),
+                              'sha256': hashlib.sha256(packet_path.read_bytes()).hexdigest(),
+                              'collections': {'positions': 1}}}}))
+        return snapshot, name, packet_path, record_id, digest
+
+    def test_recovered_aida_binding_registers_only_exact_pending_source_ref(self):
+        snapshot, name, packet_path, record_id, digest = self.recovered_aida_snapshot()
+        first = self.store.bind_verified_snapshot(snapshot, expected_revision=0,
+                                                  idempotency_key='initial-bind')
+        self.assertEqual(first['evidence_count'], 1)
+        self.assertNotIn('source_derived_ref', self.store._binding()['observation_refs'][record_id])
+        recovered = {name: packet_path}
+        second = self.store.bind_verified_snapshot(
+            snapshot, expected_revision=self.store.revision,
+            idempotency_key='recovered-bind', recovered_packet_paths=recovered)
+        self.assertEqual(second['revision'], first['revision'] + 1)
+        self.assertEqual(second, self.store.bind_verified_snapshot(
+            snapshot, expected_revision=first['revision'],
+            idempotency_key='recovered-bind', recovered_packet_paths=recovered))
+        reference = load_source_observations(
+            snapshot, [name], recovered_packet_paths=recovered)['observations'][0]['source_observation_ref']
+        self.assertEqual(reference, self.store._binding()['observation_refs'][record_id]['source_derived_ref'])
+        p = proposal('source-1', evidence=record_id)
+        p['evidence'][0] = {'id': record_id, 'version': reference,
+                            'citation': {'source_citation': {'source-sha256': reference['source_sha256'],
+                                                            'locator': reference['citation']},
+                                         'observation_revision': reference}}
+        p['canonical_binding'] = {'decision_id': p['id'], 'observation_revisions': [reference],
+                                  'evidence_bindings': [{'snapshot_record_id': record_id,
+                                                         'observation_revision': reference}]}
+        self.assertEqual(self.store.register(digest, p, idempotency_key='register-source')['effective_status'],
+                         'pending')
+        unbound = json.loads(json.dumps(p))
+        unbound['id'] = 'source-unbound'
+        del unbound['canonical_binding']
+        with self.assertRaises(ConflictError):
+            self.store.register(digest, unbound, idempotency_key='register-unbound')
+        forged = json.loads(json.dumps(p))
+        forged['id'] = 'source-forged'
+        forged['canonical_binding']['decision_id'] = forged['id']
+        forged['evidence'][0]['version']['observation_version'] = '0' * 64
+        forged['canonical_binding']['observation_revisions'][0]['observation_version'] = '0' * 64
+        forged['canonical_binding']['evidence_bindings'][0]['observation_revision']['observation_version'] = '0' * 64
+        with self.assertRaises(ConflictError):
+            self.store.register(digest, forged, idempotency_key='register-forged')
+        miscited = json.loads(json.dumps(p))
+        miscited['id'] = 'source-miscited'
+        miscited['canonical_binding']['decision_id'] = miscited['id']
+        miscited['evidence'][0]['citation']['source_citation']['locator'] = {'row': 99}
+        with self.assertRaises(ConflictError):
+            self.store.register(digest, miscited, idempotency_key='register-miscited')
+        mismatched_citation = json.loads(json.dumps(p))
+        mismatched_citation['id'] = 'source-citation-mismatch'
+        mismatched_citation['canonical_binding']['decision_id'] = mismatched_citation['id']
+        mismatched_citation['evidence'][0]['citation']['observation_revision']['observation_version'] = '0' * 64
+        with self.assertRaises(ConflictError):
+            self.store.register(digest, mismatched_citation,
+                                idempotency_key='register-citation-mismatch')
+        approved = json.loads(json.dumps(p))
+        approved['id'] = 'source-automatic'
+        approved['canonical_binding']['decision_id'] = approved['id']
+        approved['status'] = 'automatic_approved'
+        with self.assertRaisesRegex(ConflictError, 'no canonical route'):
+            self.store.register(digest, approved, idempotency_key='register-automatic')
+
+    def test_recovered_aida_binding_rejects_stale_or_changed_original(self):
+        snapshot, name, packet_path, _, _ = self.recovered_aida_snapshot()
+        self.store.bind_verified_snapshot(snapshot, expected_revision=0,
+                                          idempotency_key='initial-bind')
+        recovered = {name: packet_path}
+        with self.assertRaises(ValueError):
+            self.store.bind_verified_snapshot(snapshot, expected_revision=self.store.revision,
+                                              idempotency_key='unknown-source',
+                                              recovered_packet_paths={'unknown': packet_path})
+        with self.assertRaises(ConflictError):
+            self.store.bind_verified_snapshot(snapshot, expected_revision=0,
+                                              idempotency_key='stale-bind',
+                                              recovered_packet_paths=recovered)
+        (packet_path.parent / 'raw' / 'source.html').write_text('changed original')
+        with self.assertRaises(ValueError):
+            self.store.bind_verified_snapshot(snapshot, expected_revision=self.store.revision,
+                                              idempotency_key='changed-bind',
+                                              recovered_packet_paths=recovered)
 
     def test_remote_outbox_ack_requires_exact_event_and_order(self):
         self.bind()
