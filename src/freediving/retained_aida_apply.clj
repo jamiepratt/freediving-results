@@ -92,6 +92,12 @@
                        (:event-id event) (assoc :event_id (:event-id event))))
                    events)}))
 
+(defn target-state
+  "Read an exact target history for a guarded private replay preflight."
+  [reviewer-url expected-snapshot]
+  (assoc (identity/private-canonical-target-state reviewer-url expected-snapshot)
+         :schema "retained-aida-target-state/v1"))
+
 (defn canonical-readback
   "Verify a retained cohort and applied receipt against one current canonical read."
   [reviewer-url cohort applied]
@@ -261,6 +267,10 @@
       "history" (let [[_ expected path] args]
                   (when-not (= 3 (count args)) (fail! "Usage: history EXPECTED_SNAPSHOT_SHA HISTORY_JSON"))
                   (write-receipt! path (canonical-history reviewer expected)))
+      "target-state" (let [[_ expected path] args]
+                       (when-not (= 3 (count args))
+                         (fail! "Usage: target-state EXPECTED_SNAPSHOT_SHA TARGET_JSON"))
+                       (write-receipt! path (target-state reviewer expected)))
       "readback" (let [[_ cohort-path expected receipt-path output-path] args]
                    (when-not (and (= 5 (count args)) (re-matches #"[0-9a-f]{64}" expected)
                                   (= expected (sha256-file cohort-path)))
@@ -272,4 +282,4 @@
                                      (canonical-readback reviewer
                                                          (json/read-str (slurp cohort-path))
                                                          applied))))
-      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON | history EXPECTED_SNAPSHOT_SHA HISTORY_JSON | readback COHORT_JSON SHA256 RECEIPT_JSON OUTPUT_JSON"))))
+      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON | history EXPECTED_SNAPSHOT_SHA HISTORY_JSON | target-state EXPECTED_SNAPSHOT_SHA TARGET_JSON | readback COHORT_JSON SHA256 RECEIPT_JSON OUTPUT_JSON"))))

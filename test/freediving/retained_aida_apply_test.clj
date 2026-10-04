@@ -162,6 +162,23 @@
     (is (= ["aida-edge-1" "aida-edge-2"]
            (mapv :id (identity/private-history reviewer))))))
 
+(deftest target-state-preserves-exact-requests-for-guarded-replay
+  (let [input (cohort)
+        snapshot (get-in input [:registration :snapshot-sha256])
+        empty-target (apply-route/target-state reviewer snapshot)
+        _ (apply-route/apply-cohort! reviewer app input)
+        target (apply-route/target-state reviewer snapshot)]
+    (is (= 0 (:revision empty-target)))
+    (is (empty? (:source_rows empty-target)))
+    (is (= "retained-aida-target-state/v1" (:schema target)))
+    (is (= 2 (:revision target)))
+    (is (= 3 (count (:source_rows target))))
+    (is (= 0 (:non_source_row_count target)))
+    (is (= (mapv :request (identity/private-history reviewer))
+           (mapv :request (:events target))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (apply-route/target-state reviewer (apply str (repeat 64 "f")))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-aida-apply-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

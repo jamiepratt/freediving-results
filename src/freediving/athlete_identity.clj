@@ -731,6 +731,43 @@
          :events (:events ledger) :projection current})
       (catch Exception error (.rollback connection) (throw error)))))
 
+(defn private-canonical-target-state
+  "Read one target snapshot, all canonical rows, events and view in one transaction.
+   A truly empty target may have no source snapshot or materialized view yet."
+  [url expected-snapshot]
+  (when-not (sha256? expected-snapshot)
+    (fail! "Expected source snapshot SHA256 required" {}))
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setReadOnly connection true)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (let [ledger (read-ledger connection)
+            stored (first (query connection
+                                 "SELECT identity_revision,evidence_sha256,body_edn FROM freediving.canonical_identity_view WHERE singleton=true"))
+            snapshot (:snapshot_sha256 (first (query connection
+                                                     "SELECT snapshot_sha256 FROM freediving.source_identity_snapshot WHERE singleton=true")))
+            source (source-rows connection)
+            observation-count (:total (first (query connection
+                                                    "SELECT COUNT(*) AS total FROM freediving.observations")))
+            empty? (and (nil? snapshot) (nil? stored)
+                        (empty? (:rows ledger)) (empty? (:events ledger))
+                        (empty? source) (zero? observation-count))
+            current (when-not empty? (project ledger))]
+        (when-not (or empty?
+                      (and (= expected-snapshot snapshot) stored
+                           (= (:revision current) (:identity_revision stored))
+                           (= (evidence-digest ledger) (:evidence_sha256 stored))
+                           (= current (edn/read-string (:body_edn stored)))))
+          (fail! "Target canonical state or source snapshot changed" {}))
+        (.commit connection)
+        {:snapshot_sha256 expected-snapshot
+         :revision (count (:events ledger))
+         :events (mapv #(select-keys % [:id :request]) (:events ledger))
+         :source_rows source
+         :non_source_row_count (- (count (:rows ledger)) (count source))})
+      (catch Exception error (.rollback connection) (throw error)))))
+
 (defn private-projection
   "Read the current private grouping from retained observations and the append-only ledger."
   [url]
