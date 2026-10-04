@@ -23,6 +23,9 @@ import urllib.request
 
 SERVICE = 'freediving-owner-evidence.service'
 FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/owner_decision_store.py',
+         'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
+         'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
+         'scripts/cmas_microplus_finalize.py',
          'scripts/unified_evidence_query.py',
          'scripts/route_roster_query.py', 'scripts/owner_source_view.py',
          'scripts/private_source_bundle.py', 'scripts/vestico_safe_derivative.py',
@@ -30,6 +33,13 @@ FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_statu
          'resources/evidence_workspace.css')
 REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGIN_HOST',
                           'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
+LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
+                                   'scripts/owner_decision_store.py',
+                                   'scripts/aida_snapshot_observations.py',
+                                   'scripts/issue55_aida_selected_html.py',
+                                   'scripts/cmas_microplus_snapshot_observations.py',
+                                   'scripts/cmas_microplus_ingest.py',
+                                   'scripts/cmas_microplus_finalize.py'))
 
 
 @dataclass(frozen=True)
@@ -88,13 +98,13 @@ def _config(path, owner_uid, expected):
     return values
 
 
-def _inputs(bundle, source, expected, *, allow_legacy_status=False):
+def _inputs(bundle, source, expected, *, allow_legacy_app=False):
     if not re.fullmatch(r'[a-f0-9]{64}', expected):
         raise ValueError('invalid expected SHA256')
     if bundle.is_symlink() or source.is_symlink():
         raise ValueError('linked activation directory')
     for name in FILES:
-        if (allow_legacy_status and name == 'scripts/private_presentation_status.py' and
+        if (allow_legacy_app and name in LEGACY_OPTIONAL_FILES and
                 not (bundle / name).exists() and not (bundle / name).is_symlink()):
             continue
         _regular(bundle / name)
@@ -299,7 +309,7 @@ def _restore_checkpoint(layout, command):
             prior_app = Path(previous['app'])
             prior_snapshot = Path(previous['snapshot'])
             prior_digest = prior_snapshot.name
-            _inputs(prior_app, prior_snapshot, prior_digest, allow_legacy_status=True)
+            _inputs(prior_app, prior_snapshot, prior_digest, allow_legacy_app=True)
             if previous['roster']:
                 prior_roster = Path(previous['roster'])
                 _roster_inputs(prior_roster, prior_roster.name, prior_digest)

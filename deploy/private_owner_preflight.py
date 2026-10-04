@@ -20,7 +20,11 @@ import tempfile
 # Keep in sync with deploy/owner_evidence_activate.py FILES and SSH stage imports.
 OWNER_FILES = (
     'scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py',
-    'scripts/owner_decision_store.py', 'scripts/unified_evidence_query.py',
+    'scripts/owner_decision_store.py', 'scripts/aida_snapshot_observations.py',
+    'scripts/issue55_aida_selected_html.py',
+    'scripts/cmas_microplus_snapshot_observations.py',
+    'scripts/cmas_microplus_ingest.py', 'scripts/cmas_microplus_finalize.py',
+    'scripts/unified_evidence_query.py',
     'scripts/route_roster_query.py', 'scripts/owner_source_view.py',
     'scripts/private_source_bundle.py', 'scripts/vestico_safe_derivative.py',
     'resources/evidence_workspace.html', 'resources/evidence_workspace.js',
