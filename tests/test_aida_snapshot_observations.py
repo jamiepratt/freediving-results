@@ -81,7 +81,9 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
             recovered.mkdir()
             shutil.copytree(root / 'raw', recovered / 'raw')
             shutil.copy2(root / 'receipt.json', recovered / 'receipt.json')
-            shutil.copy2(original_packet, recovered / 'packet.json')
+            object_path = root / 'historical-packet-object'
+            shutil.copy2(original_packet, object_path)
+            (recovered / 'packet.json').symlink_to(object_path)
             original_packet.unlink()
 
             self.assertEqual(1, len(load_source_observations(root, [name])['gaps']))
@@ -125,6 +127,12 @@ class AidaSnapshotObservationsTest(unittest.TestCase):
                 load_source_observations(root, [name, 'other'],
                                          recovered_packet_paths={name: recovered / 'packet.json',
                                                                  'other': recovered / 'packet.json'})
+            alias = root / 'packet-alias.json'
+            alias.symlink_to(recovered / 'packet.json')
+            with self.assertRaisesRegex(ValueError, 'duplicate AIDA recovered packet path'):
+                load_source_observations(root, [name, 'other'],
+                                         recovered_packet_paths={name: recovered / 'packet.json',
+                                                                 'other': alias})
             receipt_path = recovered / 'receipt.json'
             receipt = json.loads(receipt_path.read_text())
             receipt['response_time'] = '2026-10-04T10:00:00Z'

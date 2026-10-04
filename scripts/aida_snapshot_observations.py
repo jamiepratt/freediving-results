@@ -124,9 +124,9 @@ def load_source_observations(snapshot_dir, source_names, *, adapter_version=ADAP
              'unknown AIDA recovered packet source')
     _require(all(isinstance(path, (str, Path)) for path in recovered_packet_paths.values()),
              'invalid AIDA recovered packet path')
-    recovered_paths = {name: Path(path).resolve()
+    recovered_paths = {name: Path(path)
                        for name, path in recovered_packet_paths.items()}
-    _require(len(set(recovered_paths.values())) == len(recovered_paths),
+    _require(len({path.resolve() for path in recovered_paths.values()}) == len(recovered_paths),
              'duplicate AIDA recovered packet path')
     observations, gaps = [], []
     with SnapshotQuery(snapshot_dir) as snapshot:
