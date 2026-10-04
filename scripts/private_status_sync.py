@@ -1,12 +1,91 @@
 """Publish one sanitized local checkpoint through the private status route."""
 import json
 import hashlib
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 STATUS_URL = 'https://poc.alphacompose.com/owner-evidence/api/presentation-status'
 STATUS_USER_AGENT = 'freediving-status-sync/1.0'
+
+
+def _status_credentials(client_id, client_secret, token, url):
+    if url != STATUS_URL or not client_id or not client_secret or not token:
+        raise ValueError('private status credentials or URL missing')
+
+
+def _active_provenance(current, snapshot, bundle):
+    active = {'snapshot_sha256': snapshot, 'bundle_manifest_sha256': bundle}
+    local = current.get('local') if isinstance(current, dict) else None
+    remote = current.get('remote') if isinstance(current, dict) else None
+    try:
+        cutoff = datetime.fromisoformat(local['cutoff'].replace('Z', '+00:00'))
+    except (KeyError, AttributeError, TypeError, ValueError):
+        raise ValueError('authenticated local status provenance missing') from None
+    if (current.get('schema') not in ('private-presentation-status/v1',
+                                      'private-presentation-status/v2',
+                                      'private-presentation-status/v3')
+            or type(current.get('revision')) is not int or current['revision'] < 1
+            or not isinstance(current.get('run_id'), str)
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', current['run_id'])
+            or not isinstance(local, dict)
+            or set(local) != {'snapshot_sha256', 'cutoff', 'gap_count'}
+            or local['snapshot_sha256'] != snapshot
+            or not local['cutoff'].endswith('Z') or cutoff.tzinfo != timezone.utc
+            or type(local['gap_count']) is not int or not 0 <= local['gap_count'] <= 100000
+            or not isinstance(remote, dict) or remote !=
+            {'status': 'active', 'pending': None, 'failed': None, 'active': active}):
+        raise ValueError('authenticated active status provenance changed')
+    return current
+
+
+def pin_active_status(snapshot, bundle, client_id, client_secret, token,
+                      *, url=STATUS_URL, opener=None):
+    """Pin an existing authenticated owner checkpoint without a local run copy."""
+    _status_credentials(client_id, client_secret, token, url)
+    if not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
+               for value in (snapshot, bundle)):
+        raise ValueError('active status binding hashes required')
+    current = _request(opener or build_opener(_NoRedirect()), 'GET', url,
+                       client_id, client_secret, token)
+    return _active_provenance(current, snapshot, bundle)
+
+
+def assert_status_pin(pinned, current):
+    if current.get('status') == 'stale' and pinned['schema'] == 'private-presentation-status/v2':
+        if (current.get('revision') == pinned['revision']
+                and current.get('run_id') == pinned['run_id']
+                and current.get('cutoff') == pinned['local']['cutoff']
+                and current.get('remote', {}).get('active') == pinned['remote']['active']):
+            return
+    if (current.get('revision') != pinned['revision']
+            or current.get('run_id') != pinned['run_id']
+            or current.get('local') != pinned['local']
+            or current.get('schema') != pinned['schema']
+            or current.get('remote') != pinned['remote']):
+        raise RuntimeError('private status revision changed')
+
+
+def sync_application_from_pin(pinned, application, client_id, client_secret, token,
+                              *, url=STATUS_URL, opener=None):
+    _status_credentials(client_id, client_secret, token, url)
+    if application.get('snapshot_sha256') != pinned['local']['snapshot_sha256']:
+        raise ValueError('application snapshot binding mismatch')
+    opener = opener or build_opener(_NoRedirect())
+    current = _request(opener, 'GET', url, client_id, client_secret, token)
+    assert_status_pin(pinned, current)
+    candidate = {'schema': 'private-presentation-status/v3',
+                 'run_id': pinned['run_id'], 'local': pinned['local'],
+                 'remote': pinned['remote'], 'application': application}
+    if pinned['schema'] == 'private-presentation-status/v3':
+        if pinned.get('application') != application:
+            raise ValueError('existing private application differs')
+        return current
+    payload = {**candidate, 'revision': pinned['revision'] + 1,
+               'expected_revision': pinned['revision']}
+    return _request(opener, 'POST', url, client_id, client_secret, token, payload)
 
 
 def _reconciliation_summary(state, run_dir):
