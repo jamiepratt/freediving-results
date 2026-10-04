@@ -252,6 +252,7 @@ class PrivateOriginTest(unittest.TestCase):
                           'limit': 2, 'offset': 0, 'summary': True})
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1')[2])['id'], 'decision-1')
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1/preview?action=reverse')[2])['action'], 'reverse')
+        self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=correct')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/decisions?limit=101')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/decisions?type=x&type=x')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=invalid')[0], 400)
@@ -367,6 +368,14 @@ class PrivateOriginTest(unittest.TestCase):
                 self.call = (args, kwargs)
                 return {'status': 'human_corrected'}
         self.server.decisions = Decisions()
+        def preview(_id, *, action, option=None):
+            return {'action': action, 'before_option': 'same-person', 'after_option': option}
+        self.server.decisions.preview = preview
+        status, _, body = self.request('/owner-evidence/api/decisions/decision-1/preview?action=correct&option=different-person')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['after_option'], 'different-person')
+        for option in ('same-person', 'new-person'):
+            self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=correct&option=' + option)[0], 400)
         csrf = json.loads(self.request('/owner-evidence/api/decisions')[2])['csrf_token']
         payload = json.dumps({'action': 'correct', 'expected_revision': 3,
                               'idempotency_key': 'correct-1', 'reason': 'checked source',

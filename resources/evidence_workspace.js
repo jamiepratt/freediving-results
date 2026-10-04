@@ -358,29 +358,40 @@ function renderDecisionDetail(item){
   const effective=item.effective_status || item.status;
   const available=effective==='pending'?['approve','reject']:['automatic_approved','human_approved','human_corrected'].includes(effective)?['reverse']:[];
   for(const action of available){const button=document.createElement('button');button.type='button';button.textContent=`Preview ${action === 'reverse' ? 'Reverse' : action}`;button.addEventListener('click',()=>run(()=>previewDecisionAction(item.id,action),'decision-detail'));actions.append(button);}
+  if(['pending','automatic_approved','human_approved','human_corrected'].includes(effective)){
+    const current=(item.correction || {}).action || item.selected_option;
+    for(const option of new Set([item.selected_option,...(item.competing_options || [])])){
+      if(typeof option!=='string' || option===current)continue;
+      const button=document.createElement('button');button.type='button';button.textContent=`Preview correction: ${option}`;
+      button.addEventListener('click',()=>run(()=>previewDecisionAction(item.id,'correct',option),'decision-detail'));actions.append(button);
+    }
+  }
   const preview=document.createElement('div');preview.id='decision-preview';
   area.append(actions,preview);
 }
 async function inspectDecision(id){renderDecisionDetail(await fetchJson('/api/decisions/'+encodeURIComponent(id)));}
-async function previewDecisionAction(id,action){
-  const result=await fetchJson('/api/decisions/'+encodeURIComponent(id)+'/preview?action='+encodeURIComponent(action));
-  decisionPreview={id,action,revision:result.revision};decisionRetryKey=null;
+async function previewDecisionAction(id,action,option=null){
+  const query='action='+encodeURIComponent(action)+(action==='correct'?'&option='+encodeURIComponent(option):'');
+  const result=await fetchJson('/api/decisions/'+encodeURIComponent(id)+'/preview?'+query);
+  if(action==='correct' && result.after_option!==option)throw new Error('Correction preview option changed. Reload and preview again.');
+  decisionPreview={id,action,option,revision:result.revision};decisionRetryKey=null;
   const area=$('decision-preview');area.replaceChildren(heading(`${action} impact preview`));
   entries(area,{decision_id:result.decision_id,revision:result.revision,affected_decisions:result.affected_decisions,affected_groups:result.affected_groups,canonical_projection_status:result.canonical_projection_status});
+  if(action==='correct')area.append(cell(`Correct from ${result.before_option} to ${result.after_option}. Canonical edges and dependent links will be recalculated after delivery; the ledger status preview does not verify their final effect.`, 'p'));
   area.append(heading('Before'),jsonBlock(result.before),heading('After'),jsonBlock(result.after));
   const reason=document.createElement('input');reason.type='text';reason.maxLength=500;reason.placeholder='Reason for audit history';reason.setAttribute?.('aria-label','Reason for decision action');
-  const commit=document.createElement('button');commit.type='button';commit.textContent=`Confirm ${action}`;
-  commit.addEventListener('click',()=>run(()=>submitDecisionAction(id,action,reason.value),'decision-action-status'));
+  const commit=document.createElement('button');commit.type='button';commit.textContent=action==='correct'?`Confirm correction to ${option}`:`Confirm ${action}`;
+  commit.addEventListener('click',()=>run(()=>submitDecisionAction(id,action,reason.value,option),'decision-action-status'));
   const status=document.createElement('p');status.id='decision-action-status';status.setAttribute?.('role','status');
   area.append(reason,commit,status);
 }
-async function submitDecisionAction(id,action,reason){
-  if(!decisionPreview || decisionPreview.id!==id || decisionPreview.action!==action)throw new Error('Preview this action before confirming.');
+async function submitDecisionAction(id,action,reason,option=null){
+  if(!decisionPreview || decisionPreview.id!==id || decisionPreview.action!==action || decisionPreview.option!==option)throw new Error('Preview this action before confirming.');
   if(!decisionCsrf)throw new Error('Reload decisions to obtain an authenticated write token.');
   const key=decisionRetryKey || crypto.randomUUID();decisionRetryKey=key;
   const result=await fetch('/api/decisions/'+encodeURIComponent(id)+'/actions',{
     method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-Freediving-CSRF':decisionCsrf},
-    body:JSON.stringify({action,expected_revision:decisionPreview.revision,idempotency_key:key,reason,csrf_token:decisionCsrf}),
+    body:JSON.stringify({action,expected_revision:decisionPreview.revision,idempotency_key:key,reason,csrf_token:decisionCsrf,...(action==='correct'?{correction:{action:option}}:{})}),
   });
   if(result.status===401){location.href='/login';return;}
   if(!result.ok){

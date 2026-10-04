@@ -63,6 +63,10 @@ class OwnerDecisionSyntheticPathTest(unittest.TestCase):
                 })
                 self.assertEqual(trace['actions'], {'reverse': 200, 'retry': 200,
                                                     'correct': 200})
+                self.assertEqual(trace['correction_ui']['clicks'],
+                                 ['Inspect corrected', 'Preview correction: two', 'Confirm correction to two'])
+                self.assertEqual(trace['correction_ui']['rendered_status'], 'human_corrected')
+                self.assertEqual(trace['correction_ui']['option'], 'two')
                 self.assertEqual(trace['inspection']['root'], 'reversed')
                 self.assertEqual(trace['inspection']['child'], 'invalidated')
                 self.assertEqual(trace['inspection']['corrected'], 'human_corrected')

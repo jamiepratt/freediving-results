@@ -635,10 +635,19 @@ class DecisionStore:
                     changed = True
         return sorted(affected)
 
-    def preview(self, decision_id, *, action):
+    def preview(self, decision_id, *, action, option=None):
         if action not in ACTIONS:
             raise ValueError('invalid action')
         current = self.inspect(decision_id)
+        current_option = (current.get('correction') or {}).get('action', current['selected_option'])
+        if action == 'correct':
+            if (not isinstance(option, str) or option not in
+                    [current['selected_option'], *current['competing_options']] or option == current_option):
+                raise ValueError('invalid correction option')
+            if current['effective_status'] not in ('pending', *ACCEPTED):
+                raise ConflictError('decision cannot be corrected in current state')
+        elif option is not None:
+            raise ValueError('option only valid for correction')
         affected = self._affected(decision_id)
         before = {ident: self.inspect(ident)['effective_status'] for ident in affected}
         after = dict(before)
@@ -656,6 +665,7 @@ class DecisionStore:
             if not changed:
                 break
         return {'revision': self.revision, 'decision_id': decision_id, 'action': action,
+                **({'before_option': current_option, 'after_option': option} if action == 'correct' else {}),
                 'affected_decisions': affected, 'affected_groups': sorted(set(
                     group for ident in affected for group in self._base(ident)['groups'])),
                 'before': before, 'after': after,

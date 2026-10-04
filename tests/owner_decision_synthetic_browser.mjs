@@ -120,18 +120,21 @@ async function clickOwnerAction(id, actionName) {
       return response.json();
     });
     await page.getByRole('button', {name:`Inspect ${id}`}).first().click();
-    await page.getByRole('button', {name:actionName === 'reverse' ? 'Preview Reverse' : 'Preview approve'}).click();
+    const previewName = actionName === 'reverse' ? 'Preview Reverse' : actionName === 'correct' ? 'Preview correction: two' : 'Preview approve';
+    const confirmName = actionName === 'correct' ? 'Confirm correction to two' : `Confirm ${actionName}`;
+    await page.getByRole('button', {name:previewName}).click();
     await page.getByRole('textbox', {name:'Reason for decision action'}).fill('synthetic owner review');
     const responsePromise = page.waitForResponse(response =>
       response.request().method() === 'POST' &&
       response.url().endsWith(`/owner-evidence/api/decisions/${id}/actions`));
-    await page.getByRole('button', {name:`Confirm ${actionName}`}).click();
+    await page.getByRole('button', {name:confirmName}).click();
     const response = await responsePromise;
     if (response.status() !== 200) throw Error(`UI ${actionName} ${response.status()}: ${await response.text()}`);
-    await page.locator('#decision-detail').getByText(actionName === 'approve' ? 'human_approved' : 'reversed', {exact:true}).first().waitFor();
+    const renderedStatus = actionName === 'approve' ? 'human_approved' : actionName === 'correct' ? 'human_corrected' : 'reversed';
+    await page.locator('#decision-detail').getByText(renderedStatus, {exact:true}).first().waitFor();
+    const tracePreviewName = actionName === 'reverse' ? 'Preview reverse' : previewName;
     return {status:response.status(), body:response.request().postData(),
-            clicks:[`Inspect ${id}`,`Preview ${actionName}`,`Confirm ${actionName}`],
-            rendered_status:actionName === 'approve' ? 'human_approved' : 'reversed'};
+            clicks:[`Inspect ${id}`,tracePreviewName,confirmName], rendered_status:renderedStatus};
   } finally {
     if (context) await context.close();
     await new Promise(resolve => gateway.close(resolve));
@@ -209,10 +212,11 @@ if (reverse.status !== 200) throw Error(`reverse ${reverse.status}`);
 const reverseResult = await reverse.json();
 const retry = await action('root','reverse',revision,'reverse-root');
 rejected.stale_revision = (await action('root','approve',revision,'stale-approve')).status;
-const correct = await action('corrected','correct',reverseResult.store_revision,'correct-independent',
-                             {correction:{action:'two'}});
+const correct = await clickOwnerAction('corrected','correct');
 if (correct.status !== 200) throw Error(`correct ${correct.status}`);
-const correctResult = await correct.json();
+if (JSON.parse(correct.body).correction?.action !== 'two') throw Error('browser correction option missing');
+const correctedResponse = await request('/owner-evidence/api/decisions/corrected');
+const correctResult = await correctedResponse.json();
 const inspection = {};
 for (const id of ['root','child','corrected']) {
   const response = await request(`/owner-evidence/api/decisions/${id}`);
@@ -229,5 +233,6 @@ const feedResponse = await request(feedPath, {headers:{
 if (feedResponse.status !== 200) throw Error(`machine feed ${feedResponse.status}`);
 const feed = await feedResponse.json();
 process.stdout.write(JSON.stringify({rejected, actions:{reverse:reverse.status,
-  retry:retry.status, correct:correct.status}, inspection,
+  retry:retry.status, correct:correct.status}, correction_ui:{clicks:correct.clicks,
+  rendered_status:correct.rendered_status, option:JSON.parse(correct.body).correction.action}, inspection,
   revision:correctResult.store_revision, feed}));

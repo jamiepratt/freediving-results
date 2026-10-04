@@ -329,6 +329,21 @@ class DecisionStoreTest(unittest.TestCase):
                                 idempotency_key='register-d2')
         self.assertEqual(self.store.inspect('d1')['status'], 'human_corrected')
 
+    def test_correction_preview_binds_distinct_option_and_shows_affected_decisions(self):
+        self.bind()
+        self.store.register(SNAP_A, proposal('d1', status='automatic_approved'),
+                            idempotency_key='register-d1')
+        self.store.register(SNAP_A, proposal('d2', depends_on=('d1',), status='automatic_approved'),
+                            idempotency_key='register-d2')
+        preview = self.store.preview('d1', action='correct', option='two')
+        self.assertEqual(preview['before_option'], 'one')
+        self.assertEqual(preview['after_option'], 'two')
+        self.assertEqual(preview['affected_decisions'], ['d1', 'd2'])
+        self.assertEqual(preview['after']['d1'], 'human_corrected')
+        for option in ('one', 'outside'):
+            with self.assertRaises(ValueError):
+                self.store.preview('d1', action='correct', option=option)
+
     def test_batch_reuses_active_binding_and_checks_corrections_once(self):
         self.bind(evidence=tuple(f'row-{i}' for i in range(4000)))
         statements = []

@@ -44,6 +44,10 @@ test('owner decision queue separates scoreless gaps and shows ascending provider
   assert.doesNotMatch(scored, /stale/);
   assert.match(node('decision-summary').visibleText, /uncalibrated/i);
   assert.match(node('decision-summary').visibleText, /snapshot-7/);
+  const html = fs.readFileSync('resources/evidence_workspace.html', 'utf8');
+  for(const status of ['human_corrected', 'invalidated', 'projection_pending'])
+    assert.match(html, new RegExp(`<option value="${status}">`));
+  assert.match(html, /Confidence scores for different decision types may use different scales/);
 });
 
 test('decision inspection shows immutable evidence, alternatives, versions and history', async () => {
@@ -109,6 +113,47 @@ test('reversal previews dependent impact before writing with revision, CSRF and 
   assert.equal(body.idempotency_key, 'retry-key');
   assert.equal(body.reason, 'correction');
   assert.equal(body.csrf_token, 'csrf-9');
+});
+
+test('owner previews a distinct correction option and confirms that exact option', async () => {
+  const {context, node, requests} = workspace({
+    '/api/decisions?status=&limit=25&offset=0': {revision: 8, csrf_token: 'csrf-8', total: 0, items: [], scoreless_items: []},
+    '/api/decisions/d1': {id: 'd1', store_revision: 8, type: 'identity', status: 'automatic_approved', selected_option: 'same_person', competing_options: ['same_person', 'different_person'], evidence: [], history: []},
+    '/api/decisions/d1/preview?action=correct&option=different_person': {revision: 8, decision_id: 'd1', action: 'correct', before_option: 'same_person', after_option: 'different_person', affected_decisions: ['d1', 'd2'], affected_groups: ['person-1'], before: {d1: 'automatic_approved'}, after: {d1: 'human_corrected'}},
+    '/api/decisions/d1/actions': {id: 'd1', store_revision: 9, type: 'identity', status: 'human_corrected', selected_option: 'same_person', competing_options: ['different_person'], correction: {action: 'different_person'}, evidence: [], history: []},
+  });
+  await vm.runInContext('loadDecisions()', context);
+  await vm.runInContext("inspectDecision('d1')", context);
+  const correctionButtons = node('decision-detail').children.flatMap(x => x.children || []).filter(x => /Preview correction/.test(x.textContent));
+  assert.equal(correctionButtons.length, 1);
+  assert.match(correctionButtons[0].textContent, /different_person/);
+  correctionButtons[0].click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(node('decision-preview').visibleText, /same_person/);
+  assert.match(node('decision-preview').visibleText, /different_person/);
+  assert.match(node('decision-preview').visibleText, /d2/);
+  assert.equal(requests.filter(r => r.options?.method === 'POST').length, 0);
+  await vm.runInContext("submitDecisionAction('d1','correct','source checked','different_person')", context);
+  const write = requests.find(r => r.options?.method === 'POST');
+  assert.equal(write.options.headers['X-Freediving-CSRF'], 'csrf-8');
+  assert.deepEqual(JSON.parse(write.options.body).correction, {action: 'different_person'});
+  assert.equal(JSON.parse(write.options.body).expected_revision, 8);
+  assert.equal(JSON.parse(write.options.body).idempotency_key, 'retry-key');
+});
+
+test('correction confirmation requires its option preview and stale revisions require a fresh preview', async () => {
+  const path = '/api/decisions/d1/actions';
+  const {context, requests} = workspace({
+    '/api/decisions?status=&limit=25&offset=0': {revision: 8, csrf_token: 'csrf-8', total: 0, items: [], scoreless_items: []},
+    '/api/decisions/d1/preview?action=correct&option=two': {revision: 8, decision_id: 'd1', action: 'correct', before_option: 'one', after_option: 'two', affected_decisions: ['d1'], affected_groups: [], before: {}, after: {}},
+    [path]: {error: 'stale'},
+  }, {[path]: 409});
+  await vm.runInContext('loadDecisions()', context);
+  await vm.runInContext("previewDecisionAction('d1','correct','two')", context);
+  await assert.rejects(vm.runInContext("submitDecisionAction('d1','correct','','one')", context), /Preview this action/);
+  await assert.rejects(vm.runInContext("submitDecisionAction('d1','correct','','two')", context), /Revision changed/);
+  await assert.rejects(vm.runInContext("submitDecisionAction('d1','correct','','two')", context), /Preview this action/);
+  assert.equal(requests.filter(r => r.options?.method === 'POST').length, 1);
 });
 
 test('automatic approval audit sample is inspectable and does not block review', async () => {
