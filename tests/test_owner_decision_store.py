@@ -240,6 +240,21 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertIn('uncalibrated', queue['score_note'])
         self.assertEqual(self.store.queue(decision_type='same_attempt', source_name='Other')['total'], 0)
 
+    def test_queue_summary_keeps_review_fields_and_full_cited_inspection(self):
+        self.bind()
+        p = proposal('cited', score=0.2)
+        p['evidence'][0]['citation']['context'] = 'synthetic evidence ' * 1000
+        p['canonical_binding'] = {'decision_id': 'cited', 'context': 'synthetic binding ' * 1000}
+        self.store.register(SNAP_A, p, idempotency_key='register-cited')
+        summary = self.store.queue(summary=True)['items'][0]
+        self.assertEqual(summary, {key: self.store.inspect('cited')[key] for key in (
+            'id', 'type', 'source_name', 'status', 'effective_status',
+            'canonical_projection_status', 'provider_confidence', 'proposed')})
+        self.assertNotIn('evidence', summary)
+        self.assertNotIn('canonical_binding', summary)
+        self.assertIn('synthetic evidence', self.store.inspect('cited')['evidence'][0]['citation']['context'])
+        self.assertIn('synthetic binding', self.store.inspect('cited')['canonical_binding']['context'])
+
     def test_source_derived_owner_views_fit_worker_deadline_at_207_proposals(self):
         evidence = [f'row-{i}' for i in range(16000)]
         refs = {ident: {'source_sha256': 'c' * 64, 'refs': [],
