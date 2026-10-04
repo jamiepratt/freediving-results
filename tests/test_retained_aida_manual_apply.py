@@ -3,6 +3,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -256,6 +257,28 @@ class ManualApplyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'existing private application requires completed stores'):
             host.verify_status_retry_state(self.stores.target, self.stores.owner,
                                            {'events': self.stores.events}, 1, 1)
+
+    def test_live_canonical_apply_uses_role_bound_urls(self):
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          self.stores.snapshot, self.directory, None, 0)
+        base = 'jdbc:postgresql://127.0.0.1:5432/freediving_canonical?'
+        def url(role):
+            return base + f'user={role}&password=secret&connectTimeout=5&socketTimeout=5'
+        env = {'FREEDIVING_REVIEW_URL': url('freediving_migrator'),
+               'FREEDIVING_AIDA_REVIEW_URL': url('reviews_owner'),
+               'FREEDIVING_AIDA_APP_URL': url('observations_app')}
+        with patch.dict('os.environ', env), patch(
+                'scripts.retained_aida_manual_apply.subprocess.run',
+                return_value=SimpleNamespace(returncode=0)) as run:
+            host._clojure('apply', 'cohort.json', 'hash', 'receipt.json')
+            self.assertEqual(run.call_args.kwargs['env']['FREEDIVING_REVIEW_URL'],
+                             env['FREEDIVING_AIDA_REVIEW_URL'])
+            self.assertEqual(run.call_args.kwargs['env']['FREEDIVING_APP_URL'],
+                             env['FREEDIVING_AIDA_APP_URL'])
+        with patch.dict('os.environ', {**env,
+                'FREEDIVING_AIDA_APP_URL': url('freediving_migrator')}):
+            with self.assertRaisesRegex(ValueError, 'Unsupported database options'):
+                host._clojure('apply', 'cohort.json', 'hash', 'receipt.json')
 
 
 if __name__ == '__main__':

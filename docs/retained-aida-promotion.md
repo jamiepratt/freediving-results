@@ -217,7 +217,11 @@ in the usual PostgreSQL environment or passfile, never in the command line.
 Set `PGHOST`, `PGUSER`, and `PGDATABASE` to the canonical target, and
 `FREEDIVING_PG_DRILL_DATABASE` to an existing empty disposable database. The
 database and host in `FREEDIVING_REVIEW_URL` must match those PostgreSQL
-settings. Set `FREEDIVING_APP_URL` for canonical event writes. Both stages
+settings. For live apply, set `FREEDIVING_AIDA_REVIEW_URL` to the same canonical
+database using `reviews_owner`, and `FREEDIVING_AIDA_APP_URL` using
+`observations_app`. The apply uses these only for event replay, preserving the
+migrator URL for backups and readback. Both roles must have an operator managed
+short lived login lease; return them to NOLOGIN after replay. Both stages
 fetch the current authenticated private active binding and require the exact
 snapshot and bundle manifest before each write. Set `CF_ACCESS_CLIENT_ID`,
 `CF_ACCESS_CLIENT_SECRET`, and `OWNER_EVIDENCE_STATUS_TOKEN` in the environment
