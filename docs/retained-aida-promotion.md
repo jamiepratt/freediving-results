@@ -9,6 +9,34 @@ source-derived automatic approvals have no owner-store registration route.
 The isolated human reversal remains provenance for the replay; it is not a
 new live owner action.
 
+## Dedicated private canonical target
+
+From a clean checkout equal to merged `origin/main`, provision the dedicated
+PostgreSQL target with the active owner snapshot hash:
+
+```sh
+bash deploy/provision_canonical.sh SNAPSHOT_SHA256
+```
+
+The wrapper pins the audited public database name
+`freediving_release_20260924_11` and stages the exact committed release on
+`bridge-vps`. Its root-only helper creates `freediving_canonical` with no PUBLIC
+database access, applies the existing checksummed migrations 1-20, and verifies
+an empty `target-state` at revision zero. It keeps a root-private intent and a
+custom dump under `/var/backups/freediving/canonical`; a disposable restore is
+checked before migration. An interrupted setup can resume only against that
+intent and the verified migration transaction prefix. The helper checks that
+public counts, config, service, site and owner snapshot/status stay unchanged.
+It does not change the public release link or Worker.
+
+For subsequent private manual apply, derive the target JDBC URL from the
+root-only `/etc/freediving/migration.env` by replacing only its database path
+with `freediving_canonical`. Use that exact URL for both
+`FREEDIVING_REVIEW_URL` and `FREEDIVING_APP_URL`, and pin `PGDATABASE` to
+`freediving_canonical`, `PGUSER` to `freediving_migrator`, `PGHOST` to
+`127.0.0.1`, and `PGPORT` to the verified JDBC port. Keep credentials in the
+process environment and private operator session, never in the runbook or logs.
+
 Obtain a fresh isolated readback using the same cohort and receipt that made
 the handoff:
 
