@@ -14,7 +14,7 @@ from scripts.owner_decision_store import ConflictError, DecisionStore
 from scripts.owner_decision_export_adapter import register_verified_export
 
 
-def source_fixture(root, heading, url):
+def source_fixture(root, heading, url, diver='Synthetic Athlete'):
     source = root / 'raw' / 'source.html'
     source.parent.mkdir()
     source.write_text('<html>' + heading +
@@ -25,7 +25,7 @@ def source_fixture(root, heading, url):
                                'OT', 'AP', 'RP', 'Card', 'Points', 'Remarks')) +
                       '</tr></thead><tbody id="body_ajax"><tr>' +
                       ''.join(f'<td>{v}</td>' for v in
-                              ('1', 'Synthetic Athlete', 'GER', 'F', 'CWTB', '09:40',
+                              ('1', diver, 'GER', 'F', 'CWTB', '09:40',
                                '25 m', '24 m', 'YELLOW', '19', 'Note')) +
                       '</tr></tbody></table></html>')
     body = source.read_bytes()
@@ -69,6 +69,36 @@ def source_fixture(root, heading, url):
 
 
 class AidaSnapshotObservationsTest(unittest.TestCase):
+    def test_cited_aida_profile_is_a_scoped_person_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = '123e4567-e89b-12d3-a456-426614174000'
+            name, _ = source_fixture(
+                root, '', 'https://www.aidainternational.org/EventPage/4408',
+                f'<a href="https://www.aidainternational.org/Athletes/Profile-{profile}">Synthetic Athlete</a>')
+            row = load_source_observations(root, [name])['observations'][0]
+            expected = {'scope': 'AIDA', 'id': profile, 'id_kind': 'person',
+                        'href': f'https://www.aidainternational.org/Athletes/Profile-{profile}'}
+            self.assertEqual(expected, row['source_fields']['publisher_person'])
+            self.assertEqual(expected, row['source_observation_ref']['publisher_person'])
+            self.assertEqual('aida-snapshot-observation/3', row['adapter_version'])
+
+    def test_missing_ambiguous_and_conflicting_profiles_are_not_person_evidence(self):
+        profile = '123e4567-e89b-12d3-a456-426614174000'
+        href = f'/Athletes/Profile-{profile}'
+        for diver in ('Synthetic Athlete',
+                      f'<a href="{href}">Synthetic Athlete</a><a href="{href}">Synthetic Athlete</a>',
+                      f'<a href="{href}">Different Person</a> Synthetic Athlete',
+                      '<a href="https://elsewhere.example/Athletes/Profile-' + profile + '">Synthetic Athlete</a>',
+                      '<a href="/Athletes/Profile-invalid">Synthetic Athlete</a>'):
+            with self.subTest(diver=diver), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                name, _ = source_fixture(
+                    root, '', 'https://www.aidainternational.org/EventPage/4408', diver)
+                row = load_source_observations(root, [name])['observations'][0]
+                self.assertIsNone(row['source_fields']['publisher_person'])
+                self.assertNotIn('publisher_person', row['source_observation_ref'])
+
     def test_missing_historical_packet_can_be_recovered_at_a_new_path(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

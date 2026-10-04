@@ -145,6 +145,36 @@
                         :publisher-athlete-id "42" :publisher-id-kind :person)]
     (is (= :verified-publisher-id (:reason (identity/decide (identity/build-index [known]) target {}))))))
 
+(deftest source-profile-id-links-reversibly-without-redundant-edges
+  (let [profile-id "123e4567-e89b-12d3-a456-426614174000"
+        ref (fn [id] {:kind "source-derived" :snapshot_sha256 "snapshot"
+                      :snapshot_record_id id :source_name "aida-source"
+                      :source_sha256 "source" :packet_sha256 "packet"
+                      :citation {:row id} :adapter_version "aida-snapshot-observation/3"
+                      :observation_version id
+                      :publisher_person {:scope "AIDA" :id profile-id :id_kind "person"
+                                         :href (str "/Athletes/Profile-" profile-id)}})
+        rows (mapv (fn [id] (athlete (str "source-observation:" id) "Same Person"
+                                     :citation (ref id) :source-observation-ref (ref id)
+                                     :publisher-scope "AIDA" :publisher-athlete-id profile-id
+                                     :publisher-id-kind :person)) ["a" "b" "c"])
+        binding (fn [a b] {:snapshot-sha256 "snapshot"
+                           :refs {(str "source-observation:" a) (ref a)
+                                  (str "source-observation:" b) (ref b)}})
+        event (fn [id a b] {:id id :action :accept :actor-kind :automatic
+                            :pair [(str "source-observation:" a) (str "source-observation:" b)]
+                            :rule-version identity/rule-version :source-binding (binding a b)})
+        linked (-> (identity/empty-ledger rows)
+                   (identity/append-event (event "ab" "a" "b"))
+                   (identity/append-event (event "ac" "a" "c")))
+        split (identity/append-event linked {:id "split" :action :reverse :actor-kind :human
+                                             :event-id "ac" :reason "owner correction"
+                                             :source-binding (binding "a" "c")})]
+    (is (= 1 (:accepted-group-count (identity/project linked))))
+    (is (= 2 (count (:groups (identity/project split)))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/append-event split (event "retry" "a" "c"))))))
+
 (deftest generated-transliteration-remains-a-candidate-signal
   (let [target (athlete "target" "李伟")
         generated (athlete "generated" "Li Wei"

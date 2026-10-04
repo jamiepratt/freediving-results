@@ -22,6 +22,20 @@
              (not (str/blank? (:publisher-scope row)))
              (not (str/blank? (:publisher-athlete-id row))))
     [(:publisher-scope row) (:publisher-athlete-id row)]))
+(defn- aida-source-person? [row]
+  (let [ref (:source-observation-ref row)
+        person (:publisher_person ref)
+        id (:id person)
+        href (:href person)]
+    (and (= "aida-snapshot-observation/3" (:adapter_version ref))
+         (= "AIDA" (:scope person) (:publisher-scope row))
+         (= "person" (:id_kind person))
+         (= :person (:publisher-id-kind row))
+         (= id (:publisher-athlete-id row))
+         (string? id)
+         (boolean (re-matches #"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}" id))
+         (string? href)
+         (boolean (re-matches (re-pattern (str "(?:https://www\\.aidainternational\\.org)?/Athletes/Profile-" id)) href)))))
 (defn- usable? [row] (= :parsed (:parse-status row)))
 (defn- aliases [row]
   (filter #(and (string? (:name %)) (#{:publisher :accepted :generated} (:origin %)))
@@ -395,7 +409,12 @@
         (when (some #(str/starts-with? % "source-observation:") bound-pair)
           (let [binding (:source-binding event)
                 refs (into {} (map (fn [id] [id (:citation (rows id))]) bound-pair))]
-            (when-not (and (= :human (:actor-kind event))
+            (when-not (and (or (= :human (:actor-kind event))
+                               (and (= :automatic (:actor-kind event))
+                                    (= :accept (:action event))
+                                    (every? #(aida-source-person? (rows %)) bound-pair)
+                                    (apply = (map #(person-id (rows %)) bound-pair))
+                                    (apply = (map #(name-key (:source-name (rows %))) bound-pair))))
                            (every? #(str/starts-with? % "source-observation:") bound-pair)
                            (every? rows bound-pair)
                            (= refs (:refs binding))
@@ -422,6 +441,15 @@
                    (or (not= rule-version (:rule-version event))
                        (and pair (blocked pair))))
           (fail! "Automatic identity rule stale or human-blocked" {:event event}))
+        (when (and (= :automatic (:actor-kind event)) (:source-binding event))
+          (let [id (person-id (rows (first pair)))
+                group-members (set (for [[observation-id row] rows
+                                         :when (= id (person-id row))] observation-id))]
+            (when (or (some #(set/subset? (set %) group-members) blocked)
+                      (= (get-in (project ledger) [:athletes (first pair) :group-id])
+                         (get-in (project ledger) [:athletes (second pair) :group-id])))
+              (fail! "Source publisher group has a human correction or redundant edge"
+                     {:pair pair}))))
         (when (and (= :model (:actor-kind event))
                    (some #(and (= :accept (:action %))
                                (= (:model-decision-id event) (:model-decision-id %))
@@ -560,7 +588,8 @@
   (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
 
 (defn- valid-source-row? [snapshot row verified-ref]
-  (let [ref (:citation row)]
+  (let [ref (:citation row)
+        publisher? (some #(contains? row %) [:publisher-scope :publisher-athlete-id :publisher-id-kind])]
     (and (map? row) (= :parsed (:parse-status row))
          (string? (:source-name row)) (not (str/blank? (:source-name row)))
          (map? ref) (= ref verified-ref (:source-observation-ref row))
@@ -573,7 +602,8 @@
          (string? (:source_name ref)) (seq (:source_name ref))
          (string? (:adapter_version ref)) (seq (:adapter_version ref))
          (map? (:citation ref)) (seq (:citation ref))
-         (not-any? #(contains? row %) [:publisher-scope :publisher-athlete-id :publisher-id-kind]))))
+         (if publisher? (aida-source-person? row)
+             (not (contains? ref :publisher_person))))))
 
 (defn register-source-observations!
   "Register an immutable, caller-verified source snapshot in the private canonical ledger.
@@ -605,7 +635,8 @@
         (doseq [row rows]
           (let [id (:observation-id row)
                 canonical (select-keys row [:observation-id :source-name :parse-status :citation
-                                            :source-observation-ref])
+                                            :source-observation-ref :publisher-scope
+                                            :publisher-athlete-id :publisher-id-kind])
                 body (binding [*print-length* nil *print-level* nil] (pr-str canonical))]
             (if-let [prior (get existing id)]
               (when-not (= canonical (edn/read-string prior))
@@ -733,7 +764,15 @@
         other (rows b)
         index (build-index (vals (dissoc rows a b)))
         candidate-index (build-index (conj (vec (vals (dissoc rows a b))) other))
-        decision (decide candidate-index target {})]
+        decision (if (:source-binding event)
+                   {:status (if (and (aida-source-person? target)
+                                     (aida-source-person? other)
+                                     (= (person-id target) (person-id other))
+                                     (= (name-key (:source-name target))
+                                        (name-key (:source-name other)))) :approve :unresolved)
+                    :reason :verified-publisher-id :candidate-id b
+                    :retrieval (retrieve (build-index (vals rows)) target)}
+                   (decide candidate-index target {}))]
     (when-not (and (= :approve (:status decision))
                    (= b (:candidate-id decision))
                    (empty? (:omitted (:retrieval decision)))
@@ -839,9 +878,10 @@
       (catch Exception e (.rollback connection) (throw e)))))
 
 (defn record-source-event!
-  "Append one human source-derived identity action against registered exact refs."
+  "Append a human action or cited AIDA profile approval against registered exact refs."
   [url event]
-  (when-not (and (= :human (:actor-kind event))
+  (when-not (and (or (= :human (:actor-kind event))
+                     (and (= :automatic (:actor-kind event)) (= :accept (:action event))))
                  (map? (:source-binding event))
                  (sha256? (get-in event [:source-binding :snapshot-sha256]))
                  (map? (get-in event [:source-binding :refs]))
