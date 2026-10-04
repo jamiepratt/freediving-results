@@ -276,12 +276,21 @@ async function showComparison(id){const item=await fetchJson('/api/comparison/'+
 async function loadRoatan(){const result=await fetchJson('/api/roatan');entries($('roatan-summary'),{current_positions:result.total,v1_observations:result.v1_observations,v2_observations:result.v2_observations,source_objects:result.source_objects,source_object_details:result.source_object_details,historical_extraction_acceptances:result.historical_extraction_acceptances,confirmed_distinct_attempts:result.confirmed_distinct_attempts,snapshot_sha256:result.snapshot_sha256});const table=document.createElement('table');table.append(makeRow(['Unit','JSON row','Name','Current parser','Review'],'th'));for(const item of result.items){const tr=makeRow([item.unit,item.index,item.name,item.parser_version,item.review_status]);tr.tabIndex=0;const show=()=>run(()=>showRoatan(item.unit,item.index),'roatan-detail');tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show();});table.append(tr);}const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);$('roatan-list').replaceChildren(scroll);}
 async function showRoatan(unit,index){const item=await fetchJson('/api/roatan/'+unit+'/'+index);const area=$('roatan-detail');area.replaceChildren();entries(area,{unit:item.unit,json_row_zero_based:item.index,name:item.name,declared_depth:item.declared_depth,raw_DEPTH:item.raw_depth,FINAL_DEPTH:item.final_depth,penalty:item.penalty,status:item.status,notes:item.notes,current_position_review:item.position_review_status,source_object_id:item.source_object_id,source_sha256:item.source_sha256,same_attempt:item.same_attempt,athlete_identity:item.athlete_identity,overlap:item.overlap});area.append(heading('Exact current citation'),jsonBlock(item.citation));const button=document.createElement('button');button.textContent='Inspect exact original JSON row';const view=document.createElement('div');view.className='source-view';button.addEventListener('click',()=>{button.disabled=true;showSourceView(item.position_record_id,view).catch(e=>{view.textContent=`Source view unavailable: ${e.message}`;}).finally(()=>{button.disabled=false;});});area.append(button,view);const sides=document.createElement('div');sides.className='comparison-sides';for(const version of ['v1','v2']){const data=item.versions[version];if(!data)continue;const side=document.createElement('div');side.append(heading(`Parser ${version}`));entries(side,{parser_version:data.parser_version,observation_version:data.observation_version,review_status:data.review_status,source_object_id:data.source_object_id,source_sha256:data.source_sha256,record_id:data.record_id});side.append(heading('Citation'),jsonBlock(data.citation),heading('Publisher raw fields'),jsonBlock(data.raw_fields),heading('Parsed fields'),jsonBlock(data.parsed_fields));sides.append(side);}area.append(sides,heading('v1 to v2 parsed changes'),jsonBlock(item.parsed_field_changes),heading('Historical extraction acceptance'),jsonBlock(item.historical_extraction));}
 let decisionOffset=0, decisionTotal=0, decisionPageSize=25, decisionRevision=null, decisionCsrf=null, decisionPreview=null, decisionRetryKey=null;
+function identityDecisionState(item){
+  if(item.type!=='athlete_identity')return null;
+  const effective=item.effective_status || item.status;
+  if(effective==='pending')return 'Pending owner review; no canonical edge';
+  if(effective==='projection_pending')return 'Owner decision recorded; canonical delivery pending';
+  if(['automatic_approved','human_approved','human_corrected'].includes(effective))
+    return item.canonical_projection_status==='verified'?'Accepted canonical edge':'Owner approval recorded; canonical edge unverified';
+  return 'No accepted canonical edge';
+}
 function decisionCard(item){
   const card=document.createElement('article');card.className='decision-card';
   const button=document.createElement('button');button.type='button';button.textContent=`Inspect ${item.id}`;
   button.addEventListener('click',()=>run(()=>inspectDecision(item.id),'decision-detail'));
   card.append(button);
-  entries(card,{type:item.type,source:item.source_name || item.source,status:item.status,provider_confidence:item.provider_confidence,proposed:item.proposed});
+  entries(card,{type:item.type,source:item.source_name || item.source,status:item.status,effective_status:item.effective_status,canonical_state:identityDecisionState(item),provider_confidence:item.provider_confidence,proposed:item.proposed});
   return card;
 }
 function renderDecisions(response){
@@ -289,12 +298,12 @@ function renderDecisions(response){
   decisionTotal=response.total ?? response.items.length;
   const scored=[],scoreless=[],other=[];
   for(const [index,item] of response.items.entries()){
-    if(item.status==='pending' && Number.isFinite(item.provider_confidence))scored.push({item,index});
-    else if(item.status==='pending')scoreless.push(item);
+    if((item.effective_status || item.status)==='pending' && Number.isFinite(item.provider_confidence))scored.push({item,index});
+    else if((item.effective_status || item.status)==='pending')scoreless.push(item);
     else other.push(item);
   }
   for(const item of response.scoreless_items || []){
-    if(item.status==='pending')scoreless.push(item);
+    if((item.effective_status || item.status)==='pending')scoreless.push(item);
     else other.push(item);
   }
   scored.sort((a,b)=>a.item.provider_confidence-b.item.provider_confidence || a.index-b.index);
@@ -330,7 +339,17 @@ function renderDecisionDetail(item){
   decisionPreview=null;decisionRetryKey=null;
   const area=$('decision-detail');area.replaceChildren(heading(`Decision ${item.id}`));
   entries(area,{type:item.type,subject_id:item.subject_id,source:item.source_name || item.source,status:item.status,effective_status:item.effective_status,provider_confidence:item.provider_confidence,rule_version:item.rule_version,model_version:item.model_version,policy_version:item.policy_version,snapshot_sha256:item.snapshot_sha256,active_snapshot_sha256:item.active_snapshot_sha256,binding_revision:item.binding_revision,store_revision:item.store_revision,canonical_projection_status:item.canonical_projection_status});
+  if(item.type==='athlete_identity')area.append(cell(identityDecisionState(item),'p'));
   for(const [label,value] of [['Original evidence',item.original],['Proposed value',item.proposed],['Selected option',item.selected_option],['Competing options',item.competing_options],['Supporting and conflicting evidence',item.evidence],['Dependencies',item.depends_on],['Missing evidence',item.missing_evidence_ids],['Correction',item.correction],['Decision history',item.history]])area.append(heading(label),jsonBlock(value ?? null));
+  for(const evidence of item.evidence || []){
+    if(typeof evidence.id!=='string' || !/^[a-f0-9]{64}$/.test(evidence.id))continue;
+    const panel=document.createElement('div');
+    panel.append(heading(`Registered evidence ${evidence.id}`),heading('Proposal citation and version'),jsonBlock({citation:evidence.citation,version:evidence.version}));
+    const button=document.createElement('button');button.type='button';button.textContent='Inspect registered citation and original';
+    const detailArea=document.createElement('div'),sourceArea=document.createElement('div');sourceArea.className='source-view';
+    button.addEventListener('click',async()=>{button.disabled=true;try{const detail=await fetchJson('/api/detail/'+evidence.id);detailArea.replaceChildren(heading('Registered source citation'),jsonBlock({citation:detail.citation,source_sha256:detail.source_sha256,snapshot_sha256:detail.snapshot_sha256}));await showSourceView(evidence.id,sourceArea);}catch(error){sourceArea.textContent=`Source view unavailable: ${error.message}`;}finally{button.disabled=false;}});
+    panel.append(button,detailArea,sourceArea);area.append(panel);
+  }
   const actions=document.createElement('div');actions.className='decision-actions';
   const effective=item.effective_status || item.status;
   const available=effective==='pending'?['approve','reject']:['automatic_approved','human_approved','human_corrected'].includes(effective)?['reverse']:[];
