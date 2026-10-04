@@ -248,7 +248,8 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(listing['items'][0]['id'], 'decision-1')
         self.assertIn('csrf_token', listing)
         self.assertEqual(self.server.decisions.filters,
-                         {'decision_type': 'identity', 'status': 'pending', 'source_name': 'meet', 'limit': 2, 'offset': 0})
+                         {'decision_type': 'identity', 'status': 'pending', 'source_name': 'meet',
+                          'limit': 2, 'offset': 0, 'summary': True})
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1')[2])['id'], 'decision-1')
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/decision-1/preview?action=reverse')[2])['action'], 'reverse')
         self.assertEqual(self.request('/owner-evidence/api/decisions?limit=101')[0], 400)
@@ -464,6 +465,51 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(request('/owner-evidence/api/decisions/decision-1/actions',
                                  method='POST', payload=stale, csrf=listing['csrf_token'])[0], 409)
         self.assertEqual(request('/owner-evidence/api/decisions/audit-sample')[0], 200)
+
+    def test_large_decision_queue_page_fits_response_and_detail_retains_evidence(self):
+        from test_owner_decision_store import proposal
+        decision_path = Path(self.tmp.name) / 'large-decisions.sqlite'
+        server = make_server(self.snapshot_dir, {**self.env,
+                             'OWNER_EVIDENCE_DECISION_DB': str(decision_path)})
+        self.addCleanup(server.server_close)
+        evidence_id = server.query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
+        citation = {'source_position': 'synthetic-row-1'}
+        large_support = 'synthetic support ' + 'x' * 25000
+        proposals = []
+        for index in range(207):
+            item = proposal(f'candidate-{index:03}', evidence=evidence_id,
+                            score=index / 207)
+            item['evidence'][0]['citation'] = citation
+            item['supporting_evidence'] = [large_support]
+            proposals.append(item)
+        server.decisions.register_batch(self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'], proposals,
+                                        idempotency_key='register-large-queue')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+
+        def request(path):
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+            connection.request('GET', path, headers={
+                'Host': HOST, 'X-Freediving-Owner-Gateway': SECRET,
+                'X-Freediving-Owner-Email': EMAIL})
+            response = connection.getresponse()
+            result = response.status, response.read()
+            connection.close()
+            return result
+
+        status, body = request('/owner-evidence/api/decisions?limit=100')
+        self.assertEqual(status, 200)
+        self.assertLess(len(body), 2 * 1024 * 1024)
+        queue = json.loads(body)
+        self.assertEqual((queue['total'], len(queue['items'])), (207, 100))
+        self.assertEqual(queue['items'][0]['id'], 'candidate-000')
+        self.assertEqual(queue['items'][0]['provider_confidence'], 0)
+        detail_status, detail_body = request('/owner-evidence/api/decisions/candidate-000')
+        self.assertEqual(detail_status, 200)
+        detail = json.loads(detail_body)
+        self.assertEqual(detail['evidence'][0]['citation'], citation)
+        self.assertEqual(detail['supporting_evidence'], [large_support])
 
 
 class RetainedSnapshotTest(unittest.TestCase):
