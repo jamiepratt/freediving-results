@@ -1,4 +1,5 @@
 """Release artifacts remain readable by the service under a private build umask."""
+import hashlib
 import os
 import pathlib
 import shutil
@@ -29,10 +30,16 @@ class BuildPermissionsTest(unittest.TestCase):
                 tool = root / 'bin' / command
                 tool.write_text('#!' + sys.executable + '\nprint(' + repr(output) + ')\n')
                 tool.chmod(0o700)
+            env = {**os.environ, 'PATH': str(root / 'bin') + os.pathsep + os.environ['PATH']}
             subprocess.run([sys.executable, str(root / 'deploy/build.py')],
-                           env={**os.environ, 'PATH': str(root / 'bin') + os.pathsep + os.environ['PATH']},
+                           env=env,
                            umask=0o077, check=True, capture_output=True, text=True)
-            with tarfile.open(root / 'data/deploy/freediving.tar.gz') as artifact:
+            artifact_path = root / 'data/deploy/freediving.tar.gz'
+            first_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            subprocess.run([sys.executable, str(root / 'deploy/build.py')],
+                           env=env, umask=0o077, check=True, capture_output=True, text=True)
+            self.assertEqual(hashlib.sha256(artifact_path.read_bytes()).hexdigest(), first_digest)
+            with tarfile.open(artifact_path) as artifact:
                 members = artifact.getmembers()
                 self.assertEqual({'src', 'resources', 'deploy', 'lib', 'REVISION'},
                                  {member.name.split('/')[0] for member in members})
