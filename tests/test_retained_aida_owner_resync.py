@@ -3,7 +3,7 @@ import hashlib
 import json
 import unittest
 
-from scripts.retained_aida_owner_resync import verify_noop_resync
+from scripts.retained_aida_owner_resync import verify_noop_resync, run_read_only_preflight
 
 
 def sha(value):
@@ -164,6 +164,67 @@ class RetainedOwnerResyncTest(unittest.TestCase):
         self.pin['source_map_sha256'] = sha(self.mapping)
         with self.assertRaisesRegex(ValueError, 'mapping incomplete'):
             self.check()
+
+    def test_private_preflight_writes_one_receipt_after_two_matching_status_reads(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            def write(name, value):
+                path = root / name
+                path.write_bytes(value if isinstance(value, bytes) else document(value))
+                path.chmod(0o600)
+                return path
+            paths = {
+                'pin': write('pin.json', self.pin),
+                'retained_manifest': write('retained.json', document(self.retained_manifest)),
+                'snapshot_manifest': write('snapshot.json', self.snapshot_manifest),
+                'production_manifest': write('production.json', document(self.production_manifest)),
+                'source_map': write('source-map.json', self.mapping),
+                'target': write('target.json', self.target),
+                'owner': write('owner.json', self.owner),
+            }
+            reads = []
+            def current():
+                reads.append(1)
+                return copy.deepcopy(self.status)
+            output = root / 'receipt.json'
+            receipt = run_read_only_preflight(root, paths, output,
+                                              status_reader=current,
+                                              retained_reader=lambda _: copy.deepcopy(self.retained))
+            self.assertEqual(receipt['outcome'], 'unchanged')
+            self.assertEqual(len(reads), 2)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(run_read_only_preflight(root, paths, output,
+                             status_reader=current,
+                             retained_reader=lambda _: copy.deepcopy(self.retained)), receipt)
+
+    def test_status_change_during_preflight_leaves_no_receipt(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            paths = {}
+            for name, value in [('pin', self.pin), ('retained_manifest', self.retained_manifest),
+                                ('snapshot_manifest', self.snapshot_manifest),
+                                ('production_manifest', self.production_manifest),
+                                ('source_map', self.mapping), ('target', self.target),
+                                ('owner', self.owner)]:
+                path = root / (name + '.json')
+                path.write_bytes(document(value))
+                path.chmod(0o600)
+                paths[name] = path
+            changed = copy.deepcopy(self.status)
+            changed['revision'] += 1
+            status_reads = iter((self.status, changed))
+            output = root / 'receipt.json'
+            with self.assertRaisesRegex(ValueError, 'status changed during preflight'):
+                run_read_only_preflight(root, paths, output,
+                                        status_reader=lambda: next(status_reads),
+                                        retained_reader=lambda _: self.retained)
+            self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':
