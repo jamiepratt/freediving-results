@@ -16,6 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = 'local-evidence-run-plan/v1'
+RETAINED_SCHEMA = 'retained-aida-local-run-plan/v1'
 
 
 def digest(path):
@@ -76,6 +77,256 @@ def checked_plan(path):
         if 'owner_sync_config' in reconciliation and not reconciliation['owner_sync_config']:
             raise ValueError('owner synchronization config path required')
     return plan
+
+
+def checked_retained_plan(path):
+    plan = json.loads(path.read_text())
+    if plan.get('schema') != RETAINED_SCHEMA or plan.get('scope') != 'AIDA source observations':
+        raise ValueError('invalid retained AIDA run plan')
+    snapshot = plan.get('snapshot')
+    if not isinstance(snapshot, dict) or set(snapshot) != {'path', 'manifest_sha256', 'sqlite_sha256', 'snapshot_sha256'}:
+        raise ValueError('retained snapshot binding incomplete')
+    inputs = plan.get('inputs')
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError('retained inputs required')
+    names = [item.get('name') for item in inputs if isinstance(item, dict)]
+    if len(names) != len(inputs) or len(names) != len(set(names)) or any(
+            not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name) for name in names):
+        raise ValueError('invalid retained input names')
+    required = {'aida_plan', 'aida_observations', 'decision_store', 'name_evidence',
+                'pg_export', 'pg_dump', 'ledger', 'owner_corrections'}
+    if not required <= set(names):
+        raise ValueError('retained cohort input roles incomplete')
+    if type(plan.get('decision_revision')) is not int or plan['decision_revision'] < 1:
+        raise ValueError('decision revision required')
+    if type(plan.get('owner_correction_revision')) is not int or plan['owner_correction_revision'] < 0:
+        raise ValueError('owner correction revision required')
+    if type(plan.get('ledger_revision')) is not int or plan['ledger_revision'] < 0:
+        raise ValueError('ledger revision required')
+    for value in (snapshot['manifest_sha256'], snapshot['sqlite_sha256'], snapshot['snapshot_sha256']):
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+            raise ValueError('invalid retained snapshot hash')
+    for item in inputs:
+        if set(item) != {'name', 'path', 'sha256'} or not isinstance(item['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['sha256']):
+            raise ValueError('invalid retained input binding')
+    return plan
+
+
+def verified_file(path, expected):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or digest(path) != expected:
+        raise ValueError(f'retained input changed: {path.name}')
+    return path
+
+
+def required_aida_assets(manifest, source_names):
+    """Locate every packet, adjacent receipt, and original used in AIDA replay."""
+    assets = set()
+    for source_name in source_names:
+        item = manifest.get('inputs', {}).get(source_name)
+        if not item or item.get('source_schema') != 'aida-selected-html-packet/v1':
+            raise ValueError('AIDA frozen source absent from snapshot')
+        packet = Path(item['path'])
+        if not packet.is_file():
+            continue  # The adapter reports this frozen packet as an explicit gap.
+        name = packet.name
+        if name == 'packet.json':
+            receipt = packet.with_name('receipt.json')
+        elif name.startswith('packet-') and name.endswith('.json'):
+            receipt = packet.with_name('receipt-' + name[len('packet-'):])
+        else:
+            raise ValueError('unsupported AIDA packet path')
+        if not receipt.is_file():
+            raise ValueError('AIDA receipt missing')
+        body = json.loads(receipt.read_text()).get('body') or {}
+        if not isinstance(body.get('path'), str) or not body['path']:
+            raise ValueError('AIDA original path missing')
+        original = (receipt.parent / body['path']).resolve()
+        if not original.is_file():
+            raise ValueError('AIDA original HTML missing')
+        assets.update((packet.resolve(), receipt.resolve(), original))
+    return assets
+
+
+def retained_adapter(snapshot, observations, plan, output):
+    command([sys.executable, str(ROOT / 'retained_aida_cohort.py'),
+             str(snapshot), str(observations), str(plan), str(output),
+             '--observations-sha256', digest(observations), '--plan-sha256', digest(plan)])
+
+
+def apply_retained_canonical(run_dir, state, *, apply=None):
+    if not os.environ.get('FREEDIVING_REVIEW_URL') or not os.environ.get('FREEDIVING_APP_URL'):
+        raise ValueError('canonical JDBC environment incomplete')
+    cohort = run_dir / 'reconciliation' / 'aida-cohort.json'
+    expected = state['reconciliation']['export_sha256']
+    verified_file(cohort, expected)
+    receipt = run_dir / 'reconciliation' / 'canonical-receipt.json'
+    if apply:
+        apply(cohort, expected, receipt)
+    else:
+        command(['clojure', '-M', '-m', 'freediving.retained-aida-apply',
+                 'apply', str(cohort), expected, str(receipt)])
+    result = json.loads(receipt.read_text())
+    if (result.get('schema') != 'retained-aida-canonical-receipt/v1'
+            or result.get('cohort-sha256') != expected
+            or type(result.get('identity-revision')) is not int
+            or type(result.get('human-correction-revision')) is not int
+            or result['human-correction-revision'] < 0):
+        raise ValueError('canonical receipt binding changed')
+    state['canonical'] = {'status': 'complete', 'receipt_sha256': digest(receipt),
+                          'cohort_sha256': expected,
+                          'identity_revision': result['identity-revision'],
+                          'owner_correction_revision': result['human-correction-revision'],
+                          'accepted_group_count': result['accepted-group-count'],
+                          'human_negative_pair_count': result['human-negative-pair-count'],
+                          'provider_calls': result['provider-calls']}
+    state['reconciliation']['canonical_status'] = 'applied'
+    atomic_json(run_dir / 'state.json', state)
+
+
+def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, canonical=None):
+    """Stage one immutable real AIDA cohort and checkpoint its verified export.
+
+    The export is a proposal for the separate canonical route. This function
+    never mutates the frozen snapshot, PG store, DecisionStore, or owner ledger.
+    """
+    plan = checked_retained_plan(plan_path)
+    source = Path(plan['snapshot']['path'])
+    snapshot_files = {'manifest.json': plan['snapshot']['manifest_sha256'],
+                      'snapshot.sqlite': plan['snapshot']['sqlite_sha256']}
+    for name, expected in snapshot_files.items():
+        verified_file(source / name, expected)
+    manifest = json.loads((source / 'manifest.json').read_text())
+    if manifest.get('snapshot_sha256') != plan['snapshot']['snapshot_sha256']:
+        raise ValueError('retained snapshot identity changed')
+    command([sys.executable, str(ROOT / 'unified_evidence_snapshot.py'), 'verify',
+             '--output-dir', str(source)])
+    for item in plan['inputs']:
+        verified_file(item['path'], item['sha256'])
+    bound = {item['name']: item for item in plan['inputs']}
+    frozen_observations = json.loads(Path(bound['aida_observations']['path']).read_text())
+    if not isinstance(frozen_observations, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get('source_name'), str)
+            for row in frozen_observations):
+        raise ValueError('invalid frozen AIDA observations')
+    source_names = {row['source_name'] for row in frozen_observations}
+    supplied_paths = {Path(item['path']).resolve() for item in plan['inputs']}
+    if not required_aida_assets(manifest, source_names) <= supplied_paths:
+        raise ValueError('AIDA replay source bytes absent from retained bundle')
+    store_path = next(Path(item['path']) for item in plan['inputs'] if item['name'] == 'decision_store')
+    with store_path.open('rb') as store_stream:
+        header = store_stream.read(16)
+    if header != b'SQLite format 3\x00':
+        raise ValueError('DecisionStore SQLite required')
+    import sqlite3
+    try:
+        with sqlite3.connect(store_path.as_uri() + '?mode=ro&immutable=1', uri=True) as store:
+            if store.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('DecisionStore integrity check failed')
+            actual_revision = int(store.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
+            if actual_revision != plan['decision_revision']:
+                raise ValueError('retained decision revision changed')
+    except (sqlite3.DatabaseError, TypeError, AttributeError) as error:
+        raise ValueError('DecisionStore SQLite required') from error
+    sys.path.insert(0, str(ROOT))
+    from reconciliation_corpus_test import build_pg_binding_report, build_report
+    from affiliate_name_query import AffiliateNameQuery
+    from unified_evidence_query import SnapshotQuery
+    corpus_report = build_report(source, bound['name_evidence']['path'],
+                                 bound['name_evidence']['sha256'])
+    pg_report = build_pg_binding_report(source, bound['pg_export']['path'],
+                                        snapshot_files['manifest.json'], snapshot_files['snapshot.sqlite'],
+                                        bound['pg_export']['sha256'])
+    with SnapshotQuery(source) as snapshot:
+        name_listing = AffiliateNameQuery(bound['name_evidence']['path'],
+                                          bound['name_evidence']['sha256'], source, snapshot).listing()
+    preflight = {'corpus_report_sha256': hashlib.sha256(json.dumps(corpus_report, sort_keys=True).encode()).hexdigest(),
+                 'pg_report_sha256': hashlib.sha256(json.dumps(pg_report, sort_keys=True).encode()).hexdigest(),
+                 'checked_name_assertions': len(name_listing['assertions']),
+                 'checked_name_gaps': len(name_listing['gaps']),
+                 'pg_observation_versions': pg_report['pg_observation_versions'],
+                 'snapshot_structured_pg_refs': pg_report['snapshot_structured_pg_refs']}
+    plan_hash = digest(plan_path)
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if run_dir.is_symlink() or run_dir.stat().st_mode & 0o077:
+        raise ValueError('run directory must be private')
+    state_path = run_dir / 'state.json'
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        if state.get('schema') != 'retained-aida-local-run/v1' or state.get('plan_sha256') != plan_hash:
+            raise ValueError('retained run plan changed; use a new run directory')
+    else:
+        state = {'schema': 'retained-aida-local-run/v1', 'run_id': str(uuid.uuid4()),
+                 'plan_sha256': plan_hash, 'reconciliation': {'status': 'pending'},
+                 'remote': {'status': 'pending'}}
+        atomic_json(state_path, state)
+    staged_snapshot = run_dir / 'snapshot'
+    bundle = run_dir / 'cohort-bundle'
+    bundle.mkdir(mode=0o700, exist_ok=True)
+    staged_snapshot.mkdir(mode=0o700, exist_ok=True)
+    for name, expected in snapshot_files.items():
+        target = staged_snapshot / name
+        if not target.exists():
+            shutil.copyfile(source / name, target)
+            target.chmod(0o600)
+        verified_file(target, expected)
+    staged = {}
+    for item in plan['inputs']:
+        target = bundle / item['name']
+        if not target.exists():
+            shutil.copyfile(item['path'], target)
+            target.chmod(0o600)
+        verified_file(target, item['sha256'])
+        staged[item['name']] = target
+    bundle_manifest = {'schema': 'retained-aida-cohort-bundle/v1',
+                       'snapshot': {**snapshot_files, 'snapshot_sha256': manifest['snapshot_sha256']},
+                       'inputs': {item['name']: item['sha256'] for item in plan['inputs']}}
+    bundle_path = bundle / 'manifest.json'
+    if bundle_path.exists():
+        if json.loads(bundle_path.read_text()) != bundle_manifest:
+            raise ValueError('retained cohort bundle changed')
+    else:
+        atomic_json(bundle_path, bundle_manifest)
+    output = run_dir / 'reconciliation' / 'aida-cohort.json'
+    if state['reconciliation'].get('status') == 'complete':
+        verified_file(output, state['reconciliation']['export_sha256'])
+        if digest(bundle_path) != state['reconciliation']['source_bundle_sha256']:
+            raise ValueError('retained cohort bundle changed')
+        if canonical_apply:
+            apply_retained_canonical(run_dir, state, apply=canonical)
+        return state
+    output.parent.mkdir(mode=0o700, exist_ok=True)
+    state['reconciliation'] = {'status': 'running', 'decision_revision': plan['decision_revision'],
+                               'owner_correction_revision': plan['owner_correction_revision']}
+    atomic_json(state_path, state)
+    try:
+        (adapter or retained_adapter)(staged_snapshot, staged['aida_observations'], staged['aida_plan'], output)
+        exported = json.loads(output.read_text())
+        expected_binding = {'snapshot_sha256': manifest['snapshot_sha256'],
+                            'observations_sha256': digest(staged['aida_observations']),
+                            'plan_sha256': digest(staged['aida_plan'])}
+        if exported.get('schema') != 'retained-aida-cohort/v1' or exported.get('binding') != expected_binding:
+            raise ValueError('retained AIDA export binding changed')
+        for item in plan['inputs']:
+            verified_file(item['path'], item['sha256'])
+        state['reconciliation'] = {'status': 'complete', 'mode': 'retained_aida',
+                                   'scope': plan['scope'], 'snapshot_sha256': manifest['snapshot_sha256'],
+                                   'source_bundle_sha256': digest(bundle_path),
+                                   'decision_revision': plan['decision_revision'],
+                                   'ledger_revision': plan['ledger_revision'],
+                                   'ledger_sha256': digest(staged['ledger']),
+                                   'owner_correction_revision': plan['owner_correction_revision'],
+                                   'export_sha256': digest(output), 'counts': exported['counts'],
+                                   'preflight': preflight,
+                                   'provider_calls': 0, 'canonical_status': 'pending'}
+        atomic_json(state_path, state)
+    except Exception as error:
+        state['reconciliation'] = {**state['reconciliation'], 'status': 'failed', 'error': str(error)}
+        atomic_json(state_path, state)
+        raise
+    if canonical_apply:
+        apply_retained_canonical(run_dir, state, apply=canonical)
+    return state
 
 
 def command(argv):
@@ -316,7 +567,7 @@ def ssh_route_reachable(ssh, host):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'metrics'])
+    parser.add_argument('command', choices=['run', 'retained', 'metrics'])
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--remote-config', type=Path)
@@ -324,10 +575,24 @@ def main():
     parser.add_argument('--publisher-requests-stopped', action='store_true')
     parser.add_argument('--status-access-jwt-env')
     parser.add_argument('--status-token-env')
+    parser.add_argument('--canonical-apply', action='store_true')
     args = parser.parse_args()
     try:
         if args.command == 'metrics':
             state = json.loads((args.run_dir / 'state.json').read_text())
+            if state.get('schema') == 'retained-aida-local-run/v1':
+                receipt = state['reconciliation']
+                if receipt.get('status') != 'complete' or not (receipt.get('export_sha256') ==
+                        digest(args.run_dir / 'reconciliation' / 'aida-cohort.json')) or not (
+                        receipt.get('source_bundle_sha256') == digest(args.run_dir / 'cohort-bundle' / 'manifest.json')):
+                    raise ValueError('metrics checkpoint binding changed')
+                canonical = state.get('canonical')
+                if canonical and (canonical.get('status') != 'complete' or
+                                  canonical.get('cohort_sha256') != receipt['export_sha256'] or
+                                  canonical.get('receipt_sha256') != digest(args.run_dir / 'reconciliation' / 'canonical-receipt.json')):
+                    raise ValueError('canonical checkpoint binding changed')
+                print(json.dumps(receipt, sort_keys=True))
+                return 0
             receipt = state['reconciliation']['metrics']
             if (state['reconciliation']['status'] != 'complete'
                     or receipt['binding']['run_id'] != state['run_id']
@@ -341,6 +606,12 @@ def main():
             return 0
         if args.plan is None:
             raise ValueError('--plan required for run')
+        if args.command == 'retained':
+            if args.remote_config is not None or args.status_access_jwt_env or args.status_token_env:
+                raise ValueError('retained cohort is local only')
+            print(json.dumps(run_retained(args.plan, args.run_dir,
+                                          canonical_apply=args.canonical_apply), sort_keys=True))
+            return 0
         run(args.plan, args.run_dir, remote_config=args.remote_config,
             owner_access_jwt=os.environ.get(args.owner_access_jwt_env) if args.owner_access_jwt_env else None,
             publisher_requests_stopped=args.publisher_requests_stopped,
