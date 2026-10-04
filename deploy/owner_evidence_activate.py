@@ -76,6 +76,8 @@ def _config(path, owner_uid, expected):
         values[match[1]] = match[2]
     if (not REQUIRED_ENV <= values.keys() or
             set(values) - REQUIRED_ENV - {'OWNER_EVIDENCE_DECISION_API_ENABLED',
+                                          'OWNER_EVIDENCE_IMPORT_TOKEN',
+                                          'OWNER_EVIDENCE_IMPORT_CLIENT_ID',
                                           'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                                           'OWNER_EVIDENCE_STATUS_CLIENT_ID'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
@@ -95,6 +97,15 @@ def _config(path, owner_uid, expected):
     if status_keys & values.keys():
         if not status_keys <= values.keys() or values['OWNER_EVIDENCE_STATUS_FILE'] != '/var/lib/freediving-owner-evidence/status/presentation-status.json' or not 24 <= len(values['OWNER_EVIDENCE_STATUS_TOKEN']) <= 256 or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', values['OWNER_EVIDENCE_STATUS_CLIENT_ID']):
             raise ValueError('invalid private status environment')
+    import_keys = {'OWNER_EVIDENCE_IMPORT_TOKEN', 'OWNER_EVIDENCE_IMPORT_CLIENT_ID'}
+    if import_keys & values.keys():
+        if (not import_keys <= values.keys() or
+                not 24 <= len(values['OWNER_EVIDENCE_IMPORT_TOKEN']) <= 256 or
+                not values['OWNER_EVIDENCE_IMPORT_TOKEN'].isascii() or
+                not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access',
+                                 values['OWNER_EVIDENCE_IMPORT_CLIENT_ID']) or
+                values['OWNER_EVIDENCE_IMPORT_TOKEN'] == values.get('OWNER_EVIDENCE_STATUS_TOKEN')):
+            raise ValueError('invalid private import environment')
     return values
 
 
