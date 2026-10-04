@@ -106,6 +106,11 @@ class DecisionStore:
                 'observation_refs': (json.loads(row['observation_refs_json'])
                                      if row['observation_refs_json'] is not None else None)}
 
+    @property
+    def active_snapshot_sha256(self):
+        row = self.db.execute('SELECT snapshot_sha256 FROM bindings ORDER BY revision DESC LIMIT 1').fetchone()
+        return row['snapshot_sha256'] if row else None
+
     def _begin(self, key, request, expected_revision=None):
         _text(key, 'idempotency_key')
         self.db.execute('BEGIN IMMEDIATE')
@@ -567,7 +572,8 @@ class DecisionStore:
     def queue(self, *, decision_type=None, status='pending', source_name=None, limit=50, offset=0):
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 100000:
             raise ValueError('invalid page')
-        items = [self.inspect(row['id']) for row in self.db.execute('SELECT id FROM proposals')]
+        binding = self._binding()
+        items = [self._inspect(row['id'], binding) for row in self.db.execute('SELECT id FROM proposals')]
         items = [p for p in items if (decision_type is None or p['type'] == decision_type)
                  and (status is None or p['effective_status'] == status)
                  and (source_name is None or p['source_name'] == source_name)]
@@ -586,7 +592,7 @@ class DecisionStore:
             raise ValueError('invalid sample limit')
         binding = self._binding()
         seed = binding['snapshot_sha256'] if binding else ''
-        items = [self.inspect(row['id']) for row in self.db.execute('SELECT id FROM proposals')]
+        items = [self._inspect(row['id'], binding) for row in self.db.execute('SELECT id FROM proposals')]
         items = [p for p in items if p['effective_status'] == 'automatic_approved']
         items.sort(key=lambda p: (_digest([seed, p['id']]), p['id']))
         return {'revision': self.revision, 'items': items[:limit],
@@ -596,13 +602,14 @@ class DecisionStore:
 
     def projection(self):
         """Rebuild a bounded view from authoritative proposals/events each read."""
-        active = [self.inspect(row['id']) for row in self.db.execute('SELECT id FROM proposals')]
+        binding = self._binding()
+        active = [self._inspect(row['id'], binding) for row in self.db.execute('SELECT id FROM proposals')]
         groups = {}
         for p in active:
             if p['effective_status'] in ACCEPTED:
                 for group in p['groups']:
                     groups[group] = groups.get(group, 0) + 1
-        return {'revision': self.revision, 'snapshot_sha256': (self._binding() or {}).get('snapshot_sha256'),
+        return {'revision': self.revision, 'snapshot_sha256': binding['snapshot_sha256'] if binding else None,
                 'overlay_decision_counts_by_group': groups,
                 'active_decisions': [p['id'] for p in active if p['effective_status'] in ACCEPTED],
                 'canonical_projection_status': 'unavailable'}
