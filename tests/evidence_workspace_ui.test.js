@@ -63,15 +63,16 @@ test('decision inspection shows immutable evidence, alternatives, versions and h
 test('identity decisions distinguish pending review from verified canonical edges and inspect cited originals', async () => {
   const id = 'a'.repeat(64);
   const {context, node, requests} = workspace({
-    '/api/decisions/pending': {id: 'pending', type: 'athlete_identity', status: 'pending', effective_status: 'pending', evidence: [{id, citation: {source_citation: {locator: {row: 3}}}, version: {source_sha256: 'source-1'}}], history: []},
-    '/api/decisions/accepted': {id: 'accepted', type: 'athlete_identity', status: 'human_approved', effective_status: 'human_approved', canonical_projection_status: 'verified', evidence: [], history: []},
-    '/api/decisions/undelivered': {id: 'undelivered', type: 'athlete_identity', status: 'human_approved', effective_status: 'projection_pending', canonical_projection_status: 'pending', evidence: [], history: []},
+    '/api/decisions/pending': {id: 'pending', type: 'identity', status: 'pending', effective_status: 'pending', evidence: [{id, citation: {source_citation: {locator: {row: 3}}}, version: {source_sha256: 'source-1'}}], history: []},
+    '/api/decisions/accepted': {id: 'accepted', type: 'identity', status: 'human_approved', effective_status: 'human_approved', canonical_projection_status: 'verified', evidence: [], history: []},
+    '/api/decisions/undelivered': {id: 'undelivered', type: 'identity', status: 'human_approved', effective_status: 'projection_pending', canonical_projection_status: 'pending', evidence: [], history: []},
     ['/api/detail/' + id]: {source_name: 'aida', citation: {row: 3}, raw_fields: {}, parsed_fields: {}},
     ['/api/source-view/' + id]: {format: 'cited_html_packet', citation: {row: 3}, source_value: {}, raw_fields: {}, parsed_fields: {}},
   });
   await vm.runInContext("inspectDecision('pending')", context);
   assert.match(node('decision-detail').visibleText, /Pending owner review/);
   assert.doesNotMatch(node('decision-detail').visibleText, /Accepted canonical edge/);
+  assert.match(fs.readFileSync('resources/evidence_workspace.html', 'utf8'), /<option value="identity">Athlete identity<\/option>/);
   const inspect = node('decision-detail').children.flatMap(x => x.children || []).find(x => x.textContent === 'Inspect registered citation and original');
   assert.ok(inspect);
   await inspect.click();
