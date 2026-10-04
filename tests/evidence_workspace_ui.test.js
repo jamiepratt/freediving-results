@@ -64,6 +64,36 @@ test('decision inspection shows immutable evidence, alternatives, versions and h
   assert.match(text, /Reverse/);
 });
 
+test('decision history labels approvals superseded by later owner correction or reversal', async () => {
+  const {context, node} = workspace({
+    '/api/decisions/auto-corrected': {id: 'auto-corrected', type: 'identity', status: 'human_corrected', evidence: [], history: [
+      {revision: 1, action: 'register'}, {revision: 2, action: 'automatic_approve'},
+      {revision: 3, action: 'correct', correction: {action: 'different_person'}}]},
+    '/api/decisions/human-reversed': {id: 'human-reversed', type: 'identity', status: 'reversed', evidence: [], history: [
+      {revision: 4, action: 'approve'}, {revision: 5, action: 'reverse'}]},
+    '/api/decisions/invalidated': {id: 'invalidated', type: 'identity', status: 'automatic_approved', effective_status: 'invalidated', evidence: [], history: [
+      {revision: 6, action: 'automatic_approve'}]},
+    '/api/decisions/current-auto': {id: 'current-auto', type: 'identity', status: 'automatic_approved', evidence: [], history: [
+      {revision: 7, action: 'automatic_approve'}]},
+    '/api/decisions/recorrected': {id: 'recorrected', type: 'identity', status: 'human_corrected', evidence: [], history: [
+      {revision: 8, action: 'automatic_approve'}, {revision: 9, action: 'correct', correction: {action: 'two'}},
+      {revision: 10, action: 'correct', correction: {action: 'three'}}]},
+  });
+  await vm.runInContext("inspectDecision('auto-corrected')", context);
+  assert.match(node('decision-detail').visibleText, /Automatic approval at revision 2 superseded by human correction at revision 3/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Human approval at revision 2/);
+  await vm.runInContext("inspectDecision('human-reversed')", context);
+  assert.match(node('decision-detail').visibleText, /Human approval at revision 4 superseded by reversal at revision 5/);
+  await vm.runInContext("inspectDecision('invalidated')", context);
+  assert.doesNotMatch(node('decision-detail').visibleText, /superseded/i);
+  await vm.runInContext("inspectDecision('current-auto')", context);
+  assert.match(node('decision-detail').visibleText, /Automatic approval recorded; canonical edge unverified/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Owner approval recorded/);
+  await vm.runInContext("inspectDecision('recorrected')", context);
+  assert.match(node('decision-detail').visibleText, /Human correction at revision 9 superseded by human correction at revision 10/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Human correction at revision 10 superseded/);
+});
+
 test('identity decisions distinguish pending review from verified canonical edges and inspect cited originals', async () => {
   const id = 'a'.repeat(64);
   const {context, node, requests} = workspace({
