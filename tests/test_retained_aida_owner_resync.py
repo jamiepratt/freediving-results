@@ -57,6 +57,7 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                                   'active': {'snapshot_sha256': self.snapshot,
                                              'bundle_manifest_sha256': self.production_bundle}},
                        'application': {'snapshot_sha256': self.snapshot, 'canonical_revision': 1,
+                                       'canonical_readback_sha256': hashlib.sha256(document(self.target)).hexdigest(),
                                        'owner_store_revision': 3, 'pending_proposals': 2,
                                        'unresolved_exclusions': 0, 'provider_calls_recorded': 0,
                                        'publication_status': 'private'}}
@@ -107,6 +108,7 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                     'source_map_sha256': sha(self.mapping),
                     'isolated_readback_sha256': hashlib.sha256(document(self.readback)).hexdigest(),
                     'canonical_revision': 1, 'canonical_state_sha256': sha(self.target),
+                    'canonical_readback_sha256': hashlib.sha256(document(self.target)).hexdigest(),
                     'owner_revision': 3, 'owner_binding_revision': 1,
                     'owner_state_sha256': sha(self.owner),
                     'status_revision': 2, 'status_sha256': sha(self.status)}
@@ -117,7 +119,7 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                                   document(self.retained_manifest),
                                   self.snapshot_manifest, document(self.production_manifest),
                                   self.mapping, self.status,
-                                  self.target, self.owner)
+                                  document(self.target), self.owner)
 
     def test_exact_replay_is_an_unchanged_noop(self):
         self.assertEqual(self.check()['outcome'], 'unchanged')
@@ -125,12 +127,20 @@ class RetainedOwnerResyncTest(unittest.TestCase):
     def test_divergent_canonical_event_fails_even_when_re_pinned(self):
         self.target['events'][0]['request']['rule-version'] = 'different-rule'
         self.pin['canonical_state_sha256'] = sha(self.target)
+        raw = hashlib.sha256(document(self.target)).hexdigest()
+        self.pin['canonical_readback_sha256'] = raw
+        self.status['application']['canonical_readback_sha256'] = raw
+        self.pin['status_sha256'] = sha(self.status)
         with self.assertRaisesRegex(ValueError, 'retained canonical event'):
             self.check()
 
     def test_divergent_source_row_fails_even_when_re_pinned(self):
         self.target['source_rows'][0]['source-name'] = 'other'
         self.pin['canonical_state_sha256'] = sha(self.target)
+        raw = hashlib.sha256(document(self.target)).hexdigest()
+        self.pin['canonical_readback_sha256'] = raw
+        self.status['application']['canonical_readback_sha256'] = raw
+        self.pin['status_sha256'] = sha(self.status)
         with self.assertRaisesRegex(ValueError, 'retained canonical source rows'):
             self.check()
 
@@ -138,6 +148,12 @@ class RetainedOwnerResyncTest(unittest.TestCase):
         self.readback['events'][0]['request']['rule-version'] = 'different-rule'
         self.pin['isolated_readback_sha256'] = hashlib.sha256(document(self.readback)).hexdigest()
         with self.assertRaisesRegex(ValueError, 'retained canonical event'):
+            self.check()
+
+    def test_status_canonical_raw_readback_must_match_fresh_target_file(self):
+        self.status['application']['canonical_readback_sha256'] = '9' * 64
+        self.pin['status_sha256'] = sha(self.status)
+        with self.assertRaisesRegex(ValueError, 'canonical readback bytes'):
             self.check()
 
     def test_replay_receipt_is_stable_after_interrupted_read(self):
@@ -155,7 +171,7 @@ class RetainedOwnerResyncTest(unittest.TestCase):
     def test_new_human_correction_is_preserved(self):
         self.owner['store_revision'] += 1
         self.owner['human_event_count'] += 1
-        with self.assertRaisesRegex(ValueError, 'canonical, owner'):
+        with self.assertRaisesRegex(ValueError, 'owner'):
             self.check()
         self.assertEqual(self.owner['store_revision'], 4)
 

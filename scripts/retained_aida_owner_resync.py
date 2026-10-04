@@ -127,7 +127,7 @@ def _verify_canonical_export(export, readback, target, snapshot):
 
 def verify_noop_resync(pin, retained, export_bytes, readback_bytes,
                        retained_manifest_bytes, snapshot_manifest,
-                       production_manifest_bytes, source_map, status, target, owner):
+                       production_manifest_bytes, source_map, status, target_bytes, owner):
     """Return an unchanged receipt only after exact source and live-state reads.
 
     Inputs are readbacks. The caller must use authenticated status, immutable
@@ -142,8 +142,11 @@ def verify_noop_resync(pin, retained, export_bytes, readback_bytes,
           and isinstance(retained, dict)
           and retained.get('schema') == 'retained-aida-private-status/v1'
           and isinstance(snapshot_manifest, dict) and isinstance(source_map, dict)
-          and isinstance(status, dict) and isinstance(target, dict)
+          and isinstance(status, dict) and isinstance(target_bytes, bytes)
           and isinstance(owner, dict), 'resync inputs incomplete')
+    target_raw_sha256 = hashlib.sha256(target_bytes).hexdigest()
+    target = json.loads(target_bytes)
+    _need(isinstance(target, dict), 'canonical target readback invalid')
     snapshot = pin.get('snapshot_sha256')
     _need(isinstance(snapshot, str) and HEX.fullmatch(snapshot)
           and retained.get('binding', {}).get('snapshot_sha256') == snapshot
@@ -260,11 +263,13 @@ def verify_noop_resync(pin, retained, export_bytes, readback_bytes,
           and _sha(owner) == pin.get('owner_state_sha256')
           and application.get('snapshot_sha256') == snapshot
           and application.get('canonical_revision') == target['revision']
+          and application.get('canonical_readback_sha256') == target_raw_sha256
+          and pin.get('canonical_readback_sha256') == target_raw_sha256
           and application.get('owner_store_revision') == owner['store_revision']
           and application.get('pending_proposals') == owner.get('proposal_count')
           and application.get('provider_calls_recorded') == 0
           and application.get('publication_status') == 'private',
-          'canonical, owner, or private application changed')
+          'canonical readback bytes, owner, or private application changed')
     _need(isinstance(export_bytes, bytes)
           and hashlib.sha256(export_bytes).hexdigest() ==
               retained['binding'].get('export_sha256'),
@@ -307,6 +312,8 @@ def run_read_only_preflight(run_dir, paths, receipt_path, *,
 
     The caller creates fresh canonical target and owner readback files separately.
     This command only authenticates status and verifies their exact pinned bytes.
+    The target file must be the exact raw target-state output whose SHA256 was
+    recorded in status v3 by canonical_readback_digest; reformatting JSON fails.
     A status revision race or changed input leaves no new receipt.
     """
     required = {'pin', 'export', 'isolated_readback', 'retained_manifest', 'snapshot_manifest',
@@ -330,7 +337,7 @@ def run_read_only_preflight(run_dir, paths, receipt_path, *,
         pin, retained, raw['export'], raw['isolated_readback'], raw['retained_manifest'],
         json.loads(raw['snapshot_manifest']),
         raw['production_manifest'], json.loads(raw['source_map']), first_status,
-        json.loads(raw['target']), json.loads(raw['owner']))
+        raw['target'], json.loads(raw['owner']))
     _need(status_reader() == first_status, 'status changed during preflight')
     _need(all(_private_bytes(paths[name]) == value for name, value in raw.items()),
           'readback file changed during preflight')
