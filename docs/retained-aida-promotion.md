@@ -127,7 +127,9 @@ canonical events, including one human reversal, and 209 active intents. The
 hash-pinned flow export supports 207 decisions: 24 pair-only and 183 with 3-10
 retrieved candidates. Two intents sharing the human-corrected publisher person
 remain unresolved. The bridge accepts those 207 as pending-only proposals with
-the complete denominator. This is an isolated checkpoint, not a live import.
+the complete denominator. The verified export adapter registered them in an
+isolated owner copy at revision 209; an idempotent replay kept that revision.
+This is an isolated checkpoint, not a live import.
 A live promotion still requires a fresh production target readback, current
 owner revision, guarded synchronization, authenticated browser review, and
 separate publication authority.
