@@ -32,6 +32,7 @@ test('owner decision queue separates scoreless gaps and shows ascending provider
       {id: 'low', type: 'athlete_identity', source_name: 'AIDA', status: 'pending', provider_confidence: 0.41, proposed: 'one'},
       {id: 'high', type: 'athlete_identity', source_name: 'AIDA', status: 'pending', provider_confidence: 0.88, proposed: 'two'},
       {id: 'auto', type: 'athlete_identity', source_name: 'AIDA', status: 'automatic_approved', provider_confidence: 0.99, proposed: 'three'},
+      {id: 'stale', type: 'athlete_identity', source_name: 'AIDA', status: 'pending', effective_status: 'invalidated', provider_confidence: 0.1, proposed: 'stale'},
     ], scoreless_items: [{id: 'gap', type: 'source_revision', source_name: 'CMAS', status: 'pending', provider_confidence: null, proposed: 'unknown'}],
   }});
   await vm.runInContext('loadDecisions()', context);
@@ -39,6 +40,8 @@ test('owner decision queue separates scoreless gaps and shows ascending provider
   assert.ok(scored.indexOf('low') < scored.indexOf('high'));
   assert.match(node('decision-scoreless').visibleText, /gap/);
   assert.match(node('decision-automatic').visibleText, /auto/);
+  assert.match(node('decision-automatic').visibleText, /stale/);
+  assert.doesNotMatch(scored, /stale/);
   assert.match(node('decision-summary').visibleText, /uncalibrated/i);
   assert.match(node('decision-summary').visibleText, /snapshot-7/);
 });
@@ -55,6 +58,32 @@ test('decision inspection shows immutable evidence, alternatives, versions and h
   const text = node('decision-detail').visibleText;
   for(const phrase of ['Source A', 'Athlete B', 'Athlete C', 'PDF page 2 row 9', 'alias-rule-v3', 'jev-v2', 'auto-v1', 'automatic', 'd0']) assert.ok(text.includes(phrase), phrase);
   assert.match(text, /Reverse/);
+});
+
+test('identity decisions distinguish pending review from verified canonical edges and inspect cited originals', async () => {
+  const id = 'a'.repeat(64);
+  const {context, node, requests} = workspace({
+    '/api/decisions/pending': {id: 'pending', type: 'identity', status: 'pending', effective_status: 'pending', evidence: [{id, citation: {source_citation: {locator: {row: 3}}}, version: {source_sha256: 'source-1'}}], history: []},
+    '/api/decisions/accepted': {id: 'accepted', type: 'identity', status: 'human_approved', effective_status: 'human_approved', canonical_projection_status: 'verified', evidence: [], history: []},
+    '/api/decisions/undelivered': {id: 'undelivered', type: 'identity', status: 'human_approved', effective_status: 'projection_pending', canonical_projection_status: 'pending', evidence: [], history: []},
+    ['/api/detail/' + id]: {source_name: 'aida', citation: {row: 3}, raw_fields: {}, parsed_fields: {}},
+    ['/api/source-view/' + id]: {format: 'cited_html_packet', citation: {row: 3}, source_value: {}, raw_fields: {}, parsed_fields: {}},
+  });
+  await vm.runInContext("inspectDecision('pending')", context);
+  assert.match(node('decision-detail').visibleText, /Pending owner review/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Accepted canonical edge/);
+  assert.match(fs.readFileSync('resources/evidence_workspace.html', 'utf8'), /<option value="identity">Athlete identity<\/option>/);
+  const inspect = node('decision-detail').children.flatMap(x => x.children || []).find(x => x.textContent === 'Inspect registered citation and original');
+  assert.ok(inspect);
+  await inspect.click();
+  assert.ok(requests.some(r => r.path === '/api/detail/' + id));
+  assert.ok(requests.some(r => r.path === '/api/source-view/' + id));
+  assert.match(node('decision-detail').visibleText, /row/);
+  await vm.runInContext("inspectDecision('accepted')", context);
+  assert.match(node('decision-detail').visibleText, /Accepted canonical edge/);
+  await vm.runInContext("inspectDecision('undelivered')", context);
+  assert.match(node('decision-detail').visibleText, /canonical delivery pending/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Accepted canonical edge/);
 });
 
 test('reversal previews dependent impact before writing with revision, CSRF and retry key', async () => {

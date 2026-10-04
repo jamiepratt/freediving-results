@@ -79,3 +79,36 @@ need a real flow-ledger reconciliation event binding and an authorized owner
 action. The current owner store rejects automatic approval on source-derived
 revisions. On preflight failure, the existing target remains unchanged;
 discard the private package or rerun against fresh checkpoints.
+
+## Pending owner proposal checkpoint
+
+`scripts/retained_aida_owner_bridge.py` can construct a pending-only owner
+export from a current promotion preflight, the fresh hash-verified AIDA source
+adapter result, the current owner binding, actual `reconciliation-flow/1`
+events and their complete source identity decisions. It verifies the exact
+snapshot, source refs, registered rows, canonical event sequence, human reversal,
+publisher person IDs, printed names, rule and policy versions, and flow event
+lineage. It stops atomically if a decision has additional plausible candidates
+or lacks a current flow event. It does not generate a flow ledger, alter a
+canonical edge, or approve a source-derived proposal automatically.
+
+A trusted private caller may pass a successful envelope to
+`owner_decision_export_adapter.register_verified_export` with the same immutable
+snapshot directory and an explicit `recovered_packet_paths` mapping when the
+frozen packet is only at its recovered private path. The adapter replays the
+packet against its original and receipt before `DecisionStore.register_batch`
+commits. The owner revision and binding must still equal the envelope values.
+Keep the export and every source row outside Git. A rejected or incomplete
+bridge result is not an import checkpoint.
+
+For the retained AIDA cohort checked on 2026-10-04, an isolated owner copy
+rebound all 281 canonical source refs with zero gaps. The preflight found 211
+canonical events, including one human reversal, and 209 active candidate
+intents. A read-only source decision audit found 24 pair-only decisions and
+185 decisions with additional candidates. No matching private flow ledger was
+present, so no owner proposals were registered. This dry run did not change
+the live owner store. A future promotion requires a durable flow ledger,
+an exact full-candidate evidence route for the remaining decisions, a current
+production target readback, and a guarded owner/canonical synchronization run.
+Track that remaining work in [#72](https://github.com/jamiepratt/freediving-results/issues/72)
+and [#73](https://github.com/jamiepratt/freediving-results/issues/73).

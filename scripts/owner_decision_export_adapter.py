@@ -34,7 +34,8 @@ def _source_hash(record):
     return raw.get('source_sha256') or record.get('source_sha256') or source_object.removeprefix('sha256:')
 
 
-def _verify_evidence(snapshot, snapshot_directory, item, binding):
+def _verify_evidence(snapshot, snapshot_directory, item, binding,
+                     recovered_packet_paths=None):
     revision = binding['observation_revision']
     _require(item['id'] == binding['snapshot_record_id'], 'snapshot record mapping changed')
     _require(item['version'] == revision, 'observation version changed')
@@ -47,7 +48,12 @@ def _verify_evidence(snapshot, snapshot_directory, item, binding):
                  'source observation snapshot binding changed')
         version = revision.get('adapter_version')
         loader = load_microplus if version == MICROPLUS_VERSION else load_aida
-        result = loader(snapshot_directory, [revision['source_name']], adapter_version=version)
+        kwargs = {'adapter_version': version}
+        if loader is load_aida and recovered_packet_paths:
+            recovered = recovered_packet_paths.get(revision['source_name'])
+            if recovered is not None:
+                kwargs['recovered_packet_paths'] = {revision['source_name']: recovered}
+        result = loader(snapshot_directory, [revision['source_name']], **kwargs)
         matches = [observation for observation in result['observations']
                    if observation['snapshot_record_id'] == item['id']]
         _require(len(matches) == 1 and
@@ -74,7 +80,8 @@ def _verify_evidence(snapshot, snapshot_directory, item, binding):
     _require(len(matches) == 1, 'snapshot lacks exact immutable observation reference')
 
 
-def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision):
+def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision,
+                     recovered_packet_paths=None):
     binding = proposal['canonical_binding']
     _require(binding['decision_id'] == proposal['id'], 'decision identity changed')
     _require(binding['reconciliation_run_revision'] == run_revision and
@@ -90,14 +97,18 @@ def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision):
     _require(len({entry['snapshot_record_id'] for entry in bindings}) == len(bindings),
              'duplicate snapshot record mapping')
     for item, entry in zip(evidence, bindings):
-        _verify_evidence(snapshot, snapshot_directory, item, entry)
+        _verify_evidence(snapshot, snapshot_directory, item, entry,
+                         recovered_packet_paths)
 
 
-def register_verified_export(store, snapshot_directory, envelope):
+def register_verified_export(store, snapshot_directory, envelope, *,
+                             recovered_packet_paths=None):
     """Verify all bindings before the first idempotent DecisionStore.register call.
 
     A verified snapshot must already be bound by DecisionStore.bind_verified_snapshot.
     This never creates a binding, so an old export cannot replace a newer one.
+    Recovered AIDA packet paths are private caller input; source replay checks
+    their frozen hashes and the original HTML before registration.
     """
     _require(isinstance(envelope, dict), 'export must be an object')
     proposals = envelope.get('proposals')
@@ -117,7 +128,8 @@ def register_verified_export(store, snapshot_directory, envelope):
         _require(len(ids) == len(set(ids)), 'duplicate proposal ID')
         for proposal in proposals:
             _verify_proposal(snapshot, snapshot_directory, proposal,
-                             envelope.get('reconciliation_run_revision'))
+                             envelope.get('reconciliation_run_revision'),
+                             recovered_packet_paths)
     return store.register_batch(envelope['snapshot_sha256'], proposals,
                                 idempotency_key='reconciliation-export:' + _digest(proposals),
                                 expected_revision=envelope['store_revision'])
