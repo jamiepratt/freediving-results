@@ -59,6 +59,14 @@ Default matching requires federation/event ID, date, venue, discipline, category
 
 Report IDs, version labels, correction notes and timestamps support review. Different source hashes prove different bytes. Retrieval order does not establish revision order. A document revision does not establish that each row changed. The API does not manufacture a before/after delta or infer replacement direction from either signal.
 
+The version-3 Jev source-revision question makes the same boundary explicit: a
+correction or republication may describe the same sporting attempt in a new
+source version, but source direction requires cited chronology and does not
+itself link attempts. Its row-semantics question asks whether headings,
+structure and explicit identifiers describe an attempt, an aggregate, a
+ranking, a start list, or another view of a result. Matching values alone
+cannot create an attempt; unresolved meanings stay unknown.
+
 Typed revision evidence can also bind `[:acquisitions n :manifest :final-url]` to retain a filename such as `-v2.pdf` from its exact registered acquisition. This exception is unavailable to scope matching. A URL version label remains evidence for explicit review, not automatic supersession or a claimed correction timestamp.
 
 An unavailable predecessor is represented by a missing reference and unknown previous values. The revised observation can be retained and its missing-history evidence reviewed without creating a fake observation. Acknowledging missing history does not confirm a replacement of an identified earlier row.
