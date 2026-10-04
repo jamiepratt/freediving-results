@@ -416,10 +416,25 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             elif DECISION_PREVIEW_PATH.fullmatch(path):
                 if self.server.decisions is None:
                     return self._reply(503)
-                args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1)
-                if set(args) != {'action'} or len(args['action']) != 1 or args['action'][0] not in ('approve','reject','reverse'):
+                args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=2)
+                action = args.get('action', [None])[0]
+                if (len(args.get('action', [])) != 1 or
+                        (action == 'correct' and set(args) != {'action', 'option'}) or
+                        (action != 'correct' and set(args) != {'action'}) or
+                        action not in ('approve', 'reject', 'reverse', 'correct')):
                     raise ValueError('invalid preview action')
-                result = self.server.decisions.preview(DECISION_PREVIEW_PATH.fullmatch(path).group(1), action=args['action'][0])
+                decision_id = DECISION_PREVIEW_PATH.fullmatch(path).group(1)
+                if action == 'correct':
+                    if len(args['option']) != 1:
+                        raise ValueError('invalid correction option')
+                    current = self.server.decisions.inspect(decision_id)
+                    option = args['option'][0]
+                    current_option = (current.get('correction') or {}).get('action', current['selected_option'])
+                    if option not in [current['selected_option'], *current['competing_options']] or option == current_option:
+                        raise ValueError('invalid correction option')
+                    result = self.server.decisions.preview(decision_id, action=action, option=option)
+                else:
+                    result = self.server.decisions.preview(decision_id, action=action)
             elif path == '/owner-evidence/api/comparisons':
                 result = query.comparisons(**self._comparison_filters(parsed.query))
             elif path in ('/owner-evidence/api/routes', '/owner-evidence/api/route-leads'):
