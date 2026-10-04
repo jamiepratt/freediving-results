@@ -92,6 +92,53 @@
                        (:event-id event) (assoc :event_id (:event-id event))))
                    events)}))
 
+(defn canonical-readback
+  "Verify a retained cohort and applied receipt against one current canonical read."
+  [reviewer-url cohort applied]
+  (let [state (identity/private-canonical-readback reviewer-url)
+        registration (field cohort :registration)
+        expected-snapshot (field registration :snapshot_sha256)
+        rows (mapv source-row (field registration :rows))
+        current-rows (into {} (map (juxt :observation-id identity) (:source-rows state)))
+        history (:events state)
+        binding (field cohort :binding)
+        base (field binding :identity_revision)
+        prior-ids (field binding :history_event_ids)
+        proposed (field cohort :events)
+        correction (or (last (keep #(when (= :human (:actor-kind %)) (:revision %))
+                                   (map-indexed (fn [i event] (assoc event :revision (inc i))) history))) 0)
+        projection (:projection state)]
+    (when-not (= expected-snapshot (:snapshot-sha256 state))
+      (fail! "Canonical source snapshot mismatch"))
+    (when-not (and (= "retained-aida-cohort/v1" (field cohort :schema))
+                   (= "retained-aida-canonical-receipt/v1" (field applied :schema))
+                   (integer? base) (<= 0 base)
+                   (vector? prior-ids) (= base (count prior-ids))
+                   (vector? proposed)
+                   (= (:revision projection) (count history))
+                   (= (count history) (+ base (count proposed)))
+                   (= (mapv :id (subvec history 0 base)) prior-ids)
+                   (= (field applied :identity_revision) (:revision projection))
+                   (= (field applied :human_correction_revision) correction)
+                   (= (field applied :accepted_group_count) (:accepted-group-count projection))
+                   (= (field applied :human_negative_pair_count) (count (:negative-pairs projection)))
+                   (= 0 (field applied :provider_calls))
+                   (zero? (:non-source-row-count state))
+                   (= (set (map :observation-id rows)) (set (keys current-rows)))
+                   (every? #(= % (current-rows (:observation-id %))) rows)
+                   (every? #(= expected-snapshot (get-in % [:source-observation-ref :snapshot_sha256]))
+                           (:source-rows state))
+                   (every? true?
+                           (map-indexed
+                            (fn [index event]
+                              (let [actual (nth history (+ base index))]
+                                (and (= (field event :id) (:id actual))
+                                     (= (source-event event (+ base index)) (:request actual)))))
+                            proposed)))
+      (fail! "Canonical readback stale or cohort mismatch"))
+    (assoc state :schema "retained-aida-canonical-readback/v1"
+           :human-correction-revision correction)))
+
 (defn- bound-history [reviewer-url binding events]
   (let [revision (field binding :identity_revision)
         ids (field binding :history_event_ids)
@@ -196,8 +243,10 @@
 (defn -main [& args]
   (let [reviewer (System/getenv "FREEDIVING_REVIEW_URL")
         app (System/getenv "FREEDIVING_APP_URL")]
-    (when-not (and (seq reviewer) (seq app))
-      (fail! "FREEDIVING_REVIEW_URL and FREEDIVING_APP_URL required"))
+    (when-not (seq reviewer)
+      (fail! "FREEDIVING_REVIEW_URL required"))
+    (when (and (= "apply" (first args)) (not (seq app)))
+      (fail! "FREEDIVING_APP_URL required for apply"))
     (case (first args)
       "apply" (let [[_ path expected receipt-path] args]
                 (when-not (and (= 4 (count args)) (re-matches #"[0-9a-f]{64}" expected)
@@ -212,4 +261,15 @@
       "history" (let [[_ expected path] args]
                   (when-not (= 3 (count args)) (fail! "Usage: history EXPECTED_SNAPSHOT_SHA HISTORY_JSON"))
                   (write-receipt! path (canonical-history reviewer expected)))
-      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON | history EXPECTED_SNAPSHOT_SHA HISTORY_JSON"))))
+      "readback" (let [[_ cohort-path expected receipt-path output-path] args]
+                   (when-not (and (= 5 (count args)) (re-matches #"[0-9a-f]{64}" expected)
+                                  (= expected (sha256-file cohort-path)))
+                     (fail! "Retained AIDA cohort hash mismatch"))
+                   (let [applied (json/read-str (slurp receipt-path))]
+                     (when-not (= expected (field applied :cohort_sha256))
+                       (fail! "Canonical receipt cohort mismatch"))
+                     (write-receipt! output-path
+                                     (canonical-readback reviewer
+                                                         (json/read-str (slurp cohort-path))
+                                                         applied))))
+      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON | history EXPECTED_SNAPSHOT_SHA HISTORY_JSON | readback COHORT_JSON SHA256 RECEIPT_JSON OUTPUT_JSON"))))

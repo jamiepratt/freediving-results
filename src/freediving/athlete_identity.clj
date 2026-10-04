@@ -704,6 +704,33 @@
         (.commit connection) current)
       (catch Exception error (.rollback connection) (throw error)))))
 
+(defn private-canonical-readback
+  "Read the source snapshot, immutable rows, events and checked view in one transaction."
+  [url]
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setReadOnly connection true)
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (let [ledger (read-ledger connection)
+            stored (first (query connection
+                                 "SELECT identity_revision,evidence_sha256,body_edn FROM freediving.canonical_identity_view WHERE singleton=true"))
+            current (project ledger)
+            snapshot (:snapshot_sha256 (first (query connection
+                                                     "SELECT snapshot_sha256 FROM freediving.source_identity_snapshot WHERE singleton=true")))
+            source (source-rows connection)
+            database (:database (first (query connection "SELECT current_database() AS database")))]
+        (when-not (and stored snapshot
+                       (= (:revision current) (:identity_revision stored))
+                       (= (evidence-digest ledger) (:evidence_sha256 stored))
+                       (= current (edn/read-string (:body_edn stored))))
+          (fail! "Private canonical identity view requires rebuild" {}))
+        (.commit connection)
+        {:database database :snapshot-sha256 snapshot :source-rows source
+         :non-source-row-count (- (count (:rows ledger)) (count source))
+         :events (:events ledger) :projection current})
+      (catch Exception error (.rollback connection) (throw error)))))
+
 (defn private-projection
   "Read the current private grouping from retained observations and the append-only ledger."
   [url]

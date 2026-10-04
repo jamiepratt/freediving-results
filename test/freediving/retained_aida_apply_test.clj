@@ -110,6 +110,32 @@
     (is (= 3 (:human-correction-revision
               (apply-route/apply-cohort! reviewer app expansion))))))
 
+(deftest canonical-readback-binds-current-state-and-human-correction
+  (let [initial (cohort)
+        _ (apply-route/apply-cohort! reviewer app initial)
+        _ (apply-route/reverse-source-event! reviewer "aida-edge-1" "owner correction")
+        history (apply-route/canonical-history reviewer (get-in initial [:registration :snapshot-sha256]))
+        expansion (assoc (safe-expansion initial)
+                         :binding {:identity_revision (:revision history)
+                                   :history_event_ids (mapv :id (:events history))})
+        receipt (assoc (apply-route/apply-cohort! reviewer app expansion)
+                       :cohort-sha256 (apply str (repeat 64 "e")))
+        readback (apply-route/canonical-readback reviewer expansion receipt)]
+    (is (= 4 (get-in readback [:projection :revision])))
+    (is (= 3 (:human-correction-revision readback)))
+    (is (= 5 (count (:source-rows readback))))
+    (is (= 4 (count (:events readback))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"stale"
+                          (apply-route/canonical-readback
+                           reviewer expansion (assoc receipt :identity-revision 3))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"snapshot"
+                          (apply-route/canonical-readback
+                           reviewer (assoc-in expansion [:registration :snapshot-sha256]
+                                              (apply str (repeat 64 "f"))) receipt)))
+    (apply-route/reverse-source-event! reviewer "new-safe-edge" "later correction")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"stale"
+                          (apply-route/canonical-readback reviewer expansion receipt)))))
+
 (deftest correction-bound-expansion-rejects-stale-human-history-before-appending
   (let [initial (cohort)
         _ (apply-route/apply-cohort! reviewer app initial)
