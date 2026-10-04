@@ -635,6 +635,13 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
                                    capture_output=True, text=True)
     assert stale_receipt.returncode != 0
     assert 'canonical checkpoint binding changed' in stale_receipt.stderr
+    def rejected(*_):
+        raise ValueError('new human correction')
+
+    with __import__('pytest').raises(ValueError, match='new human correction'):
+        runner.run_retained(retained, target, adapter=adapter,
+                            canonical_apply=True, canonical=rejected)
+    assert json.loads((target / 'state.json').read_text())['canonical']['status'] == 'failed'
     (tmp_path / 'aida_plan').write_text('{"stale":true}')
     with __import__('pytest').raises(ValueError, match='retained input changed'):
         runner.run_retained(retained, target, adapter=adapter)

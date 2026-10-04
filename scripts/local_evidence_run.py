@@ -164,12 +164,15 @@ def required_aida_assets(manifest, source_names):
     return assets
 
 
-def retained_adapter(snapshot, observations, plan, output, recovered_packets=None):
+def retained_adapter(snapshot, observations, plan, output, recovered_packets=None,
+                     canonical_history=None):
     argv = [sys.executable, str(ROOT / 'retained_aida_cohort.py'),
              str(snapshot), str(observations), str(plan), str(output),
              '--observations-sha256', digest(observations), '--plan-sha256', digest(plan)]
     for source, path in sorted((recovered_packets or {}).items()):
         argv.extend(('--recovered-packet', f'{source}={path}'))
+    if canonical_history is not None:
+        argv.extend(('--canonical-history', str(canonical_history)))
     command(argv)
 
 
@@ -240,18 +243,24 @@ def apply_retained_canonical(run_dir, state, *, apply=None):
     expected = state['reconciliation']['export_sha256']
     verified_file(cohort, expected)
     receipt = run_dir / 'reconciliation' / 'canonical-receipt.json'
-    if apply:
-        apply(cohort, expected, receipt)
-    else:
-        command(['clojure', '-M', '-m', 'freediving.retained-aida-apply',
-                 'apply', str(cohort), expected, str(receipt)])
-    result = json.loads(receipt.read_text())
-    if (result.get('schema') != 'retained-aida-canonical-receipt/v1'
-            or result.get('cohort-sha256') != expected
-            or type(result.get('identity-revision')) is not int
-            or type(result.get('human-correction-revision')) is not int
-            or result['human-correction-revision'] < 0):
-        raise ValueError('canonical receipt binding changed')
+    try:
+        if apply:
+            apply(cohort, expected, receipt)
+        else:
+            command(['clojure', '-M', '-m', 'freediving.retained-aida-apply',
+                     'apply', str(cohort), expected, str(receipt)])
+        result = json.loads(receipt.read_text())
+        if (result.get('schema') != 'retained-aida-canonical-receipt/v1'
+                or result.get('cohort-sha256') != expected
+                or type(result.get('identity-revision')) is not int
+                or type(result.get('human-correction-revision')) is not int
+                or result['human-correction-revision'] < 0):
+            raise ValueError('canonical receipt binding changed')
+    except Exception:
+        state['canonical'] = {'status': 'failed', 'cohort_sha256': expected}
+        state['reconciliation']['canonical_status'] = 'failed'
+        atomic_json(run_dir / 'state.json', state)
+        raise
     state['canonical'] = {'status': 'complete', 'receipt_sha256': digest(receipt),
                           'cohort_sha256': expected,
                           'identity_revision': result['identity-revision'],
@@ -409,15 +418,31 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
                                'owner_correction_revision': plan['owner_correction_revision']}
     atomic_json(state_path, state)
     try:
+        canonical_history = None
+        if canonical_apply:
+            canonical_history = output.parent / 'canonical-history.json'
+            command(['clojure', '-M', '-m', 'freediving.retained-aida-apply',
+                     'history', manifest['snapshot_sha256'], str(canonical_history)])
         if adapter:
             adapter(staged_snapshot, staged['aida_observations'], staged['aida_plan'], output)
         else:
             retained_adapter(staged_snapshot, staged['aida_observations'],
-                             staged['aida_plan'], output, staged_recovered)
+                             staged['aida_plan'], output, staged_recovered,
+                             canonical_history)
         exported = json.loads(output.read_text())
         expected_binding = {'snapshot_sha256': manifest['snapshot_sha256'],
                             'observations_sha256': digest(staged['aida_observations']),
                             'plan_sha256': digest(staged['aida_plan'])}
+        if canonical_history is not None:
+            observed = json.loads(canonical_history.read_text())
+            if (observed.get('schema') != 'retained-aida-canonical-history/v1'
+                    or observed.get('snapshot_sha256') != manifest['snapshot_sha256']
+                    or type(observed.get('revision')) is not int
+                    or not isinstance(observed.get('events'), list)
+                    or observed['revision'] != len(observed['events'])):
+                raise ValueError('canonical history binding changed')
+            expected_binding['identity_revision'] = observed['revision']
+            expected_binding['history_event_ids'] = [event['id'] for event in observed['events']]
         if exported.get('schema') != 'retained-aida-cohort/v1' or exported.get('binding') != expected_binding:
             raise ValueError('retained AIDA export binding changed')
         for item in plan['inputs']:

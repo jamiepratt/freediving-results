@@ -47,6 +47,29 @@
      :registration {:snapshot-sha256 snapshot :rows rows :verified-refs refs}
      :events [(event "aida-edge-1" 0 1) (event "aida-edge-2" 0 2)]}))
 
+(defn- safe-expansion [initial]
+  (let [profile "123e4567-e89b-12d3-a456-426614174001"
+        person {:scope "AIDA" :id profile :id_kind "person"
+                :href (str "/Athletes/Profile-" profile)}
+        added (mapv (fn [digit row]
+                      (let [record (apply str (repeat 64 digit))
+                            ref (-> (:citation row)
+                                    (assoc :snapshot_record_id record :publisher_person person))]
+                        (assoc row :observation-id (str "source-observation:" record)
+                               :citation ref :source-observation-ref ref
+                               :publisher-athlete-id profile)))
+                    ["4" "5"] (take 2 (get-in initial [:registration :rows])))
+        refs (into {} (map (juxt :observation-id :citation) added))
+        pair (mapv :observation-id added)
+        event {:id "new-safe-edge" :action :accept :actor-kind :automatic :pair pair
+               :rule-version identity/rule-version
+               :source-binding {:snapshot-sha256 (get-in initial [:registration :snapshot-sha256])
+                                :refs refs}}]
+    (-> initial
+        (update-in [:registration :rows] into added)
+        (update-in [:registration :verified-refs] merge refs)
+        (assoc :events [event]))))
+
 (deftest retained-aida-canonical-apply-reverses-and-preserves-correction
   (let [input (cohort)
         first-pass (apply-route/apply-cohort! reviewer app input)]
@@ -69,6 +92,49 @@
       (is (= 3 (count (identity/private-history reviewer))))
       (is (= (:groups (identity/private-projection reviewer))
              (:groups (identity/rebuild-private-canonical-view! reviewer)))))))
+
+(deftest correction-bound-expansion-resumes-only-its-own-events
+  (let [initial (cohort)
+        _ (apply-route/apply-cohort! reviewer app initial)
+        _ (apply-route/reverse-source-event! reviewer "aida-edge-1" "owner correction")
+        history (apply-route/canonical-history reviewer (get-in initial [:registration :snapshot-sha256]))
+        expansion (-> (safe-expansion initial)
+                      (assoc :binding {:identity_revision (:revision history)
+                                       :history_event_ids (mapv :id (:events history))}))]
+    (is (= 3 (:revision history)))
+    (is (= ["aida-edge-1" "aida-edge-2" "retained-human-reverse:aida-edge-1"]
+           (mapv :id (:events history))))
+    (is (= 4 (:identity-revision (apply-route/apply-cohort! reviewer app expansion))))
+    (is (= 4 (:identity-revision (apply-route/apply-cohort! reviewer app expansion))))
+    (is (= 4 (count (identity/private-history reviewer))))
+    (is (= 3 (:human-correction-revision
+              (apply-route/apply-cohort! reviewer app expansion))))))
+
+(deftest correction-bound-expansion-rejects-stale-human-history-before-appending
+  (let [initial (cohort)
+        _ (apply-route/apply-cohort! reviewer app initial)
+        history (apply-route/canonical-history reviewer (get-in initial [:registration :snapshot-sha256]))
+        stale (-> (safe-expansion initial)
+                  (assoc :binding {:identity_revision (:revision history)
+                                   :history_event_ids (mapv :id (:events history))}))]
+    (apply-route/reverse-source-event! reviewer "aida-edge-1" "new owner correction")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Stale retained AIDA canonical history"
+                          (apply-route/apply-cohort! reviewer app stale)))
+    (is (= 3 (count (identity/private-history reviewer))))))
+
+(deftest bound-replay-resumes-an-exact-interrupted-prefix
+  (let [input (assoc (cohort) :binding {:identity_revision 0 :history_event_ids []})
+        interrupted (assoc input :events [(first (:events input))])]
+    (is (= {:schema "retained-aida-canonical-history/v1"
+            :revision 0 :snapshot_sha256 (get-in input [:registration :snapshot-sha256])
+            :events []}
+           (apply-route/canonical-history reviewer
+                                          (get-in input [:registration :snapshot-sha256]))))
+    (is (= 1 (:identity-revision (apply-route/apply-cohort! reviewer app interrupted))))
+    (is (= 2 (:identity-revision (apply-route/apply-cohort! reviewer app input))))
+    (is (= 2 (:identity-revision (apply-route/apply-cohort! reviewer app input))))
+    (is (= ["aida-edge-1" "aida-edge-2"]
+           (mapv :id (identity/private-history reviewer))))))
 
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-aida-apply-test)]
