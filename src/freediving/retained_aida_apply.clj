@@ -230,6 +230,43 @@
         (fail! "Stale retained AIDA canonical history"))
       result)))
 
+(defn- guarded-target-prefix! [reviewer-url cohort]
+  (let [binding (field cohort :binding)
+        events (field cohort :events)
+        registration (field cohort :registration)
+        snapshot (field registration :snapshot_sha256)
+        rows (mapv source-row (field registration :rows))]
+    (when-not (and (= "retained-aida-cohort/v1" (field cohort :schema))
+                   (= 0 (field binding :identity_revision))
+                   (= [] (field binding :history_event_ids))
+                   (vector? events) (seq events) (seq rows)
+                   (= (count rows) (count (set (map :observation-id rows)))))
+      (fail! "Guarded apply requires a complete zero-revision binding"))
+    (let [target (target-state reviewer-url snapshot)
+          revision (:revision target)
+          expected (mapv #(source-event %1 %2) events (range))
+          actual (mapv :request (:events target))]
+      (when-not (and (zero? (:non_source_row_count target))
+                     (<= 0 revision (count expected))
+                     (= revision (count actual))
+                     (= actual (subvec expected 0 revision))
+                     (= (mapv :id (:events target))
+                        (mapv #(field % :id) (subvec events 0 revision)))
+                     (or (empty? (:source_rows target))
+                         (= (set (:source_rows target)) (set rows)))
+                     (or (zero? revision) (seq (:source_rows target))))
+        (fail! "Guarded apply target prefix or source rows changed"))
+      revision)))
+
+(defn guarded-apply-cohort!
+  "Apply a zero-bound cohort only against its exact target prefix and source rows.
+   A repeated invocation completes an interrupted source registration or event suffix."
+  [reviewer-url app-url cohort]
+  (guarded-target-prefix! reviewer-url cohort)
+  (let [result (apply-cohort! reviewer-url app-url cohort)]
+    (canonical-readback reviewer-url cohort result)
+    result))
+
 (defn reverse-source-event!
   "Persist an explicit human reversal; its negative pair blocks later automatic relinks."
   [reviewer-url event-id reason]
@@ -278,7 +315,7 @@
                                (= expected (sha256-file path)))
                   (fail! "Retained AIDA cohort hash mismatch"))
                 (write-receipt! receipt-path
-                                (assoc (apply-cohort! reviewer app (json/read-str (slurp path)))
+                                (assoc (guarded-apply-cohort! reviewer app (json/read-str (slurp path)))
                                        :cohort-sha256 expected)))
       "reverse" (let [[_ event-id reason receipt-path] args]
                   (when-not (= 4 (count args)) (fail! "Usage: reverse EVENT_ID REASON RECEIPT_JSON"))
