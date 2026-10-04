@@ -246,6 +246,24 @@ test('owner reconciliation status shows bounded metrics and sample bias without 
   assert.doesNotMatch(text,/published/i);
 });
 
+test('private application receipt shows pending work and verified store readback without approvals or publication', async () => {
+  const snap='a'.repeat(64);
+  const {context,node}=workspace({
+    '/api/overview': {coverage:'partial',cutoff:'2026-10-03T00:00:00Z',snapshot_sha256:snap,counts:[]},
+    '/api/sources': [],
+    '/api/presentation-status': {schema:'private-presentation-status/v3',run_id:'run-1',revision:3,
+      local:{snapshot_sha256:snap,cutoff:'2026-10-03T00:00:00Z',gap_count:0},
+      remote:{status:'active',pending:null,failed:null,active:{snapshot_sha256:snap,bundle_manifest_sha256:'b'.repeat(64)}},
+      application:{snapshot_sha256:snap,canonical_revision:211,canonical_readback_sha256:'c'.repeat(64),
+        owner_store_revision:12,pending_proposals:207,unresolved_exclusions:2,
+        provider_calls_recorded:0,publication_status:'private'}},
+  });
+  await vm.runInContext('loadOverview()',context);
+  const text=node('presentation-status').visibleText;
+  for(const phrase of ['211 canonical events','207 pending','2 unresolved','zero provider calls','private','publication unverified']) assert.match(text,new RegExp(phrase,'i'));
+  assert.doesNotMatch(text,/automatically approved|published|accepted athletes/i);
+});
+
 test('stale owner receipt is omitted after a correction or active snapshot change', async () => {
   const {context,node}=workspace({
     '/api/overview': {coverage:'partial',snapshot_sha256:'remote-new',counts:[]},

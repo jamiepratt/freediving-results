@@ -216,6 +216,63 @@
                                                          (assoc-in [:events 2 :actor-kind] :automatic)))))
     (is (= 0 (count (identity/private-history reviewer))))))
 
+(deftest guarded-apply-requires-an-exact-empty-or-matching-target
+  (let [initial (cohort)
+        input (assoc initial :binding {:identity_revision 0 :history_event_ids []})
+        snapshot (get-in input [:registration :snapshot-sha256])]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"binding"
+                          (apply-route/guarded-apply-cohort! reviewer app initial)))
+    (is (= 0 (:revision (apply-route/target-state reviewer snapshot))))
+    (identity/register-source-observations!
+     reviewer {:snapshot-sha256 snapshot
+               :rows (get-in input [:registration :rows])
+               :verified-refs (get-in input [:registration :verified-refs])})
+    (is (= 2 (:identity-revision
+              (apply-route/guarded-apply-cohort! reviewer app input))))
+    (is (= 2 (:identity-revision
+              (apply-route/guarded-apply-cohort! reviewer app input))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"target"
+                          (apply-route/guarded-apply-cohort!
+                           reviewer app (assoc-in input [:events 0 :rule-version] "changed"))))
+    (is (= 2 (:revision (apply-route/target-state reviewer snapshot))))))
+
+(deftest guarded-apply-resumes-exact-event-prefix-and-stops-on-owner-change
+  (let [initial (cohort)
+        input (assoc initial :binding {:identity_revision 0 :history_event_ids []})
+        partial (assoc input :events [(first (:events input))])
+        snapshot (get-in input [:registration :snapshot-sha256])]
+    (is (= 1 (:identity-revision (apply-route/apply-cohort! reviewer app partial))))
+    (is (= 2 (:identity-revision
+              (apply-route/guarded-apply-cohort! reviewer app input))))
+    (is (= 2 (:identity-revision
+              (apply-route/guarded-apply-cohort! reviewer app input))))
+    (apply-route/reverse-source-event! reviewer "aida-edge-1" "later owner correction")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"target"
+                          (apply-route/guarded-apply-cohort! reviewer app input)))
+    (is (= 3 (:revision (apply-route/target-state reviewer snapshot))))))
+
+(deftest source-registration-rejects-a-row-set-changed-after-target-read
+  (let [initial (cohort)
+        expansion (safe-expansion initial)
+        snapshot (get-in initial [:registration :snapshot-sha256])
+        _ (apply-route/target-state reviewer snapshot)
+        competing-rows (subvec (get-in expansion [:registration :rows]) 3)
+        competing-refs (select-keys (get-in expansion [:registration :verified-refs])
+                                    (map :observation-id competing-rows))]
+    (identity/register-source-observations!
+     reviewer {:snapshot-sha256 snapshot :rows competing-rows
+               :verified-refs competing-refs})
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"source row set changed"
+         (identity/register-source-observations!
+          reviewer {:snapshot-sha256 snapshot
+                    :rows (get-in initial [:registration :rows])
+                    :verified-refs (get-in initial [:registration :verified-refs])
+                    :expected-existing-row-ids #{}})))
+    (is (= (set (map :observation-id competing-rows))
+           (set (map :observation-id (:source_rows
+                                      (apply-route/target-state reviewer snapshot))))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-aida-apply-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

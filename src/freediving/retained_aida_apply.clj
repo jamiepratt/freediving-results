@@ -184,51 +184,94 @@
 
 (defn apply-cohort!
   "Register exact refs and resume deterministic edges. Existing identical events are unchanged."
-  [reviewer-url app-url cohort]
-  (when-not (= "retained-aida-cohort/v1" (field cohort :schema))
-    (fail! "Unknown retained AIDA cohort schema"))
-  (let [registration (field cohort :registration)
-        rows (mapv source-row (field registration :rows))
-        refs (into {} (map (fn [[id ref]] [id (keywordize ref)])
-                           (field registration :verified_refs)))
-        registration {:snapshot-sha256 (field registration :snapshot_sha256)
-                      :rows rows :verified-refs refs}
+  ([reviewer-url app-url cohort]
+   (apply-cohort! reviewer-url app-url cohort {}))
+  ([reviewer-url app-url cohort {:keys [expected-existing-row-ids] :as options}]
+   (when-not (= "retained-aida-cohort/v1" (field cohort :schema))
+     (fail! "Unknown retained AIDA cohort schema"))
+   (let [registration (field cohort :registration)
+         rows (mapv source-row (field registration :rows))
+         refs (into {} (map (fn [[id ref]] [id (keywordize ref)])
+                            (field registration :verified_refs)))
+         registration (cond-> {:snapshot-sha256 (field registration :snapshot_sha256)
+                               :rows rows :verified-refs refs}
+                        (contains? options :expected-existing-row-ids)
+                        (assoc :expected-existing-row-ids expected-existing-row-ids))
+         events (field cohort :events)
+         binding (field cohort :binding)
+         bound? (or (some? (field binding :identity_revision))
+                    (some? (field binding :history_event_ids)))]
+     (when-not (and (seq rows) (vector? events)
+                    (= (set (map :observation-id rows)) (set (keys refs)))
+                    (= (count events) (count (set (map #(field % :id) events)))))
+       (fail! "Incomplete retained AIDA registration or duplicate events"))
+     (doseq [[index event] (map-indexed vector events)]
+       (source-event event (+ (or (field binding :identity_revision) 0) index)))
+     (when bound? (bound-history reviewer-url binding events))
+     (identity/register-source-observations! reviewer-url registration)
+     (doseq [[index event] (map-indexed vector events)]
+       (when bound?
+         (let [applied (bound-history reviewer-url binding events)]
+           (when-not (<= index applied)
+             (fail! "Stale retained AIDA canonical history"))))
+       (let [history (identity/private-history reviewer-url)
+             existing (some #(when (= (field event :id) (:id %)) %) history)
+             request (source-event event (count history))]
+         (if existing
+           (when-not (= (:request existing)
+                        (assoc request :base-revision (get-in existing [:request :base-revision])))
+             (fail! "Conflicting retained AIDA event replay"))
+           (identity/record-source-event!
+            (if (= :human (:actor-kind request)) reviewer-url app-url) request))))
+     (when bound?
+       (let [applied (bound-history reviewer-url binding events)]
+         (when-not (= applied (count events))
+           (fail! "Incomplete retained AIDA canonical replay"))))
+     (let [result (receipt reviewer-url (identity/private-canonical-view reviewer-url))]
+       (when (and bound?
+                  (not= (:identity-revision result)
+                        (+ (field binding :identity_revision) (count events))))
+         (fail! "Stale retained AIDA canonical history"))
+       result))))
+
+(defn- guarded-target-prefix! [reviewer-url cohort]
+  (let [binding (field cohort :binding)
         events (field cohort :events)
-        binding (field cohort :binding)
-        bound? (or (some? (field binding :identity_revision))
-                   (some? (field binding :history_event_ids)))]
-    (when-not (and (seq rows) (vector? events)
-                   (= (set (map :observation-id rows)) (set (keys refs)))
-                   (= (count events) (count (set (map #(field % :id) events)))))
-      (fail! "Incomplete retained AIDA registration or duplicate events"))
-    (doseq [[index event] (map-indexed vector events)]
-      (source-event event (+ (or (field binding :identity_revision) 0) index)))
-    (when bound? (bound-history reviewer-url binding events))
-    (identity/register-source-observations! reviewer-url registration)
-    (doseq [[index event] (map-indexed vector events)]
-      (when bound?
-        (let [applied (bound-history reviewer-url binding events)]
-          (when-not (<= index applied)
-            (fail! "Stale retained AIDA canonical history"))))
-      (let [history (identity/private-history reviewer-url)
-            existing (some #(when (= (field event :id) (:id %)) %) history)
-            request (source-event event (count history))]
-        (if existing
-          (when-not (= (:request existing)
-                       (assoc request :base-revision (get-in existing [:request :base-revision])))
-            (fail! "Conflicting retained AIDA event replay"))
-          (identity/record-source-event!
-           (if (= :human (:actor-kind request)) reviewer-url app-url) request))))
-    (when bound?
-      (let [applied (bound-history reviewer-url binding events)]
-        (when-not (= applied (count events))
-          (fail! "Incomplete retained AIDA canonical replay"))))
-    (let [result (receipt reviewer-url (identity/private-canonical-view reviewer-url))]
-      (when (and bound?
-                 (not= (:identity-revision result)
-                       (+ (field binding :identity_revision) (count events))))
-        (fail! "Stale retained AIDA canonical history"))
-      result)))
+        registration (field cohort :registration)
+        snapshot (field registration :snapshot_sha256)
+        rows (mapv source-row (field registration :rows))]
+    (when-not (and (= "retained-aida-cohort/v1" (field cohort :schema))
+                   (= 0 (field binding :identity_revision))
+                   (= [] (field binding :history_event_ids))
+                   (vector? events) (seq events) (seq rows)
+                   (= (count rows) (count (set (map :observation-id rows)))))
+      (fail! "Guarded apply requires a complete zero-revision binding"))
+    (let [target (target-state reviewer-url snapshot)
+          revision (:revision target)
+          expected (mapv #(source-event %1 %2) events (range))
+          actual (mapv :request (:events target))]
+      (when-not (and (zero? (:non_source_row_count target))
+                     (<= 0 revision (count expected))
+                     (= revision (count actual))
+                     (= actual (subvec expected 0 revision))
+                     (= (mapv :id (:events target))
+                        (mapv #(field % :id) (subvec events 0 revision)))
+                     (or (empty? (:source_rows target))
+                         (= (set (:source_rows target)) (set rows)))
+                     (or (zero? revision) (seq (:source_rows target))))
+        (fail! "Guarded apply target prefix or source rows changed"))
+      target)))
+
+(defn guarded-apply-cohort!
+  "Apply a zero-bound cohort only against its exact target prefix and source rows.
+   A repeated invocation completes an interrupted source registration or event suffix."
+  [reviewer-url app-url cohort]
+  (let [target (guarded-target-prefix! reviewer-url cohort)
+        expected-existing-row-ids (set (map :observation-id (:source_rows target)))
+        result (apply-cohort! reviewer-url app-url cohort
+                              {:expected-existing-row-ids expected-existing-row-ids})]
+    (canonical-readback reviewer-url cohort result)
+    result))
 
 (defn reverse-source-event!
   "Persist an explicit human reversal; its negative pair blocks later automatic relinks."
@@ -278,7 +321,7 @@
                                (= expected (sha256-file path)))
                   (fail! "Retained AIDA cohort hash mismatch"))
                 (write-receipt! receipt-path
-                                (assoc (apply-cohort! reviewer app (json/read-str (slurp path)))
+                                (assoc (guarded-apply-cohort! reviewer app (json/read-str (slurp path)))
                                        :cohort-sha256 expected)))
       "reverse" (let [[_ event-id reason receipt-path] args]
                   (when-not (= 4 (count args)) (fail! "Usage: reverse EVENT_ID REASON RECEIPT_JSON"))

@@ -607,10 +607,14 @@
 
 (defn register-source-observations!
   "Register an immutable, caller-verified source snapshot in the private canonical ledger.
-   Caller must independently verify every supplied ref against the retained source."
-  [url {:keys [snapshot-sha256 rows verified-refs]}]
+   Caller must independently verify every supplied ref against the retained source.
+   An optional expected-existing-row-ids set guards a prior exact target read."
+  [url {:keys [snapshot-sha256 rows verified-refs expected-existing-row-ids] :as request}]
   (when-not (and (sha256? snapshot-sha256) (vector? rows) (seq rows)
                  (<= (count rows) 100000) (map? verified-refs)
+                 (or (not (contains? request :expected-existing-row-ids))
+                     (and (set? expected-existing-row-ids)
+                          (every? string? expected-existing-row-ids)))
                  (= (set (map :observation-id rows)) (set (keys verified-refs)))
                  (= (count rows) (count (set (map :observation-id rows))))
                  (every? #(valid-source-row? snapshot-sha256 %
@@ -618,13 +622,18 @@
     (fail! "Source observations lack exact verified immutable refs" {}))
   (with-open [connection (DriverManager/getConnection url)]
     (.setAutoCommit connection false)
-    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+    ;; The first read must see writes committed while this transaction waited
+    ;; for the advisory lock. REPEATABLE_READ would pin an older snapshot.
+    (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_READ_COMMITTED)
     (try
       (query connection "SELECT pg_advisory_xact_lock(781246919)")
       (let [active (:snapshot_sha256 (first (query connection
                                                    "SELECT snapshot_sha256 FROM freediving.source_identity_snapshot WHERE singleton=true")))
             existing (into {} (map (juxt :observation_id :body_edn)
                                    (query connection "SELECT observation_id,body_edn FROM freediving.source_identity_observations")))]
+        (when (and (contains? request :expected-existing-row-ids)
+                   (not= expected-existing-row-ids (set (keys existing))))
+          (fail! "Source identity source row set changed" {}))
         (when (and active (not= active snapshot-sha256))
           (fail! "Source identity snapshot changed" {}))
         (when-not active

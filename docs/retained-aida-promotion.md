@@ -71,14 +71,12 @@ The owner origin does not perform this rebind automatically. A changed owner
 revision, snapshot, packet, receipt, or original fails the operation. Reread
 the owner binding and store revisions before running the preflight above.
 
-There is no apply command for this package. Before any host replay, reread
-the target and owner revisions, snapshot, source refs, and event prefix;
-invalidate the package on any change. Exact canonical replay must preserve
-the human reversal at its original sequence position. Owner candidate intents
-need a real flow-ledger reconciliation event binding and an authorized owner
-action. The current owner store rejects automatic approval on source-derived
-revisions. On preflight failure, the existing target remains unchanged;
-discard the private package or rerun against fresh checkpoints.
+The manual apply route is described below. Before host replay, reread the
+target and owner revisions, snapshot, source refs, and event prefix; invalidate
+the package on any change. Exact canonical replay preserves the human reversal
+at its original sequence position. Owner candidate intents need a durable
+flow-ledger binding. The owner store accepts the verified export as pending
+proposals only. A failed preflight leaves the existing target unchanged.
 
 ## Pending owner proposal checkpoint
 
@@ -172,8 +170,78 @@ The output has phase receipts, a SQLite backup, a separate restore drill, and
 `checkpoint.json`, all owner-only. A repeat with unchanged inputs must return
 the same checkpoint. A changed target, owner history, packet, source ref, or
 envelope stops before a completion checkpoint. Preserve the whole directory.
-This gate does not write to PostgreSQL or register proposals. A PostgreSQL
-backup and proven prefix recovery across PostgreSQL and SQLite remain the
-next live apply checkpoint in [#73](https://github.com/jamiepratt/freediving-results/issues/73).
-Do not treat the 207 pending proposals as approved, or the two human-correction
-exclusions as accepted.
+This gate does not write to PostgreSQL or register proposals. Preserve its
+owner-only SQLite backup and restore drill for the manual apply below. The 207
+proposals remain pending, and the two human-correction exclusions remain
+unresolved.
+
+## Guarded manual apply
+
+`scripts/retained_aida_manual_apply.py` has two host stages. Use a private
+directory outside Git with mode 0700. Keep the snapshot, recovered packet,
+preflight, flow export, envelope, and activation checkpoint outside Git too.
+The command reads the current canonical target and owner SQLite store. It
+backs up both stores, restores each backup to a separate disposable store, and
+checks exact target identity before the first write. Put database credentials
+in the usual PostgreSQL environment or passfile, never in the command line.
+Set `PGHOST`, `PGUSER`, and `PGDATABASE` to the canonical target, and
+`FREEDIVING_PG_DRILL_DATABASE` to an existing empty disposable database. The
+database and host in `FREEDIVING_REVIEW_URL` must match those PostgreSQL
+settings. Set `FREEDIVING_APP_URL` for canonical event writes. Both stages
+fetch the current authenticated private active binding and require the exact
+snapshot and bundle manifest before each write. Set `CF_ACCESS_CLIENT_ID`,
+`CF_ACCESS_CLIENT_SECRET`, and `OWNER_EVIDENCE_STATUS_TOKEN` in the environment
+for that read and the final status commit.
+
+When the active owner store lacks source-derived AIDA refs, first run the
+`rebind` stage with its current owner revision. It verifies every original and
+recovered packet, completes SQLite and PostgreSQL backup and restore drills,
+then performs one owner compare-and-swap rebind. It records a private phase
+receipt. The rebind changes the owner revision, so regenerate the promotion
+preflight, flow export, pending envelope, and activation checkpoint against
+fresh target and owner reads before running `apply`.
+
+```sh
+mkdir -m 700 /private/aida-manual-apply
+python3 scripts/retained_aida_manual_apply.py rebind \
+  --snapshot-dir /private/snapshot --snapshot-sha256 SNAPSHOT_SHA256 \
+  --bundle-sha256 BUNDLE_MANIFEST_SHA256 \
+  --owner-db /private/owner-decisions.sqlite --expected-owner-revision 1 \
+  --recovered-packet aida-source-name=/private/recovered/packet.json \
+  --phase-dir /private/aida-manual-apply
+```
+
+After regenerating and hashing the four files, run the apply stage. Keep
+status credentials out of arguments and receipts. `--run-dir` points to the
+completed retained local run. The current private owner origin must support
+the v3 application status receipt before this stage can complete.
+
+```sh
+python3 scripts/retained_aida_manual_apply.py \
+  --preflight /private/preflight.json --preflight-sha256 PREFLIGHT_SHA256 \
+  --flow /private/flow-export.json --flow-sha256 FLOW_SHA256 \
+  --envelope /private/pending-envelope.json --envelope-sha256 ENVELOPE_SHA256 \
+  --checkpoint /private/activation/checkpoint.json \
+  --checkpoint-sha256 CHECKPOINT_SHA256 \
+  --bundle-sha256 BUNDLE_MANIFEST_SHA256 \
+  --owner-db /private/owner-decisions.sqlite --snapshot-dir /private/snapshot \
+  --recovered-packet aida-source-name=/private/recovered/packet.json \
+  --run-dir /private/completed-run --phase-dir /private/aida-manual-apply
+```
+
+The apply stage accepts only an empty or exact canonical event prefix with
+all-or-empty matching source rows. It registers source rows, replays the exact
+211 events including the human reversal, reads back the final canonical
+projection, registers the 207 pending owner proposals with compare-and-swap,
+and reads back the owner store. Only then does it commit the private v3 status
+receipt. Phase receipts support an unchanged retry after interruption. A new
+human owner action, unrelated canonical event, changed source, changed
+snapshot, or changed package stops the retry. Failure leaves the old live
+presentation in place; no public route is enabled.
+
+For a disposable local rehearsal only, use `--isolated-rehearsal` with
+`FREEDIVING_PG_ISOLATED=1`, an `aida_rehearsal_*` target database, and an
+`aida_drill_*` restore database. Supply an owner-only JSON file with the exact
+`snapshot_sha256` and `bundle_manifest_sha256` as `--active-binding FILE
+--active-binding-sha256 SHA256`. That mode checks the pinned binding, suppresses
+the remote status write, and records a private rehearsal receipt.
