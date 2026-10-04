@@ -5,7 +5,7 @@ import argparse
 from hmac import compare_digest
 import hmac
 from hashlib import sha256
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -106,7 +106,7 @@ def _config(env):
     return secret, host, frozenset(owners), digest
 
 
-class PrivateOrigin(HTTPServer):
+class PrivateOrigin(ThreadingHTTPServer):
     def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
         self.canonical_reader = canonical_reader
@@ -118,8 +118,7 @@ class PrivateOrigin(HTTPServer):
         try:
             if not compare_digest(self.query.manifest['snapshot_sha256'], expected_digest):
                 raise ValueError('snapshot does not match configured digest')
-            # HTTPServer handles one request at a time in its serving thread.
-            # Reopen the verified immutable database for that thread.
+            # Request threads share this verified immutable read-only database.
             self.query.db.close()
             path = (Path(snapshot_dir) / 'snapshot.sqlite').resolve()
             self.query.db = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1',

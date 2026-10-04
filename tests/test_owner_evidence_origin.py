@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 import threading
@@ -74,6 +75,14 @@ class PrivateOriginTest(unittest.TestCase):
         status, _, body = self.request('/owner-evidence/api/overview')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['bundle_manifest_sha256'], 'd' * 64)
+
+    def test_idle_origin_connection_does_not_block_authorized_overview(self):
+        idle = socket.create_connection(('127.0.0.1', self.server.server_port), timeout=1)
+        self.addCleanup(idle.close)
+        idle.sendall(b'GET /owner-evidence HTTP/1.1\r\nHost: ' + HOST.encode())
+        status, _, body = self.request('/owner-evidence/api/overview')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
 
     def test_direct_origin_spoof_and_wrong_owner_get_no_private_bytes(self):
         for headers in ([('Host', HOST)],
