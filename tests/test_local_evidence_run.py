@@ -547,13 +547,26 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     source_plan, _, _, _ = fixture(tmp_path)
     assert run(source_plan, tmp_path / 'source-run').returncode == 0
     snapshot = tmp_path / 'source-run' / 'snapshot'
+    checked_names = {'schema': 'affiliate-name-input/v1',
+                     'snapshot': {'path': str(snapshot),
+                                  'manifest_sha256': sha(snapshot / 'manifest.json'),
+                                  'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                                  'cutoff': '2026-10-03T00:00:00Z'},
+                     'sources': [], 'assertions': [], 'gaps': [], 'roster': {}}
     inputs = {}
     for name, content in [('aida_plan', '{}'), ('aida_observations', '{}'),
-                          ('decision_store', 'immutable store'), ('name_evidence', '{}'),
-                          ('pg_export', '{}'), ('pg_dump', 'private PG dump'),
+                          ('decision_store', ''), ('name_evidence', json.dumps(checked_names)),
+                          ('pg_export', 'job_id,ordinal,candidate_id,artifact_sha256,source_sha256,parser_version\n'),
+                          ('pg_dump', 'private PG dump'),
                           ('ledger', '[]'), ('owner_corrections', '{}')]:
         path = tmp_path / name
-        path.write_text(content)
+        if name == 'decision_store':
+            import sqlite3
+            with sqlite3.connect(path) as db:
+                db.execute('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+                db.execute("INSERT INTO meta VALUES ('revision', '1')")
+        else:
+            path.write_text(content)
         inputs[name] = {'name': name, 'path': str(path), 'sha256': sha(path)}
     retained = tmp_path / 'retained-plan.json'
     retained.write_text(json.dumps({
@@ -585,6 +598,8 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     assert first['reconciliation']['ledger_revision'] == 0
     assert first['reconciliation']['provider_calls'] == 0
     assert first['reconciliation']['ledger_sha256'] == inputs['ledger']['sha256']
+    assert first['reconciliation']['preflight']['pg_observation_versions'] == 0
+    assert first['reconciliation']['preflight']['checked_name_assertions'] == 0
     assert calls == [1]
     assert runner.run_retained(retained, target, adapter=adapter) == first
     assert calls == [1]
@@ -624,3 +639,52 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
     with __import__('pytest').raises(ValueError, match='retained input changed'):
         runner.run_retained(retained, target, adapter=adapter)
     assert calls == [1]
+
+
+def test_retained_aida_rejects_unverified_corpus_inputs(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('local_evidence_run', SCRIPT)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    source_plan, _, _, _ = fixture(tmp_path)
+    assert run(source_plan, tmp_path / 'source-run').returncode == 0
+    snapshot = tmp_path / 'source-run' / 'snapshot'
+    files = {}
+    for name, content in [('aida_plan', '{}'), ('aida_observations', '{}'),
+                          ('decision_store', 'not a sqlite store'), ('name_evidence', '{}'),
+                          ('pg_export', '{}'), ('pg_dump', '{}'), ('ledger', '[]'),
+                          ('owner_corrections', '{}')]:
+        path = tmp_path / name
+        path.write_text(content)
+        files[name] = {'name': name, 'path': str(path), 'sha256': sha(path)}
+    plan = tmp_path / 'retained.json'
+    plan.write_text(json.dumps({'schema': 'retained-aida-local-run-plan/v1',
+                                'scope': 'AIDA source observations',
+                                'snapshot': {'path': str(snapshot),
+                                             'manifest_sha256': sha(snapshot / 'manifest.json'),
+                                             'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                                             'snapshot_sha256': sha(snapshot / 'snapshot.sqlite')},
+                                'inputs': list(files.values()), 'decision_revision': 1,
+                                'ledger_revision': 0, 'owner_correction_revision': 0}))
+    with __import__('pytest').raises(ValueError, match='DecisionStore SQLite required'):
+        runner.run_retained(plan, tmp_path / 'retained-run', adapter=lambda *_: None)
+    assert not (tmp_path / 'retained-run').exists()
+
+
+def test_retained_aida_requires_packet_receipt_and_original_in_bundle(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('local_evidence_run', SCRIPT)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    packet = tmp_path / 'packet.json'
+    receipt = tmp_path / 'receipt.json'
+    original = tmp_path / 'original.html'
+    packet.write_text('{}')
+    original.write_text('<html></html>')
+    receipt.write_text(json.dumps({'body': {'path': original.name}}))
+    manifest = {'inputs': {'aida-example': {'source_schema': 'aida-selected-html-packet/v1',
+                                           'path': str(packet)}}}
+    assert runner.required_aida_assets(manifest) == {packet, receipt, original}
+    receipt.write_text(json.dumps({'body': {'path': 'missing.html'}}))
+    with __import__('pytest').raises(ValueError, match='AIDA original HTML missing'):
+        runner.required_aida_assets(manifest)

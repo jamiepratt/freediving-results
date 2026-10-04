@@ -119,6 +119,34 @@ def verified_file(path, expected):
     return path
 
 
+def required_aida_assets(manifest):
+    """Locate every packet, adjacent receipt, and original used in AIDA replay."""
+    assets = set()
+    for item in manifest.get('inputs', {}).values():
+        if item.get('source_schema') != 'aida-selected-html-packet/v1':
+            continue
+        packet = Path(item['path'])
+        if not packet.is_file():
+            continue  # The adapter reports this frozen packet as an explicit gap.
+        name = packet.name
+        if name == 'packet.json':
+            receipt = packet.with_name('receipt.json')
+        elif name.startswith('packet-') and name.endswith('.json'):
+            receipt = packet.with_name('receipt-' + name[len('packet-'):])
+        else:
+            raise ValueError('unsupported AIDA packet path')
+        if not receipt.is_file():
+            raise ValueError('AIDA receipt missing')
+        body = json.loads(receipt.read_text()).get('body') or {}
+        if not isinstance(body.get('path'), str) or not body['path']:
+            raise ValueError('AIDA original path missing')
+        original = (receipt.parent / body['path']).resolve()
+        if not original.is_file():
+            raise ValueError('AIDA original HTML missing')
+        assets.update((packet.resolve(), receipt.resolve(), original))
+    return assets
+
+
 def retained_adapter(snapshot, observations, plan, output):
     command([sys.executable, str(ROOT / 'retained_aida_cohort.py'),
              str(snapshot), str(observations), str(plan), str(output),
@@ -174,13 +202,43 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
              '--output-dir', str(source)])
     for item in plan['inputs']:
         verified_file(item['path'], item['sha256'])
+    supplied_paths = {Path(item['path']).resolve() for item in plan['inputs']}
+    if not required_aida_assets(manifest) <= supplied_paths:
+        raise ValueError('AIDA replay source bytes absent from retained bundle')
     store_path = next(Path(item['path']) for item in plan['inputs'] if item['name'] == 'decision_store')
-    if store_path.read_bytes()[:16] == b'SQLite format 3\x00':
-        import sqlite3
-        with sqlite3.connect(f'file:{store_path}?mode=ro', uri=True) as store:
+    with store_path.open('rb') as store_stream:
+        header = store_stream.read(16)
+    if header != b'SQLite format 3\x00':
+        raise ValueError('DecisionStore SQLite required')
+    import sqlite3
+    try:
+        with sqlite3.connect(store_path.as_uri() + '?mode=ro&immutable=1', uri=True) as store:
+            if store.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('DecisionStore integrity check failed')
             actual_revision = int(store.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
-        if actual_revision != plan['decision_revision']:
-            raise ValueError('retained decision revision changed')
+            if actual_revision != plan['decision_revision']:
+                raise ValueError('retained decision revision changed')
+    except (sqlite3.DatabaseError, TypeError, AttributeError) as error:
+        raise ValueError('DecisionStore SQLite required') from error
+    sys.path.insert(0, str(ROOT))
+    from reconciliation_corpus_test import build_pg_binding_report, build_report
+    from affiliate_name_query import AffiliateNameQuery
+    from unified_evidence_query import SnapshotQuery
+    bound = {item['name']: item for item in plan['inputs']}
+    corpus_report = build_report(source, bound['name_evidence']['path'],
+                                 bound['name_evidence']['sha256'])
+    pg_report = build_pg_binding_report(source, bound['pg_export']['path'],
+                                        snapshot_files['manifest.json'], snapshot_files['snapshot.sqlite'],
+                                        bound['pg_export']['sha256'])
+    with SnapshotQuery(source) as snapshot:
+        name_listing = AffiliateNameQuery(bound['name_evidence']['path'],
+                                          bound['name_evidence']['sha256'], source, snapshot).listing()
+    preflight = {'corpus_report_sha256': hashlib.sha256(json.dumps(corpus_report, sort_keys=True).encode()).hexdigest(),
+                 'pg_report_sha256': hashlib.sha256(json.dumps(pg_report, sort_keys=True).encode()).hexdigest(),
+                 'checked_name_assertions': len(name_listing['assertions']),
+                 'checked_name_gaps': len(name_listing['gaps']),
+                 'pg_observation_versions': pg_report['pg_observation_versions'],
+                 'snapshot_structured_pg_refs': pg_report['snapshot_structured_pg_refs']}
     plan_hash = digest(plan_path)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if run_dir.is_symlink() or run_dir.stat().st_mode & 0o077:
@@ -252,6 +310,7 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
                                    'ledger_sha256': digest(staged['ledger']),
                                    'owner_correction_revision': plan['owner_correction_revision'],
                                    'export_sha256': digest(output), 'counts': exported['counts'],
+                                   'preflight': preflight,
                                    'provider_calls': 0, 'canonical_status': 'pending'}
         atomic_json(state_path, state)
     except Exception as error:
