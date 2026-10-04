@@ -201,9 +201,21 @@ class HostStores:
 
     def _clojure(self, command, *args):
         need(os.getenv('FREEDIVING_REVIEW_URL'), 'FREEDIVING_REVIEW_URL required')
+        env = os.environ.copy()
+        if command == 'apply' and not self.isolated_rehearsal:
+            from deploy.prepare_database import endpoint
+            reviewer = os.getenv('FREEDIVING_AIDA_REVIEW_URL', '')
+            ingest = os.getenv('FREEDIVING_AIDA_APP_URL', '')
+            canonical = endpoint(env['FREEDIVING_REVIEW_URL'], 'freediving_migrator')
+            need(reviewer and ingest
+                 and endpoint(reviewer, 'reviews_owner') == canonical
+                 and endpoint(ingest, 'observations_app') == canonical,
+                 'role-bound canonical apply URLs missing or mismatched')
+            env['FREEDIVING_REVIEW_URL'] = reviewer
+            env['FREEDIVING_APP_URL'] = ingest
         completed = subprocess.run(['clojure', '-M', '-m', 'freediving.retained-aida-apply',
                                     command, *map(str, args)], cwd=REPO,
-                                   capture_output=True, text=True, timeout=3600)
+                                   capture_output=True, text=True, timeout=3600, env=env)
         if completed.returncode:
             raise RuntimeError('canonical ' + command + ' failed')
 
