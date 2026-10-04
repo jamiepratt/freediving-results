@@ -554,7 +554,7 @@ def test_retained_aida_cohort_checkpoints_exact_private_inputs_without_provider_
                                   'cutoff': '2026-10-03T00:00:00Z'},
                      'sources': [], 'assertions': [], 'gaps': [], 'roster': {}}
     inputs = {}
-    for name, content in [('aida_plan', '{}'), ('aida_observations', '{}'),
+    for name, content in [('aida_plan', '{}'), ('aida_observations', '[]'),
                           ('decision_store', ''), ('name_evidence', json.dumps(checked_names)),
                           ('pg_export', 'job_id,ordinal,candidate_id,artifact_sha256,source_sha256,parser_version\n'),
                           ('pg_dump', 'private PG dump'),
@@ -650,7 +650,7 @@ def test_retained_aida_rejects_unverified_corpus_inputs(tmp_path):
     assert run(source_plan, tmp_path / 'source-run').returncode == 0
     snapshot = tmp_path / 'source-run' / 'snapshot'
     files = {}
-    for name, content in [('aida_plan', '{}'), ('aida_observations', '{}'),
+    for name, content in [('aida_plan', '{}'), ('aida_observations', '[]'),
                           ('decision_store', 'not a sqlite store'), ('name_evidence', '{}'),
                           ('pg_export', '{}'), ('pg_dump', '{}'), ('ledger', '[]'),
                           ('owner_corrections', '{}')]:
@@ -684,7 +684,7 @@ def test_retained_aida_requires_packet_receipt_and_original_in_bundle(tmp_path):
     receipt.write_text(json.dumps({'body': {'path': original.name}}))
     manifest = {'inputs': {'aida-example': {'source_schema': 'aida-selected-html-packet/v1',
                                            'path': str(packet)}}}
-    assert runner.required_aida_assets(manifest) == {packet, receipt, original}
+    assert runner.required_aida_assets(manifest, {'aida-example'}) == {packet, receipt, original}
     receipt.write_text(json.dumps({'body': {'path': 'missing.html'}}))
     with __import__('pytest').raises(ValueError, match='AIDA original HTML missing'):
-        runner.required_aida_assets(manifest)
+        runner.required_aida_assets(manifest, {'aida-example'})

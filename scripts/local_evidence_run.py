@@ -119,12 +119,13 @@ def verified_file(path, expected):
     return path
 
 
-def required_aida_assets(manifest):
+def required_aida_assets(manifest, source_names):
     """Locate every packet, adjacent receipt, and original used in AIDA replay."""
     assets = set()
-    for item in manifest.get('inputs', {}).values():
-        if item.get('source_schema') != 'aida-selected-html-packet/v1':
-            continue
+    for source_name in source_names:
+        item = manifest.get('inputs', {}).get(source_name)
+        if not item or item.get('source_schema') != 'aida-selected-html-packet/v1':
+            raise ValueError('AIDA frozen source absent from snapshot')
         packet = Path(item['path'])
         if not packet.is_file():
             continue  # The adapter reports this frozen packet as an explicit gap.
@@ -202,8 +203,15 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
              '--output-dir', str(source)])
     for item in plan['inputs']:
         verified_file(item['path'], item['sha256'])
+    bound = {item['name']: item for item in plan['inputs']}
+    frozen_observations = json.loads(Path(bound['aida_observations']['path']).read_text())
+    if not isinstance(frozen_observations, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get('source_name'), str)
+            for row in frozen_observations):
+        raise ValueError('invalid frozen AIDA observations')
+    source_names = {row['source_name'] for row in frozen_observations}
     supplied_paths = {Path(item['path']).resolve() for item in plan['inputs']}
-    if not required_aida_assets(manifest) <= supplied_paths:
+    if not required_aida_assets(manifest, source_names) <= supplied_paths:
         raise ValueError('AIDA replay source bytes absent from retained bundle')
     store_path = next(Path(item['path']) for item in plan['inputs'] if item['name'] == 'decision_store')
     with store_path.open('rb') as store_stream:
@@ -224,7 +232,6 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
     from reconciliation_corpus_test import build_pg_binding_report, build_report
     from affiliate_name_query import AffiliateNameQuery
     from unified_evidence_query import SnapshotQuery
-    bound = {item['name']: item for item in plan['inputs']}
     corpus_report = build_report(source, bound['name_evidence']['path'],
                                  bound['name_evidence']['sha256'])
     pg_report = build_pg_binding_report(source, bound['pg_export']['path'],
