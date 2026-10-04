@@ -312,3 +312,62 @@ For a disposable local rehearsal only, use `--isolated-rehearsal` with
 `snapshot_sha256` and `bundle_manifest_sha256` as `--active-binding FILE
 --active-binding-sha256 SHA256`. That mode checks the pinned binding, suppresses
 the remote status write, and records a private rehearsal receipt.
+
+## Retained run to active owner no-op resync
+
+An already applied retained AIDA run uses `retained-aida-local-run/v1`. It is
+not a normal local reconciliation run. Its `retained-aida-cohort-bundle/v1`
+manifest also differs from the active `private-source-bundle/v1` manifest. Do
+not copy the active bundle hash into the retained checkpoint or send the
+retained checkpoint through the normal status synchronization route.
+
+`scripts/retained_aida_owner_resync.py` verifies a separate, read-only
+`retained-aida-owner-resync/v1` pin. The pin names both manifest byte hashes,
+the frozen snapshot and cutoff, a hash of an explicit source map, canonical
+target revision and state hash, owner revision, binding revision and state
+hash, and private v3 status revision and hash. The map links each retained AIDA
+packet, receipt and original by SHA-256 to one unique source ID in the active
+production inventory and links each packet to its frozen snapshot input. A
+restricted original is an inventory hash attestation, not a production object
+whose bytes can be reread. Verify its retained original bytes locally. Do not
+count a restricted entry as an included object.
+
+Reread the retained run with `retained_status`, the target through
+`retained-aida-apply target-state`, the owner through a read-only transaction,
+and the authenticated private status before invoking the verifier. The
+isolated canonical readback must be hash-pinned and equal the retained export
+after the explicit Clojure field conversion. The target's full event requests
+and source rows must equal that readback. The raw target-state file SHA-256 must
+equal the canonical readback hash recorded by the active v3 status; do not
+reformat that JSON file. Recheck status after the comparison. A successful
+result is an `unchanged` receipt: it
+does not call a provider, append a canonical event, register a proposal,
+advance owner/status revisions, clear other source gaps, or change the public
+release. A newer human action, different source inventory, changed status or
+stale local export rejects the pin. After an interrupted read, retry the same
+pin against fresh reads; a changed read requires a new reviewed pin. Preserve
+the earlier active presentation on failure.
+
+Keep the map, pin, fresh target-state and owner readback as 0600 files outside
+Git. The CLI accepts those exact files and the completed run, then performs
+two authenticated private status reads and writes only an owner-only receipt:
+
+```sh
+python3 scripts/retained_aida_owner_resync.py \
+  --run-dir /private/completed-run \
+  --pin /private/resync/pin.json \
+  --export /private/completed-run/reconciliation/aida-cohort.json \
+  --isolated-readback /private/resync/isolated-readback.json \
+  --retained-manifest /private/completed-run/cohort-bundle/manifest.json \
+  --snapshot-manifest /private/completed-run/snapshot/manifest.json \
+  --production-manifest /private/resync/production-manifest.json \
+  --source-map /private/resync/source-map.json \
+  --target /private/resync/fresh-target-state.json \
+  --owner /private/resync/fresh-owner-state.json \
+  --receipt /private/resync/unchanged-receipt.json
+```
+
+The owner-state receipt contains counts and revisions, not proposal payloads.
+Its hash establishes the pinned readback state; it does not prove proposal
+lineage for a later write-capable route. Revalidate the live target and owner
+after the receipt if either may have changed during file preparation.
