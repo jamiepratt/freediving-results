@@ -173,25 +173,30 @@
                        {:observation-id (str "source-observation:" record)
                         :source-name "Synthetic Diver" :parse-status :parsed
                         :citation ref :source-observation-ref ref}))
-                   [(apply str (repeat 64 "1")) (apply str (repeat 64 "2"))])
+                   [(apply str (repeat 64 "1")) (apply str (repeat 64 "2"))
+                    (apply str (repeat 64 "3"))])
         refs (into {} (map (juxt :observation-id :citation) rows))
         registration {:snapshot-sha256 sha :rows rows :verified-refs refs}
         [a b] (mapv :observation-id rows)
         decision (identity/jev-decision (identity/empty-ledger rows) a b)
         binding {:decision_id (:id decision) :reconciliation_run_revision 1
                  :reconciliation_event_id "original-flow"
-                 :observation_revisions (mapv refs [a b])
+                 :observation_revisions (mapv refs (:candidates decision))
                  :evidence_bindings (mapv (fn [item source-id]
                                             {:evidence_id (:evidence-id item)
                                              :snapshot_record_id (get-in refs [source-id :snapshot_record_id])
                                              :observation_revision (refs source-id)})
-                                          (:evidence decision) [a b])}
+                                          (:evidence decision) (:candidates decision))}
         owner {:id "owner-store:3" :store_revision 3 :binding_revision 2
                :snapshot_sha256 sha :decision_id (:id decision) :action "approve"
                :actor "owner" :reason "Source cited"
                :proposal {:selected_option "same_person" :canonical_binding binding}}
         base (update (flow/empty-ledger) :events conj
-                     {:id "original-flow" :decision-id (:id decision)})
+                     {:id "original-flow" :decision-id (:id decision)
+                      :family :identity :action :same-person :origin :deterministic
+                      :status :unresolved :reason :source-context-unverified
+                      :rule-version "source-identity/1" :policy-version "synthetic/1"
+                      :evidence (:evidence decision)})
         opts {:config {:version "synthetic/1"} :policy {:version "synthetic/1"}
               :persist-flow! (fn [_]) :import-token "private-import-token-for-test"
               :current-bindings {(:id decision) binding}
@@ -210,8 +215,28 @@
                                                         :store_revision 3 :next_revision 3})
                                           (assoc-in opts [:current-bindings (:id decision)]
                                                     forged-binding))
+        missing-ref (application/run-imported!
+                     base [decision] feed
+                     (update-in opts [:source-registration :verified-refs]
+                                dissoc (last (:candidates decision))))
+        stale-flow (application/run-imported!
+                    (assoc-in base [:events 0 :decision-id] "other-decision")
+                    [decision] feed opts)
+        future-binding (assoc binding :reconciliation_run_revision 2)
+        future-owner (assoc-in owner [:proposal :canonical_binding] future-binding)
+        future-flow (application/run-imported!
+                     base [decision]
+                     (signed-feed (:import-token opts)
+                                  {:events [future-owner] :store_revision 3 :next_revision 3})
+                     (assoc-in opts [:current-bindings (:id decision)] future-binding))
         approved (application/run-imported! base [decision] feed opts)]
     (is (= :unresolved (get-in forged [:results (:id decision) :status])))
+    (is (= :unresolved (get-in missing-ref [:results (:id decision) :status])))
+    (is (= :unresolved (get-in stale-flow [:results (:id decision) :status])))
+    (is (= :unresolved (get-in future-flow [:results (:id decision) :status])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (application/run-imported! base [decision] feed
+                                            (assoc opts :active-binding-revision 3))))
     (is (= :materialized (get-in approved [:results (:id decision) :status])))
     (is (= 1 (:accepted-group-count (identity/private-canonical-view reviewer))))
     (is (= :materialized (get-in (application/run-imported! base [decision] feed opts)

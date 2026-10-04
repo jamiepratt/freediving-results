@@ -21,7 +21,7 @@
 
 (deftest source-derived-identity-awaits-verified-context-without-provider-call
   (let [sha (apply str (repeat 64 "a"))
-        ids (mapv #(str "source-observation:" (apply str (repeat 64 %))) ["1" "2"])
+        ids (mapv #(str "source-observation:" (apply str (repeat 64 %))) ["1" "2" "3"])
         refs (into {} (map (fn [id]
                              [id {:kind "source-derived" :snapshot_sha256 sha
                                   :snapshot_record_id (subs id (count "source-observation:"))
@@ -30,7 +30,7 @@
                                   :observation_version sha :adapter_version "synthetic/1"
                                   :citation {:row id}}]) ids))
         source (assoc (decision "source")
-                      :subject {:pair ids :target-id (first ids)
+                      :subject {:pair (subvec ids 0 2) :target-id (first ids)
                                 :observation-versions refs}
                       :candidates ids
                       :evidence (mapv (fn [id]
