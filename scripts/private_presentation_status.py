@@ -55,8 +55,9 @@ class PrivatePresentationStatus:
              include_stale_checkpoint=False):
         if self.current is None:
             return {'status': 'unavailable', 'remote': {'active': active}}
-        if self.current['schema'] == 'private-presentation-status/v2':
-            binding = self.current['reconciliation']
+        if self.current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
+            binding = (self.current['reconciliation'] if self.current['schema'].endswith('/v2')
+                       else self.current['application'])
             if (owner_revision != binding['owner_store_revision'] or
                     owner_snapshot != binding['snapshot_sha256'] or
                     (active if active and active.get('bundle_manifest_sha256') else None) != self.current['remote']['active']):
@@ -73,12 +74,16 @@ class PrivatePresentationStatus:
         keys = {'schema', 'run_id', 'revision', 'local', 'remote'}
         if isinstance(data, dict) and data.get('schema') == 'private-presentation-status/v2':
             keys.add('reconciliation')
+        if isinstance(data, dict) and data.get('schema') == 'private-presentation-status/v3':
+            keys.add('application')
         if not stored:
             keys.add('expected_revision')
-        if not isinstance(data, dict) or set(data) != keys or data['schema'] not in ('private-presentation-status/v1', 'private-presentation-status/v2'):
+        if not isinstance(data, dict) or set(data) != keys or data['schema'] not in ('private-presentation-status/v1', 'private-presentation-status/v2', 'private-presentation-status/v3'):
             raise ValueError('invalid status fields')
         if data['schema'] == 'private-presentation-status/v2':
             self._validate_reconciliation(data['reconciliation'], data['local'])
+        if data['schema'] == 'private-presentation-status/v3':
+            self._validate_application(data['application'], data['local'])
         if not isinstance(data['run_id'], str) or not RUN.fullmatch(data['run_id']):
             raise ValueError('invalid run ID')
         if type(data['revision']) is not int or not 1 <= data['revision'] < 2**53:
@@ -121,10 +126,30 @@ class PrivatePresentationStatus:
                     or sample['denominator'] == 0):
                 raise ValueError('invalid sample summary')
 
+    def _validate_application(self, result, local):
+        keys = {'snapshot_sha256', 'canonical_revision', 'canonical_readback_sha256',
+                'owner_store_revision', 'pending_proposals', 'unresolved_exclusions',
+                'provider_calls_recorded', 'publication_status'}
+        if (not isinstance(result, dict) or set(result) != keys
+                or result['snapshot_sha256'] != local['snapshot_sha256']
+                or not isinstance(result['canonical_readback_sha256'], str)
+                or not HASH.fullmatch(result['canonical_readback_sha256'])
+                or type(result['canonical_revision']) is not int
+                or not 1 <= result['canonical_revision'] < 2**53
+                or type(result['owner_store_revision']) is not int
+                or not 0 <= result['owner_store_revision'] < 2**53
+                or any(type(result[key]) is not int or not 0 <= result[key] <= 1000000
+                       for key in ('pending_proposals', 'unresolved_exclusions'))
+                or result['provider_calls_recorded'] != 0
+                or type(result['provider_calls_recorded']) is not int
+                or result['publication_status'] != 'private'):
+            raise ValueError('invalid private application receipt')
+
     def update(self, data, active, *, owner_revision=None, owner_snapshot=None):
         self._validate(data)
-        if data['schema'] == 'private-presentation-status/v2':
-            binding = data['reconciliation']
+        if data['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
+            binding = (data['reconciliation'] if data['schema'].endswith('/v2')
+                       else data['application'])
             if (owner_revision != binding['owner_store_revision'] or
                     owner_snapshot != binding['snapshot_sha256']):
                 raise StatusConflict('owner decision binding mismatch')
@@ -137,9 +162,9 @@ class PrivatePresentationStatus:
             raise StatusConflict('unverified active status')
         candidate = {key: value for key, value in data.items() if key != 'expected_revision'}
         current = self.current
-        if current and current['schema'] == 'private-presentation-status/v2' and self.read(
-                active, owner_revision=owner_revision, owner_snapshot=owner_snapshot)['status'] == 'stale':
-            if (data['schema'] != 'private-presentation-status/v2' or
+        if current and current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3') and self.read(
+                active, owner_revision=owner_revision, owner_snapshot=owner_snapshot).get('status') == 'stale':
+            if (data['schema'] not in ('private-presentation-status/v2', 'private-presentation-status/v3') or
                     data['run_id'] == current['run_id'] or
                     data['local']['cutoff'] <= current['local']['cutoff']):
                 raise StatusConflict('stale run cannot replace owner correction')

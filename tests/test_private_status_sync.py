@@ -11,6 +11,56 @@ from private_presentation_status import PrivatePresentationStatus, StatusConflic
 from test_unified_evidence_query import snapshot
 
 
+def test_private_apply_status_commits_exact_readback_and_stales_on_owner_change(tmp_path):
+    store = PrivatePresentationStatus(tmp_path / 'status.json')
+    snap = 'a' * 64
+    active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+    application = {'snapshot_sha256': snap, 'canonical_revision': 189,
+                   'canonical_readback_sha256': 'c' * 64,
+                   'owner_store_revision': 12, 'pending_proposals': 207,
+                   'unresolved_exclusions': 2, 'provider_calls_recorded': 0,
+                   'publication_status': 'private'}
+    payload = {'schema': 'private-presentation-status/v3', 'run_id': 'run-1',
+               'revision': 1, 'expected_revision': 0,
+               'local': {'snapshot_sha256': snap, 'cutoff': '2026-10-03T00:00:00Z',
+                         'gap_count': 0},
+               'remote': {'status': 'active', 'pending': None, 'failed': None,
+                          'active': active}, 'application': application}
+    with __import__('pytest').raises(StatusConflict):
+        store.update(payload, active, owner_revision=13, owner_snapshot=snap)
+    assert store.update(payload, active, owner_revision=12, owner_snapshot=snap)['application'] == application
+    assert PrivatePresentationStatus(store.path).update(
+        payload, active, owner_revision=12, owner_snapshot=snap)['revision'] == 1
+    assert store.read(active, owner_revision=13, owner_snapshot=snap)['status'] == 'stale'
+    assert 'application' not in store.read(active, owner_revision=13, owner_snapshot=snap)
+    assert store.read({**active, 'bundle_manifest_sha256': 'd' * 64},
+                      owner_revision=12, owner_snapshot=snap)['status'] == 'stale'
+
+
+def test_private_apply_status_rejects_unverified_or_public_claims(tmp_path):
+    store = PrivatePresentationStatus(tmp_path / 'status.json')
+    snap = 'a' * 64
+    active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+    application = {'snapshot_sha256': snap, 'canonical_revision': 189,
+                   'canonical_readback_sha256': 'c' * 64,
+                   'owner_store_revision': 12, 'pending_proposals': 207,
+                   'unresolved_exclusions': 2, 'provider_calls_recorded': 0,
+                   'publication_status': 'private'}
+    payload = {'schema': 'private-presentation-status/v3', 'run_id': 'run-1',
+               'revision': 1, 'expected_revision': 0,
+               'local': {'snapshot_sha256': snap, 'cutoff': '2026-10-03T00:00:00Z',
+                         'gap_count': 0},
+               'remote': {'status': 'active', 'pending': None, 'failed': None,
+                          'active': active}, 'application': application}
+    for change in ({'publication_status': 'public'}, {'provider_calls_recorded': 1},
+                   {'pending_proposals': -1}, {'canonical_readback_sha256': None},
+                   {'snapshot_sha256': 'd' * 64}):
+        with __import__('pytest').raises(ValueError):
+            store.update({**payload, 'application': {**application, **change}},
+                         active, owner_revision=12, owner_snapshot=snap)
+    assert not store.path.exists()
+
+
 def test_reconciliation_status_is_hidden_after_owner_correction_or_snapshot_change(tmp_path):
     store = PrivatePresentationStatus(tmp_path / 'status.json')
     snap = 'a' * 64

@@ -4,7 +4,60 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from private_status_sync import sync_status
+from private_status_sync import sync_status, sync_application_status
+
+
+def test_private_apply_sync_requires_active_binding_and_skips_identical_retry(tmp_path):
+    run = tmp_path / 'run'
+    run.mkdir()
+    snap = 'a' * 64
+    (run / 'state.json').write_text(json.dumps({
+        'run_id': 'run-1', 'local': {'status': 'complete', 'snapshot_sha256': snap},
+        'coverage': {'cutoff': '2026-10-03T00:00:00Z', 'gaps': []}}))
+    application = {'snapshot_sha256': snap, 'canonical_revision': 189,
+                   'canonical_readback_sha256': 'c' * 64,
+                   'owner_store_revision': 12, 'pending_proposals': 207,
+                   'unresolved_exclusions': 2, 'provider_calls_recorded': 0,
+                   'publication_status': 'private'}
+    active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+
+    class Response:
+        status = 200
+        def __init__(self, value): self.value = value
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def read(self, *_): return json.dumps(self.value).encode()
+
+    class Opener:
+        current = {'status': 'unavailable', 'remote': {'active': active}}
+        posts = 0
+        def open(self, request, **_):
+            if request.get_method() == 'POST':
+                self.posts += 1
+                self.current = json.loads(request.data)
+                self.current.pop('expected_revision')
+            return Response(self.current)
+
+    opener = Opener()
+    result = sync_application_status(run, application, 'machine.access',
+                                     'access-secret', 'token', opener=opener)
+    assert result['schema'] == 'private-presentation-status/v3'
+    assert result['application'] == application
+    assert opener.posts == 1
+    assert sync_application_status(run, application, 'machine.access',
+                                   'access-secret', 'token', opener=opener) == result
+    assert opener.posts == 1
+    opener.current = {'status': 'stale', 'revision': 1, 'run_id': 'run-1',
+                      'cutoff': '2026-10-03T00:00:00Z', 'remote': {'active': active}}
+    import pytest
+    with pytest.raises(RuntimeError, match='stale'):
+        sync_application_status(run, application, 'machine.access',
+                                'access-secret', 'token', opener=opener)
+    opener.current = {'status': 'unavailable', 'remote': {'active': {
+        'snapshot_sha256': 'd' * 64, 'bundle_manifest_sha256': 'b' * 64}}}
+    with pytest.raises(ValueError, match='active snapshot'):
+        sync_application_status(run, application, 'machine.access',
+                                'access-secret', 'token', opener=opener)
 
 
 def test_stale_checkpoint_requires_newer_run_before_compare_and_swap(tmp_path):
