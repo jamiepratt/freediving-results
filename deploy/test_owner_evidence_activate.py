@@ -14,7 +14,9 @@ from unittest import mock
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_evidence_activate import Layout, activate, main, _health, _config
+from private_presentation_status import PrivatePresentationStatus
 
 
 class ActivationTests(unittest.TestCase):
@@ -74,6 +76,61 @@ class ActivationTests(unittest.TestCase):
         self.config.write_text(text)
         assert _config(self.config, os.getuid(), self.digest)['OWNER_EVIDENCE_STATUS_CLIENT_ID'] == 'status123.access'
         self.config.write_text(text.replace('OWNER_EVIDENCE_STATUS_TOKEN=separate-random-status-token-123456\n', ''))
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
+
+    def test_import_and_status_credentials_survive_private_activation(self):
+        settings = ('OWNER_EVIDENCE_DECISION_API_ENABLED=1\n'
+                    'OWNER_EVIDENCE_IMPORT_TOKEN=separate-random-import-token-123456\n'
+                    'OWNER_EVIDENCE_IMPORT_CLIENT_ID=import123.access\n'
+                    'OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n'
+                    'OWNER_EVIDENCE_STATUS_TOKEN=separate-random-status-token-123456\n'
+                    'OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n')
+        self.config.write_text(self.config.read_text() + settings)
+        self.run_activation()
+        active_env = (self.layout.state / 'active.env').read_text()
+        self.assertIn(settings, active_env)
+        self.assertIn('OWNER_EVIDENCE_DECISION_DB=', active_env)
+        status_file = self.layout.state / 'status' / 'presentation-status.json'
+        status = {'schema': 'private-presentation-status/v3', 'run_id': 'run-1',
+                  'revision': 1,
+                  'local': {'snapshot_sha256': self.digest,
+                            'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+                  'remote': {'status': 'active', 'pending': None, 'failed': None,
+                             'active': {'snapshot_sha256': self.digest,
+                                        'bundle_manifest_sha256': 'b' * 64}},
+                  'application': {'snapshot_sha256': self.digest,
+                                  'canonical_revision': 211,
+                                  'canonical_readback_sha256': 'c' * 64,
+                                  'owner_store_revision': 1,
+                                  'pending_proposals': 207,
+                                  'unresolved_exclusions': 2,
+                                  'provider_calls_recorded': 0,
+                                  'publication_status': 'private'}}
+        status_file.write_text(json.dumps(status))
+        self.assertEqual(PrivatePresentationStatus(status_file).current, status)
+        previous_env = active_env.encode()
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+        with self.assertRaises(RuntimeError):
+            self.activate_candidate(digest, private, manifest_digest,
+                                    health=lambda: (_ for _ in ()).throw(RuntimeError('unhealthy')))
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), previous_env)
+        self.assertEqual(json.loads(status_file.read_text()), status)
+
+    def test_import_credentials_must_be_complete_and_independent(self):
+        base = self.config.read_text()
+        self.config.write_text(base + 'OWNER_EVIDENCE_IMPORT_TOKEN=separate-random-import-token-123456\n')
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
+        self.config.write_text(base + 'OWNER_EVIDENCE_IMPORT_TOKEN=short\n'
+                               'OWNER_EVIDENCE_IMPORT_CLIENT_ID=import123.access\n')
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
+        self.config.write_text(base + 'OWNER_EVIDENCE_IMPORT_TOKEN=separate-random-import-token-123456\n'
+                               'OWNER_EVIDENCE_IMPORT_CLIENT_ID=import123.access\n'
+                               'OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n'
+                               'OWNER_EVIDENCE_STATUS_TOKEN=separate-random-import-token-123456\n'
+                               'OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n')
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 
