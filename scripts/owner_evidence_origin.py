@@ -164,7 +164,7 @@ class PrivateOrigin(ThreadingHTTPServer):
                 if decision_path.is_relative_to(Path(snapshot_dir).resolve()):
                     raise ValueError('decision DB must be independent of snapshot')
                 self.decisions = DecisionStore(decision_path)
-                if self.decisions.projection()['snapshot_sha256'] != expected_digest:
+                if self.decisions.active_snapshot_sha256 != expected_digest:
                     self.decisions.bind_verified_snapshot(snapshot_dir,
                         expected_revision=self.decisions.revision,
                         idempotency_key='snapshot-' + expected_digest)
@@ -357,7 +357,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 owner = self.server.decisions
                 result = (self.server.presentation_status.read(
                     active, owner_revision=owner.revision if owner else None,
-                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None,
+                    owner_snapshot=owner.active_snapshot_sha256 if owner else None,
                     include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None) if self.server.presentation_status else
                           {'status': 'unavailable', 'remote': {'active': active}})
             elif path == '/owner-evidence/api/sources' and not parsed.query:
@@ -376,7 +376,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                     return self._reply(503)
                 result = self.server.decisions.queue(**self._decision_filters(parsed.query))
                 result['csrf_token'] = self._csrf()
-                result['active_snapshot_sha256'] = self.server.decisions.projection()['snapshot_sha256']
+                result['active_snapshot_sha256'] = self.server.decisions.active_snapshot_sha256
                 result['canonical_projection_status'] = 'unavailable'
             elif path == '/owner-evidence/api/canonical-projection' and not parsed.query:
                 if self.server.canonical_reader is None:
@@ -527,7 +527,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 owner = self.server.decisions
                 result = self.server.presentation_status.update(
                     body, active, owner_revision=owner.revision if owner else None,
-                    owner_snapshot=owner.projection()['snapshot_sha256'] if owner else None)
+                    owner_snapshot=owner.active_snapshot_sha256 if owner else None)
             except StatusConflict:
                 return self._reply(409)
             except (ValueError, TypeError, KeyError):
