@@ -61,6 +61,39 @@ role grants without registering a snapshot or importing observations. Source
 registration is a separate private operation; the migration alone changes no
 identity decision or public result.
 
+### Migration-only operator checkpoint
+
+When the host is still at exact migrations 1-7, run this from a clean checkout of
+the intended merged commit with the existing `bridge-vps` SSH alias:
+
+```sh
+bash deploy/migrate_only.sh
+```
+
+This stages a reproducible source/resources/JAR archive under
+`/opt/freediving/releases/<commit>` and verifies its SHA-256 on the host. It does
+not change `/opt/freediving/current`, restart a service, or call Cloudflare. The
+root-only host helper checks all existing migration checksums, database owner and
+restricted roles, public URL/config agreement, public table counts, and the
+private owner snapshot/status bytes. It takes a root-private complete custom dump
+under `/var/backups/freediving`, verifies the archive listing, restores it into a
+new disposable database, compares schema and public row counts, then drops only
+that disposable database. Only then does it run the existing checksummed
+`freediving.deployment` migration main and verify exact migrations 1-20, empty
+source identity tables, unchanged public counts, active public service/site, and
+unchanged public app and owner snapshot/status pointers and bytes. An exact 1-20
+retry skips the migration and repeats verification. Other version sets, altered
+checksums and mismatched configuration are refused.
+
+The helper prints the retained dump path as the rollback checkpoint before any
+migration. Save that path and the commit SHA in the private operator record. A
+failed migration may leave a partially forward-migrated schema because the
+existing migration main commits in modules. Inspect the retained dump and
+database before retrying; do not restore over new submissions. A public write
+during the dump can make the disposable restore count check differ from the live
+database; this fails closed and requires a fresh checkpoint. This path does not
+authorize public policy activation, corpus import, or release publication.
+
 ## HTML publication policy checkpoint
 
 Normal deployment applies migration 9 but leaves the active publication policy unchanged. Policy-1 PDF validations and projections remain valid. HTML publication requires policy 2; deploying this code does not activate it or approve any observation.
