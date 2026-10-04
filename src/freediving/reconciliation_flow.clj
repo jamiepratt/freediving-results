@@ -161,15 +161,19 @@
 
 (defn- source-identity-reason [decision]
   (let [pair (get-in decision [:subject :pair])
+        candidates (:candidates decision)
         versions (get-in decision [:subject :observation-versions])
         citations (mapv :citation (:evidence decision))
-        refs (mapv #(get versions %) pair)
+        refs (mapv #(get versions %) candidates)
         sha? #(and (string? %) (boolean (re-matches #"[0-9a-f]{64}" %)))]
     (if-not (and (= :same-person (:action decision))
                  (vector? pair) (= 2 (count pair)) (= 2 (count (set pair)))
-                 (= (set pair) (set (:candidates decision)))
-                 (= (set pair) (set (keys versions)))
-                 (= (set refs) (set citations)) (= 2 (count citations))
+                 (vector? candidates) (<= 2 (count candidates))
+                 (= (count candidates) (count (set candidates)))
+                 (= (first pair) (first candidates))
+                 (some #{(second pair)} candidates)
+                 (= (set candidates) (set (keys versions)))
+                 (= refs citations) (= (count candidates) (count citations))
                  (= 1 (count (set (map :snapshot_sha256 refs))))
                  (every? (fn [[id ref]]
                            (and (= "source-derived" (:kind ref))
@@ -180,7 +184,7 @@
                                 (string? (:source_name ref))
                                 (string? (:adapter_version ref))
                                 (map? (:citation ref))))
-                         (map vector pair refs)))
+                         (map vector candidates refs)))
       :invalid-source-ref
       ;; Source refs currently bind name and position, but no verified event,
       ;; session or category context for the identity rule.

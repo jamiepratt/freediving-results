@@ -56,7 +56,125 @@ def inputs():
                           owner, flow, [decision]))
 
 
+def multi_candidate_inputs(count=3):
+    data = list(inputs())
+    package, loaded, owner, flow, decisions = data
+    while len(loaded['observations']) < count:
+        row = copy.deepcopy(loaded['observations'][1])
+        record = format(len(loaded['observations']) + 1, 'x') * 64
+        row['snapshot_record_id'] = record
+        row['source_observation_ref']['snapshot_record_id'] = record
+        row['source_observation_ref']['citation'] = {'row': record}
+        row['citation'] = {'row': record}
+        loaded['observations'].append(row)
+        owner['observation_refs'][record] = {'source_derived_ref': row['source_observation_ref']}
+        package['source_rows'].append({'observation-id': 'source-observation:' + record,
+                                       'source-observation-ref': row['source_observation_ref'],
+                                       'citation': row['source_observation_ref']})
+    pair = decisions[0]['subject']['pair']
+    candidates = [pair[0], pair[1]] + [
+        'source-observation:' + row['snapshot_record_id']
+        for row in loaded['observations'] if 'source-observation:' + row['snapshot_record_id'] not in pair]
+    candidates = candidates[:count]
+    refs = {'source-observation:' + row['snapshot_record_id']: row['source_observation_ref']
+            for row in loaded['observations']}
+    decision = decisions[0]
+    decision['candidates'] = candidates
+    decision['subject']['observation-versions'] = {ident: refs[ident] for ident in candidates}
+    decision['evidence'] = [{'evidence-id': 'identity-' + ident,
+                             'citation': refs[ident]} for ident in candidates]
+    flow['events'][0]['evidence'] = copy.deepcopy(decision['evidence'])
+    return data
+
+
+def corrected_coverage_inputs():
+    data = list(inputs())
+    package, loaded, owner, flow, decisions = data
+    refs = {}
+    for index in (4, 5, 6):
+        row = copy.deepcopy(loaded['observations'][1])
+        record = format(index, 'x') * 64
+        row['snapshot_record_id'] = record
+        row['source_observation_ref']['snapshot_record_id'] = record
+        row['source_observation_ref']['citation'] = {'row': record}
+        row['citation'] = {'row': record}
+        row['source_fields']['name'] = 'Corrected'
+        row['source_fields']['publisher_person']['id'] = 'corrected'
+        row['source_observation_ref']['publisher_person']['id'] = 'corrected'
+        loaded['observations'].append(row)
+        owner['observation_refs'][record] = {'source_derived_ref': row['source_observation_ref']}
+        ident = 'source-observation:' + record
+        refs[ident] = row['source_observation_ref']
+        package['source_rows'].append({'observation-id': ident,
+                                       'source-observation-ref': row['source_observation_ref'],
+                                       'citation': row['source_observation_ref']})
+    ids = list(refs)
+    def accept(name, pair, revision):
+        return {'id': name, 'action': 'accept', 'actor-kind': 'automatic',
+                'rule-version': 'source-rule/1', 'pair': pair,
+                'base-revision': revision,
+                'source-binding': {'snapshot-sha256': SHA,
+                                   'refs': {ident: refs[ident] for ident in pair}}}
+    corrected = accept('corrected-edge', [ids[0], ids[2]], 2)
+    prior = accept('reversed-edge', [ids[0], ids[1]], 0)
+    reverse = {'id': 'human-reversal', 'action': 'reverse', 'actor-kind': 'human',
+               'event-id': prior['id'], 'base-revision': 1, 'reason': 'Different people',
+               'source-binding': prior['source-binding']}
+    package['canonical_replay'][0]['base-revision'] = 3
+    package['canonical_replay'] = [prior, reverse, corrected] + package['canonical_replay']
+    package['owner']['candidate_intents'].append(
+        {'source_event_id': corrected['id'], 'pair': corrected['pair'],
+         'source_binding': corrected['source-binding'], 'status': 'pending'})
+    coverage = {'schema': 'retained-aida-flow-export/v1',
+                'preflight_sha256': 'e' * 64,
+                'snapshot_sha256': SHA,
+                'counts': {'active_intents': 2, 'supported': 1, 'unresolved': 1},
+                'decisions': copy.deepcopy(decisions), 'flow': copy.deepcopy(flow),
+                'unresolved': [{'source_event_id': corrected['id'],
+                                'reason': 'human-correction'}]}
+    return data, coverage
+
+
 class RetainedAidaOwnerBridgeTest(unittest.TestCase):
+    def test_coverage_accounts_for_corrected_person_without_exporting_her_edge(self):
+        data, coverage = corrected_coverage_inputs()
+        result = build_owner_export(*data, coverage=coverage,
+                                    expected_preflight_sha256='e' * 64)
+        self.assertEqual(len(result['proposals']), 1)
+        self.assertEqual(result['counts'],
+                         {'active_intents': 2, 'supported': 1, 'unresolved': 1})
+
+    def test_coverage_rejects_unproved_or_hidden_omissions(self):
+        data, coverage = corrected_coverage_inputs()
+        for mutation in (
+            lambda c: c['unresolved'][0].update(reason='unsupported'),
+            lambda c: c['unresolved'][0].update(source_event_id='other-edge'),
+            lambda c: c['unresolved'][0].update(source_event_id='edge-2'),
+            lambda c: c['counts'].update(active_intents=3),
+            lambda c: c['decisions'].clear(),
+        ):
+            changed = copy.deepcopy(coverage)
+            mutation(changed)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                build_owner_export(*data, coverage=changed,
+                                   expected_preflight_sha256='e' * 64)
+        with self.assertRaises(ValueError):
+            build_owner_export(*data, coverage=coverage,
+                               expected_preflight_sha256='f' * 64)
+        package, loaded, owner, flow, decisions = inputs()
+        unsupported = {'schema': 'retained-aida-flow-export/v1',
+                       'snapshot_sha256': SHA,
+                       'preflight_sha256': 'e' * 64,
+                       'counts': {'active_intents': 1, 'supported': 0, 'unresolved': 1},
+                       'decisions': [], 'flow': {'version': 'reconciliation-flow/1',
+                                                'events': []},
+                       'unresolved': [{'source_event_id': 'edge-2',
+                                       'reason': 'human-correction'}]}
+        with self.assertRaises(ValueError):
+            build_owner_export(package, loaded, owner, unsupported['flow'], [],
+                               coverage=unsupported,
+                               expected_preflight_sha256='e' * 64)
+
     def test_active_canonical_edge_becomes_pending_cited_owner_proposal(self):
         package, loaded, owner, flow, decisions = inputs()
         result = build_owner_export(package, loaded, owner, flow, decisions)
@@ -93,12 +211,34 @@ class RetainedAidaOwnerBridgeTest(unittest.TestCase):
         package, loaded, owner, flow, decisions = inputs()
         with self.assertRaisesRegex(ValueError, 'private reconciliation lineage missing'):
             build_owner_export(package, loaded, owner, {}, decisions)
-        decisions[0]['candidates'].append('source-observation:' + '2' * 64)
+        decisions[0]['candidates'].append('source-observation:' + 'f' * 64)
         with self.assertRaisesRegex(ValueError, 'source identity decision differs'):
             build_owner_export(package, loaded, owner, flow, decisions)
 
+    def test_all_retrieved_candidates_are_bound_while_selected_pair_stays_exact(self):
+        for count in (3, 10):
+            with self.subTest(count=count):
+                package, loaded, owner, flow, decisions = multi_candidate_inputs(count)
+                proposal, = build_owner_export(package, loaded, owner, flow, decisions)['proposals']
+                self.assertEqual(proposal['proposed']['subject']['pair'],
+                                 decisions[0]['subject']['pair'])
+                self.assertEqual(len(proposal['canonical_binding']['evidence_bindings']), count)
+                self.assertEqual(len(proposal['evidence']), count)
+
+    def test_unrelated_missing_or_stale_retrieved_candidate_fails_closed(self):
+        for change in (
+            lambda d: d[1]['observations'][1]['source_fields']['publisher_person'].update(id='other'),
+            lambda d: d[4][0]['subject']['observation-versions'].pop(d[4][0]['candidates'][-1]),
+            lambda d: d[3]['events'][0].update({'policy-version': ''}),
+            lambda d: d[2].update(binding_revision=2),
+        ):
+            data = multi_candidate_inputs()
+            change(data)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                build_owner_export(*data)
+
     def test_bridge_envelope_passes_store_contract_as_pending(self):
-        package, loaded, owner, flow, decisions = inputs()
+        package, loaded, owner, flow, decisions = multi_candidate_inputs()
         envelope = build_owner_export(package, loaded, owner, flow, decisions)
         with tempfile.TemporaryDirectory() as temporary:
             store = DecisionStore(Path(temporary) / 'owner.sqlite')

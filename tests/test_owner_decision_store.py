@@ -273,6 +273,45 @@ class DecisionStoreTest(unittest.TestCase):
                                 idempotency_key='register-d2')
         self.assertEqual(self.store.inspect('d1')['status'], 'human_corrected')
 
+    def test_batch_reuses_active_binding_and_checks_corrections_once(self):
+        self.bind(evidence=tuple(f'row-{i}' for i in range(4000)))
+        statements = []
+        self.store.db.set_trace_callback(statements.append)
+        try:
+            revisions = self.store.revision
+            batch = [proposal(f'batch-{i}', evidence=f'row-{i}') for i in range(30)]
+            results = self.store.register_batch(
+                SNAP_A, batch, idempotency_key='large-batch', expected_revision=revisions)
+        finally:
+            self.store.db.set_trace_callback(None)
+        self.assertEqual(len(results), 30)
+        self.assertTrue(all(item['effective_status'] == 'pending' for item in results))
+        binding_reads = [sql for sql in statements if 'FROM bindings ORDER BY' in sql]
+        proposal_scans = [sql for sql in statements if sql.strip() == 'SELECT id FROM proposals']
+        correction_reads = [sql for sql in statements if "e.action='correct'" in sql]
+        self.assertLessEqual(len(binding_reads), 1)
+        self.assertEqual(proposal_scans, [])
+        self.assertEqual(len(correction_reads), 1)
+
+    def test_batch_conflict_rolls_back_when_human_correction_exists(self):
+        self.bind()
+        self.store.register(SNAP_A, proposal('corrected', subject='person-1'),
+                            idempotency_key='register-corrected')
+        self.store.act('corrected', action='correct', correction={'athlete': 'person-2'},
+                       expected_revision=self.store.revision, idempotency_key='correct-person')
+        before = self.store.revision
+        with self.assertRaisesRegex(ConflictError, 'human correction'):
+            self.store.register_batch(
+                SNAP_A, [proposal('safe'), proposal('blocked', subject='person-1')],
+                idempotency_key='corrected-batch', expected_revision=before)
+        self.assertEqual(self.store.revision, before)
+        with self.assertRaises(KeyError):
+            self.store.inspect('safe')
+        with self.assertRaises(ConflictError):
+            self.store.register_batch(
+                SNAP_A, [proposal('stale')], idempotency_key='stale-batch',
+                expected_revision=before - 1)
+
     def test_snapshot_missing_evidence_invalidates_projection_but_keeps_ledger(self):
         self.bind()
         self.store.register(SNAP_A, proposal('d1', status='automatic_approved'),

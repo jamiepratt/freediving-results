@@ -243,15 +243,31 @@ class DecisionStore:
         if old is not None:
             return old
         try:
-            results = [self._register_uncommitted(snapshot_sha256, proposal)
+            binding = self._binding()
+            corrected_subjects = self._corrected_subjects()
+            results = [self._register_uncommitted(
+                snapshot_sha256, proposal, binding=binding,
+                corrected_subjects=corrected_subjects)
                        for proposal in proposals]
             return self._finish(idempotency_key, fingerprint, results)
         except Exception:
             self.db.execute('ROLLBACK')
             raise
 
-    def _register_uncommitted(self, snapshot_sha256, proposal):
-        binding = self._binding()
+    def _corrected_subjects(self):
+        rows = self.db.execute('''SELECT p.payload_json FROM proposals p
+                                  JOIN events e ON e.decision_id=p.id
+                                  WHERE e.action='correct' AND e.revision=(
+                                    SELECT MAX(revision) FROM events WHERE decision_id=p.id)''')
+        return {(item['type'], item['subject_id'])
+                for item in (json.loads(row['payload_json']) for row in rows)}
+
+    def _register_uncommitted(self, snapshot_sha256, proposal, *, binding=None,
+                              corrected_subjects=None):
+        if binding is None:
+            binding = self._binding()
+        if corrected_subjects is None:
+            corrected_subjects = self._corrected_subjects()
         if binding is None or binding['snapshot_sha256'] != snapshot_sha256:
             raise ConflictError('proposal is not bound to active snapshot')
         if not {item['id'] for item in proposal['evidence']} <= binding['evidence_ids']:
@@ -263,14 +279,12 @@ class DecisionStore:
             raise ConflictError('source-derived observation has no canonical route for approval')
         if self.db.execute('SELECT 1 FROM proposals WHERE id=?', (proposal['id'],)).fetchone():
             raise ConflictError('decision ID already registered')
-        for row in self.db.execute('SELECT id FROM proposals'):
-            existing = self.inspect(row['id'])
-            if (existing['type'], existing['subject_id']) == (proposal['type'], proposal['subject_id']) and existing['status'] == 'human_corrected':
-                raise ConflictError('human correction prevents automatic reapplication')
+        if (proposal['type'], proposal['subject_id']) in corrected_subjects:
+            raise ConflictError('human correction prevents automatic reapplication')
         for dependency in proposal['depends_on']:
             if dependency == proposal['id'] or not self.db.execute('SELECT 1 FROM proposals WHERE id=?', (dependency,)).fetchone():
                 raise ValueError('dependency must be an existing different decision')
-            if proposal['status'] == 'automatic_approved' and self.inspect(dependency)['effective_status'] not in ACCEPTED:
+            if proposal['status'] == 'automatic_approved' and self._inspect(dependency, binding)['effective_status'] not in ACCEPTED:
                 raise ConflictError('automatic approval requires active prerequisites')
         revision = self._next_revision()
         self.db.execute('INSERT INTO proposals VALUES (?,?,?,?)',
@@ -279,7 +293,7 @@ class DecisionStore:
         if proposal['status'] == 'automatic_approved':
             revision = self._next_revision()
             self._event(revision, proposal['id'], 'automatic_approve', 'system', '', None)
-        return self.inspect(proposal['id'])
+        return self._inspect(proposal['id'], binding)
 
     @staticmethod
     def _has_source_derived_revision(proposal):
@@ -517,8 +531,10 @@ class DecisionStore:
                     'correction': correction, 'history': history}
 
     def inspect(self, decision_id):
+        return self._inspect(decision_id, self._binding())
+
+    def _inspect(self, decision_id, binding):
         p = self._base(decision_id)
-        binding = self._binding()
         effective = p['status']
         projection_status = 'unavailable'
         missing = []
@@ -529,7 +545,7 @@ class DecisionStore:
             effective = 'invalidated'
         elif p['status'] in ACCEPTED:
             for dependency in p['depends_on']:
-                if self.inspect(dependency)['effective_status'] not in ACCEPTED:
+                if self._inspect(dependency, binding)['effective_status'] not in ACCEPTED:
                     effective = 'invalidated'
                     break
         if self._has_source_derived_revision(p):
