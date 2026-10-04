@@ -28,6 +28,27 @@
     (is (= "private source" (get-in request [:source-labels "source-1"])))
     (is (not (.contains (:body request) "private source")))))
 
+(deftest same-attempt-question-uses-rebuttable-performance-prior
+  (let [families [:same-attempt :identity :source-revision :row-semantics]
+        decisions (mapv #(decision (str "d" %2) %1) families (range))
+        request (first (jev/prepare-batches config decisions))
+        body (json/read-str (:body request))
+        scope (get-in body ["questions" "d0" "instructions" "scope"])
+        other-scopes (map #(get-in body ["questions" (str "d" %) "instructions" "scope"])
+                          (range 1 4))]
+    (is (= "reconciliation-jev/2" (:template-version request)))
+    (is (= 1 (count (jev/prepare-batches config decisions))))
+    (is (<= (count (.getBytes ^String (:body request) "UTF-8")) 49152))
+    (is (every? #(str/includes? scope %)
+                ["same competition, athlete and discipline" "identical performance"
+                 "strong, rebuttable prior" "same depth" "static apnea duration"
+                 "pool distance" "rare" "session" "day" "round" "attempt ID"
+                 "status" "penalty" "source semantics" "PDF date range" "specific unit day"
+                 "missing PDF row day" "shared upstream timing" "not independent corroboration"
+                 "unknown" "Invent no facts"]))
+    (is (every? #(not (str/includes? % "strong, rebuttable prior")) other-scopes))
+    (is (contains? (set (keys (get-in body ["questions" "d0" "criteria"]))) "unknown"))))
+
 (deftest independent-questions-batch-and-dependencies-wait
   (let [nine (mapv #(decision (str "d" %) :identity) (range 9))]
     (is (= [8 1] (mapv #(count (:decision-ids %)) (jev/prepare-batches config nine))))
