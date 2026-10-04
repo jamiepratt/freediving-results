@@ -688,3 +688,174 @@ def test_retained_aida_requires_packet_receipt_and_original_in_bundle(tmp_path):
     receipt.write_text(json.dumps({'body': {'path': 'missing.html'}}))
     with __import__('pytest').raises(ValueError, match='AIDA original HTML missing'):
         runner.required_aida_assets(manifest, {'aida-example'})
+
+
+def test_retained_cohort_cli_recovers_exact_missing_packet(tmp_path):
+    from test_aida_snapshot_observations import source_fixture
+    from scripts.aida_identity_replay import plan_replay
+    from scripts.aida_snapshot_observations import load_source_observations
+    import shutil
+
+    name, _ = source_fixture(tmp_path, '<div class="event-title--description">Synthetic Open</div>',
+                             'https://www.aidainternational.org/EventPage/4408',
+                             '<a href="/Athletes/Profile-123e4567-e89b-12d3-a456-426614174000">Synthetic Athlete</a>')
+    observations = load_source_observations(tmp_path, [name])['observations']
+    frozen = tmp_path / 'observations.json'
+    frozen.write_text(json.dumps(observations))
+    plan = tmp_path / 'aida-plan.json'
+    plan.write_text(json.dumps(plan_replay(observations,
+        expected_snapshot_sha256=json.loads((tmp_path / 'manifest.json').read_text())['snapshot_sha256'])))
+    recovered = tmp_path / 'recovered'
+    recovered.mkdir()
+    shutil.copy2(tmp_path / 'packet.json', recovered / 'packet.json')
+    shutil.copy2(tmp_path / 'receipt.json', recovered / 'receipt.json')
+    shutil.copytree(tmp_path / 'raw', recovered / 'raw')
+    (tmp_path / 'packet.json').unlink()
+    output = tmp_path / 'cohort.json'
+    result = subprocess.run([sys.executable, str(SCRIPT.parent / 'retained_aida_cohort.py'),
+                             str(tmp_path), str(frozen), str(plan), str(output),
+                             '--observations-sha256', sha(frozen), '--plan-sha256', sha(plan),
+                             '--recovered-packet', f'{name}={recovered / "packet.json"}'],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    counts = json.loads(output.read_text())['counts']
+    assert counts['source_rows'] == 1
+    assert counts['source_gaps'] == 0
+    stale = recovered / 'packet.json'
+    stale.write_bytes(stale.read_bytes() + b' ')
+    rejected = subprocess.run([sys.executable, str(SCRIPT.parent / 'retained_aida_cohort.py'),
+                               str(tmp_path), str(frozen), str(plan), str(output),
+                               '--observations-sha256', sha(frozen), '--plan-sha256', sha(plan),
+                               '--recovered-packet', f'{name}={stale}'],
+                              capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert 'AIDA packet hash mismatch' in rejected.stderr
+
+
+def test_retained_plan_recovery_requires_frozen_hash_and_safe_original(tmp_path):
+    from test_aida_snapshot_observations import source_fixture
+    import shutil
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('local_evidence_run', SCRIPT)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    name, _ = source_fixture(tmp_path, '', 'https://www.aidainternational.org/EventPage/4408')
+    manifest = json.loads((tmp_path / 'manifest.json').read_text())
+    recovered = tmp_path / 'recovered'
+    recovered.mkdir()
+    shutil.copy2(tmp_path / 'packet.json', recovered / 'packet.json')
+    shutil.copy2(tmp_path / 'receipt.json', recovered / 'receipt.json')
+    shutil.copytree(tmp_path / 'raw', recovered / 'raw')
+    (tmp_path / 'packet.json').unlink()
+    binding = {'source_name': name, 'path': str(recovered / 'packet.json'),
+               'sha256': sha(recovered / 'packet.json'),
+               'receipt_sha256': sha(recovered / 'receipt.json'),
+               'original_sha256': sha(recovered / 'raw' / 'source.html')}
+    assert name in runner.recovered_aida_assets(manifest, [binding], {name})
+    with __import__('pytest').raises(ValueError, match='frozen source'):
+        runner.recovered_aida_assets(manifest, [{**binding, 'sha256': '0' * 64}], {name})
+    receipt = json.loads((recovered / 'receipt.json').read_text())
+    receipt['body']['path'] = '../outside.html'
+    (recovered / 'receipt.json').write_text(json.dumps(receipt))
+    with __import__('pytest').raises(ValueError, match='unsafe recovered AIDA original path'):
+        runner.recovered_aida_assets(manifest, [{**binding,
+            'receipt_sha256': sha(recovered / 'receipt.json')}], {name})
+
+
+def test_retained_runner_cli_recovers_frozen_source_and_checks_staged_bytes(tmp_path):
+    from test_aida_snapshot_observations import source_fixture
+    from scripts.aida_identity_replay import plan_replay
+    from scripts.aida_snapshot_observations import load_source_observations
+    import shutil
+    import sqlite3
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    name, _ = source_fixture(source, '<div class="event-title--description">Synthetic Open</div>',
+                             'https://www.aidainternational.org/EventPage/4408',
+                             '<a href="/Athletes/Profile-123e4567-e89b-12d3-a456-426614174000">Synthetic Athlete</a>')
+    snapshot = tmp_path / 'snapshot'
+    built = subprocess.run([sys.executable, str(SCRIPT.parent / 'unified_evidence_snapshot.py'),
+                            'build', '--cutoff', '2026-10-03T00:00:00Z',
+                            '--input', f'{name}={source / "packet.json"}',
+                            '--output-dir', str(snapshot)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    manifest = json.loads((snapshot / 'manifest.json').read_text())
+    observations = load_source_observations(snapshot, [name])['observations']
+    (tmp_path / 'aida_observations').write_text(json.dumps(observations))
+    (tmp_path / 'aida_plan').write_text(json.dumps(plan_replay(
+        observations, expected_snapshot_sha256=manifest['snapshot_sha256'])))
+    recovered = tmp_path / 'recovered'
+    recovered.mkdir()
+    shutil.copy2(source / 'packet.json', recovered / 'packet.json')
+    shutil.copy2(source / 'receipt.json', recovered / 'receipt.json')
+    shutil.copytree(source / 'raw', recovered / 'raw')
+    (source / 'packet.json').unlink()
+    checked_names = {'schema': 'affiliate-name-input/v1',
+                     'snapshot': {'path': str(snapshot),
+                                  'manifest_sha256': sha(snapshot / 'manifest.json'),
+                                  'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                                  'cutoff': '2026-10-03T00:00:00Z'},
+                     'sources': [], 'assertions': [], 'gaps': [], 'roster': {}}
+    (tmp_path / 'name_evidence').write_text(json.dumps(checked_names))
+    (tmp_path / 'pg_export').write_text(
+        'job_id,ordinal,candidate_id,artifact_sha256,source_sha256,parser_version\n')
+    for role, value in [('pg_dump', 'synthetic dump'), ('ledger', '[]'),
+                        ('owner_corrections', '{}')]:
+        (tmp_path / role).write_text(value)
+    with sqlite3.connect(tmp_path / 'decision_store') as store:
+        store.execute('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        store.execute("INSERT INTO meta VALUES ('revision','1')")
+    roles = ('aida_plan', 'aida_observations', 'decision_store', 'name_evidence',
+             'pg_export', 'pg_dump', 'ledger', 'owner_corrections')
+    plan = {'schema': 'retained-aida-local-run-plan/v1', 'scope': 'AIDA source observations',
+            'snapshot': {'path': str(snapshot), 'manifest_sha256': sha(snapshot / 'manifest.json'),
+                         'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                         'snapshot_sha256': manifest['snapshot_sha256']},
+            'inputs': [{'name': role, 'path': str(tmp_path / role),
+                        'sha256': sha(tmp_path / role)} for role in roles],
+            'decision_revision': 1, 'owner_correction_revision': 0, 'ledger_revision': 0,
+            'recovered_packets': [{'source_name': name, 'path': str(recovered / 'packet.json'),
+                                   'sha256': sha(recovered / 'packet.json'),
+                                   'receipt_sha256': sha(recovered / 'receipt.json'),
+                                   'original_sha256': sha(recovered / 'raw/source.html')}]}
+    retained = tmp_path / 'retained-plan.json'
+    retained.write_text(json.dumps(plan))
+    target = tmp_path / 'retained-run'
+    command = [sys.executable, str(SCRIPT), 'retained', '--plan', str(retained),
+               '--run-dir', str(target)]
+    first = subprocess.run(command, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['reconciliation']['counts']['source_rows'] == 1
+    assert state['reconciliation']['counts']['source_gaps'] == 0
+    assert state['reconciliation']['provider_calls'] == 0
+    assert json.loads((target / 'cohort-bundle/manifest.json').read_text())[
+        'recovered_packets'][name]['packet_sha256'] == sha(recovered / 'packet.json')
+    second = subprocess.run(command, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    assert json.loads((target / 'state.json').read_text()) == state
+    staged = target / 'cohort-bundle/recovered-packets' / name / 'packet.json'
+    staged.write_bytes(b'tampered')
+    metrics = subprocess.run([sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)],
+                             capture_output=True, text=True)
+    assert metrics.returncode != 0
+    assert 'retained input changed' in metrics.stderr
+    attack = tmp_path / 'attack-run'
+    attack.mkdir(mode=0o700)
+    (attack / 'cohort-bundle').mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (attack / 'cohort-bundle/recovered-packets').symlink_to(outside, target_is_directory=True)
+    escaped = subprocess.run(command[:-1] + [str(attack)], capture_output=True, text=True)
+    assert escaped.returncode != 0
+    assert 'staging directory is a symlink' in escaped.stderr
+    assert list(outside.iterdir()) == []
+    unsafe_plan = tmp_path / 'unsafe-plan.json'
+    unsafe_plan.write_text(json.dumps({**plan, 'recovered_packets': [
+        {**plan['recovered_packets'][0], 'source_name': '..'}]}))
+    unsafe = subprocess.run([sys.executable, str(SCRIPT), 'retained', '--plan', str(unsafe_plan),
+                             '--run-dir', str(tmp_path / 'unsafe-run')],
+                            capture_output=True, text=True)
+    assert unsafe.returncode != 0
+    assert 'invalid recovered packet binding' in unsafe.stderr

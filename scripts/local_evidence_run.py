@@ -109,6 +109,22 @@ def checked_retained_plan(path):
     for item in inputs:
         if set(item) != {'name', 'path', 'sha256'} or not isinstance(item['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['sha256']):
             raise ValueError('invalid retained input binding')
+    recovered = plan.get('recovered_packets', [])
+    if not isinstance(recovered, list):
+        raise ValueError('invalid recovered packet bindings')
+    sources = []
+    for item in recovered:
+        if (not isinstance(item, dict) or set(item) !=
+                {'source_name', 'path', 'sha256', 'receipt_sha256', 'original_sha256'}
+                or not isinstance(item['source_name'], str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]+', item['source_name'])
+                or item['source_name'] in ('.', '..')
+                or not all(isinstance(item[key], str) and re.fullmatch(r'[0-9a-f]{64}', item[key])
+                           for key in ('sha256', 'receipt_sha256', 'original_sha256'))):
+            raise ValueError('invalid recovered packet binding')
+        sources.append(item['source_name'])
+    if len(sources) != len(set(sources)):
+        raise ValueError('duplicate recovered packet source')
     return plan
 
 
@@ -148,10 +164,73 @@ def required_aida_assets(manifest, source_names):
     return assets
 
 
-def retained_adapter(snapshot, observations, plan, output):
-    command([sys.executable, str(ROOT / 'retained_aida_cohort.py'),
+def retained_adapter(snapshot, observations, plan, output, recovered_packets=None):
+    argv = [sys.executable, str(ROOT / 'retained_aida_cohort.py'),
              str(snapshot), str(observations), str(plan), str(output),
-             '--observations-sha256', digest(observations), '--plan-sha256', digest(plan)])
+             '--observations-sha256', digest(observations), '--plan-sha256', digest(plan)]
+    for source, path in sorted((recovered_packets or {}).items()):
+        argv.extend(('--recovered-packet', f'{source}={path}'))
+    command(argv)
+
+
+def recovered_aida_assets(manifest, bindings, source_names):
+    """Check private recovery bytes against the frozen source and plan."""
+    assets = {}
+    for binding in bindings:
+        name = binding['source_name']
+        item = manifest.get('inputs', {}).get(name)
+        if name not in source_names or not item or item.get('source_schema') != 'aida-selected-html-packet/v1':
+            raise ValueError('unknown recovered AIDA source')
+        if item['sha256'] != binding['sha256'] or Path(item['path']).is_file():
+            raise ValueError('recovered AIDA packet differs from frozen source')
+        packet = verified_file(binding['path'], binding['sha256'])
+        if packet.name != 'packet.json':
+            raise ValueError('unsupported recovered AIDA packet path')
+        receipt = verified_file(packet.with_name('receipt.json'), binding['receipt_sha256'])
+        body = json.loads(receipt.read_text()).get('body') or {}
+        relative = Path(body.get('path', ''))
+        if (not body.get('path') or relative.is_absolute() or '..' in relative.parts
+                or str(relative) in ('.', '')):
+            raise ValueError('unsafe recovered AIDA original path')
+        original = verified_file(receipt.parent / relative, binding['original_sha256'])
+        if original.resolve().is_relative_to(receipt.parent.resolve()) is False:
+            raise ValueError('unsafe recovered AIDA original path')
+        assets[name] = (packet, receipt, original, relative, binding)
+    return assets
+
+
+def private_stage_directory(path):
+    if path.is_symlink():
+        raise ValueError('recovered AIDA staging directory is a symlink')
+    path.mkdir(mode=0o700, parents=False, exist_ok=True)
+    if not path.is_dir() or path.is_symlink():
+        raise ValueError('invalid recovered AIDA staging directory')
+
+
+def verified_staged_recovery(bundle, recovered):
+    base = bundle / 'recovered-packets'
+    if not recovered:
+        return
+    if bundle.is_symlink() or base.is_symlink() or not base.is_dir():
+        raise ValueError('invalid recovered AIDA staging directory')
+    for name, binding in recovered.items():
+        if (name in ('.', '..') or not re.fullmatch(r'[A-Za-z0-9_.-]+', name)
+                or not isinstance(binding, dict)):
+            raise ValueError('invalid recovered AIDA staging binding')
+        directory = base / name
+        relative = Path(binding['original_path'])
+        if (directory.is_symlink() or not directory.is_dir() or relative.is_absolute()
+                or '..' in relative.parts or str(relative) in ('.', '')):
+            raise ValueError('invalid recovered AIDA staging path')
+        parent = directory
+        for part in relative.parts[:-1]:
+            parent = parent / part
+            if parent.is_symlink() or not parent.is_dir():
+                raise ValueError('invalid recovered AIDA staging path')
+        for path, key in ((directory / 'packet.json', 'packet_sha256'),
+                          (directory / 'receipt.json', 'receipt_sha256'),
+                          (directory / relative, 'original_sha256')):
+            verified_file(path, binding[key])
 
 
 def apply_retained_canonical(run_dir, state, *, apply=None):
@@ -211,7 +290,8 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
         raise ValueError('invalid frozen AIDA observations')
     source_names = {row['source_name'] for row in frozen_observations}
     supplied_paths = {Path(item['path']).resolve() for item in plan['inputs']}
-    if not required_aida_assets(manifest, source_names) <= supplied_paths:
+    recovered_assets = recovered_aida_assets(manifest, plan.get('recovered_packets', []), source_names)
+    if not required_aida_assets(manifest, source_names - set(recovered_assets)) <= supplied_paths:
         raise ValueError('AIDA replay source bytes absent from retained bundle')
     store_path = next(Path(item['path']) for item in plan['inputs'] if item['name'] == 'decision_store')
     with store_path.open('rb') as store_stream:
@@ -262,6 +342,8 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
         atomic_json(state_path, state)
     staged_snapshot = run_dir / 'snapshot'
     bundle = run_dir / 'cohort-bundle'
+    if bundle.is_symlink():
+        raise ValueError('retained cohort bundle is a symlink')
     bundle.mkdir(mode=0o700, exist_ok=True)
     staged_snapshot.mkdir(mode=0o700, exist_ok=True)
     for name, expected in snapshot_files.items():
@@ -278,15 +360,42 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
             target.chmod(0o600)
         verified_file(target, item['sha256'])
         staged[item['name']] = target
+    staged_recovered = {}
+    if recovered_assets:
+        private_stage_directory(bundle / 'recovered-packets')
+    for name, (packet, receipt, original, relative, binding) in recovered_assets.items():
+        recovery_dir = bundle / 'recovered-packets' / name
+        private_stage_directory(recovery_dir)
+        for source_path, target, expected in (
+                (packet, recovery_dir / 'packet.json', binding['sha256']),
+                (receipt, recovery_dir / 'receipt.json', binding['receipt_sha256']),
+                (original, recovery_dir / relative, binding['original_sha256'])):
+            parent = recovery_dir
+            for part in target.relative_to(recovery_dir).parts[:-1]:
+                parent = parent / part
+                private_stage_directory(parent)
+            if target.is_symlink():
+                raise ValueError('recovered AIDA staging file is a symlink')
+            if not target.exists():
+                shutil.copyfile(source_path, target)
+                target.chmod(0o600)
+            verified_file(target, expected)
+        staged_recovered[name] = recovery_dir / 'packet.json'
     bundle_manifest = {'schema': 'retained-aida-cohort-bundle/v1',
                        'snapshot': {**snapshot_files, 'snapshot_sha256': manifest['snapshot_sha256']},
-                       'inputs': {item['name']: item['sha256'] for item in plan['inputs']}}
+                       'inputs': {item['name']: item['sha256'] for item in plan['inputs']},
+                       'recovered_packets': {name: {'packet_sha256': binding['sha256'],
+                                                   'receipt_sha256': binding['receipt_sha256'],
+                                                   'original_sha256': binding['original_sha256'],
+                                                   'original_path': str(relative)}
+                                             for name, (_, _, _, relative, binding) in recovered_assets.items()}}
     bundle_path = bundle / 'manifest.json'
     if bundle_path.exists():
         if json.loads(bundle_path.read_text()) != bundle_manifest:
             raise ValueError('retained cohort bundle changed')
     else:
         atomic_json(bundle_path, bundle_manifest)
+    verified_staged_recovery(bundle, bundle_manifest['recovered_packets'])
     output = run_dir / 'reconciliation' / 'aida-cohort.json'
     if state['reconciliation'].get('status') == 'complete':
         verified_file(output, state['reconciliation']['export_sha256'])
@@ -300,7 +409,11 @@ def run_retained(plan_path, run_dir, *, adapter=None, canonical_apply=False, can
                                'owner_correction_revision': plan['owner_correction_revision']}
     atomic_json(state_path, state)
     try:
-        (adapter or retained_adapter)(staged_snapshot, staged['aida_observations'], staged['aida_plan'], output)
+        if adapter:
+            adapter(staged_snapshot, staged['aida_observations'], staged['aida_plan'], output)
+        else:
+            retained_adapter(staged_snapshot, staged['aida_observations'],
+                             staged['aida_plan'], output, staged_recovered)
         exported = json.loads(output.read_text())
         expected_binding = {'snapshot_sha256': manifest['snapshot_sha256'],
                             'observations_sha256': digest(staged['aida_observations']),
@@ -586,6 +699,8 @@ def main():
                         digest(args.run_dir / 'reconciliation' / 'aida-cohort.json')) or not (
                         receipt.get('source_bundle_sha256') == digest(args.run_dir / 'cohort-bundle' / 'manifest.json')):
                     raise ValueError('metrics checkpoint binding changed')
+                bundle = args.run_dir / 'cohort-bundle'
+                verified_staged_recovery(bundle, json.loads((bundle / 'manifest.json').read_text()).get('recovered_packets', {}))
                 canonical = state.get('canonical')
                 if canonical and (canonical.get('status') != 'complete' or
                                   canonical.get('cohort_sha256') != receipt['export_sha256'] or

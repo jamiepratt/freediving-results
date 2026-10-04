@@ -125,11 +125,19 @@ def main(argv=None):
     parser.add_argument('--observations-sha256', required=True)
     parser.add_argument('--plan-sha256', required=True)
     parser.add_argument('--prior-events', type=Path)
+    parser.add_argument('--recovered-packet', action='append', default=[], metavar='SOURCE=PATH')
     args = parser.parse_args(argv)
     frozen = _checked_json(args.observations_json, args.observations_sha256)
     plan = _checked_json(args.plan_json, args.plan_sha256)
     names = sorted({row['source_name'] for row in frozen})
-    loaded = load_source_observations(args.snapshot_dir, names)
+    recovered = {}
+    for binding in args.recovered_packet:
+        source, separator, path = binding.partition('=')
+        _need(separator and source and path and source not in recovered,
+              'invalid recovered packet binding')
+        recovered[source] = Path(path)
+    loaded = load_source_observations(args.snapshot_dir, names,
+                                      recovered_packet_paths=recovered)
     prior = json.loads(args.prior_events.read_text()) if args.prior_events else ()
     result = build_cohort(loaded, frozen, plan,
                           observations_sha256=args.observations_sha256,
