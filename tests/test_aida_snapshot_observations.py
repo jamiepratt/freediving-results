@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -68,6 +69,83 @@ def source_fixture(root, heading, url):
 
 
 class AidaSnapshotObservationsTest(unittest.TestCase):
+    def test_missing_historical_packet_can_be_recovered_at_a_new_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, packet = source_fixture(root, '<div class="event-title--description">Synthetic Depth Open</div>',
+                                          'https://www.aidainternational.org/EventPage/4408')
+            original_packet = root / 'packet.json'
+            original_hash = hashlib.sha256(original_packet.read_bytes()).hexdigest()
+            frozen_manifest = (root / 'manifest.json').read_bytes()
+            recovered = root / 'recovered'
+            recovered.mkdir()
+            shutil.copytree(root / 'raw', recovered / 'raw')
+            shutil.copy2(root / 'receipt.json', recovered / 'receipt.json')
+            object_path = root / 'historical-packet-object'
+            shutil.copy2(original_packet, object_path)
+            (recovered / 'packet.json').symlink_to(object_path)
+            original_packet.unlink()
+
+            self.assertEqual(1, len(load_source_observations(root, [name])['gaps']))
+            result = load_source_observations(
+                root, [name], recovered_packet_paths={name: recovered / 'packet.json'})
+            self.assertEqual({'supported': 1, 'source_gaps': 0,
+                              'confirmed_distinct_attempts': None,
+                              'approved_athletes': None}, result['summary'])
+            self.assertEqual(packet['positions'][0]['position'], result['observations'][0]['citation'])
+            self.assertEqual(original_hash, result['observations'][0]['packet_sha256'])
+            reference = result['observations'][0]['source_observation_ref']
+            with self.assertRaisesRegex(ValueError, 'source observation revision differs'):
+                load_verified_bindings(
+                    root, [{'evidence_id': 'recovered-row', 'source_observation_ref': reference}],
+                    [reference])
+            binding = load_verified_bindings(
+                root, [{'evidence_id': 'recovered-row', 'source_observation_ref': reference}],
+                [reference], recovered_packet_paths={name: recovered / 'packet.json'})
+            self.assertEqual(reference,
+                             binding['evidence_bindings']['recovered-row']['observation-revision'])
+            self.assertEqual(frozen_manifest, (root / 'manifest.json').read_bytes())
+
+    def test_recovered_packet_rejects_provenance_drift_and_ambiguous_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, _ = source_fixture(root, '',
+                                     'https://www.aidainternational.org/EventPage/4408')
+            recovered = root / 'recovered'
+            recovered.mkdir()
+            shutil.copytree(root / 'raw', recovered / 'raw')
+            shutil.copy2(root / 'receipt.json', recovered / 'receipt.json')
+            shutil.copy2(root / 'packet.json', recovered / 'packet.json')
+            with self.assertRaisesRegex(ValueError, 'already present'):
+                load_source_observations(root, [name],
+                                         recovered_packet_paths={name: recovered / 'packet.json'})
+            (root / 'packet.json').unlink()
+            with self.assertRaisesRegex(ValueError, 'unknown AIDA recovered packet source'):
+                load_source_observations(root, [name],
+                                         recovered_packet_paths={'other': recovered / 'packet.json'})
+            with self.assertRaisesRegex(ValueError, 'duplicate AIDA recovered packet path'):
+                load_source_observations(root, [name, 'other'],
+                                         recovered_packet_paths={name: recovered / 'packet.json',
+                                                                 'other': recovered / 'packet.json'})
+            alias = root / 'packet-alias.json'
+            alias.symlink_to(recovered / 'packet.json')
+            with self.assertRaisesRegex(ValueError, 'duplicate AIDA recovered packet path'):
+                load_source_observations(root, [name, 'other'],
+                                         recovered_packet_paths={name: recovered / 'packet.json',
+                                                                 'other': alias})
+            receipt_path = recovered / 'receipt.json'
+            receipt = json.loads(receipt_path.read_text())
+            receipt['response_time'] = '2026-10-04T10:00:00Z'
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, 'differs from source replay'):
+                load_source_observations(root, [name],
+                                         recovered_packet_paths={name: recovered / 'packet.json'})
+            packet_path = recovered / 'packet.json'
+            packet_path.write_bytes(packet_path.read_bytes() + b' ')
+            with self.assertRaisesRegex(ValueError, 'packet hash mismatch'):
+                load_source_observations(root, [name],
+                                         recovered_packet_paths={name: packet_path})
+
     def test_event_results_heading_has_page_citation_and_generic_title_is_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
