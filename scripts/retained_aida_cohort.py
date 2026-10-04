@@ -38,7 +38,7 @@ def _encoded(value):
 
 
 def build_cohort(loaded, frozen_observations, frozen_plan, *, observations_sha256,
-                 plan_sha256, prior_events=()):
+                 plan_sha256, prior_events=(), canonical_history=None):
     """Use only rows reverified from original bytes; missing packet rows stay gaps."""
     snapshot = loaded.get('snapshot_sha256')
     _need(isinstance(snapshot, str) and SHA.fullmatch(snapshot), 'verified snapshot required')
@@ -70,6 +70,26 @@ def build_cohort(loaded, frozen_observations, frozen_plan, *, observations_sha25
     _need(set(verified) | set(missing) == set(frozen),
           'source replay does not cover frozen AIDA cohort')
     _need(verified, 'no currently reverified AIDA rows')
+    binding = {'snapshot_sha256': snapshot,
+               'observations_sha256': observations_sha256,
+               'plan_sha256': plan_sha256}
+    if canonical_history is not None:
+        _need(not prior_events, 'ambiguous prior AIDA history')
+        _need(isinstance(canonical_history, dict)
+              and canonical_history.get('schema') == 'retained-aida-canonical-history/v1'
+              and canonical_history.get('snapshot_sha256') == snapshot,
+              'canonical AIDA history binding mismatch')
+        revision = canonical_history.get('revision')
+        events = canonical_history.get('events')
+        _need(type(revision) is int and revision >= 0
+              and isinstance(events, list) and len(events) == revision
+              and all(isinstance(event, dict) and isinstance(event.get('id'), str)
+                      and event['id'] for event in events)
+              and len({event['id'] for event in events}) == revision,
+              'invalid canonical AIDA history')
+        prior_events = events
+        binding['identity_revision'] = revision
+        binding['history_event_ids'] = [event['id'] for event in events]
     replay = plan_replay(list(verified.values()), expected_snapshot_sha256=snapshot,
                          prior_events=prior_events)
     registration_rows = []
@@ -95,9 +115,7 @@ def build_cohort(loaded, frozen_observations, frozen_plan, *, observations_sha25
                        'source_binding': {'snapshot_sha256': snapshot,
                                           'refs': edge['refs']}})
     return {'schema': 'retained-aida-cohort/v1',
-            'binding': {'snapshot_sha256': snapshot,
-                        'observations_sha256': observations_sha256,
-                        'plan_sha256': plan_sha256},
+            'binding': binding,
             'registration': {'snapshot_sha256': snapshot,
                              'rows': registration_rows, 'verified_refs': refs},
             'events': events,
@@ -125,6 +143,7 @@ def main(argv=None):
     parser.add_argument('--observations-sha256', required=True)
     parser.add_argument('--plan-sha256', required=True)
     parser.add_argument('--prior-events', type=Path)
+    parser.add_argument('--canonical-history', type=Path)
     parser.add_argument('--recovered-packet', action='append', default=[], metavar='SOURCE=PATH')
     args = parser.parse_args(argv)
     frozen = _checked_json(args.observations_json, args.observations_sha256)
@@ -138,10 +157,14 @@ def main(argv=None):
         recovered[source] = Path(path)
     loaded = load_source_observations(args.snapshot_dir, names,
                                       recovered_packet_paths=recovered)
+    _need(not (args.prior_events and args.canonical_history),
+          'ambiguous prior AIDA history')
     prior = json.loads(args.prior_events.read_text()) if args.prior_events else ()
+    history = json.loads(args.canonical_history.read_text()) if args.canonical_history else None
     result = build_cohort(loaded, frozen, plan,
                           observations_sha256=args.observations_sha256,
-                          plan_sha256=args.plan_sha256, prior_events=prior)
+                          plan_sha256=args.plan_sha256, prior_events=prior,
+                          canonical_history=history)
     destination = args.output_json.resolve()
     _need(not destination.is_relative_to(Path(__file__).resolve().parents[1]),
           'private cohort output must be outside repository')

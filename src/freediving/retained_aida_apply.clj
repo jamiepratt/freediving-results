@@ -2,10 +2,13 @@
   "Apply a verified private AIDA cohort through the canonical source identity ledger."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.string :as str]
             [freediving.athlete-identity :as identity])
-  (:import [java.nio.file Files Paths]
+  (:import [java.nio.file Files Paths StandardCopyOption]
+           [java.nio.file.attribute PosixFilePermissions]
            [java.security MessageDigest]
+           [java.sql DriverManager]
            [java.util HexFormat]))
 
 (defn- fail! [message]
@@ -65,6 +68,51 @@
    :global-distinctness "unknown"
    :provider-calls 0})
 
+(defn canonical-history
+  "Export only the canonical event facts needed to plan a private incremental cohort."
+  [reviewer-url expected-snapshot]
+  (when-not (re-matches #"[0-9a-f]{64}" (or expected-snapshot ""))
+    (fail! "Expected source snapshot SHA256 required"))
+  (let [active (with-open [connection (DriverManager/getConnection reviewer-url)
+                           statement (.prepareStatement connection
+                                                        "SELECT snapshot_sha256 FROM freediving.source_identity_snapshot WHERE singleton=true")
+                           result (.executeQuery statement)]
+                 (when (.next result) (.getString result 1)))
+        events (identity/private-history reviewer-url)]
+    (when-not (or (= active expected-snapshot)
+                  (and (nil? active) (empty? events)))
+      (fail! "Canonical source snapshot differs from expected"))
+    {:schema "retained-aida-canonical-history/v1"
+     :revision (count events)
+     :snapshot_sha256 expected-snapshot
+     :events (mapv (fn [event]
+                     (cond-> {:id (:id event) :action (name (:action event))
+                              :actor_kind (name (:actor-kind event))}
+                       (:pair event) (assoc :pair (:pair event))
+                       (:event-id event) (assoc :event_id (:event-id event))))
+                   events)}))
+
+(defn- bound-history [reviewer-url binding events]
+  (let [revision (field binding :identity_revision)
+        ids (field binding :history_event_ids)
+        history (identity/private-history reviewer-url)
+        current-ids (mapv :id history)
+        proposed-ids (mapv #(field % :id) events)
+        suffix (subvec current-ids (min (count current-ids) (if (integer? revision) revision 0)))]
+    (when-not (and (integer? revision) (<= 0 revision)
+                   (vector? ids) (= revision (count ids))
+                   (= ids (subvec current-ids 0 (min revision (count current-ids))))
+                   (<= revision (count current-ids))
+                   (<= (count suffix) (count proposed-ids))
+                   (= suffix (subvec proposed-ids 0 (count suffix)))
+                   (empty? (set/intersection (set ids) (set proposed-ids))))
+      (fail! "Stale retained AIDA canonical history"))
+    (doseq [[index prior] (map-indexed vector (subvec history revision))]
+      (let [request (source-event (nth events index) (+ revision index))]
+        (when-not (= request (:request prior))
+          (fail! "Conflicting retained AIDA event replay"))))
+    (count suffix)))
+
 (defn apply-cohort!
   "Register exact refs and resume deterministic edges. Existing identical events are unchanged."
   [reviewer-url app-url cohort]
@@ -76,13 +124,21 @@
                            (field registration :verified_refs)))
         registration {:snapshot-sha256 (field registration :snapshot_sha256)
                       :rows rows :verified-refs refs}
-        events (field cohort :events)]
+        events (field cohort :events)
+        binding (field cohort :binding)
+        bound? (or (some? (field binding :identity_revision))
+                   (some? (field binding :history_event_ids)))]
     (when-not (and (seq rows) (vector? events)
                    (= (set (map :observation-id rows)) (set (keys refs)))
                    (= (count events) (count (set (map #(field % :id) events)))))
       (fail! "Incomplete retained AIDA registration or duplicate events"))
+    (when bound? (bound-history reviewer-url binding events))
     (identity/register-source-observations! reviewer-url registration)
-    (doseq [event events]
+    (doseq [[index event] (map-indexed vector events)]
+      (when bound?
+        (let [applied (bound-history reviewer-url binding events)]
+          (when-not (<= index applied)
+            (fail! "Stale retained AIDA canonical history"))))
       (let [history (identity/private-history reviewer-url)
             existing (some #(when (= (field event :id) (:id %)) %) history)
             request (source-event event (count history))]
@@ -91,7 +147,16 @@
                        (assoc request :base-revision (get-in existing [:request :base-revision])))
             (fail! "Conflicting retained AIDA event replay"))
           (identity/record-source-event! app-url request))))
-    (receipt reviewer-url (identity/private-canonical-view reviewer-url))))
+    (when bound?
+      (let [applied (bound-history reviewer-url binding events)]
+        (when-not (= applied (count events))
+          (fail! "Incomplete retained AIDA canonical replay"))))
+    (let [result (receipt reviewer-url (identity/private-canonical-view reviewer-url))]
+      (when (and bound?
+                 (not= (:identity-revision result)
+                       (+ (field binding :identity_revision) (count events))))
+        (fail! "Stale retained AIDA canonical history"))
+      result)))
 
 (defn reverse-source-event!
   "Persist an explicit human reversal; its negative pair blocks later automatic relinks."
@@ -112,9 +177,20 @@
       (receipt reviewer-url (identity/private-canonical-view reviewer-url)))))
 
 (defn- write-receipt! [path value]
-  (let [target (Paths/get path (make-array String 0))]
-    (when-let [parent (.getParent target)] (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0)))
-    (spit path (str (json/write-str value) "\n"))
+  (let [target (Paths/get path (make-array String 0))
+        parent (.getParent (.toAbsolutePath target))]
+    (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0))
+    (let [temporary (Files/createTempFile
+                     parent ".retained-aida-" ".json"
+                     (into-array java.nio.file.attribute.FileAttribute
+                                 [(PosixFilePermissions/asFileAttribute
+                                   (PosixFilePermissions/fromString "rw-------"))]))]
+      (try
+        (spit (.toFile temporary) (str (json/write-str value) "\n"))
+        (Files/move temporary target
+                    (into-array StandardCopyOption
+                                [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
+        (finally (Files/deleteIfExists temporary))))
     value))
 
 (defn -main [& args]
@@ -133,4 +209,7 @@
       "reverse" (let [[_ event-id reason receipt-path] args]
                   (when-not (= 4 (count args)) (fail! "Usage: reverse EVENT_ID REASON RECEIPT_JSON"))
                   (write-receipt! receipt-path (reverse-source-event! reviewer event-id reason)))
-      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON"))))
+      "history" (let [[_ expected path] args]
+                  (when-not (= 3 (count args)) (fail! "Usage: history EXPECTED_SNAPSHOT_SHA HISTORY_JSON"))
+                  (write-receipt! path (canonical-history reviewer expected)))
+      (fail! "Usage: apply COHORT_JSON SHA256 RECEIPT_JSON | reverse EVENT_ID REASON RECEIPT_JSON | history EXPECTED_SNAPSHOT_SHA HISTORY_JSON"))))
