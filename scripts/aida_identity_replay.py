@@ -9,6 +9,7 @@ import re
 
 
 SHA = re.compile(r'[0-9a-f]{64}\Z')
+PROFILE = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z')
 ADAPTER = 'aida-snapshot-observation/3'
 PERSON_KEYS = ('scope', 'id', 'id_kind')
 
@@ -42,8 +43,8 @@ def _person(observation, snapshot):
           'missing AIDA publisher person')
     person = tuple(source_person.get(key) for key in PERSON_KEYS)
     _need(person[0] == 'AIDA' and person[2] == 'person'
-          and isinstance(person[1], str) and 0 < len(person[1]) <= 128
-          and all(cited_person.get(key) == value for key, value in zip(PERSON_KEYS, person)),
+          and isinstance(person[1], str) and PROFILE.fullmatch(person[1])
+          and source_person == cited_person,
           'conflicting AIDA publisher person')
     _need(isinstance(fields.get('name'), str) and bool(fields['name'].strip()),
           'missing AIDA printed name')
