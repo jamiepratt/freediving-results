@@ -223,6 +223,22 @@ snapshot and bundle manifest before each write. Set `CF_ACCESS_CLIENT_ID`,
 `CF_ACCESS_CLIENT_SECRET`, and `OWNER_EVIDENCE_STATUS_TOKEN` in the environment
 for that read and the final status commit.
 
+From a clean checkout equal to merged `origin/main`, provision the empty drill
+database before either stage:
+
+```sh
+bash deploy/provision_aida_drill.sh aida_drill_OPERATOR_RUN
+```
+
+The root-only helper stages the merged release on `bridge-vps`, checks the
+dedicated canonical and public bindings, then creates a `template0` database
+owned by `freediving_migrator`. It revokes PUBLIC database access and keeps an
+exact root-private intent in `/var/backups/freediving/aida-drill`. A retry
+accepts only that marked, still-empty database with matching config, owner,
+and private CONNECT ACL. Use its name for `FREEDIVING_PG_DRILL_DATABASE`.
+The manual apply fills it during the restore drill, so do not rerun the
+provisioner after that restore.
+
 When the active owner store lacks source-derived AIDA refs, first run the
 `rebind` stage with its current owner revision. It verifies every original and
 recovered packet, completes SQLite and PostgreSQL backup and restore drills,
