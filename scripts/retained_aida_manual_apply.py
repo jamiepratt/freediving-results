@@ -62,6 +62,8 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
     expected_revision = expected_owner.get('store_revision', owner['store_revision'])
     expected_binding = expected_owner.get('binding_revision', owner['binding_revision'])
     count = len(proposals)
+    stores.verify_status_application_expectation(len(cohort['events']),
+                                                 expected_revision + count, count)
     need(owner['snapshot_sha256'] == preflight['snapshot_sha256']
          and owner['binding_revision'] == expected_binding
          and ((owner['store_revision'] == expected_revision
@@ -72,6 +74,8 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
                   and owner['proposal_count'] == count
                   and stores.verify_owner(envelope))),
          'owner revision, human action, or proposal state changed')
+    stores.verify_status_retry_state(target, owner, cohort,
+                                     expected_revision + count, count)
     phase = {'schema': 'retained-aida-manual-apply-phase/v1', 'pins': pins,
              'snapshot_sha256': preflight['snapshot_sha256']}
     receipt(directory, 'phase-inputs.json', phase | {'phase': 'inputs_verified'})
@@ -124,7 +128,8 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
 class HostStores:
     def __init__(self, owner_db, snapshot_dir, recovered, snapshot, directory, run_dir,
                  unresolved_exclusions, isolated_rehearsal=False, bundle_sha256=None,
-                 active_binding_path=None, active_binding_sha256=None):
+                 active_binding_path=None, active_binding_sha256=None,
+                 status_from_current=False):
         self.owner_db = Path(owner_db)
         self.snapshot_dir = Path(snapshot_dir)
         self.recovered = recovered
@@ -136,6 +141,8 @@ class HostStores:
         self.bundle_sha256 = bundle_sha256
         self.active_binding_path = active_binding_path
         self.active_binding_sha256 = active_binding_sha256
+        self.status_from_current = status_from_current
+        self.status_pin = None
 
     def verify_active(self):
         need(isinstance(self.bundle_sha256, str) and SHA.fullmatch(self.bundle_sha256),
@@ -145,7 +152,8 @@ class HostStores:
                                              self.active_binding_sha256)
         else:
             sys.path.insert(0, str(REPO / 'scripts'))
-            from private_status_sync import STATUS_URL, _NoRedirect, _request
+            from private_status_sync import (STATUS_URL, _NoRedirect, _request,
+                                             _active_provenance, assert_status_pin)
             from urllib.request import build_opener
             credentials = [os.getenv('CF_ACCESS_CLIENT_ID'),
                            os.getenv('CF_ACCESS_CLIENT_SECRET'),
@@ -153,11 +161,43 @@ class HostStores:
             need(all(credentials), 'private active status credentials missing')
             current = _request(build_opener(_NoRedirect()), 'GET', STATUS_URL,
                                *credentials)
+            if self.status_from_current:
+                if self.status_pin is None:
+                    self.status_pin = _active_provenance(current, self.snapshot,
+                                                          self.bundle_sha256)
+                else:
+                    assert_status_pin(self.status_pin, current)
             active = current.get('remote', {}).get('active')
         need(isinstance(active, dict)
              and active.get('snapshot_sha256') == self.snapshot
              and active.get('bundle_manifest_sha256') == self.bundle_sha256,
              'active snapshot or bundle binding changed')
+
+    def verify_status_application_expectation(self, canonical_revision,
+                                              owner_revision, pending_count):
+        if not self.status_from_current or self.status_pin['schema'] != 'private-presentation-status/v3':
+            return
+        application = self.status_pin.get('application', {})
+        expected = {'snapshot_sha256': self.snapshot,
+                    'canonical_revision': canonical_revision,
+                    'owner_store_revision': owner_revision,
+                    'pending_proposals': pending_count,
+                    'unresolved_exclusions': self.unresolved_exclusions,
+                    'provider_calls_recorded': 0,
+                    'publication_status': 'private'}
+        need(all(application.get(key) == value for key, value in expected.items()),
+             'existing private application differs')
+
+    def verify_status_retry_state(self, target, owner, cohort,
+                                  owner_revision, pending_count):
+        if not self.status_from_current or self.status_pin['schema'] != 'private-presentation-status/v3':
+            return
+        need(target['revision'] == len(cohort['events'])
+             and target['source_rows'] == cohort['registration']['rows']
+             and owner['store_revision'] == owner_revision
+             and owner['proposal_count'] == pending_count
+             and owner['human_event_count'] == pending_count,
+             'existing private application requires completed stores')
 
     def _clojure(self, command, *args):
         need(os.getenv('FREEDIVING_REVIEW_URL'), 'FREEDIVING_REVIEW_URL required')
@@ -324,7 +364,7 @@ class HostStores:
         if self.isolated_rehearsal:
             return {'revision': None, 'status': 'isolated_rehearsal'}
         sys.path.insert(0, str(REPO / 'scripts'))
-        from private_status_sync import sync_application_status
+        from private_status_sync import sync_application_status, sync_application_from_pin
         application = {'snapshot_sha256': self.snapshot,
                        'canonical_revision': target['revision'],
                        'canonical_readback_sha256': self.canonical_readback_digest(target),
@@ -337,6 +377,8 @@ class HostStores:
                        os.getenv('CF_ACCESS_CLIENT_SECRET'),
                        os.getenv('OWNER_EVIDENCE_STATUS_TOKEN')]
         need(all(credentials), 'private status credentials missing')
+        if self.status_from_current:
+            return sync_application_from_pin(self.status_pin, application, *credentials)
         return sync_application_status(self.run_dir, application, *credentials)
 
 
@@ -475,14 +517,16 @@ def main(argv=None):
     parser.add_argument('--snapshot-dir', type=Path, required=True)
     parser.add_argument('--recovered-packet', action='append', default=[])
     parser.add_argument('--phase-dir', type=Path, required=True)
-    parser.add_argument('--run-dir', type=Path)
+    status_source = parser.add_mutually_exclusive_group()
+    status_source.add_argument('--run-dir', type=Path)
+    status_source.add_argument('--status-from-current', action='store_true')
     parser.add_argument('--isolated-rehearsal', action='store_true')
     parser.add_argument('--bundle-sha256', required=True)
     parser.add_argument('--active-binding', type=Path)
     parser.add_argument('--active-binding-sha256')
     args = parser.parse_args(argv)
-    need(args.isolated_rehearsal or args.run_dir is not None,
-         'private status run directory required')
+    need(args.isolated_rehearsal or args.run_dir is not None or args.status_from_current,
+         'private status provenance required')
     if args.isolated_rehearsal:
         need(os.getenv('FREEDIVING_PG_ISOLATED') == '1'
              and os.getenv('PGDATABASE', '').startswith('aida_rehearsal_')
@@ -543,7 +587,7 @@ def main(argv=None):
                         preflight['snapshot_sha256'], directory, args.run_dir,
                         envelope['counts']['unresolved'], args.isolated_rehearsal,
                         args.bundle_sha256, args.active_binding,
-                        args.active_binding_sha256)
+                        args.active_binding_sha256, args.status_from_current)
     result = run_manual_apply(stores, preflight, envelope, pins, directory)
     print(json.dumps(result, sort_keys=True))
     return 0

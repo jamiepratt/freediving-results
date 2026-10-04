@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.retained_aida_manual_apply import HostStores, run_manual_apply
 
@@ -36,6 +37,12 @@ class SyntheticStores:
         self.active_checks += 1
         if not self.active or self.active_checks == self.expire_active_on_check:
             raise ValueError('active snapshot binding changed')
+
+    def verify_status_application_expectation(self, *_):
+        pass
+
+    def verify_status_retry_state(self, *_):
+        pass
 
     def target_state(self):
         return copy.deepcopy(self.target)
@@ -193,6 +200,62 @@ class ManualApplyTest(unittest.TestCase):
                                     'bundle_manifest_sha256': 'c' * 64}))
         with self.assertRaisesRegex(ValueError, 'input file changed'):
             host.verify_active()
+
+    def test_live_status_provenance_blocks_changed_revision_before_write(self):
+        snap = self.stores.snapshot
+        active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+        current = {'schema': 'private-presentation-status/v1', 'revision': 1,
+                   'run_id': 'completed-run',
+                   'local': {'snapshot_sha256': snap,
+                             'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+                   'remote': {'status': 'active', 'pending': None,
+                              'failed': None, 'active': active}}
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          snap, self.directory, None, 0, False, 'b' * 64,
+                          status_from_current=True)
+        env = {'CF_ACCESS_CLIENT_ID': 'id', 'CF_ACCESS_CLIENT_SECRET': 'secret',
+               'OWNER_EVIDENCE_STATUS_TOKEN': 'token'}
+        with patch.dict('os.environ', env), patch('private_status_sync._request',
+              side_effect=[current, {**current, 'revision': 2}]):
+            host.verify_active()
+            with self.assertRaisesRegex(RuntimeError, 'revision changed'):
+                host.verify_active()
+
+    def test_existing_v3_must_match_expected_apply_before_backup(self):
+        snap = self.stores.snapshot
+        active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
+        current = {'schema': 'private-presentation-status/v3', 'revision': 2,
+                   'run_id': 'completed-run',
+                   'local': {'snapshot_sha256': snap,
+                             'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+                   'remote': {'status': 'active', 'pending': None,
+                              'failed': None, 'active': active},
+                   'application': {'snapshot_sha256': snap,
+                                   'canonical_revision': 999,
+                                   'owner_store_revision': 2,
+                                   'pending_proposals': 1,
+                                   'unresolved_exclusions': 0,
+                                   'provider_calls_recorded': 0,
+                                   'publication_status': 'private'}}
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          snap, self.directory, None, 0, False, 'b' * 64,
+                          status_from_current=True)
+        env = {'CF_ACCESS_CLIENT_ID': 'id', 'CF_ACCESS_CLIENT_SECRET': 'secret',
+               'OWNER_EVIDENCE_STATUS_TOKEN': 'token'}
+        with patch.dict('os.environ', env), patch('private_status_sync._request',
+              return_value=current):
+            host.verify_active()
+            with self.assertRaisesRegex(ValueError, 'existing private application differs'):
+                host.verify_status_application_expectation(2, 2, 1)
+
+    def test_existing_v3_cannot_authorize_fresh_canonical_or_owner_writes(self):
+        host = HostStores(self.directory / 'owner.sqlite', self.directory, {},
+                          self.stores.snapshot, self.directory, None, 0, False,
+                          'b' * 64, status_from_current=True)
+        host.status_pin = {'schema': 'private-presentation-status/v3'}
+        with self.assertRaisesRegex(ValueError, 'existing private application requires completed stores'):
+            host.verify_status_retry_state(self.stores.target, self.stores.owner,
+                                           {'events': self.stores.events}, 1, 1)
 
 
 if __name__ == '__main__':
