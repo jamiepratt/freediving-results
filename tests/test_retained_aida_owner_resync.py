@@ -20,11 +20,20 @@ class RetainedOwnerResyncTest(unittest.TestCase):
         self.retained_bundle = None
         self.production_bundle = None
         self.source = 'd' * 64
-        self.row = {'observation-id': 'source-observation:' + 'e' * 64}
-        self.event = {'id': 'accept', 'action': 'accept', 'base-revision': 0}
+        self.row = {'observation-id': 'source-observation:' + 'e' * 64,
+                    'source-name': 'synthetic', 'parse-status': 'parsed',
+                    'citation': {'snapshot_sha256': self.snapshot},
+                    'source-observation-ref': {'snapshot_sha256': self.snapshot},
+                    'publisher-scope': 'AIDA', 'publisher-athlete-id': 'person-1',
+                    'publisher-id-kind': 'person'}
+        self.event = {'id': 'accept', 'action': 'accept', 'actor-kind': 'automatic',
+                      'base-revision': 0,
+                      'source-binding': {'snapshot-sha256': self.snapshot, 'refs': {}},
+                      'pair': ['one', 'two'], 'rule-version': 'athlete-identity/1'}
         self.target = {'schema': 'retained-aida-target-state/v1', 'snapshot_sha256': self.snapshot,
-                       'revision': 1, 'source_rows': [self.row],
-                       'events': [{'id': 'accept', 'request': self.event}], 'non_source_row_count': 0}
+                       'revision': 1, 'source_rows': [copy.deepcopy(self.row)],
+                       'events': [{'id': 'accept', 'request': copy.deepcopy(self.event)}],
+                       'non_source_row_count': 0}
         self.owner = {'snapshot_sha256': self.snapshot, 'store_revision': 3,
                       'binding_revision': 1, 'proposal_count': 2, 'human_event_count': 2,
                       'operation_count': 2, 'observation_refs': {}}
@@ -53,7 +62,8 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                                        'publication_status': 'private'}}
         self.retained = {'schema': 'retained-aida-private-status/v1', 'run_id': 'retained-run',
                          'binding': {'snapshot_sha256': self.snapshot,
-                                     'source_bundle_sha256': self.retained_bundle},
+                                     'source_bundle_sha256': self.retained_bundle,
+                                     'export_sha256': None},
                          'cutoff': self.status['local']['cutoff'], 'source_gaps': 0,
                          'provider_calls': 0, 'counts': {'source_rows': 1},
                          'canonical': {'status': 'applied', 'identity_revision': 1}}
@@ -68,24 +78,67 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                             {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'packet', 'production_source_id': 'packet', 'sha256': self.source},
                             {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'receipt', 'production_source_id': 'receipt', 'sha256': 'f' * 64},
                             {'retained_source': 'aida', 'snapshot_input': 'aida', 'role': 'original', 'production_source_id': 'original', 'sha256': '1' * 64}]}
+        self.export = {'schema': 'retained-aida-cohort/v1',
+                       'binding': {'snapshot_sha256': self.snapshot,
+                                   'identity_revision': 0, 'history_event_ids': []},
+                       'registration': {'snapshot_sha256': self.snapshot,
+                                        'rows': [{'observation_id': self.row['observation-id'],
+                                                  'source_name': 'synthetic', 'parse_status': 'parsed',
+                                                  'citation': {'snapshot_sha256': self.snapshot},
+                                                  'source_observation_ref': {'snapshot_sha256': self.snapshot},
+                                                  'publisher_scope': 'AIDA',
+                                                  'publisher_athlete_id': 'person-1',
+                                                  'publisher_id_kind': 'person'}]},
+                       'events': [{'id': 'accept', 'action': 'accept', 'actor_kind': 'automatic',
+                                   'source_binding': {'snapshot_sha256': self.snapshot, 'refs': {}},
+                                   'pair': ['one', 'two'], 'rule_version': 'athlete-identity/1'}]}
+        self.retained['binding']['export_sha256'] = hashlib.sha256(document(self.export)).hexdigest()
+        self.readback = {'schema': 'retained-aida-canonical-readback/v1',
+                         'snapshot-sha256': self.snapshot,
+                         'non-source-row-count': 0,
+                         'projection': {'revision': 1},
+                         'source-rows': [copy.deepcopy(self.row)],
+                         'events': [{'id': 'accept', 'base-revision': 0,
+                                     'request': copy.deepcopy(self.event)}]}
         self.pin = {'schema': 'retained-aida-owner-resync/v1', 'snapshot_sha256': self.snapshot,
                     'cutoff': self.status['local']['cutoff'],
                     'retained_bundle_sha256': self.retained_bundle,
                     'production_bundle_sha256': self.production_bundle,
                     'source_map_sha256': sha(self.mapping),
+                    'isolated_readback_sha256': hashlib.sha256(document(self.readback)).hexdigest(),
                     'canonical_revision': 1, 'canonical_state_sha256': sha(self.target),
                     'owner_revision': 3, 'owner_binding_revision': 1,
                     'owner_state_sha256': sha(self.owner),
                     'status_revision': 2, 'status_sha256': sha(self.status)}
 
     def check(self):
-        return verify_noop_resync(self.pin, self.retained, document(self.retained_manifest),
+        return verify_noop_resync(self.pin, self.retained, document(self.export),
+                                  document(self.readback),
+                                  document(self.retained_manifest),
                                   self.snapshot_manifest, document(self.production_manifest),
                                   self.mapping, self.status,
                                   self.target, self.owner)
 
     def test_exact_replay_is_an_unchanged_noop(self):
         self.assertEqual(self.check()['outcome'], 'unchanged')
+
+    def test_divergent_canonical_event_fails_even_when_re_pinned(self):
+        self.target['events'][0]['request']['rule-version'] = 'different-rule'
+        self.pin['canonical_state_sha256'] = sha(self.target)
+        with self.assertRaisesRegex(ValueError, 'retained canonical event'):
+            self.check()
+
+    def test_divergent_source_row_fails_even_when_re_pinned(self):
+        self.target['source_rows'][0]['source-name'] = 'other'
+        self.pin['canonical_state_sha256'] = sha(self.target)
+        with self.assertRaisesRegex(ValueError, 'retained canonical source rows'):
+            self.check()
+
+    def test_changed_isolated_readback_cannot_authorize_re_pinned_target(self):
+        self.readback['events'][0]['request']['rule-version'] = 'different-rule'
+        self.pin['isolated_readback_sha256'] = hashlib.sha256(document(self.readback)).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'retained canonical event'):
+            self.check()
 
     def test_replay_receipt_is_stable_after_interrupted_read(self):
         first = self.check()
@@ -178,6 +231,8 @@ class RetainedOwnerResyncTest(unittest.TestCase):
                 return path
             paths = {
                 'pin': write('pin.json', self.pin),
+                'export': write('export.json', self.export),
+                'isolated_readback': write('readback.json', self.readback),
                 'retained_manifest': write('retained.json', document(self.retained_manifest)),
                 'snapshot_manifest': write('snapshot.json', self.snapshot_manifest),
                 'production_manifest': write('production.json', document(self.production_manifest)),
@@ -207,7 +262,9 @@ class RetainedOwnerResyncTest(unittest.TestCase):
             root = Path(directory)
             root.chmod(0o700)
             paths = {}
-            for name, value in [('pin', self.pin), ('retained_manifest', self.retained_manifest),
+            for name, value in [('pin', self.pin), ('export', self.export),
+                                ('isolated_readback', self.readback),
+                                ('retained_manifest', self.retained_manifest),
                                 ('snapshot_manifest', self.snapshot_manifest),
                                 ('production_manifest', self.production_manifest),
                                 ('source_map', self.mapping), ('target', self.target),
