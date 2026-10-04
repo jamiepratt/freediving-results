@@ -3,17 +3,20 @@
 The runbook below describes the owner evidence workspace and its guarded
 decision API. [ADR 0003](adr/0003-automatic-evidence-reconciliation.md)
 accepts automatic reconciliation with later review and rollback.
-[Issue #72](https://github.com/jamiepratt/freediving-results/issues/72) tracks
-the remaining integration, corpus binding and activation gates.
+[Issue #72](https://github.com/jamiepratt/freediving-results/issues/72) records
+the private review implementation and validation.
 
-The optional decision API has a separate append-only SQLite store, verified
-snapshot binding, authenticated write routes, and review controls. Normal private
-origin activation leaves it disabled. A trusted local delivery command can send
+The decision API has a separate append-only SQLite store, verified snapshot
+binding, authenticated write routes, and review controls. It is opt-in for a
+fresh private origin. On 4 October 2026, the existing custom-domain owner service
+was active with 207 pending, scoreless AIDA proposals at decision revision 209,
+bound to snapshot `278daebb34b6770cf52baf1cc412148f3384435c09fd113e5ab6267815bf6a71`.
+No live owner approval, correction, rejection, or reversal had been submitted.
+A trusted local delivery command can send
 human events through the signed Access feed to a durable flow ledger and canonical
 PostgreSQL callbacks, with a checkpoint for each destination. The browser still
 reports canonical projection status as unavailable; its local overlay counts do
-not attest that PostgreSQL has caught up. Retained-corpus authority and production
-activation remain gated by issue #72. Automatic decisions shown here are never
+not attest that PostgreSQL has caught up. Automatic decisions shown here are never
 human review attestations or public publication approval.
 
 For a trusted local import, run
