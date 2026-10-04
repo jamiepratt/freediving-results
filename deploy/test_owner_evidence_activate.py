@@ -26,6 +26,9 @@ class ActivationTests(unittest.TestCase):
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
         for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'unified_evidence_query.py', 'route_roster_query.py',
+                     'aida_snapshot_observations.py', 'cmas_microplus_snapshot_observations.py',
+                     'issue55_aida_selected_html.py', 'cmas_microplus_ingest.py',
+                     'cmas_microplus_finalize.py',
                      'owner_source_view.py', 'owner_decision_store.py', 'vestico_safe_derivative.py'):
             (self.bundle / 'scripts' / name).write_text('print("test")\n')
         (self.bundle / 'scripts/private_source_bundle.py').write_bytes(
@@ -265,6 +268,26 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), prior_config)
         self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
 
+    def test_owner_route_failure_restores_pre_decision_application(self):
+        from owner_evidence_activate import rollback_candidate
+        self.run_activation()
+        prior_app = (self.layout.app / 'current').resolve()
+        for name in ('private_presentation_status.py', 'owner_decision_store.py',
+                     'aida_snapshot_observations.py', 'issue55_aida_selected_html.py',
+                     'cmas_microplus_snapshot_observations.py',
+                     'cmas_microplus_ingest.py', 'cmas_microplus_finalize.py'):
+            (prior_app / 'scripts' / name).unlink()
+        prior_snapshot = (self.layout.state / 'current').resolve()
+        (self.bundle / 'scripts/private_presentation_status.py').write_text('print("new status")\n')
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        rollback_candidate(self.layout, digest, manifest_digest, command=self.command)
+
+        self.assertEqual((self.layout.app / 'current').resolve(), prior_app)
+        self.assertEqual((self.layout.state / 'current').resolve(), prior_snapshot)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
+
     def test_owner_route_rollback_rejects_other_missing_prior_application_file(self):
         from owner_evidence_activate import rollback_candidate
         self.run_activation()
@@ -282,6 +305,12 @@ class ActivationTests(unittest.TestCase):
 
     def test_new_activation_requires_status_script(self):
         (self.bundle / 'scripts/private_presentation_status.py').unlink()
+        with self.assertRaisesRegex(ValueError, 'missing or linked'):
+            self.run_activation()
+        self.assertEqual(self.calls, [])
+
+    def test_new_activation_requires_decision_observation_dependencies(self):
+        (self.bundle / 'scripts/aida_snapshot_observations.py').unlink()
         with self.assertRaisesRegex(ValueError, 'missing or linked'):
             self.run_activation()
         self.assertEqual(self.calls, [])

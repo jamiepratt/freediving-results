@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -88,6 +89,22 @@ class PrivateOwnerPreflightCLI(unittest.TestCase):
         result = self.run_cli('--candidate', candidate)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('checkout is not clean', result.stderr)
+
+    def test_staged_owner_runtime_imports_without_checkout_paths(self):
+        spec = importlib.util.spec_from_file_location('preflight', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        staged = Path(self.temp.name) / 'staged' / 'scripts'
+        staged.mkdir(parents=True)
+        checkout = SCRIPT.parent.parent
+        for name in module.OWNER_FILES:
+            if name.startswith('scripts/'):
+                shutil.copyfile(checkout / name, staged / Path(name).name)
+        result = subprocess.run(
+            [sys.executable, '-I', '-c',
+             'import sys; sys.path.insert(0, sys.argv[1]); import owner_evidence_origin',
+             str(staged)], capture_output=True, text=True, cwd=staged)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__':
