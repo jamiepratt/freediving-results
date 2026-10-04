@@ -6,8 +6,9 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
+from urllib.request import Request
 
-from scripts.retained_aida_manual_apply import HostStores, run_manual_apply
+from scripts.retained_aida_manual_apply import HostStores, LoopbackStatusOpener, run_manual_apply
 
 
 class SyntheticStores:
@@ -279,6 +280,30 @@ class ManualApplyTest(unittest.TestCase):
                 'FREEDIVING_AIDA_APP_URL': url('freediving_migrator')}):
             with self.assertRaisesRegex(ValueError, 'Unsupported database options'):
                 host._clojure('apply', 'cohort.json', 'hash', 'receipt.json')
+
+    def test_loopback_status_uses_origin_auth_without_forwarding_access_secret(self):
+        class Transport:
+            request = None
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return SimpleNamespace(status=200)
+        transport = Transport()
+        public = 'https://poc.alphacompose.com/owner-evidence/api/presentation-status'
+        opener = LoopbackStatusOpener(public, 'private.example.test', 'gateway',
+                                      'writer.access', 'token', transport)
+        response = opener.open(Request(public, data=b'{}', method='POST', headers={
+            'CF-Access-Client-Secret': 'must-not-forward'}), timeout=90)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(transport.request.full_url,
+                         'http://127.0.0.1:8081/owner-evidence/api/presentation-status')
+        headers = dict(transport.request.header_items())
+        self.assertEqual(headers['Host'], 'private.example.test')
+        self.assertEqual(headers['X-freediving-owner-gateway'], 'gateway')
+        self.assertNotIn('Cf-access-client-secret', headers)
+        self.assertEqual(transport.timeout, 90)
+        with self.assertRaisesRegex(ValueError, 'unexpected private status request'):
+            opener.open(Request('https://other.example.test/', method='GET'), timeout=90)
 
 
 if __name__ == '__main__':

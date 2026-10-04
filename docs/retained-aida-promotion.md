@@ -288,6 +288,13 @@ including its revision, run ID, local snapshot, cutoff, gap count, and active
 binding; the apply checks that pin before the v3 compare-and-swap commit.
 An exact matching v3 status supports retry. Keep the same status credentials
 in the environment. This route does not reconstruct a local run file.
+When the public private-status gateway times out while computing a large owner
+projection, `--local-status-origin` uses the same origin on
+`127.0.0.1:8081`. Supply `OWNER_EVIDENCE_ORIGIN_HOST`,
+`OWNER_EVIDENCE_GATEWAY_SECRET`, and `OWNER_EVIDENCE_STATUS_CLIENT_ID` from the
+root-private owner configuration. The request still uses the status token,
+pins the returned revision and active binding, and performs the same v3
+compare-and-swap. This option requires `--status-from-current`.
 
 The apply stage accepts only an empty or exact canonical event prefix with
 all-or-empty matching source rows. It registers source rows, replays the exact

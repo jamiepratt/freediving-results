@@ -125,11 +125,38 @@ def run_manual_apply(stores, preflight, envelope, pins, directory):
     return result
 
 
+class LoopbackStatusOpener:
+    """Send the pinned status request to the authenticated local origin."""
+
+    def __init__(self, public_url, host, gateway, machine, token, transport):
+        self.public_url = public_url
+        self.host = host
+        self.gateway = gateway
+        self.machine = machine
+        self.token = token
+        self.transport = transport
+
+    def open(self, request, timeout):
+        from urllib.request import Request
+        need(request.full_url == self.public_url
+             and request.get_method() in ('GET', 'POST') and self.token,
+             'unexpected private status request')
+        headers = {'Host': self.host,
+                   'X-Freediving-Owner-Gateway': self.gateway,
+                   'X-Freediving-Owner-Machine': self.machine,
+                   'X-Freediving-Status-Token': self.token}
+        if request.data is not None:
+            headers['Content-Type'] = 'application/json'
+        local = Request('http://127.0.0.1:8081/owner-evidence/api/presentation-status',
+                        data=request.data, headers=headers, method=request.get_method())
+        return self.transport.open(local, timeout=timeout)
+
+
 class HostStores:
     def __init__(self, owner_db, snapshot_dir, recovered, snapshot, directory, run_dir,
                  unresolved_exclusions, isolated_rehearsal=False, bundle_sha256=None,
                  active_binding_path=None, active_binding_sha256=None,
-                 status_from_current=False):
+                 status_from_current=False, local_status_origin=False):
         self.owner_db = Path(owner_db)
         self.snapshot_dir = Path(snapshot_dir)
         self.recovered = recovered
@@ -142,7 +169,23 @@ class HostStores:
         self.active_binding_path = active_binding_path
         self.active_binding_sha256 = active_binding_sha256
         self.status_from_current = status_from_current
+        self.local_status_origin = local_status_origin
         self.status_pin = None
+
+    def _status_opener(self):
+        from private_status_sync import STATUS_URL, _NoRedirect
+        from urllib.request import build_opener
+        if not self.local_status_origin:
+            return build_opener(_NoRedirect())
+        gateway = os.getenv('OWNER_EVIDENCE_GATEWAY_SECRET', '')
+        host = os.getenv('OWNER_EVIDENCE_ORIGIN_HOST', '')
+        machine = os.getenv('OWNER_EVIDENCE_STATUS_CLIENT_ID', '')
+        need(gateway and host and machine == os.getenv('CF_ACCESS_CLIENT_ID')
+             and re.fullmatch(r'[A-Za-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?', host),
+             'private loopback status credentials missing')
+        return LoopbackStatusOpener(STATUS_URL, host, gateway, machine,
+                                    os.getenv('OWNER_EVIDENCE_STATUS_TOKEN', ''),
+                                    build_opener(_NoRedirect()))
 
     def verify_active(self):
         need(isinstance(self.bundle_sha256, str) and SHA.fullmatch(self.bundle_sha256),
@@ -152,14 +195,13 @@ class HostStores:
                                              self.active_binding_sha256)
         else:
             sys.path.insert(0, str(REPO / 'scripts'))
-            from private_status_sync import (STATUS_URL, _NoRedirect, _request,
+            from private_status_sync import (STATUS_URL, _request,
                                              _active_provenance, assert_status_pin)
-            from urllib.request import build_opener
             credentials = [os.getenv('CF_ACCESS_CLIENT_ID'),
                            os.getenv('CF_ACCESS_CLIENT_SECRET'),
                            os.getenv('OWNER_EVIDENCE_STATUS_TOKEN')]
             need(all(credentials), 'private active status credentials missing')
-            current = _request(build_opener(_NoRedirect()), 'GET', STATUS_URL,
+            current = _request(self._status_opener(), 'GET', STATUS_URL,
                                *credentials)
             if self.status_from_current:
                 if self.status_pin is None:
@@ -391,7 +433,8 @@ class HostStores:
                        os.getenv('OWNER_EVIDENCE_STATUS_TOKEN')]
         need(all(credentials), 'private status credentials missing')
         if self.status_from_current:
-            return sync_application_from_pin(self.status_pin, application, *credentials)
+            return sync_application_from_pin(self.status_pin, application, *credentials,
+                                             opener=self._status_opener())
         return sync_application_status(self.run_dir, application, *credentials)
 
 
@@ -533,6 +576,7 @@ def main(argv=None):
     status_source = parser.add_mutually_exclusive_group()
     status_source.add_argument('--run-dir', type=Path)
     status_source.add_argument('--status-from-current', action='store_true')
+    parser.add_argument('--local-status-origin', action='store_true')
     parser.add_argument('--isolated-rehearsal', action='store_true')
     parser.add_argument('--bundle-sha256', required=True)
     parser.add_argument('--active-binding', type=Path)
@@ -540,6 +584,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     need(args.isolated_rehearsal or args.run_dir is not None or args.status_from_current,
          'private status provenance required')
+    need(not args.local_status_origin or (args.status_from_current and not args.isolated_rehearsal),
+         'loopback status requires live current status provenance')
     if args.isolated_rehearsal:
         need(os.getenv('FREEDIVING_PG_ISOLATED') == '1'
              and os.getenv('PGDATABASE', '').startswith('aida_rehearsal_')
@@ -600,7 +646,8 @@ def main(argv=None):
                         preflight['snapshot_sha256'], directory, args.run_dir,
                         envelope['counts']['unresolved'], args.isolated_rehearsal,
                         args.bundle_sha256, args.active_binding,
-                        args.active_binding_sha256, args.status_from_current)
+                        args.active_binding_sha256, args.status_from_current,
+                        args.local_status_origin)
     result = run_manual_apply(stores, preflight, envelope, pins, directory)
     print(json.dumps(result, sort_keys=True))
     return 0
