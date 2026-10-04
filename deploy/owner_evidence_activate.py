@@ -88,12 +88,15 @@ def _config(path, owner_uid, expected):
     return values
 
 
-def _inputs(bundle, source, expected):
+def _inputs(bundle, source, expected, *, allow_legacy_status=False):
     if not re.fullmatch(r'[a-f0-9]{64}', expected):
         raise ValueError('invalid expected SHA256')
     if bundle.is_symlink() or source.is_symlink():
         raise ValueError('linked activation directory')
     for name in FILES:
+        if (allow_legacy_status and name == 'scripts/private_presentation_status.py' and
+                not (bundle / name).exists() and not (bundle / name).is_symlink()):
+            continue
         _regular(bundle / name)
     for name in ('manifest.json', 'snapshot.sqlite'):
         _regular(source / name)
@@ -296,7 +299,7 @@ def _restore_checkpoint(layout, command):
             prior_app = Path(previous['app'])
             prior_snapshot = Path(previous['snapshot'])
             prior_digest = prior_snapshot.name
-            _inputs(prior_app, prior_snapshot, prior_digest)
+            _inputs(prior_app, prior_snapshot, prior_digest, allow_legacy_status=True)
             if previous['roster']:
                 prior_roster = Path(previous['roster'])
                 _roster_inputs(prior_roster, prior_roster.name, prior_digest)
