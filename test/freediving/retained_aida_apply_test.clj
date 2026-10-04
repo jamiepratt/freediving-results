@@ -251,6 +251,28 @@
                           (apply-route/guarded-apply-cohort! reviewer app input)))
     (is (= 3 (:revision (apply-route/target-state reviewer snapshot))))))
 
+(deftest source-registration-rejects-a-row-set-changed-after-target-read
+  (let [initial (cohort)
+        expansion (safe-expansion initial)
+        snapshot (get-in initial [:registration :snapshot-sha256])
+        _ (apply-route/target-state reviewer snapshot)
+        competing-rows (subvec (get-in expansion [:registration :rows]) 3)
+        competing-refs (select-keys (get-in expansion [:registration :verified-refs])
+                                    (map :observation-id competing-rows))]
+    (identity/register-source-observations!
+     reviewer {:snapshot-sha256 snapshot :rows competing-rows
+               :verified-refs competing-refs})
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"source row set changed"
+         (identity/register-source-observations!
+          reviewer {:snapshot-sha256 snapshot
+                    :rows (get-in initial [:registration :rows])
+                    :verified-refs (get-in initial [:registration :verified-refs])
+                    :expected-existing-row-ids #{}})))
+    (is (= (set (map :observation-id competing-rows))
+           (set (map :observation-id (:source_rows
+                                      (apply-route/target-state reviewer snapshot))))))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-aida-apply-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))
