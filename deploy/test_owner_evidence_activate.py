@@ -247,6 +247,45 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual((self.layout.state / 'current').resolve(), old_snapshot)
         self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
 
+    def test_owner_route_failure_restores_pre_status_application(self):
+        from owner_evidence_activate import rollback_candidate
+        self.run_activation()
+        prior_app = (self.layout.app / 'current').resolve()
+        (prior_app / 'scripts/private_presentation_status.py').unlink()
+        prior_snapshot = (self.layout.state / 'current').resolve()
+        prior_config = self.config.read_bytes()
+        (self.bundle / 'scripts/private_presentation_status.py').write_text('print("new status")\n')
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        rollback_candidate(self.layout, digest, manifest_digest, command=self.command)
+
+        self.assertEqual((self.layout.app / 'current').resolve(), prior_app)
+        self.assertEqual((self.layout.state / 'current').resolve(), prior_snapshot)
+        self.assertEqual(self.config.read_bytes(), prior_config)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'failed')
+
+    def test_owner_route_rollback_rejects_other_missing_prior_application_file(self):
+        from owner_evidence_activate import rollback_candidate
+        self.run_activation()
+        prior_app = (self.layout.app / 'current').resolve()
+        (prior_app / 'scripts/owner_evidence_origin.py').unlink()
+        (self.bundle / 'scripts/private_presentation_status.py').write_text('print("new status")\n')
+        digest, private, manifest_digest = self.candidate_with_source_bundle()
+
+        self.assertEqual(self.activate_candidate(digest, private, manifest_digest), 'activated')
+        with self.assertRaisesRegex(RuntimeError, 'recovery failed'):
+            rollback_candidate(self.layout, digest, manifest_digest, command=self.command)
+        self.assertNotEqual((self.layout.app / 'current').resolve(), prior_app)
+        self.assertEqual(json.loads((self.layout.state / 'activation-checkpoint' / 'status.json').read_text())['status'], 'pending')
+        self.assertIn(('systemctl', 'stop', 'freediving-owner-evidence.service'), self.calls)
+
+    def test_new_activation_requires_status_script(self):
+        (self.bundle / 'scripts/private_presentation_status.py').unlink()
+        with self.assertRaisesRegex(ValueError, 'missing or linked'):
+            self.run_activation()
+        self.assertEqual(self.calls, [])
+
     def test_interrupted_candidate_recovers_before_same_candidate_retry(self):
         self.run_activation()
         old_snapshot = (self.layout.state / 'current').resolve()
