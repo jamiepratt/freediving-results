@@ -2,6 +2,7 @@
   "Private, append-only reconciliation dispatch. It records proposed links, not publication approval."
   (:refer-clojure :exclude [run!])
   (:require [clojure.edn :as edn]
+            [freediving.reconciliation-budget :as budget]
             [freediving.reconciliation-jev :as jev]
             [freediving.reconciliation-policy :as policy])
   (:import [java.security MessageDigest]
@@ -108,11 +109,20 @@
      :policy-version (:policy-version assessment) :answer answer
      :result-hash (:result-hash answer) :receipt (:receipt answer)}))
 
-(defn- dispatch-batch [ledger decisions request config policy-config execute! checkpoint!]
-  (let [ledger (reduce (fn [ledger decision]
+(defn- dispatch-batch [ledger decisions request config policy-config execute! checkpoint!
+                       provider-budget-path provider-pricing]
+  (when (and (string? (:endpoint config))
+             (.startsWith ^String (:endpoint config) "https://")
+             (nil? provider-budget-path))
+    (throw (ex-info "Remote Jev dispatch requires a durable provider budget"
+                    {:reason :missing-budget-baseline})))
+  (let [reservation (when provider-budget-path
+                      (budget/reserve! provider-budget-path request provider-pricing))
+        ledger (reduce (fn [ledger decision]
                          (append-result ledger decision config
                                         {:status :unknown-external-outcome
                                          :reason :dispatch-started
+                                         :budget-reservation-id (:id reservation)
                                          :policy-version (:version policy-config)
                                          :request-hash (:request-hash request)
                                          :template-version (:template-version request)}))
@@ -120,6 +130,8 @@
         _ (when checkpoint! (checkpoint! ledger))]
     (try
       (let [response (execute! request)
+            _ (when reservation
+                (budget/record-receipt! provider-budget-path reservation response))
             _ (when (:error response)
                 (throw (ex-info "Reconciliation transport error" {:error (:error response)})))
             parsed (jev/parse-batch request response)]
@@ -194,7 +206,8 @@
   "Resolve a bounded set of decisions. execute! is the only external boundary.
    Retained answers and deterministic outcomes bypass HTTP. Independent ready
    decisions batch together; dependencies advance only after acceptance."
-  [ledger decisions {:keys [config policy execute! checkpoint! retained-answers deterministic-results]}]
+  [ledger decisions {:keys [config policy execute! checkpoint! retained-answers deterministic-results
+                            provider-budget-path provider-pricing]}]
   (when-not (and (= ledger-version (:version ledger)) (vector? decisions)
                  (= (count decisions) (count (set (map :id decisions))))
                  (every? (comp string? :id) decisions) (map? config) (map? policy))
@@ -259,7 +272,8 @@
                              (reduce (fn [ledger request]
                                        (let [ids (set (:decision-ids request))
                                              members (filterv #(ids (:id %)) pending)]
-                                         (dispatch-batch ledger members request config policy execute! checkpoint!)))
+                                         (dispatch-batch ledger members request config policy execute! checkpoint!
+                                                         provider-budget-path provider-pricing)))
                                      ledger (jev/prepare-batches config pending))
                              ledger)
                     known (reduce (fn [known decision]

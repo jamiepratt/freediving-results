@@ -2,6 +2,8 @@
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is run-tests]]
             [freediving.reconciliation-flow :as flow]
+            [freediving.reconciliation-budget :as budget]
+            [freediving.reconciliation-application :as application]
             [freediving.reconciliation-transport :as transport])
   (:import [com.sun.net.httpserver HttpServer]
            [java.net InetSocketAddress]))
@@ -18,6 +20,144 @@
 (def answer {:outcome :same-person :confidence 0.96
              :probabilities {:same-person 0.94 :different-person 0.04 :unknown 0.02}
              :model-version "jev-1.13.0"})
+
+(def budget-pricing {:version "test-rate/1" :model "jev-1.13.0"
+                     :source "synthetic published rate" :input-usd-per-million 0.1M
+                     :output-usd-per-million 0M :max-input-tokens 64000
+                     :max-output-tokens 64000})
+(defn successful-response [request]
+  {:model "jev-1.13.0" :usage {:input_tokens 1 :output_tokens 1}
+   :answers (zipmap (:decision-ids request)
+                    (repeat {:type "choice" :choice "same_person" :confidence 0.96
+                             :probabilities {"same_person" 0.94 "different_person" 0.04 "unknown" 0.02}}))})
+
+(deftest provider-budget-survives-restart-and-changed-evidence
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-budget-test"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        flow-path (.resolve root "flow.edn")
+        budget-path (.resolve root "budget.edn")
+        calls (atom 0)
+        opts {:config config :policy policy :provider-budget-path budget-path
+              :provider-pricing budget-pricing
+              :execute! (fn [request] (swap! calls inc) (successful-response request))}
+        initial [(decision "a")]
+        changed [(assoc-in (decision "a") [:evidence 0 :exact-excerpt] "Changed row")]]
+    (budget/initialize! budget-path [])
+    (flow/run-file! flow-path initial opts)
+    (flow/run-file! flow-path initial opts)
+    (flow/run-file! flow-path changed opts)
+    (is (= 2 @calls))
+    (is (= 2 (count (:reservations (budget/load-ledger! budget-path)))))
+    (is (every? :reported-usage (:reservations (budget/load-ledger! budget-path))))))
+
+(deftest provider-budget-stops-before-exact-ten-dollar-boundary
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-budget-limit"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        budget-path (.resolve root "budget.edn")
+        calls (atom 0)
+        pricing (assoc budget-pricing :input-usd-per-million 78.125M)
+        opts {:config config :policy policy :provider-budget-path budget-path
+              :provider-pricing pricing
+              :execute! (fn [request] (swap! calls inc) (successful-response request))}]
+    (budget/initialize! budget-path [])
+    (flow/run-file! (.resolve root "one.edn") [(decision "a")] opts)
+    (is (= :provider-budget-exhausted
+           (try (flow/run-file! (.resolve root "two.edn") [(decision "b")] opts)
+                nil
+                (catch clojure.lang.ExceptionInfo error (:reason (ex-data error))))))
+    (is (= 1 @calls))
+    (is (= 5M (:reserved-usd (first (:reservations (budget/load-ledger! budget-path))))))))
+
+(deftest provider-budget-keeps-uncertain-dispatch-and-rejects-unpriced-requests
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-budget-unknown"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        budget-path (.resolve root "budget.edn")
+        calls (atom 0)
+        opts {:config config :policy policy :provider-budget-path budget-path
+              :provider-pricing budget-pricing
+              :execute! (fn [_] (swap! calls inc) (throw (Error. "process death")))}]
+    (budget/initialize! budget-path [])
+    (is (thrown? Error (flow/run-file! (.resolve root "unknown.edn")
+                                       [(decision "a")] opts)))
+    (is (= 1 (count (:reservations (budget/load-ledger! budget-path)))))
+    (is (nil? (:reported-usage (first (:reservations (budget/load-ledger! budget-path))))))
+    (is (= :unpriced-request
+           (try (flow/run-file! (.resolve root "unpriced.edn") [(decision "b")]
+                                (assoc opts :provider-pricing (dissoc budget-pricing :source)))
+                nil (catch clojure.lang.ExceptionInfo error (:reason (ex-data error))))))
+    (is (= 1 @calls))
+    (is (= 1 (count (:reservations (budget/load-ledger! budget-path)))))))
+
+(deftest provider-budget-serializes-concurrent-dispatches
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-budget-race"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        budget-path (.resolve root "budget.edn")
+        calls (atom 0)
+        opts {:config config :policy policy :provider-budget-path budget-path
+              :provider-pricing (assoc budget-pricing :input-usd-per-million 93.75M)
+              :execute! (fn [request] (swap! calls inc) (successful-response request))}
+        run-one (fn [id]
+                  (try (flow/run-file! (.resolve root (str id ".edn")) [(decision id)] opts)
+                       :ok
+                       (catch clojure.lang.ExceptionInfo error (:reason (ex-data error)))))]
+    (budget/initialize! budget-path [])
+    (let [a (future (run-one "a"))
+          b (future (run-one "b"))]
+      (is (= #{:ok :provider-budget-exhausted} #{@a @b})))
+    (is (= 1 @calls))
+    (is (= 1 (count (:reservations (budget/load-ledger! budget-path)))))))
+
+(deftest application-dispatch-requires-budget-baseline-and-records-raw-usage
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-application-budget"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        flow-path (.resolve root "flow.edn")
+        budget-path (.resolve root "budget.edn")
+        calls (atom 0)
+        d (decision "a")
+        strict-policy (assoc-in policy [:thresholds :identity :same-person :min-confidence] 1.0)
+        opts {:config (assoc config :endpoint "https://api.typesafe.ai/jev")
+              :policy strict-policy :persist-flow! #(flow/save-ledger! flow-path %)
+              :provider-budget-path budget-path :provider-pricing budget-pricing
+              :execute! (fn [request]
+                          (swap! calls inc)
+                          {:raw-response (json/write-str (successful-response request))
+                           :http-status 200})}]
+    (is (= :missing-budget-baseline
+           (try (application/run! (flow/empty-ledger) [d] opts)
+                nil (catch clojure.lang.ExceptionInfo error (:reason (ex-data error))))))
+    (is (zero? @calls))
+    (budget/initialize! budget-path [])
+    (application/run! (flow/empty-ledger) [d] opts)
+    (is (= 1 @calls))
+    (flow/run-file! flow-path [d]
+                    (-> opts (dissoc :provider-budget-path :provider-pricing)
+                        (dissoc :persist-flow!)))
+    (is (= 1 @calls))
+    (is (= {:input_tokens 1 :output_tokens 1}
+           (:reported-usage (first (:reservations (budget/load-ledger! budget-path))))))))
+
+(deftest historical-provider-attempt-is-carried-into-cumulative-budget
+  (let [root (java.nio.file.Files/createTempDirectory "reconciliation-budget-history"
+                                                      (make-array java.nio.file.attribute.FileAttribute 0))
+        budget-path (.resolve root "budget.edn")
+        historical {:type :reservation :id "prior-1" :historical? true
+                    :request-hash (apply str (repeat 64 "a"))
+                    :source-sha256 (apply str (repeat 64 "b"))
+                    :price-version "published-jev-2026-10-05"
+                    :reserved-usd 6M :reported-usage {:input_tokens 1453 :output_tokens 57}}
+        pricing (assoc budget-pricing :input-usd-per-million 62.5M)
+        calls (atom 0)]
+    (budget/initialize! budget-path [historical])
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (budget/initialize! budget-path [])))
+    (is (= :provider-budget-exhausted
+           (try (flow/run-file! (.resolve root "flow.edn") [(decision "a")]
+                                {:config config :policy policy
+                                 :provider-budget-path budget-path :provider-pricing pricing
+                                 :execute! (fn [_] (swap! calls inc) {})})
+                nil (catch clojure.lang.ExceptionInfo error (:reason (ex-data error))))))
+    (is (zero? @calls))
+    (is (= historical (first (:reservations (budget/load-ledger! budget-path)))))))
 
 (deftest source-derived-identity-awaits-verified-context-without-provider-call
   (let [sha (apply str (repeat 64 "a"))

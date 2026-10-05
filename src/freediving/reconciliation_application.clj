@@ -519,6 +519,8 @@
   (let [flow-ledger (if imported-only? flow-ledger
                         (flow/run! flow-ledger decisions
                                    {:config config :policy policy :execute! execute!
+                                    :provider-budget-path (:provider-budget-path opts)
+                                    :provider-pricing (:provider-pricing opts)
                                     :checkpoint! (fn [pending]
                                                    (persist-flow! pending)
                                                    (when checkpoint! (checkpoint! pending)))
