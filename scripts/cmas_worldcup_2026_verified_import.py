@@ -57,21 +57,27 @@ def check_bbox(box, width, height):
             "invalid cited image bbox")
 
 
-def import_stage(stage_path, stage_sha256, store_path):
+def import_stage(stage_path, stage_sha256, store_path, *,
+                 stage_schema="cmas-worldcup-2026-verified-stage/v1",
+                 store_schema="cmas-worldcup-2026-isolated-store/v1",
+                 marker_table="worldcup_stage_meta"):
     """Insert a checked JSON stage into an isolated SQLite store in one transaction."""
     stage = bound_json(stage_path, stage_sha256, "stage")
-    require(stage.get("schema") == "cmas-worldcup-2026-verified-stage/v1",
+    require(stage.get("schema") == stage_schema,
             "unsupported stage schema")
     source, parser = stage.get("source_sha256"), stage.get("parser_version")
     require(isinstance(source, str) and SHA.fullmatch(source)
             and isinstance(parser, str) and parser.strip(), "stage source/parser invalid")
     versions, unresolved, counts = (stage.get("observation_versions"),
                                     stage.get("unresolved_positions"), stage.get("counts"))
+    non_primary = stage.get("non_primary_positions", [])
     require(isinstance(versions, list) and isinstance(unresolved, list)
+            and isinstance(non_primary, list)
             and isinstance(counts, dict), "stage accounting absent")
-    require(counts.get("cited_positions") == len(versions) + len(unresolved)
+    require(counts.get("cited_positions") == len(versions) + len(unresolved) + len(non_primary)
             and counts.get("verified_staged_versions") == len(versions)
-            and counts.get("unresolved_positions") == len(unresolved),
+            and counts.get("unresolved_positions") == len(unresolved)
+            and (not non_primary or counts.get("non_primary_positions") == len(non_primary)),
             "stage source-position accounting mismatch")
     seen_positions, seen_versions = set(), set()
     for item in versions:
@@ -82,6 +88,9 @@ def import_stage(stage_path, stage_sha256, store_path):
                 and isinstance(item.get("id"), str) and item["id"].startswith("observation-version:")
                 and isinstance(item.get("raw_fields"), dict)
                 and item.get("interpreted_fields") == {}, "invalid staged observation")
+        if stage_schema == "italian-open-2025-verified-stage/v1":
+            require(item.get("source_role") == "event_result_table",
+                    "non-result observation cannot be imported")
         require(position not in seen_positions and item["id"] not in seen_versions,
                 "duplicate staged observation position or version")
         seen_positions.add(position)
@@ -91,25 +100,47 @@ def import_stage(stage_path, stage_sha256, store_path):
         require(isinstance(position, str) and position and position not in seen_positions,
                 "duplicate or invalid unresolved position")
         seen_positions.add(position)
+        if stage_schema == "italian-open-2025-verified-stage/v1":
+            require(item.get("source_role") == "event_result_table",
+                    "unresolved position role invalid")
+    for item in non_primary:
+        position = item.get("id")
+        require(isinstance(position, str) and position and position not in seen_positions,
+                "duplicate or invalid non-primary position")
+        seen_positions.add(position)
+        if stage_schema == "italian-open-2025-verified-stage/v1":
+            require(item.get("disposition") in ("aggregate", "summary", "duplicate_render")
+                    and item.get("source_role") in ("aggregate", "summary", "duplicate_render"),
+                    "non-primary position role invalid")
     require(len(seen_positions) == counts["cited_positions"], "stage position accounting mismatch")
+    if stage_schema == "italian-open-2025-verified-stage/v1":
+        require(counts.get("candidate_result_positions") == len(versions) + len(unresolved)
+                and counts.get("aggregate_rows_excluded") == sum(
+                    x["disposition"] == "aggregate" for x in non_primary)
+                and counts.get("summary_rows_excluded") == sum(
+                    x["disposition"] == "summary" for x in non_primary)
+                and counts.get("duplicate_rendered_rows") == sum(
+                    x["disposition"] == "duplicate_render" for x in non_primary),
+                "Italian Open stage role accounting mismatch")
     store_path = store_path.resolve()
     new_store = not store_path.exists()
     if not new_store:
         with sqlite3.connect(f"file:{store_path}?mode=ro", uri=True) as check:
-            marker = check.execute("select name from sqlite_master where type='table' and name='worldcup_stage_meta'").fetchone()
-            require(marker is not None, "existing SQLite file is not an isolated World Cup stage store")
+            marker = check.execute("select name from sqlite_master where type='table' and name=?",
+                                   (marker_table,)).fetchone()
+            require(marker is not None, "existing SQLite file is not an isolated stage store")
     store_path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(store_path)
     if new_store:
         os.chmod(store_path, 0o600)
     try:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("CREATE TABLE IF NOT EXISTS worldcup_stage_meta (schema TEXT NOT NULL)")
-        marker = db.execute("SELECT schema FROM worldcup_stage_meta").fetchall()
+        db.execute(f"CREATE TABLE IF NOT EXISTS {marker_table} (schema TEXT NOT NULL)")
+        marker = db.execute(f"SELECT schema FROM {marker_table}").fetchall()
         if not marker:
-            db.execute("INSERT INTO worldcup_stage_meta VALUES (?)", ("cmas-worldcup-2026-isolated-store/v1",))
+            db.execute(f"INSERT INTO {marker_table} VALUES (?)", (store_schema,))
         else:
-            require(marker == [("cmas-worldcup-2026-isolated-store/v1",)], "store marker mismatch")
+            require(marker == [(store_schema,)], "store marker mismatch")
         db.execute("""CREATE TABLE IF NOT EXISTS observation_versions (
             id TEXT PRIMARY KEY, source_sha256 TEXT NOT NULL,
             source_position_id TEXT NOT NULL, parser_version TEXT NOT NULL,
@@ -120,6 +151,16 @@ def import_stage(stage_path, stage_sha256, store_path):
             parser_version TEXT NOT NULL, cited_positions INTEGER NOT NULL,
             staged_versions INTEGER NOT NULL, unresolved_positions INTEGER NOT NULL,
             unresolved_json TEXT NOT NULL)""")
+        if "non_primary_positions" in stage:
+            db.execute("""CREATE TABLE IF NOT EXISTS non_primary_positions (
+                stage_sha256 TEXT NOT NULL, source_position_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY(stage_sha256, source_position_id))""")
+            for item in non_primary:
+                db.execute("""INSERT OR IGNORE INTO non_primary_positions
+                    (stage_sha256, source_position_id, payload_json) VALUES (?, ?, ?)""",
+                    (stage_sha256, item["id"], json.dumps(item, ensure_ascii=False,
+                     sort_keys=True, separators=(",", ":"))))
         for item in versions:
             payload = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             position = item["source_position"]["id"]
