@@ -26,7 +26,7 @@ ASSETS = {
     '/assets/app.css': ('evidence_workspace.css', 'text/css; charset=utf-8'),
 }
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
-           'session', 'discipline', 'category', 'limit', 'offset'}
+           'session', 'discipline', 'category', 'federation', 'limit', 'offset'}
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 COMPARISON_PATH = re.compile(r'^/api/comparison/([a-f0-9]{64})$')
 ROATAN_PATH = re.compile(r'^/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
@@ -168,7 +168,7 @@ class EvidenceHandler(BaseHTTPRequestHandler):
         return parsed
 
     def _filters(self, query, *, fixed_kind=None):
-        values = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=12)
+        values = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=13)
         allowed = FILTERS - ({'kind'} if fixed_kind else set())
         if set(values) - allowed or any(len(v) != 1 for v in values.values()):
             raise ValueError('invalid filters')
@@ -217,7 +217,8 @@ class EvidenceHandler(BaseHTTPRequestHandler):
         try:
             if path == '/api/overview' and not parsed.query:
                 result = self.server.snapshot().overview()
-                result['normalized_federation'] = 'unavailable in this snapshot'
+                result['normalized_federation'] = ('cited source-object mapping' if result['federation_mapping']['schema']
+                                                   else 'unavailable in this snapshot')
             elif path == '/api/sources' and not parsed.query:
                 result = self.server.snapshot().sources()
             elif path == '/api/source':

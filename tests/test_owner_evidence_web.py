@@ -1,6 +1,7 @@
 import http.client
 import hashlib
 import json
+import subprocess
 import threading
 import unittest
 from pathlib import Path
@@ -112,6 +113,58 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIsNotNone(comparison['unavailable'])
         self.assertEqual(self.request('GET', '/api/comparisons?limit=101', headers=headers)[0], 400)
         self.assertEqual(self.request('GET', '/api/comparisons')[0], 401)
+
+    def test_old_snapshot_federation_filter_reports_only_unknown(self):
+        cookie = self.login()
+        headers = {'Cookie': cookie}
+        status, _, body = self.request('GET', '/api/browse?federation=unknown&kind=candidate_position&limit=1&offset=1', headers=headers)
+        self.assertEqual(status, 200)
+        page = json.loads(body)
+        self.assertEqual((page['total'], page['offset'], len(page['records'])), (2, 1, 1))
+        self.assertIsNone(page['records'][0]['federation'])
+        self.assertEqual(json.loads(self.request('GET', '/api/browse?federation=CMAS', headers=headers)[2])['total'], 0)
+        self.assertEqual(self.request('GET', '/api/browse?federation=unknown&federation=CMAS', headers=headers)[0], 400)
+
+    def test_mapped_snapshot_federation_filter_keeps_source_claim_citation(self):
+        root = Path(self.tmp.name)
+        packet = root / 'mapped-packet.json'
+        packet.write_text(json.dumps({'schema': 'synthetic/v1', 'positions': [
+            {'source_object_id': 'sha256:' + 'a' * 64, 'citation': {'page': 1, 'row': 1}},
+            {'source_object_id': 'sha256:' + 'b' * 64, 'citation': {'page': 2, 'row': 1}}]}))
+        script = ROOT / 'scripts' / 'unified_evidence_snapshot.py'
+        base, mapped = root / 'base', root / 'mapped'
+        subprocess.run([sys.executable, str(script), 'build', '--cutoff', '2026-10-01T00:00:00Z',
+                        '--input', f'packet={packet}', '--output-dir', str(base)], check=True, capture_output=True)
+        mapping = root / 'mapping.json'
+        mapping.write_text(json.dumps({'schema': 'evidence-federation-map/v1', 'entries': [{
+            'source_name': 'packet', 'source_object_id': 'sha256:' + 'a' * 64,
+            'federation': 'CMAS', 'authority': 'CMAS publisher', 'role': 'primary',
+            'citation': {'url': 'https://example.test/results.pdf', 'sha256': 'a' * 64,
+                         'locator': 'page 1 heading', 'evidence_text': 'CMAS WORLD CUP'}}]}))
+        subprocess.run([sys.executable, str(script), 'map-federations', '--base-dir', str(base),
+                        '--mapping', str(mapping), '--output-dir', str(mapped)], check=True, capture_output=True)
+        server = make_server(mapped, password='local secret')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.server, self.port = server, server.server_port
+        self.thread = thread
+        self.host = f'127.0.0.1:{self.port}'
+        cookie = self.login()
+        headers = {'Cookie': cookie}
+        page = json.loads(self.request('GET', '/api/browse?federation=CMAS&kind=candidate_position&limit=1', headers=headers)[2])
+        self.assertEqual((page['total'], page['limit']), (1, 1))
+        row = page['records'][0]
+        self.assertEqual((row['federation'], row['authority']), ('CMAS', 'CMAS publisher'))
+        detail = json.loads(self.request('GET', '/api/detail/' + row['record_id'], headers=headers)[2])
+        self.assertEqual(detail['federation_citation']['locator'], 'page 1 heading')
+        self.assertEqual(detail['citation'], {'page': 1, 'row': 1})
+        self.assertEqual(json.loads(self.request('GET', '/api/browse?federation=unknown&kind=candidate_position', headers=headers)[2])['total'], 1)
+        overview = json.loads(self.request('GET', '/api/overview', headers=headers)[2])
+        self.assertEqual(overview['federation_mapping']['mapped_candidate_positions'], 1)
+        self.assertEqual(overview['normalized_federation'], 'cited source-object mapping')
 
     def test_query_bounds_and_asset_isolation(self):
         cookie = self.login()
