@@ -167,11 +167,15 @@
       origin:(a['decision-origin']||[]).join(', ')||'Source observation',
       unresolved:(a['unresolved-candidates']||[]).length
     })).sort((a,b)=>a.name.localeCompare(b.name)||a.observation.localeCompare(b.observation));
+    const history=data?.history||[], revisionById=new Map(history.map(event=>[event.id,event.revision]));
+    const pendingAutomaticReview=(projection['pending-automatic-review']||[]).map(item=>({
+      id:item.id,pair:item.pair,reason:item.reason,
+      approvalRevision:item['prior-decision-revision'],invalidationRevision:revisionById.get(item.id),
+      priorEvidence:item['prior-evidence'],currentEvidence:item['current-evidence']}));
     return {rows,accepted:projection['accepted-group-count']||0,
       provisional:projection['provisional-record-count']||0,
       unresolved:projection['unresolved-count']||0,
-      scope:projection.scope||'retained-observations',
-      pendingAutomaticReview:projection['pending-automatic-review']||[],history:data?.history||[]};
+      scope:projection.scope||'retained-observations',pendingAutomaticReview,history};
   }
   if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls,scoreSummary,queueCases,scoreRows,scorePresentation,probabilityColor,athletePresentation}; return; }
   const $=id=>document.getElementById(id);
@@ -221,6 +225,17 @@
     });
     if(!view.rows.length)$('athletes').append(node('p','No parsed athlete observations in this retained corpus.'));
     $('athletes-history').replaceChildren();
+    if(view.pendingAutomaticReview.length){
+      $('athletes-history').append(node('h3','Automatic links needing review'));
+      view.pendingAutomaticReview.forEach(item=>{
+        const card=node('article',undefined,'event');
+        card.append(node('strong',`${item.pair.join(' / ')} · ${human(item.reason)}`),
+          node('p',`Approval revision ${item.approvalRevision}; invalidation revision ${item.invalidationRevision}`),
+          expandable('Evidence at approval',item.priorEvidence),
+          expandable('Current evidence and candidates',item.currentEvidence));
+        $('athletes-history').append(card);
+      });
+    }
     view.history.slice(-20).reverse().forEach(event=>{
       const card=node('article',undefined,'event');
       card.append(node('strong',`${event.action} · ${event['actor-kind']} · ${event.id}`),

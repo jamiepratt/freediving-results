@@ -426,10 +426,18 @@
                                  :source-name (:source-name (rows id)) :citation (:citation (rows id))}]) groups))]
     {:revision (count (:events ledger)) :athletes ids
      :pending-automatic-review
-     (mapv #(select-keys % [:id :event-id :pair :reason :prior-decision-revision
-                            :prior-evidence :current-evidence])
-           (filter #(and (= :automatic (:actor-kind %)) (= :reverse (:action %)))
-                   (:events ledger)))
+     (->> (:events ledger)
+          (map-indexed vector)
+          (keep (fn [[index event]]
+                  (when (and (= :automatic (:actor-kind event))
+                             (= :reverse (:action event))
+                             (not-any? #(and (= :human (:actor-kind %))
+                                             (#{:accept :reject :reverse} (:action %))
+                                             (= (:pair event) (:pair %)))
+                                       (drop (inc index) (:events ledger))))
+                    (select-keys event [:id :event-id :pair :reason :prior-decision-revision
+                                        :prior-evidence :current-evidence]))))
+          vec)
      :groups (into {} (map (fn [members] [(group-id members) (vec (sort members))]) (distinct (vals groups))))
      :negative-pairs (negative-pairs (:events ledger))
      :accepted-group-count (count (filter #(> (count %) 1) (distinct (vals groups))))

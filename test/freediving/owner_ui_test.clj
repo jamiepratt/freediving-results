@@ -31,9 +31,9 @@
                     assert.equal(p.accepted,1);assert.equal(p.provisional,2);assert.equal(p.unresolved,1);
                     assert.deepEqual(p.rows.map(r=>[r.status,r.origin,r.unresolved]),[['Accepted link','automatic',0],['Provisional record','Source observation',1]]);
                     assert.equal(p.history[0].id,'link');
-                    const pending=ui.athletePresentation({projection:{'pending-automatic-review':[{id:'automatic-invalidation:link',reason:'candidate-set-changed','prior-decision-revision':1}]}});
+                    const pending=ui.athletePresentation({projection:{'pending-automatic-review':[{id:'automatic-invalidation:link','event-id':'link',pair:['a','b'],reason:'candidate-set-changed','prior-decision-revision':1,'prior-evidence':{alternatives:[{id:'b'}]},'current-evidence':{candidates:[{id:'b'},{id:'c'}]}}]},history:[{id:'automatic-invalidation:link',revision:2}]});
                     assert.equal(pending.pendingAutomaticReview.length,1);
-                    assert.equal(pending.pendingAutomaticReview[0]['prior-decision-revision'],1);")]
+                    assert.deepEqual(pending.pendingAutomaticReview[0],{id:'automatic-invalidation:link',pair:['a','b'],reason:'candidate-set-changed',approvalRevision:1,invalidationRevision:2,priorEvidence:{alternatives:[{id:'b'}]},currentEvidence:{candidates:[{id:'b'},{id:'c'}]}});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (deftest scored-identity-proposal-binds-exact-pair
   (let [r (shell/sh "node" "-e"

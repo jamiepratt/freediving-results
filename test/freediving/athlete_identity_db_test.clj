@@ -256,7 +256,13 @@
       (is (= 0 (:accepted-group-count view)))
       (is (= 4 (:provisional-record-count view)))
       (is (= 2 (:revision view)))
-      (is (= 4 (count (:athletes view)))))))
+      (is (= 4 (count (:athletes view))))
+      (is (= 1 (count (:pending-automatic-review view)))))
+    (identity/record-event! reviewer {:id "owner-reviewed-invalidation"
+                                      :action :reject :actor-kind :human
+                                      :pair [a b] :reason "separate athletes"})
+    (is (empty? (:pending-automatic-review (identity/private-canonical-view reviewer))))
+    (is (= 3 (:revision (identity/private-canonical-view reviewer))))))
 
 (deftest imported-publisher-conflict-is-pending-with-exact-history
   (let [person-source (fn [parser person-id]

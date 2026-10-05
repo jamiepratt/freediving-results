@@ -59,7 +59,11 @@
     (is (= 0 (:accepted-group-count (identity/project checked))))
     (is (= #{"athlete:a" "athlete:b" "athlete:c"}
            (set (map :provisional-id (vals (:athletes (identity/project checked)))))))
-    (is (= checked (identity/recheck-automatic-links checked)))))
+    (is (= checked (identity/recheck-automatic-links checked)))
+    (let [reviewed (identity/append-event checked
+                                          {:id "owner-reviewed" :action :reject :actor-kind :human
+                                           :pair ["a" "b"] :reason "different athletes"})]
+      (is (empty? (:pending-automatic-review (identity/project reviewed)))))))
 
 (deftest conflicting-verified-person-id-exposes-contradiction
   (let [person (fn [id name publisher-id]
