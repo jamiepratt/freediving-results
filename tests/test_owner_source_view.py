@@ -267,7 +267,7 @@ def pdf_bytes():
 
 
 def fixture(root, *, original_bytes=None, content_type='application/json', positions=None,
-            classification='eligible', safe_derivative=False):
+            classification='eligible', safe_derivative=False, schema='visual/v1', collection='positions'):
     original = root / ('original.pdf' if content_type == 'application/pdf' else 'original.json')
     original.write_bytes(original_bytes if original_bytes is not None else
                          json.dumps({'data': [{'Name': 'Ada'}, {'Name': 'Bea'}]}).encode())
@@ -279,8 +279,8 @@ def fixture(root, *, original_bytes=None, content_type='application/json', posit
                      {'fields': {'Name': 'Bea'}, 'locator': 'row index zero based 999'},
                      {'fields': {'Name': 'Bea'}, 'locator': 'not an original row'}]
     packet = root / 'packet.json'
-    packet.write_text(json.dumps({'schema': 'visual/v1', 'source': {'id': 'sha256:' + digest},
-        'positions': positions, 'source_gaps': [{'id': 'gap', 'status': 'unresolved'}]}))
+    packet.write_text(json.dumps({'schema': schema, 'source': {'id': 'sha256:' + digest},
+        collection: positions, 'source_gaps': [{'id': 'gap', 'status': 'unresolved'}]}))
     snapshot = root / 'snapshot'
     subprocess.run([sys.executable, str(ROOT / 'scripts/unified_evidence_snapshot.py'), 'build',
                     '--cutoff', '2026-09-28T12:00:00Z', '--input', 'visual=' + str(packet),
@@ -327,6 +327,44 @@ def fixture(root, *, original_bytes=None, content_type='application/json', posit
 
 
 class SourceViewTest(unittest.TestCase):
+    def test_retained_candidate_pdf_page_requires_exact_record_citation(self):
+        root = Path(self.tmp.name) / 'retained-candidate-pdf'
+        root.mkdir()
+        citation = 'page 1 line 2 column start 3 column end 12'
+        coords = {'page': 1, 'line': 2, 'column-start': 3, 'column-end': 12}
+        good = {'source_id': 'sha256:' + sha(pdf_bytes()), 'citation': citation,
+                'candidate': {'coordinates': coords, 'raw': {'fields': {'Name': 'Ada'}}}}
+        bad_coords = {**good, 'candidate': {'coordinates': {**coords, 'line': 3}}}
+        bad_citation = {**good, 'citation': 'page 1 line 3 column start 3 column end 12'}
+        bad_page = {**good, 'citation': 'page 501 line 2 column start 3 column end 12',
+                    'candidate': {'coordinates': {**coords, 'page': 501}}}
+        bad_columns = {**good, 'citation': 'page 1 line 2 column start 12 column end 3',
+                       'candidate': {'coordinates': {**coords, 'column-start': 12, 'column-end': 3}}}
+        bad_hash = {**good, 'source_id': 'sha256:' + '0' * 64}
+        snapshot, _, env = fixture(root, original_bytes=pdf_bytes(), content_type='application/pdf',
+            schema='worker-retained-artifact-reconciliation/v1', collection='candidate_versions',
+            positions=[good, bad_coords, bad_citation, bad_page, bad_columns, bad_hash])
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                records = server.query.browse(collection='candidate_versions')['records']
+                paths = ['/owner-evidence/api/source-view/' + row['record_id'] for row in records]
+                self.assertEqual(self.request(paths[0], authorized=False, server=server)[0], 403)
+                status, _, body = self.request(paths[0], server=server)
+                self.assertEqual(status, 200)
+                view = json.loads(body)
+                self.assertEqual((view['format'], view['page'], view['region']), ('pdf', 1, citation))
+                self.assertEqual(view['source_sha256'], sha(pdf_bytes()))
+                self.assertIn('source line and retained artifact not replayed', view['verification_scope'])
+                self.assertEqual(self.request(paths[0] + '/page/1', server=server)[0], 200)
+                self.assertEqual(self.request(paths[0] + '/page/2', server=server)[0], 404)
+                self.assertEqual([self.request(path, server=server)[0] for path in paths[1:]],
+                                 [422, 422, 422, 422, 404])
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
     def test_portable_roatan_array_requires_exact_citation_and_row(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -177,7 +177,24 @@ class OriginalSourceView:
                 raise SourceViewError(422)
             return {**base, 'format': 'jpeg', 'original_replay': 'verified_original'}
         citation = detail.get('citation')
-        if detail.get('source_schema') in ('ffessm-2025-rankings/v1', 'ffessm-2025-daily/v1'):
+        retained_candidate = detail.get('source_schema') == 'worker-retained-artifact-reconciliation/v1'
+        if retained_candidate:
+            raw = detail.get('raw') or {}
+            match = FFESSM_LINE.fullmatch(citation) if isinstance(citation, str) else None
+            coords = (raw.get('candidate') or {}).get('coordinates') or {}
+            if (detail.get('kind') != 'candidate_position'
+                    or detail.get('collection') != 'candidate_versions'
+                    or not match or match.group(3) is None
+                    or raw.get('citation') != citation
+                    or detail.get('source_object_id') != 'sha256:' + item['sha256']
+                    or coords.get('page') != int(match.group(1))
+                    or coords.get('line') != int(match.group(2))
+                    or coords.get('column-start') != int(match.group(3))
+                    or coords.get('column-end') != int(match.group(4))
+                    or int(match.group(3)) > int(match.group(4))):
+                raise SourceViewError(422)
+            page = int(match.group(1))
+        elif detail.get('source_schema') in ('ffessm-2025-rankings/v1', 'ffessm-2025-daily/v1'):
             raw = detail.get('raw') or {}
             match = FFESSM_LINE.fullmatch(citation) if isinstance(citation, str) else None
             coords = raw.get('coordinates') or {}
@@ -192,9 +209,11 @@ class OriginalSourceView:
             page = int(match.group(1))
         else:
             page = citation.get('page') if isinstance(citation, dict) else None
-        if type(page) is not int or not 1 <= page <= 500 or page != detail.get('page'):
+        if type(page) is not int or not 1 <= page <= 500 or (not retained_candidate and page != detail.get('page')):
             raise SourceViewError(422)
         return {**base, 'format': 'pdf', 'page': page,
+                **({'verification_scope': 'Cited original PDF page only; source line and retained artifact not replayed'}
+                   if retained_candidate else {}),
                 'region': citation.get('region') if isinstance(citation, dict) else citation}
 
     def _aida_packet(self, detail, original):
