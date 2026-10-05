@@ -178,6 +178,101 @@ class ActivationTests(unittest.TestCase):
                         health=kwargs.get('health', lambda: None),
                         owner_uid=os.getuid(), owner_gid=os.getgid())
 
+    def queue_inputs(self, snapshot_digest=None):
+        root = Path(self.temp.name)
+        audit = root / 'audit-v1.json'
+        audit.write_text(json.dumps({'schema': 'issue172-consolidated-audit-v1',
+            'snapshot_sha256': snapshot_digest or self.digest,
+            'totals': {'candidate_result_positions': 799, 'verified_staged_versions': 750,
+                       'unresolved_positions': 49, 'ambiguous_candidate': 419,
+                       'no_known_counterpart': 380}}))
+        audit_digest = hashlib.sha256(audit.read_bytes()).hexdigest()
+        queue = root / 'owner-queue-v1.json'
+        def entry(n, kind):
+            return {'id': f'{kind}-{n}', 'kind': kind, 'status': 'pending',
+                    'source_key': 'source', 'source_sha256': 'c'*64,
+                    'source_position': 'p1-r1', 'citation': 'page 1 row 1',
+                    'evidence_version': 'v1', 'reason': 'unresolved', 'related_positions': []}
+        entries = ([entry(n, 'unresolved_field') for n in range(49)] +
+                   [entry(n, 'relationship_candidate') for n in range(419)])
+        queue.write_text(json.dumps({'schema': 'issue172-owner-queue-v1',
+            'audit_sha256': audit_digest, 'entries': entries}))
+        return queue, hashlib.sha256(queue.read_bytes()).hexdigest(), audit, audit_digest
+
+    def test_guarded_queue_activation_is_idempotent_and_restores_prior_on_failure(self):
+        self.run_activation()
+        queue, digest, audit, audit_digest = self.queue_inputs()
+        from owner_evidence_activate import activate_queue
+        arguments = dict(queue_source=queue, expected_queue_sha256=digest,
+                         audit_source=audit, expected_audit_sha256=audit_digest,
+                         layout=self.layout, expected_snapshot_sha256=self.digest,
+                         command=self.command, health=lambda: None,
+                         owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(activate_queue(**arguments), 'activated')
+        installed = self.layout.state / 'issue172-queue' / 'owner-queue-v1.json'
+        self.assertEqual(installed.read_bytes(), queue.read_bytes())
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(activate_queue(**arguments), 'unchanged')
+        before_config = self.config.read_bytes()
+        before_env = (self.layout.state / 'active.env').read_bytes()
+        queue.write_text(queue.read_text().replace('relationship_candidate-0', 'relationship_candidate-new'))
+        new_digest = hashlib.sha256(queue.read_bytes()).hexdigest()
+        with self.assertRaises(RuntimeError):
+            activate_queue(**{**arguments, 'expected_queue_sha256': new_digest,
+                'health': lambda: (_ for _ in ()).throw(RuntimeError('unhealthy'))})
+        self.assertIn(b'"schema": "issue172-owner-queue-v1"', installed.read_bytes())
+        self.assertEqual(hashlib.sha256(installed.read_bytes()).hexdigest(), digest)
+        self.assertEqual(self.config.read_bytes(), before_config)
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), before_env)
+
+    def test_queue_refuses_wrong_audit_binding_without_changing_service(self):
+        self.run_activation()
+        queue, digest, audit, audit_digest = self.queue_inputs('a' * 64)
+        from owner_evidence_activate import activate_queue
+        self.calls.clear()
+        with self.assertRaises(ValueError):
+            activate_queue(queue, digest, audit, audit_digest, self.layout, self.digest,
+                           command=self.command, owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(self.calls, [])
+
+    def test_queue_rollback_restores_prior_pins_and_removes_new_file(self):
+        self.run_activation()
+        original_config = self.config.read_bytes()
+        original_env = (self.layout.state / 'active.env').read_bytes()
+        queue, digest, audit, audit_digest = self.queue_inputs()
+        from owner_evidence_activate import activate_queue, rollback_queue
+        activate_queue(queue, digest, audit, audit_digest, self.layout, self.digest,
+                       command=self.command, health=lambda: None,
+                       owner_uid=os.getuid(), owner_gid=os.getgid())
+        rollback_queue(self.layout, digest, command=self.command,
+                       owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(self.config.read_bytes(), original_config)
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), original_env)
+        self.assertFalse((self.layout.state / 'issue172-queue' / 'owner-queue-v1.json').exists())
+        with self.assertRaises(ValueError):
+            rollback_queue(self.layout, digest, command=self.command,
+                           owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    def test_queue_activation_rolls_back_when_installed_app_lacks_queue_route(self):
+        self.run_activation()
+        before_config = self.config.read_bytes()
+        before_env = (self.layout.state / 'active.env').read_bytes()
+        queue, digest, audit, audit_digest = self.queue_inputs()
+        from owner_evidence_activate import activate_queue
+        class Response(io.BytesIO):
+            status = 200
+        def old_app(request, timeout):
+            if '/api/issue172-queue' in request.full_url:
+                raise urllib.error.HTTPError(request.full_url, 404, 'missing', {}, None)
+            return Response(json.dumps({'snapshot_sha256': self.digest}).encode())
+        with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=old_app):
+            with self.assertRaises(urllib.error.HTTPError):
+                activate_queue(queue, digest, audit, audit_digest, self.layout, self.digest,
+                               command=self.command, owner_uid=os.getuid(), owner_gid=os.getgid())
+        self.assertEqual(self.config.read_bytes(), before_config)
+        self.assertEqual((self.layout.state / 'active.env').read_bytes(), before_env)
+        self.assertFalse((self.layout.state / 'issue172-queue' / 'owner-queue-v1.json').exists())
+
     def test_candidate_pin_changes_only_after_private_inputs_match_and_converges(self):
         self.run_activation()
         old_config = self.config.read_bytes()
@@ -626,6 +721,34 @@ class ActivationTests(unittest.TestCase):
         with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=lambda *_a, **_k: Response(b'{}')):
             with self.assertRaises(RuntimeError):
                 _health(values, self.digest, self.roster_digest)
+
+    def test_queue_health_requires_pinned_cited_response_and_route_denials(self):
+        values = {'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-origin.alphacompose.com',
+                  'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',
+                  'OWNER_EVIDENCE_EMAILS': 'owner@example.com'}
+        queue_digest, audit_digest = 'd'*64, 'e'*64
+        class Response(io.BytesIO):
+            status = 200
+        def response(request, timeout):
+            headers = {key.lower(): value for key, value in request.header_items()}
+            if (headers['host'] != values['OWNER_EVIDENCE_ORIGIN_HOST'] or
+                    headers['x-freediving-owner-gateway'] != values['OWNER_EVIDENCE_GATEWAY_SECRET'] or
+                    headers['x-freediving-owner-email'] != values['OWNER_EVIDENCE_EMAILS']):
+                raise urllib.error.HTTPError(request.full_url, 403, 'denied', {}, None)
+            if '/api/issue172-queue' in request.full_url:
+                return Response(json.dumps({'schema': 'issue172-owner-queue-v1',
+                    'audit_sha256': audit_digest, 'queue_sha256': queue_digest,
+                    'total': 468, 'items': [{'citation': 'page 1 row 1'}]}).encode())
+            return Response(json.dumps({'snapshot_sha256': self.digest}).encode())
+        with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=response):
+            _health(values, self.digest, queue_digest=queue_digest, audit_digest=audit_digest)
+        def missing_route(request, timeout):
+            if '/api/issue172-queue' in request.full_url:
+                raise urllib.error.HTTPError(request.full_url, 404, 'missing', {}, None)
+            return response(request, timeout)
+        with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=missing_route):
+            with self.assertRaises(urllib.error.HTTPError):
+                _health(values, self.digest, queue_digest=queue_digest, audit_digest=audit_digest)
 
 
 if __name__ == '__main__':

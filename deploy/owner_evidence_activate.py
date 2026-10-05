@@ -40,6 +40,7 @@ LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
                                    'scripts/cmas_microplus_snapshot_observations.py',
                                    'scripts/cmas_microplus_ingest.py',
                                    'scripts/cmas_microplus_finalize.py'))
+QUEUE_PATH = Path('/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json')
 
 
 @dataclass(frozen=True)
@@ -230,7 +231,8 @@ def _stage_directory(parent, name, files, uid, gid, mode):
     return destination
 
 
-def _health(values, expected, roster_digest=None, source_digest=None):
+def _health(values, expected, roster_digest=None, source_digest=None,
+            queue_digest=None, audit_digest=None):
     headers = {
         'Host': values['OWNER_EVIDENCE_ORIGIN_HOST'],
         'X-Freediving-Owner-Gateway': values['OWNER_EVIDENCE_GATEWAY_SECRET'],
@@ -258,16 +260,33 @@ def _health(values, expected, roster_digest=None, source_digest=None):
         with urllib.request.urlopen(route_request, timeout=5) as response:
             if response.status != 200 or json.load(response).get('roster_sha256') != roster_digest:
                 raise RuntimeError('private route roster health check failed')
-    for change in ({'Host': 'poc.alphacompose.com'},
-                   {'X-Freediving-Owner-Gateway': 'invalid'},
-                   {'X-Freediving-Owner-Email': 'unlisted@example.invalid'}):
-        request = urllib.request.Request(url, headers={**headers, **change})
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                raise RuntimeError('private origin accepted invalid identity')
-        except urllib.error.HTTPError as exc:
-            if exc.code != 403:
-                raise RuntimeError('private origin returned unexpected denial') from exc
+    queue_url = None
+    if queue_digest or audit_digest:
+        if not queue_digest or not audit_digest:
+            raise ValueError('queue health pins incomplete')
+        queue_url = 'http://127.0.0.1:8081/owner-evidence/api/issue172-queue?limit=1'
+        with urllib.request.urlopen(urllib.request.Request(queue_url, headers=headers), timeout=5) as response:
+            result = json.load(response)
+            items = result.get('items')
+            if (response.status != 200 or result.get('schema') != 'issue172-owner-queue-v1' or
+                    result.get('total') != 468 or result.get('queue_sha256') != queue_digest or
+                    result.get('audit_sha256') != audit_digest or
+                    not isinstance(items, list) or len(items) != 1 or
+                    not isinstance(items[0], dict) or
+                    not isinstance(items[0].get('citation'), str) or
+                    not items[0]['citation']):
+                raise RuntimeError('private queue readback failed')
+    for probe_url in (url, queue_url) if queue_url else (url,):
+        for change in ({'Host': 'poc.alphacompose.com'},
+                       {'X-Freediving-Owner-Gateway': 'invalid'},
+                       {'X-Freediving-Owner-Email': 'unlisted@example.invalid'}):
+            request = urllib.request.Request(probe_url, headers={**headers, **change})
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    raise RuntimeError('private origin accepted invalid identity')
+            except urllib.error.HTTPError as exc:
+                if exc.code != 403:
+                    raise RuntimeError('private origin returned unexpected denial') from exc
 
 
 def _checkpoint_dir(layout):
@@ -410,6 +429,150 @@ def _system_command(*args):
         return subprocess.run(args, check=False, capture_output=True).returncode == 0
     subprocess.run(args, check=True)
     return True
+
+
+def activate_queue(queue_source, expected_queue_sha256, audit_source,
+                   expected_audit_sha256, layout, expected_snapshot_sha256, *,
+                   command=None, health=None, owner_uid=0, owner_gid=0):
+    """Install a cited queue for the already active snapshot, preserving prior state."""
+    command = command or _system_command
+    queue_source, audit_source = Path(queue_source), Path(audit_source)
+    for path, digest in ((queue_source, expected_queue_sha256),
+                         (audit_source, expected_audit_sha256)):
+        _regular(path)
+        if not re.fullmatch(r'[a-f0-9]{64}', digest) or _sha(path) != digest:
+            raise ValueError('private queue input differs from pinned hash')
+    values = _config(layout.config, os.geteuid(), expected_snapshot_sha256)
+    current = layout.state / 'current'
+    if (not current.is_symlink() or current.resolve().name != expected_snapshot_sha256 or
+            not re.fullmatch(r'[a-f0-9]{64}', expected_snapshot_sha256)):
+        raise ValueError('active snapshot differs from queue binding')
+    queue = json.loads(queue_source.read_text())
+    audit = json.loads(audit_source.read_text())
+    totals = audit.get('totals', {})
+    if (queue.get('schema') != 'issue172-owner-queue-v1' or
+            queue.get('audit_sha256') != expected_audit_sha256 or
+            audit.get('schema') != 'issue172-consolidated-audit-v1' or
+            audit.get('snapshot_sha256') != expected_snapshot_sha256 or
+            any(totals.get(k) != n for k, n in {
+                'candidate_result_positions': 799, 'verified_staged_versions': 750,
+                'unresolved_positions': 49, 'ambiguous_candidate': 419,
+                'no_known_counterpart': 380}.items()) or
+            not isinstance(queue.get('entries'), list) or len(queue['entries']) != 468 or
+            sum(isinstance(e, dict) and e.get('kind') == 'unresolved_field' for e in queue['entries']) != 49 or
+            sum(isinstance(e, dict) and e.get('kind') == 'relationship_candidate' for e in queue['entries']) != 419 or
+            any(not isinstance(e, dict) or not isinstance(e.get('id'), str) or not e['id']
+                    or e.get('status') != 'pending' or
+                    not all(key in e for key in ('source_key', 'source_sha256',
+                        'source_position', 'citation', 'evidence_version', 'reason',
+                        'related_positions'))
+                    for e in queue['entries']) or
+            len({e.get('id') for e in queue['entries']}) != 468):
+        raise ValueError('queue schema, counts or snapshot binding invalid')
+    installed = layout.state / 'issue172-queue' / 'owner-queue-v1.json'
+    checkpoint = layout.state / 'issue172-queue-checkpoint'
+    if checkpoint.is_symlink() or (checkpoint.exists() and not checkpoint.is_dir()):
+        raise ValueError('invalid queue checkpoint')
+    if (checkpoint / 'status.json').exists():
+        record = json.loads((checkpoint / 'status.json').read_text())
+        if record.get('status') == 'pending':
+            _restore_queue_checkpoint(layout, command, owner_uid, owner_gid)
+    if installed.exists():
+        _regular(installed)
+    config_before = layout.config.read_bytes()
+    env_path = layout.state / 'active.env'
+    _regular(env_path)
+    env_before = env_path.read_bytes()
+    queue_before = installed.read_bytes() if installed.exists() else None
+    pin_lines = (f'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE={QUEUE_PATH}\n'
+                 f'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256={expected_queue_sha256}\n').encode()
+    def replace_pins(data):
+        return b''.join(line for line in data.splitlines(keepends=True)
+                        if not line.startswith((b'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE=',
+                                                b'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256='))) + pin_lines
+    new_config = replace_pins(config_before)
+    new_env = replace_pins(env_before)
+    if queue_before == queue_source.read_bytes() and config_before == new_config and env_before == new_env:
+        if not command('systemctl', 'is-active', '--quiet', SERVICE):
+            raise RuntimeError('private origin service inactive')
+        return 'unchanged'
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    if installed.parent.is_symlink():
+        raise ValueError('linked queue directory')
+    installed.parent.chmod(0o700)
+    os.chown(installed.parent, owner_uid, owner_gid)
+    checkpoint.mkdir(mode=0o700, exist_ok=True)
+    checkpoint.chmod(0o700)
+    _atomic_write(checkpoint / 'before-config', config_before, 0o600)
+    _atomic_write(checkpoint / 'before-env', env_before, 0o600)
+    if queue_before is not None:
+        _atomic_write(checkpoint / 'before-queue', queue_before, 0o600)
+    else:
+        (checkpoint / 'before-queue').unlink(missing_ok=True)
+    _atomic_write(checkpoint / 'status.json', json.dumps({
+        'status': 'pending', 'candidate': expected_queue_sha256,
+        'had_queue': queue_before is not None}).encode(), 0o600)
+    try:
+        _atomic_write(installed, queue_source.read_bytes(), 0o600)
+        os.chown(installed, owner_uid, owner_gid)
+        _atomic_write(layout.config, new_config, 0o600)
+        _atomic_write(env_path, new_env, 0o600)
+        command('systemctl', 'restart', SERVICE)
+        if health:
+            health()
+        else:
+            _health(values, expected_snapshot_sha256,
+                    queue_digest=expected_queue_sha256,
+                    audit_digest=expected_audit_sha256)
+    except BaseException:
+        _restore_queue_checkpoint(layout, command, owner_uid, owner_gid)
+        raise
+    _atomic_write(checkpoint / 'status.json', json.dumps({
+        'status': 'active', 'candidate': expected_queue_sha256,
+        'had_queue': queue_before is not None}).encode(), 0o600)
+    return 'activated'
+
+
+def _restore_queue_checkpoint(layout, command, owner_uid, owner_gid):
+    checkpoint = layout.state / 'issue172-queue-checkpoint'
+    status = checkpoint / 'status.json'
+    _regular(status)
+    record = json.loads(status.read_text())
+    if record.get('status') not in ('pending', 'active') or type(record.get('had_queue')) is not bool:
+        raise ValueError('invalid queue checkpoint status')
+    config = checkpoint / 'before-config'
+    env = checkpoint / 'before-env'
+    for path in (status, config, env):
+        _regular(path)
+        if path.stat().st_mode & 0o077:
+            raise ValueError('queue checkpoint is not private')
+    installed = layout.state / 'issue172-queue' / 'owner-queue-v1.json'
+    if record['had_queue']:
+        before = checkpoint / 'before-queue'
+        _regular(before)
+        _atomic_write(installed, before.read_bytes(), 0o600)
+        os.chown(installed, owner_uid, owner_gid)
+    else:
+        installed.unlink(missing_ok=True)
+    _atomic_write(layout.config, config.read_bytes(), 0o600)
+    _atomic_write(layout.state / 'active.env', env.read_bytes(), 0o600)
+    command('systemctl', 'restart', SERVICE)
+    _atomic_write(status, json.dumps({**record, 'status': 'rolled_back'}).encode(), 0o600)
+
+
+def rollback_queue(layout, expected_queue_sha256, *, command=None, owner_uid=0, owner_gid=0):
+    command = command or _system_command
+    checkpoint = layout.state / 'issue172-queue-checkpoint' / 'status.json'
+    _regular(checkpoint)
+    record = json.loads(checkpoint.read_text())
+    if (record.get('status') != 'active' or record.get('candidate') != expected_queue_sha256 or
+            not re.fullmatch(r'[a-f0-9]{64}', expected_queue_sha256)):
+        raise ValueError('active queue differs from rollback request')
+    installed = layout.state / 'issue172-queue' / 'owner-queue-v1.json'
+    _regular(installed)
+    if _sha(installed) != expected_queue_sha256:
+        raise ValueError('active queue content differs from rollback request')
+    _restore_queue_checkpoint(layout, command, owner_uid, owner_gid)
 
 
 def activate(bundle, source, expected, layout, *, roster_source=None, expected_roster_sha256=None,
@@ -611,12 +774,54 @@ def main():
     parser.add_argument('--expected-source-manifest-sha256')
     parser.add_argument('--rollback-candidate-sha256')
     parser.add_argument('--rollback-source-manifest-sha256')
+    parser.add_argument('--queue-source', type=Path)
+    parser.add_argument('--expected-queue-sha256')
+    parser.add_argument('--audit-source', type=Path)
+    parser.add_argument('--expected-audit-sha256')
+    parser.add_argument('--queue-snapshot-sha256')
+    parser.add_argument('--rollback-queue-sha256')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('root required')
     layout = Layout(Path('/opt/freediving/owner-evidence/app'),
                     Path('/var/lib/freediving-owner-evidence'),
                     Path('/etc/systemd/system'), Path('/etc/freediving/owner-evidence.env'))
+    if args.rollback_queue_sha256:
+        if any((args.bundle_dir, args.snapshot_source, args.expected_sha256,
+                args.source_bundle, args.expected_source_manifest_sha256,
+                args.roster_source, args.expected_roster_sha256,
+                args.rollback_candidate_sha256, args.rollback_source_manifest_sha256,
+                args.queue_source, args.expected_queue_sha256, args.audit_source,
+                args.expected_audit_sha256, args.queue_snapshot_sha256)):
+            parser.error('queue rollback requires only its active hash')
+        try:
+            identity = pwd.getpwnam('freediving-evidence')
+            rollback_queue(layout, args.rollback_queue_sha256,
+                           owner_uid=identity.pw_uid, owner_gid=identity.pw_gid)
+        except (ValueError, OSError, KeyError, json.JSONDecodeError, RuntimeError):
+            parser.exit(1, 'Private queue rollback refused or incomplete\n')
+        print('rolled back')
+        return
+    queue_args = (args.queue_source, args.expected_queue_sha256, args.audit_source,
+                  args.expected_audit_sha256, args.queue_snapshot_sha256)
+    if any(queue_args):
+        if not all(queue_args) or any((args.bundle_dir, args.snapshot_source, args.expected_sha256,
+                                      args.source_bundle, args.expected_source_manifest_sha256,
+                                      args.roster_source, args.expected_roster_sha256,
+                                      args.rollback_candidate_sha256,
+                                      args.rollback_source_manifest_sha256)):
+            parser.error('queue activation requires only queue, audit and snapshot pins')
+        try:
+            identity = pwd.getpwnam('freediving-evidence')
+            if identity.pw_uid == 0:
+                raise ValueError('private service account is root')
+            print(activate_queue(args.queue_source, args.expected_queue_sha256,
+                                 args.audit_source, args.expected_audit_sha256,
+                                 layout, args.queue_snapshot_sha256,
+                                 owner_uid=identity.pw_uid, owner_gid=identity.pw_gid))
+        except (ValueError, OSError, KeyError, json.JSONDecodeError, RuntimeError):
+            parser.exit(1, 'Private queue activation refused or incomplete\n')
+        return
     if args.rollback_candidate_sha256 or args.rollback_source_manifest_sha256:
         if (not args.rollback_candidate_sha256 or not args.rollback_source_manifest_sha256 or
                 any((args.bundle_dir, args.snapshot_source, args.expected_sha256,
