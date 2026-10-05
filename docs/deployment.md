@@ -38,9 +38,12 @@ bash deploy/release.sh
 ```
 
 The normal workflow packages only source, resources, deployment scripts and pinned
-JAR dependencies. It takes a private database backup, applies all 20 checksummed
-migrations without seeding data, switches the release, verifies readiness, provisions
-the tunnel/DNS idempotently, publishes the Worker and verifies the custom domain.
+JAR dependencies. On an existing host it uses the guarded migration checkpoint below:
+exact checksum preflight, fresh root-private backup and disposable restore drill,
+then all 21 checksummed migrations without seeding data. A first host install creates
+an empty database and uses the bootstrap backup/migration path. It switches the
+release, verifies readiness, provisions the tunnel/DNS idempotently, publishes the
+Worker and verifies the custom domain.
 A readiness failure restores the previous app symlink when one exists. Migrations
 remain forward-applied; inspect the backup before any database rollback. No GitHub
 push automatically deploys this project.
@@ -61,9 +64,12 @@ role grants without registering a snapshot or importing observations. Source
 registration is a separate private operation; the migration alone changes no
 identity decision or public result.
 
+Migration 21 updates the identity event role check to allow a mechanically proven
+automatic reversal. It changes no existing identity decision or public result.
+
 ### Migration-only operator checkpoint
 
-When the host is still at exact migrations 1-7, run this from a clean checkout of
+When the host is at exact migrations 1-7 or 1-20, run this from a clean checkout of
 the intended merged commit with the existing `bridge-vps` SSH alias:
 
 ```sh
@@ -77,14 +83,18 @@ root-only host helper checks all existing migration checksums, database owner an
 restricted roles, public URL/config agreement, public table counts, and the
 private owner snapshot/status bytes. It takes a root-private complete custom dump
 under `/var/backups/freediving`, verifies the archive listing, restores it into a
-new disposable database, compares schema and public row counts, then drops only
-that disposable database. Only then does it run the existing checksummed
-`freediving.deployment` migration main and verify exact migrations 1-20, empty
-source identity tables, unchanged public counts, active public service/site, and
-unchanged public app and owner snapshot/status pointers and bytes. An exact 1-20
-retry skips the migration and repeats verification. Other version sets, altered
+new disposable database, compares schema, public row counts and (when present)
+source identity row counts, then drops only that disposable database. Only then
+does it run the existing checksummed
+`freediving.deployment` migration main and verify exact migrations 1-21, unchanged
+source identity counts (including existing private rows), unchanged public counts,
+active public service/site, and unchanged public app and owner snapshot/status
+pointers and bytes. An exact 1-21 retry skips the migration and repeats verification.
+Other version sets, altered
 checksums and mismatched configuration are refused.
 
+The same guard runs before normal activation on an existing host. It refuses the
+release if the active public site or private owner checkpoint is absent or changes.
 The helper prints the retained dump path as the rollback checkpoint before any
 migration. Save that path and the commit SHA in the private operator record. A
 failed migration may leave a partially forward-migrated schema because the
@@ -261,8 +271,8 @@ action, the operator must verify and retain these root-private checkpoints:
 1. The exact candidate commit and archive manifest match the chosen host code,
    `private_evidence_transfer.py`/`private_evidence_ssh.py` protocol and local
    caller. Install the complete matching code and helpers outside public releases.
-2. The intended PostgreSQL database has every checksummed migration 1-20 applied,
-   including 20, before any private activation. Retain a verified database backup;
+2. The intended PostgreSQL database has every checksummed migration 1-21 applied,
+   including 21, before any private activation. Retain a verified database backup;
    a migration gap blocks activation. The normal release applies migrations but
    does not install this private archive.
 3. The root-owned 0600 `owner-evidence.env` has the gateway, snapshot pin, owner

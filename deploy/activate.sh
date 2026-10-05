@@ -5,10 +5,18 @@ umask 077
 release=$(realpath "$1")
 [[ "$release" == /opt/freediving/releases/* ]]
 [[ -f "$release/REVISION" ]]
+existing_deployment=0
+if [[ -f /etc/freediving/public.env ]]; then
+  existing_deployment=1
+fi
 id freediving >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin freediving
 python3 "$release/deploy/bootstrap.py"
 cd "$release"
-python3 "$release/deploy/prepare_database.py"
+if [[ "$existing_deployment" == 1 ]]; then
+  python3 "$release/deploy/migrate_only.py" --release "$release" --expected-revision "$(cat "$release/REVISION")"
+else
+  python3 "$release/deploy/prepare_database.py"
+fi
 chown -R root:root "$release"
 chmod -R go-w "$release"
 previous=$(readlink -f /opt/freediving/current || true)

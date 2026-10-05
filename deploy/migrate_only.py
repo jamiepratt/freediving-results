@@ -64,8 +64,8 @@ def expected_migrations():
         if version == 6:
             data = json.dumps(data.decode('utf-8'), ensure_ascii=False).encode('utf-8')
         expected[version] = hashlib.sha256(data).hexdigest()
-    if set(expected) != set(range(1, 21)):
-        raise ValueError('Release must contain exact migrations 1-20')
+    if set(expected) != set(range(1, 22)):
+        raise ValueError('Release must contain exact migrations 1-21')
     return expected
 
 
@@ -164,13 +164,15 @@ def restore_drill(backup, database, port, versions):
             raise ValueError('Disposable restore schema differs from source')
         if counts(disposable, port, PUBLIC_TABLES) != counts(database, port, PUBLIC_TABLES):
             raise ValueError('Disposable restore public counts differ')
+        if 20 in versions and counts(disposable, port, SOURCE_TABLES) != counts(database, port, SOURCE_TABLES):
+            raise ValueError('Disposable restore source counts differ')
     finally:
         if created:
             postgres('dropdb', '-h', '/var/run/postgresql', '-p', port, disposable)
 
 
 def apply_if_needed(current, migration_url, release):
-    if current == 20:
+    if current == 21:
         return
     env = {key: value for key, value in os.environ.items() if not key.startswith('PG')}
     env['FREEDIVING_MIGRATION_URL'] = migration_url
@@ -200,9 +202,9 @@ def migrate(args):
     port, database, migration_url, public_origin = deployment_config(args.config_dir)
     verify_roles(database, port)
     before = version_state(database, port)
-    current = verify_versions(before, expected, (set(range(1, 8)), set(range(1, 21))))
-    if current == 20 and counts(database, port, SOURCE_TABLES) != (0, 0):
-        raise ValueError('Source identity tables are not empty')
+    allowed = tuple(set(range(1, end)) for end in (8, 21, 22))
+    current = verify_versions(before, expected, allowed)
+    source_before = counts(database, port, SOURCE_TABLES) if current >= 20 else None
     public_before = counts(database, port, PUBLIC_TABLES)
     deployment_before = deployment_state(args.public_current, args.owner_current,
                                          args.owner_status, public_origin)
@@ -225,15 +227,15 @@ def migrate(args):
         raise
     print('Rollback checkpoint: ' + str(backup), flush=True)
     apply_if_needed(current, migration_url, release)
-    verify_versions(version_state(database, port), expected, (set(range(1, 21)),))
-    if counts(database, port, SOURCE_TABLES) != (0, 0):
-        raise ValueError('Source identity tables changed')
+    verify_versions(version_state(database, port), expected, (set(range(1, 22)),))
+    if counts(database, port, SOURCE_TABLES) != (source_before if source_before is not None else (0, 0)):
+        raise ValueError('Source identity table counts changed')
     if counts(database, port, PUBLIC_TABLES) != public_before:
         raise ValueError('Public table counts changed')
     if deployment_state(args.public_current, args.owner_current,
                         args.owner_status, public_origin) != deployment_before:
         raise ValueError('Public or owner deployment state changed')
-    print('Migration-only verified versions 1-20; public and owner checkpoints unchanged')
+    print('Migration-only verified versions 1-21; public and owner checkpoints unchanged')
 
 
 def main():
