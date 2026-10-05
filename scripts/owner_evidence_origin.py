@@ -199,9 +199,10 @@ class PrivateOrigin(ThreadingHTTPServer):
                     raise ValueError('decision DB must be independent of snapshot')
                 self.decisions = DecisionStore(decision_path)
                 if self.decisions.active_snapshot_sha256 != expected_digest:
+                    revision = self.decisions.revision
                     self.decisions.bind_verified_snapshot(snapshot_dir,
-                        expected_revision=self.decisions.revision,
-                        idempotency_key='snapshot-' + expected_digest)
+                        expected_revision=revision,
+                        idempotency_key=f'snapshot-{expected_digest}-after-{revision}')
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()

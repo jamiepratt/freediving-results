@@ -3,7 +3,9 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,32 @@ SECRET = 'a-private-gateway-secret-for-tests'
 
 
 class PrivateOriginTest(unittest.TestCase):
+    def test_snapshot_revisit_after_rollback_binds_new_revision(self):
+        decision_path = Path(self.tmp.name) / 'durable-decisions' / 'ledger.sqlite'
+        original_env = {**self.env, 'OWNER_EVIDENCE_DECISION_DB': str(decision_path)}
+        other_dir = Path(self.tmp.name) / 'other-snapshot'
+        shutil.copytree(self.snapshot_dir, other_dir)
+        with sqlite3.connect(other_dir / 'snapshot.sqlite') as db:
+            db.execute('PRAGMA user_version=1')
+        other_digest = sha256((other_dir / 'snapshot.sqlite').read_bytes()).hexdigest()
+        manifest = json.loads((other_dir / 'manifest.json').read_text())
+        manifest['snapshot_sha256'] = other_digest
+        (other_dir / 'manifest.json').write_text(json.dumps(manifest))
+        other_env = {**original_env, 'OWNER_EVIDENCE_SNAPSHOT_SHA256': other_digest}
+
+        with make_server(self.snapshot_dir, original_env) as server:
+            self.assertEqual(server.decisions.revision, 1)
+        with make_server(self.snapshot_dir, original_env) as server:
+            self.assertEqual(server.decisions.revision, 1)
+        with make_server(other_dir, other_env) as server:
+            self.assertEqual(server.decisions.revision, 2)
+        with make_server(self.snapshot_dir, original_env) as server:
+            self.assertEqual(server.decisions.revision, 3)
+        with make_server(other_dir, other_env) as server:
+            self.assertEqual(server.decisions.revision, 4)
+        with make_server(other_dir, other_env) as server:
+            self.assertEqual(server.decisions.revision, 4)
+
     def test_consolidated_queue_is_private_bounded_and_independent_of_decision_store(self):
         queue = {'schema': 'issue172-owner-queue-v1', 'audit_sha256': 'a' * 64,
                  'entries': [{'id': f'item-{index}', 'kind': 'unresolved_field',
