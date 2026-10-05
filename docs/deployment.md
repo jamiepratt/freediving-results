@@ -67,6 +67,17 @@ identity decision or public result.
 Migration 21 updates the identity event role check to allow a mechanically proven
 automatic reversal. It changes no existing identity decision or public result.
 
+For an already populated `freediving_canonical` database, use the dedicated
+`deploy/migrate_canonical_21.py` helper from an exact staged release, as root.
+It requires the existing private database marker and ACL, exact public and
+canonical migration checksums, expected canonical revision and row counts, and
+unchanged owner/public checkpoints. It writes a root-private custom dump,
+restores it into a disposable database, and checks the retained data digest
+before applying migration 21 in one transaction as `freediving_migrator`.
+Retry at version 21 verifies the same state without applying SQL again. The
+existing `migrate_only.py` targets the public database; `provision_canonical.py`
+requires an empty canonical target.
+
 ### Migration-only operator checkpoint
 
 When the host is at exact migrations 1-7 or 1-20, run this from a clean checkout of

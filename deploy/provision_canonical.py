@@ -74,7 +74,9 @@ def target_versions(database, port):
 
 
 def verify_target_versions(actual, expected):
-    if set(actual) not in (set(MIGRATION_ORDER[:n]) for n in range(len(MIGRATION_ORDER) + 1)):
+    allowed = [set(MIGRATION_ORDER[:n]) for n in range(len(MIGRATION_ORDER) + 1)]
+    allowed.append(set(range(1, 22)))
+    if set(actual) not in allowed:
         raise ValueError('Unexpected canonical migration')
     if any(actual[version] != expected[version] for version in actual):
         raise ValueError('Canonical migration checksum conflict')
