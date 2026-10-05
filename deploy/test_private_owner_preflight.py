@@ -19,6 +19,7 @@ MATCHING_PRIVATE_HELPERS = {
     'scripts/affiliate_name_query.py',
     'scripts/owner_decision_export_adapter.py',
     'scripts/owner_snapshot_binding.py',
+    'scripts/reconciliation_flow_host_proof.py',
 }
 
 

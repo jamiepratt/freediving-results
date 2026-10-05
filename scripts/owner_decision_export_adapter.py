@@ -12,6 +12,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from reconciliation_flow_host_proof import LedgerError, verify as verify_host_flow
+
 from unified_evidence_query import SnapshotQuery
 from aida_snapshot_observations import (
     ADAPTER_VERSION as AIDA_VERSION, EVENT_ADAPTER_VERSION as AIDA_EVENT_VERSION,
@@ -134,23 +136,11 @@ def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision,
 def _verify_microplus_flow(flow_path, decision_id, run_revision, event_id, bindings):
     if flow_path is None:
         raise ValueError('persisted reconciliation flow required for Microplus attempt')
-    path = Path(flow_path)
-    if not path.is_file() or path.is_symlink():
-        raise ValueError('persisted reconciliation flow must be a regular file')
-    request = {'flow_path': str(path.resolve()), 'decision_id': decision_id,
-               'reconciliation_run_revision': run_revision,
-               'reconciliation_event_id': event_id,
-               'evidence_bindings': bindings}
-    completed = subprocess.run(
-        ['clojure', '-M', '-m', 'freediving.reconciliation-flow-proof'],
-        input=json.dumps(request, sort_keys=True), text=True, capture_output=True,
-        cwd=Path(__file__).resolve().parents[1], timeout=60)
-    if completed.returncode:
-        raise ValueError('Microplus reconciliation event differs from persisted flow')
     try:
-        proof = json.loads(completed.stdout)
-    except ValueError as exc:
-        raise ValueError('invalid reconciliation flow proof') from exc
+        proof = verify_host_flow(Path(flow_path).absolute(), decision_id,
+                                 run_revision, event_id, bindings)
+    except (LedgerError, OSError, UnicodeError, KeyError, TypeError) as exc:
+        raise ValueError('Microplus reconciliation event differs from persisted flow') from exc
     if proof != {'verified': True, 'event_id': event_id,
                   'run_revision': run_revision}:
         raise ValueError('invalid reconciliation flow proof')
@@ -308,8 +298,13 @@ def deliver_verified_owner_events(store, config_path, *, limit=100):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Private local owner event delivery')
+    parser = argparse.ArgumentParser(description='Private local owner decision operations')
     subcommands = parser.add_subparsers(dest='command', required=True)
+    registration = subcommands.add_parser('register-pending')
+    registration.add_argument('--decision-db', required=True)
+    registration.add_argument('--snapshot', required=True)
+    registration.add_argument('--export', required=True)
+    registration.add_argument('--flow', required=True)
     delivery = subcommands.add_parser('deliver')
     delivery.add_argument('--decision-db', required=True)
     delivery.add_argument('--config', required=True)
@@ -321,11 +316,28 @@ def main(argv=None):
     from owner_decision_store import DecisionStore
     with_store = DecisionStore(db_path)
     try:
-        result = deliver_verified_owner_events(with_store, args.config, limit=args.limit)
+        if args.command == 'register-pending':
+            export_path = Path(args.export)
+            export_stat = export_path.lstat()
+            if not stat.S_ISREG(export_stat.st_mode):
+                raise ValueError('owner export must be a regular file')
+            envelope = json.loads(export_path.read_text())
+            if (not isinstance(envelope, dict) or
+                    not isinstance(envelope.get('proposals'), list) or
+                    not envelope['proposals'] or
+                    any(not isinstance(item, dict) or item.get('status') != 'pending'
+                        for item in envelope['proposals'])):
+                raise ValueError('owner export must contain pending proposals only')
+            result = register_verified_export(with_store, args.snapshot, envelope,
+                                              reconciliation_flow_path=args.flow)
+            result = {'status': 'pending_registered', 'count': len(result),
+                      'store_revision': with_store.revision}
+        else:
+            result = deliver_verified_owner_events(with_store, args.config, limit=args.limit)
     finally:
         with_store.close()
     print(json.dumps(result, sort_keys=True))
-    return 0 if result['status'] == 'complete' else 2
+    return 0 if args.command == 'register-pending' or result['status'] == 'complete' else 2
 
 
 if __name__ == '__main__':

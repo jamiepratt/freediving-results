@@ -38,6 +38,7 @@ HOST_FILES = (
     'scripts/private_evidence_remote.py', 'scripts/private_status_sync.py',
     'scripts/macos_nordvpn.py', 'scripts/affiliate_name_query.py',
     'scripts/owner_decision_export_adapter.py', 'scripts/owner_snapshot_binding.py',
+    'scripts/reconciliation_flow_host_proof.py',
 )
 FILES = OWNER_FILES + HOST_FILES
 

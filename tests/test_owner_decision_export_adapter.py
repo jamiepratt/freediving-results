@@ -1,6 +1,9 @@
 import hashlib
+import copy
 import io
 import json
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -18,6 +21,9 @@ from unified_evidence_snapshot import create_db
 from scripts.cmas_microplus_snapshot_observations import (
     load_source_observations as load_microplus, load_attempt_evidence)
 from tests.test_cmas_microplus_snapshot_observations import fixture as microplus_fixture
+from deploy.private_owner_preflight import FILES as PRIVATE_OWNER_FILES
+from scripts.reconciliation_flow_host_proof import (Keyword, LedgerError, load_ledger,
+                                                    pr_str, verify as verify_host_flow)
 
 SHA = 'a' * 64
 ARTIFACT = 'b' * 64
@@ -235,6 +241,141 @@ class ExportAdapterTest(unittest.TestCase):
                 reconciliation_run_revision=flow['run_revision'],
                 reconciliation_event_id=flow['event_id'],
                 reconciliation_flow_path=flow_path)
+            ledger = load_ledger(flow_path)
+            proof_binding = envelope['proposals'][0]['canonical_binding']
+            proof_request = {'flow_path': str(flow_path), 'decision_id': 'decision-1',
+                             'reconciliation_run_revision': flow['run_revision'],
+                             'reconciliation_event_id': flow['event_id'],
+                             'evidence_bindings': proof_binding['evidence_bindings']}
+
+            def parity(name, mutate=None, expected=False):
+                candidate = copy.deepcopy(ledger)
+                if mutate is not None:
+                    mutate(candidate)
+                payload = pr_str(candidate)
+                source = self.root / ('parity-' + name + '.edn')
+                source.write_text(pr_str({Keyword(':sha256'): hashlib.sha256(
+                    payload.encode()).hexdigest(), Keyword(':ledger'): candidate}))
+                request = dict(proof_request, flow_path=str(source))
+                clojure = subprocess.run(
+                    ['clojure', '-M', '-m', 'freediving.reconciliation-flow-proof'],
+                    input=json.dumps(request), text=True, capture_output=True,
+                    cwd=Path(__file__).resolve().parents[1])
+                try:
+                    verify_host_flow(source, request['decision_id'],
+                                     request['reconciliation_run_revision'],
+                                     request['reconciliation_event_id'],
+                                     request['evidence_bindings'])
+                    portable = True
+                except (LedgerError, ValueError):
+                    portable = False
+                self.assertEqual(expected, portable, name)
+                self.assertEqual(expected, clojure.returncode == 0, name)
+
+            event = lambda candidate: candidate[Keyword(':events')][-1]
+            parity('valid', expected=True)
+            parity('newer', lambda candidate: candidate[Keyword(':events')].append(
+                copy.deepcopy(event(candidate))))
+            parity('event-id', lambda candidate: event(candidate).__setitem__(
+                Keyword(':id'), 'fabricated'))
+            parity('candidate', lambda candidate: event(candidate).__setitem__(
+                Keyword(':candidates'), ['fabricated', 'other']))
+            parity('view', lambda candidate: event(candidate)[Keyword(':evidence')][0]
+                   .__setitem__(Keyword(':evidence-id'), 'fabricated'))
+            parity('source', lambda candidate: event(candidate)[Keyword(':evidence')][0]
+                   [Keyword(':canonical-subject')][Keyword(':source')]
+                   .__setitem__(Keyword(':sha256'), 'fabricated'))
+            parity('citation', lambda candidate: event(candidate)[Keyword(':evidence')][0]
+                   [Keyword(':citation')].__setitem__(Keyword(':locator'), 'fabricated'))
+            parity('human', lambda candidate: event(candidate).__setitem__(
+                Keyword(':origin'), Keyword(':human')))
+            parity('revision', lambda candidate: event(candidate)[Keyword(':evidence')][0]
+                   [Keyword(':canonical-subject')][Keyword(':version')]
+                   .__setitem__(Keyword(':observation-revision'), {'changed': True}))
+            malformed = self.root / 'malformed.edn'
+            malformed.write_text('{:ledger')
+            with self.assertRaises(LedgerError):
+                load_ledger(malformed)
+            for name, contents in [('duplicate-map', '{:ledger {} :ledger {}}'),
+                                   ('unsupported-tag', '{:ledger #unknown {}}')]:
+                invalid = self.root / (name + '.edn')
+                invalid.write_text(contents)
+                with self.assertRaises(LedgerError):
+                    load_ledger(invalid)
+                request = dict(proof_request, flow_path=str(invalid))
+                clojure = subprocess.run(
+                    ['clojure', '-M', '-m', 'freediving.reconciliation-flow-proof'],
+                    input=json.dumps(request), text=True, capture_output=True,
+                    cwd=Path(__file__).resolve().parents[1])
+                self.assertNotEqual(0, clojure.returncode, name)
+            unsupported = self.root / 'unsupported-version.edn'
+            other = copy.deepcopy(ledger)
+            other[Keyword(':version')] = 'reconciliation-flow/unknown'
+            unsupported.write_text(pr_str({Keyword(':ledger'): other,
+                Keyword(':sha256'): hashlib.sha256(pr_str(other).encode()).hexdigest()}))
+            with self.assertRaises(LedgerError):
+                load_ledger(unsupported)
+            altered = self.root / 'tampered-digest.edn'
+            altered.write_text(flow_path.read_text().replace(':sha256 "', ':sha256 "0', 1))
+            with self.assertRaises(LedgerError):
+                load_ledger(altered)
+            linked = self.root / 'flow-link.edn'
+            linked.symlink_to(flow_path)
+            with self.assertRaises(OSError):
+                load_ledger(linked)
+            staged = self.root / 'stripped-owner-code'
+            for name in PRIVATE_OWNER_FILES:
+                target = staged / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(Path(__file__).resolve().parents[1] / name, target)
+            export_path = self.root / 'pending-export.json'
+            export_path.write_text(json.dumps(envelope))
+            command = [sys.executable, str(staged / 'scripts/owner_decision_export_adapter.py'),
+                       'register-pending', '--decision-db', str(self.root / 'view-decisions.sqlite'),
+                       '--snapshot', str(microplus), '--export', str(export_path),
+                       '--flow', str(flow_path)]
+            env = dict(os.environ, PATH='')
+            staged_result = subprocess.run(command, cwd=staged, env=env,
+                                           text=True, capture_output=True)
+            self.assertEqual(0, staged_result.returncode, staged_result.stderr)
+            self.assertEqual('pending', store.inspect('decision-1')['effective_status'])
+            retry = subprocess.run(command, cwd=staged, env=env,
+                                   text=True, capture_output=True)
+            self.assertEqual(0, retry.returncode, retry.stderr)
+            self.assertEqual(store.revision, json.loads(retry.stdout)['store_revision'])
+            forged_export = copy.deepcopy(envelope)
+            forged_export['proposals'][0]['canonical_binding']['reconciliation_event_id'] = 'forged'
+            forged_path = self.root / 'forged-export.json'
+            forged_path.write_text(json.dumps(forged_export))
+            forged_command = command[:]
+            forged_command[forged_command.index('--export') + 1] = str(forged_path)
+            forged_result = subprocess.run(forged_command, cwd=staged, env=env,
+                                           text=True, capture_output=True)
+            self.assertNotEqual(0, forged_result.returncode)
+            self.assertIn('persisted flow', forged_result.stderr)
+            stale_export = copy.deepcopy(envelope)
+            stale_export['store_revision'] += 1
+            stale_path = self.root / 'stale-export.json'
+            stale_path.write_text(json.dumps(stale_export))
+            stale_command = command[:]
+            stale_command[stale_command.index('--export') + 1] = str(stale_path)
+            stale_result = subprocess.run(stale_command, cwd=staged, env=env,
+                                          text=True, capture_output=True)
+            self.assertNotEqual(0, stale_result.returncode)
+            link_command = command[:]
+            link_command[link_command.index('--flow') + 1] = str(linked)
+            link_result = subprocess.run(link_command, cwd=staged, env=env,
+                                         text=True, capture_output=True)
+            self.assertNotEqual(0, link_result.returncode)
+            original = (microplus / 'unit-16-results.json').read_bytes()
+            try:
+                (microplus / 'unit-16-results.json').write_bytes(b'changed')
+                changed_result = subprocess.run(command, cwd=staged, env=env,
+                                                text=True, capture_output=True)
+                self.assertNotEqual(0, changed_result.returncode)
+                self.assertIn('source receipt mismatch', changed_result.stderr)
+            finally:
+                (microplus / 'unit-16-results.json').write_bytes(original)
             proposal = envelope['proposals'][0]
             self.assertEqual([record_id, record_id], [item['id'] for item in proposal['evidence']])
             self.assertEqual({view['id'] for view in views['evidence']['observation-versions']},
