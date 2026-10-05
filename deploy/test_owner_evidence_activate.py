@@ -727,6 +727,8 @@ class ActivationTests(unittest.TestCase):
                   'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',
                   'OWNER_EVIDENCE_EMAILS': 'owner@example.com'}
         queue_digest, audit_digest = 'd'*64, 'e'*64
+        queue_item = {'citation': {'page': 1, 'region': {
+            'bbox': [0, 0, 1, 1], 'units': 'relative'}}}
         class Response(io.BytesIO):
             status = 200
         def response(request, timeout):
@@ -738,10 +740,19 @@ class ActivationTests(unittest.TestCase):
             if '/api/issue172-queue' in request.full_url:
                 return Response(json.dumps({'schema': 'issue172-owner-queue-v1',
                     'audit_sha256': audit_digest, 'queue_sha256': queue_digest,
-                    'total': 468, 'items': [{'citation': 'page 1 row 1'}]}).encode())
+                    'total': 468, 'items': [queue_item]}).encode())
             return Response(json.dumps({'snapshot_sha256': self.digest}).encode())
         with mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=response):
             _health(values, self.digest, queue_digest=queue_digest, audit_digest=audit_digest)
+            queue_item['citation'] = {'page': 1, 'region': 'printed result row',
+                                      'bbox': [0, 0, 1, 1], 'units': 'relative'}
+            _health(values, self.digest, queue_digest=queue_digest, audit_digest=audit_digest)
+            for citation in ({}, {'page': 1}, {'page': 0, 'region': {'bbox': [0, 0, 1, 1], 'units': 'relative'}},
+                             {'page': 1, 'region': {'bbox': [], 'units': 'relative'}}, ''):
+                queue_item['citation'] = citation
+                with self.subTest(citation=citation), self.assertRaises(RuntimeError):
+                    _health(values, self.digest, queue_digest=queue_digest, audit_digest=audit_digest)
+            queue_item['citation'] = {'page': 1, 'region': {'bbox': [0, 0, 1, 1], 'units': 'relative'}}
         def missing_route(request, timeout):
             if '/api/issue172-queue' in request.full_url:
                 raise urllib.error.HTTPError(request.full_url, 404, 'missing', {}, None)

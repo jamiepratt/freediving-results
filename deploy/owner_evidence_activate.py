@@ -231,6 +231,26 @@ def _stage_directory(parent, name, files, uid, gid, mode):
     return destination
 
 
+def _has_queue_citation(citation):
+    if isinstance(citation, str):
+        return bool(citation.strip())
+    if not isinstance(citation, dict) or type(citation.get('page')) is not int or citation['page'] < 1:
+        return False
+    region = citation.get('region')
+    if isinstance(region, str):
+        if not region.strip():
+            return False
+        location = citation
+    elif isinstance(region, dict):
+        location = region
+    else:
+        return False
+    bbox = location.get('bbox')
+    return (isinstance(location.get('units'), str) and bool(location['units'].strip()) and
+            isinstance(bbox, list) and len(bbox) == 4 and
+            all(type(value) in (int, float) for value in bbox))
+
+
 def _health(values, expected, roster_digest=None, source_digest=None,
             queue_digest=None, audit_digest=None):
     headers = {
@@ -273,8 +293,7 @@ def _health(values, expected, roster_digest=None, source_digest=None,
                     result.get('audit_sha256') != audit_digest or
                     not isinstance(items, list) or len(items) != 1 or
                     not isinstance(items[0], dict) or
-                    not isinstance(items[0].get('citation'), str) or
-                    not items[0]['citation']):
+                    not _has_queue_citation(items[0].get('citation'))):
                 raise RuntimeError('private queue readback failed')
     for probe_url in (url, queue_url) if queue_url else (url,):
         for change in ({'Host': 'poc.alphacompose.com'},
