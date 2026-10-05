@@ -170,7 +170,8 @@
     return {rows,accepted:projection['accepted-group-count']||0,
       provisional:projection['provisional-record-count']||0,
       unresolved:projection['unresolved-count']||0,
-      scope:projection.scope||'retained-observations',history:data?.history||[]};
+      scope:projection.scope||'retained-observations',
+      pendingAutomaticReview:projection['pending-automatic-review']||[],history:data?.history||[]};
   }
   if (typeof module !== 'undefined') { module.exports={scalar,proposal,publication,comparison,triage,reviewEnabled,sourcePageQuery,pageViewer,casePresentation,viewerControls,scoreSummary,queueCases,scoreRows,scorePresentation,probabilityColor,athletePresentation}; return; }
   const $=id=>document.getElementById(id);
@@ -209,7 +210,7 @@
   async function loadAthletes(){
     const sessionToken=csrf, view=athletePresentation(await api('/api/athletes'));
     if(csrf!==sessionToken)return;
-    $('athletes-summary').textContent=`${view.accepted} accepted groups; ${view.provisional} stable provisional records; ${view.unresolved} observations with unresolved candidates. Scope: ${view.scope}. Showing ${Math.min(100,view.rows.length)} of ${view.rows.length} observations.`;
+    $('athletes-summary').textContent=`${view.accepted} accepted groups; ${view.provisional} stable provisional records; ${view.unresolved} observations with unresolved candidates; ${view.pendingAutomaticReview.length} automatic links need review. Scope: ${view.scope}. Showing ${Math.min(100,view.rows.length)} of ${view.rows.length} observations.`;
     $('athletes').replaceChildren();
     view.rows.slice(0,100).forEach(row=>{
       const card=node('article',undefined,'event');
@@ -224,7 +225,8 @@
       const card=node('article',undefined,'event');
       card.append(node('strong',`${event.action} · ${event['actor-kind']} · ${event.id}`),
         node('p',`Revision ${event.revision}; ${event.reason||event.decision?.reason||'No reason recorded'}`),
-        expandable('Cited identity evidence',event.evidence||{}));
+        expandable('Cited identity evidence',event.evidence||event['current-evidence']||{}),
+        ...(event['prior-evidence']?[expandable('Evidence at approval',event['prior-evidence'])]:[]));
       $('athletes-history').append(card);
     });
     if(!view.history.length)$('athletes-history').append(node('p','No identity decisions recorded.'));

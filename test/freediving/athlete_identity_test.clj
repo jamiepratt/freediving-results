@@ -39,6 +39,48 @@
                                                  {:ambiguous-names #{"amy smith"}}))))
     (is (= :unresolved (:status (identity/decide index (athlete "target" "Zsofia Torocsik" :parse-status :damaged) {}))))))
 
+(deftest later-name-competitor-invalidates-automatic-link
+  (let [a (athlete "a" "Distinctive Diver")
+        b (athlete "b" "Distinctive Diver")
+        approval {:id "auto-ab" :action :accept :actor-kind :automatic
+                  :pair ["a" "b"] :rule-version identity/rule-version
+                  :evidence {:observations [a b]
+                             :alternatives [{:observation-id "b"}]
+                             :candidate-count 1}}
+        original (identity/append-event (identity/empty-ledger [a b]) approval)
+        later (assoc original :rows (assoc (:rows original)
+                                           "c" (athlete "c" "Distinctive Diver")))
+        checked (identity/recheck-automatic-links later)
+        invalidation (last (:events checked))]
+    (is (= :reverse (:action invalidation)))
+    (is (= "auto-ab" (:event-id invalidation)))
+    (is (= :candidate-set-changed (:reason invalidation)))
+    (is (= #{"b" "c"} (set (map :observation-id (get-in invalidation [:current-evidence :candidates])))))
+    (is (= 0 (:accepted-group-count (identity/project checked))))
+    (is (= #{"athlete:a" "athlete:b" "athlete:c"}
+           (set (map :provisional-id (vals (:athletes (identity/project checked)))))))
+    (is (= checked (identity/recheck-automatic-links checked)))))
+
+(deftest conflicting-verified-person-id-exposes-contradiction
+  (let [person (fn [id name publisher-id]
+                 (athlete id name :publisher-scope "CMAS"
+                          :publisher-athlete-id publisher-id :publisher-id-kind :person))
+        a (person "a" "Distinctive Diver" "person-1")
+        b (person "b" "Distinctive Diver" "person-1")
+        c (person "c" "Distinctive Diver" "person-2")
+        approval {:id "auto-ab" :action :accept :actor-kind :automatic
+                  :pair ["a" "b"] :rule-version identity/rule-version
+                  :evidence {:observations [a b] :alternatives [{:observation-id "b"}]}}
+        original (identity/append-event (identity/empty-ledger [a b]) approval)
+        unrelated (assoc original :rows (assoc (:rows original) "other" (athlete "other" "Other Athlete")))
+        changed (assoc original :rows (assoc (:rows original) "c" c))
+        checked (identity/recheck-automatic-links changed)]
+    (is (= (:events original) (:events (identity/recheck-automatic-links unrelated))))
+    (is (= :publisher-person-contradiction (:reason (last (:events checked)))))
+    (is (= 0 (:accepted-group-count (identity/project checked))))
+    (is (= :publisher-person-contradiction
+           (get-in (identity/project checked) [:pending-automatic-review 0 :reason])))))
+
 (deftest reversible-groups-and-human-suppression
   (let [rows [(athlete "a" "A Person") (athlete "b" "B Person") (athlete "c" "C Person")]
         e1 {:id "one" :action :accept :actor-kind :automatic :pair ["a" "b"] :rule-version identity/rule-version}

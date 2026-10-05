@@ -9,6 +9,7 @@
             [freediving.camotes-world-cup :as camotes-world-cup]
             [freediving.camotes-world-cup-continuation :as camotes-world-cup-continuation]
             [freediving.aida-html :as html]
+            [freediving.athlete-identity :as identity]
             [freediving.cmas-2025-indoor-json :as indoor-json]
             [freediving.cmas-2026-roatan-json :as roatan-json])
   (:import [java.sql DriverManager Connection]
@@ -237,6 +238,7 @@
                               (= (:schema-version artifact) (:schema_version existing))
                               (= (observation-rows artifact)
                                  (query c "SELECT ordinal,candidate_id,kind,classification_reason,payload_edn FROM freediving.observations WHERE job_id=? ORDER BY ordinal" job-id))) (fail! "Conflicting artifact for existing extraction job"))
+               (identity/reconcile-import! c)
                (.commit c) {:status :skipped :job-id job-id :observations (count (:candidates artifact))})
            (do
              (execute! c "INSERT INTO freediving.extractions(job_id,artifact_sha256,source_sha256,parser_version,schema_version,artifact_bytes) VALUES (?,?,?,?,?,?)"
@@ -247,6 +249,7 @@
                  (execute! c "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) VALUES (?,?,?,?,?,?)"
                            job-id ordinal candidate-id kind reason (encoded candidate))
                  (when on-progress (on-progress {:phase :observation-inserted :ordinal ordinal :job-id job-id}))))
+             (identity/reconcile-import! c)
              (.commit c) {:status :created :job-id job-id :observations (count (:candidates artifact))}))
          (catch Exception e (.rollback c) (throw e)))))))
 (defn list-extractions [url]
