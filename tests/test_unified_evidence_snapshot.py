@@ -379,7 +379,8 @@ def test_extend_accounts_for_apnea_aggregates_and_san_mauro_versions(tmp_path):
                                 'fields': {'team': 'X'}}]}})
     jpg = write(tmp_path / 'jpg.json', {
         'schema': 'san-mauro-jpg-supplement/v1',
-        'counts': {'source_objects': 1, 'source_positions': 2, 'individual_positions': 1,
+        'counts': {'source_objects': 1, 'source_positions': 2, 'transport_rows': 2,
+                   'repeated_transport_rows': 0, 'individual_positions': 1,
                    'aggregate_positions': 1, 'observation_versions': 2,
                    'manual_observation_versions': 2, 'relationship_candidates': 1,
                    'confirmed_distinct_attempts': None},
