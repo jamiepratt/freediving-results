@@ -328,10 +328,16 @@ def main(argv=None):
                     any(not isinstance(item, dict) or item.get('status') != 'pending'
                         for item in envelope['proposals'])):
                 raise ValueError('owner export must contain pending proposals only')
+            before_revision = with_store.revision
             result = register_verified_export(with_store, args.snapshot, envelope,
                                               reconciliation_flow_path=args.flow)
-            result = {'status': 'pending_registered', 'count': len(result),
-                      'store_revision': with_store.revision}
+            statuses = {}
+            for proposal in envelope['proposals']:
+                status = with_store.inspect(proposal['id'])['status']
+                statuses[status] = statuses.get(status, 0) + 1
+            result = {'status': 'registered' if with_store.revision > before_revision
+                      else 'unchanged_replay', 'count': len(result),
+                      'statuses': statuses, 'store_revision': with_store.revision}
         else:
             result = deliver_verified_owner_events(with_store, args.config, limit=args.limit)
     finally:

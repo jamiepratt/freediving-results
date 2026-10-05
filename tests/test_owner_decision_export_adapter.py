@@ -338,11 +338,46 @@ class ExportAdapterTest(unittest.TestCase):
             staged_result = subprocess.run(command, cwd=staged, env=env,
                                            text=True, capture_output=True)
             self.assertEqual(0, staged_result.returncode, staged_result.stderr)
+            self.assertEqual('registered', json.loads(staged_result.stdout)['status'])
+            self.assertEqual({'pending': 1}, json.loads(staged_result.stdout)['statuses'])
             self.assertEqual('pending', store.inspect('decision-1')['effective_status'])
             retry = subprocess.run(command, cwd=staged, env=env,
                                    text=True, capture_output=True)
             self.assertEqual(0, retry.returncode, retry.stderr)
             self.assertEqual(store.revision, json.loads(retry.stdout)['store_revision'])
+            self.assertEqual('unchanged_replay', json.loads(retry.stdout)['status'])
+            later_db = self.root / 'later-action.sqlite'
+            with sqlite3.connect(later_db) as copy_db:
+                store.db.backup(copy_db)
+            later_store = DecisionStore(later_db)
+            try:
+                later_store.act('decision-1', action='approve',
+                                expected_revision=later_store.revision,
+                                idempotency_key='later-human-approval')
+            finally:
+                later_store.close()
+            later_command = command[:]
+            later_command[later_command.index('--decision-db') + 1] = str(later_db)
+            later_result = subprocess.run(later_command, cwd=staged, env=env,
+                                          text=True, capture_output=True)
+            self.assertEqual(0, later_result.returncode, later_result.stderr)
+            self.assertEqual('unchanged_replay', json.loads(later_result.stdout)['status'])
+            self.assertEqual({'human_approved': 1}, json.loads(later_result.stdout)['statuses'])
+            later_store = DecisionStore(later_db)
+            try:
+                approval = later_store.human_events()['events'][0]
+                later_store.acknowledge_human_event('flow-ledger', approval, 'test-flow-committed')
+                later_store.acknowledge_human_event('postgresql', approval, 'test-canonical-committed')
+                later_store.act('decision-1', action='reverse',
+                                expected_revision=later_store.revision,
+                                idempotency_key='later-human-reversal')
+            finally:
+                later_store.close()
+            reversed_result = subprocess.run(later_command, cwd=staged, env=env,
+                                             text=True, capture_output=True)
+            self.assertEqual(0, reversed_result.returncode, reversed_result.stderr)
+            self.assertEqual('unchanged_replay', json.loads(reversed_result.stdout)['status'])
+            self.assertEqual({'reversed': 1}, json.loads(reversed_result.stdout)['statuses'])
             forged_export = copy.deepcopy(envelope)
             forged_export['proposals'][0]['canonical_binding']['reconciliation_event_id'] = 'forged'
             forged_path = self.root / 'forged-export.json'
