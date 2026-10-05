@@ -60,3 +60,28 @@ citations before claiming positions. Identical replay merges duplicate inputs;
 changed bytes require their own matching receipt and remain a separate version.
 This narrow route does not generalize to the other Microplus unit endpoints or
 establish six distinct sporting attempts.
+
+## Retained attempt reversal check
+
+`scripts.cmas_microplus_snapshot_observations.py` exposes
+`load_attempt_evidence(snapshot_dir, source_names, record_ids=[...])` for an
+explicit selection of individual results. It first replays the retained packet
+and verifies the snapshot, original response receipts and every cited JSON row.
+Complete scope comes from the payload's competition, date, unit, phase,
+discipline, participant and result IDs. The requested endpoint's unit is retained
+as transport metadata; grouped endpoints can return another unit's results.
+Missing scope and nonpositive or unresolved final results reject the selection.
+Each primary or alternate citation becomes a separately cited observation with
+its own response hash. The adapter emits evidence only, without decision events.
+
+The isolated [#76](https://github.com/jamiepratt/freediving-results/issues/76)
+check selected five positive final results from individual unit 3520, also cited
+in grouped unit 3519. The original responses have different bytes. The frozen
+snapshot above retains five positions; the attempt ledger retains ten cited
+view positions across two source objects. Equal complete publisher scope forms
+five automatic attempt groups. A test-only reversal splits one group, yielding
+six projected groups and four remaining automatic links. An unchanged rebase
+preserves that projection, the single human reversal event and all source
+evidence, with zero provider calls. Six is the counterfactual rollback projection,
+not a count of verified sporting dives. Originals and ledger artifacts remain
+private under `issue76-microplus-reversal-20261005/` in the private corpus root.

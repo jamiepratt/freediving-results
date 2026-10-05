@@ -12,12 +12,13 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def fixture(root, schema='cmas-microplus-private-census/v1'):
+def fixture(root, schema='cmas-microplus-private-census/v1', overrides=None):
     source = root / 'unit-17-results.json'
     raw_row = {'DCCmpID': 28, 'ResID': 91, 'UtID': 17, 'ParID': 7,
                'EvID': 8, 'PhID': 9, 'EvStartDate': '2026-08-07T12:00:00',
                'ParPrintName': 'Synthetic Diver', 'EvShortDescr': 'CWT',
                'AGCodeDescr': 'SENM', 'ResResultFinal': '42', 'ResPenality': None}
+    raw_row.update(overrides or {})
     raw = json.dumps([raw_row]).encode()
     source.write_bytes(raw)
     url = 'https://cmas-api.microplustimingservices.com/api/units/17/results'
@@ -59,6 +60,94 @@ def fixture(root, schema='cmas-microplus-private-census/v1'):
 
 
 class MicroplusSnapshotObservationsTest(unittest.TestCase):
+    def test_grouped_and_individual_views_keep_their_own_source_hashes(self):
+        from scripts.cmas_microplus_snapshot_observations import load_attempt_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, record_id, row = fixture(root)
+            alias_url = row['citation']['url'].replace('/17/', '/16/')
+            payload = json.dumps([{'unrelated': 'retained transport row'}, row['raw_fields']]).encode()
+            (root / 'unit-16-results.json').write_bytes(payload)
+            (root / 'unit-16-results.receipt.json').write_text(json.dumps({
+                'status': 200, 'sha256': sha(payload), 'bytes': len(payload), 'final_url': alias_url}))
+            alias = {'url': alias_url, 'json_pointer': '/1', 'source_sha256': sha(payload)}
+            row['alternate_citations'] = [alias]
+            packet = json.loads((root / 'packet.json').read_text())
+            packet['positions'][0] = row
+            packet['sources'].append(dict(packet['sources'][0], unit_id=16, url=alias_url,
+                                           id='sha256:' + sha(payload), sha256=sha(payload),
+                                           bytes=len(payload), row_count=2))
+            (root / 'packet.json').write_text(json.dumps(packet))
+            with sqlite3.connect(root / 'snapshot.sqlite') as db:
+                db.execute('UPDATE records SET raw_json=?', (json.dumps(row),))
+            manifest = json.loads((root / 'manifest.json').read_text())
+            manifest['snapshot_sha256'] = sha((root / 'snapshot.sqlite').read_bytes())
+            manifest['inputs'][name]['sha256'] = sha((root / 'packet.json').read_bytes())
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+
+            result = load_attempt_evidence(root, [name], record_ids=[record_id], source_dir=root)
+            self.assertEqual(2, result['summary']['source_objects'])
+            for version in result['evidence']['observation-versions']:
+                citation = version['scope-evidence']['citation']
+                self.assertEqual(citation['source_sha256'], version['scope-evidence']['source-sha256'])
+                self.assertEqual(citation['source_sha256'], version['observation-revision']['source_sha256'])
+                self.assertEqual(citation, version['observation-revision']['citation'])
+
+    def test_attempt_evidence_rejects_missing_scope_or_unresolved_result(self):
+        from scripts.cmas_microplus_snapshot_observations import load_attempt_evidence
+        for changes in ({'UtID': None}, {'PhID': None}, {'ParID': 0},
+                        {'EvShortDescr': ''}, {'ResResultFinal': None},
+                        {'ResResultFinal': 'NaN'}, {'ResResultFinal': '0'}):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                name, record_id, _ = fixture(root, overrides=changes)
+                with self.assertRaises(ValueError):
+                    load_attempt_evidence(root, [name], record_ids=[record_id], source_dir=root)
+
+    def test_attempt_evidence_requires_exact_selected_snapshot_records(self):
+        from scripts.cmas_microplus_snapshot_observations import load_attempt_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, record_id, _ = fixture(root)
+            for selected in ([], [record_id, record_id], ['missing-record']):
+                with self.subTest(selected=selected), self.assertRaises(ValueError):
+                    load_attempt_evidence(root, [name], record_ids=selected, source_dir=root)
+
+    def test_alternate_endpoint_uses_payload_attempt_ids_and_keeps_both_citations(self):
+        from scripts.cmas_microplus_snapshot_observations import load_attempt_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name, record_id, row = fixture(root)
+            alias_url = row['citation']['url'].replace('/17/', '/16/')
+            alias = dict(row['citation'], url=alias_url)
+            row['alternate_citations'] = [alias]
+            (root / 'unit-16-results.json').write_bytes((root / 'unit-17-results.json').read_bytes())
+            receipt = json.loads((root / 'unit-17-results.receipt.json').read_text())
+            (root / 'unit-16-results.receipt.json').write_text(json.dumps(dict(receipt, final_url=alias_url)))
+            packet = json.loads((root / 'packet.json').read_text())
+            packet['positions'][0] = row
+            packet['sources'].append(dict(packet['sources'][0], unit_id=16, url=alias_url))
+            (root / 'packet.json').write_text(json.dumps(packet))
+            with sqlite3.connect(root / 'snapshot.sqlite') as db:
+                db.execute('UPDATE records SET raw_json=?', (json.dumps(row),))
+            manifest = json.loads((root / 'manifest.json').read_text())
+            manifest['snapshot_sha256'] = sha((root / 'snapshot.sqlite').read_bytes())
+            manifest['inputs'][name]['sha256'] = sha((root / 'packet.json').read_bytes())
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+
+            result = load_attempt_evidence(root, [name], record_ids=[record_id], source_dir=root)
+            self.assertEqual(1, result['summary']['snapshot_positions'])
+            self.assertEqual(2, result['summary']['cited_view_observations'])
+            self.assertEqual(1, result['summary']['source_objects'])
+            self.assertIsNone(result['summary']['confirmed_distinct_attempts'])
+            versions = result['evidence']['observation-versions']
+            self.assertEqual([17, 17], [v['scope']['session'] for v in versions])
+            self.assertEqual([91, 91], [v['scope']['attempt'] for v in versions])
+            self.assertEqual({alias_url, row['citation']['url']},
+                             {p['locator']['url'] for p in result['evidence']['positions']})
+            self.assertEqual([record_id, record_id], [v['snapshot-record-id'] for v in versions])
+            self.assertEqual([16, 17], sorted(s['transport-unit-id'] for s in result['evidence']['sources']))
+
     def test_original_json_and_snapshot_bind_without_attempt_approval(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
