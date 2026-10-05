@@ -63,7 +63,8 @@ def parse_origin_env(content):
                 'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'}
     status_keys = {'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                    'OWNER_EVIDENCE_STATUS_CLIENT_ID'}
-    allowed = required | status_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED'}
+    queue_keys = {'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE', 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'}
+    allowed = required | status_keys | queue_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED'}
     if (not required <= values.keys() or set(values) - allowed or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             values['OWNER_EVIDENCE_ORIGIN_HOST'] != PRIVATE_HOST):
@@ -74,6 +75,11 @@ def parse_origin_env(content):
                 not 24 <= len(values['OWNER_EVIDENCE_STATUS_TOKEN']) <= 256 or
                 not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', values['OWNER_EVIDENCE_STATUS_CLIENT_ID'])):
             raise ValueError('Private status configuration incomplete or malformed')
+    if queue_keys & values.keys():
+        if (not queue_keys <= values.keys() or
+                values['OWNER_EVIDENCE_ISSUE172_QUEUE_FILE'] != '/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json' or
+                not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'])):
+            raise ValueError('Private queue configuration incomplete or malformed')
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
     if not emails or any(not re.fullmatch(r'[^\s,@]+@[^\s,@]+\.[^\s,@]+', e) or e != e.lower() for e in emails):
         raise ValueError('Owner allowlist malformed')

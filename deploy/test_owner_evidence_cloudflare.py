@@ -55,6 +55,19 @@ class PrivateActivationChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_origin_env(lines.replace('owner-origin.alphacompose.com', 'poc-origin.alphacompose.com'))
 
+    def test_origin_configuration_accepts_only_complete_fixed_queue_pin(self):
+        base = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+                "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+                "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+                f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n")
+        pin = ("OWNER_EVIDENCE_ISSUE172_QUEUE_FILE=/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json\n"
+               f"OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256={'b'*64}\n")
+        self.assertEqual(parse_origin_env(base + pin)[0]['OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'], 'b'*64)
+        for bad in (pin.splitlines()[0] + '\n', pin.replace('b'*64, 'invalid'),
+                    pin.replace('/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json', '/tmp/queue.json')):
+            with self.assertRaises(ValueError):
+                parse_origin_env(base + bad)
+
     def test_origin_configuration_accepts_complete_private_status_writer(self):
         base = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
                 "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
