@@ -41,6 +41,15 @@ class ConsolidatedAuditTest(unittest.TestCase):
             self.assertIsNone(audit["totals"]["confirmed_distinct_attempts"])
             self.assertEqual(len(queue["entries"]), 9)
             self.assertNotIn("private", (root / "out/owner-queue-v1.json").read_text())
+            unsupported = root / "unsupported-relationships.json"
+            unsupported.write_text(json.dumps({"schema": "issue172-cited-relationships-v1",
+                "corpus_sha256": None, "relationships": [{"source_position": "worldcup:1",
+                "classification": "exact_supported", "citation": {"page": 1},
+                "target_citation": {"page": 1}, "target_source_sha256": "unverified"}]}))
+            unsupported_sha = hashlib.sha256(unsupported.read_bytes()).hexdigest()
+            result = subprocess.run(command + ["--relationship-evidence",
+                                     f"{unsupported}={unsupported_sha}"], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, "uncorroborated exact relationship was accepted")
             snapshot = root / "retained.sqlite"
             with sqlite3.connect(snapshot) as db:
                 db.execute("create table records(record_id, source_id, source_object_id, event_date, "

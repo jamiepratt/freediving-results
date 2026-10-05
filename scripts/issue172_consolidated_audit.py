@@ -20,7 +20,6 @@ from pathlib import Path
 SOURCES = ("worldcup", "italian_open", "barracuda", "komaros", "cagliari",
            "liberamente", "friday", "firenze", "asti")
 IMPORT_NAMES = {"italian_open": "italian-open", "friday": "friday-night", "asti": "asti-blu"}
-RELATIONS = ("exact_supported", "likely_overlap", "conflicting_revision", "ambiguous_candidate")
 EVENT_DAYS = {"barracuda": "2026-05-08", "komaros": "2026-04-12",
               "cagliari": "2026-01-18", "liberamente": "2026-07-11",
               "friday": "2026-05-29", "firenze": "2026-03-29", "asti": "2026-04-19"}
@@ -117,8 +116,6 @@ def compatible_date(source, source_day, other_day, other_source=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", action="append", required=True, metavar="SOURCE=PATH=SHA256")
-    parser.add_argument("--relationship-evidence", metavar="PATH=SHA256",
-                        help="Cited, independently reviewed relationship assertions")
     parser.add_argument("--corpus-sha256", help="Pinned retained/imported corpus digest for comparison scope")
     parser.add_argument("--snapshot", metavar="PATH=SHA256", help="Read-only retained corpus snapshot")
     parser.add_argument("--evidence-root", action="append", default=[],
@@ -273,36 +270,12 @@ def main(argv=None):
             for report in source_reports.values():
                 if report["no_known_counterpart"] is None:
                     report["no_known_counterpart"] = 0
-        relationship_sha = None
-        if args.relationship_evidence:
-            _, _, relationship_sha, evidence = read_pinned("relationships=" + args.relationship_evidence)
-            if evidence.get("schema") != "issue172-cited-relationships-v1":
-                raise ValueError("relationship evidence schema mismatch")
-            if evidence.get("corpus_sha256") != args.corpus_sha256:
-                raise ValueError("relationship corpus digest mismatch")
-            assigned = set()
-            for rel in evidence["relationships"]:
-                source_position = rel["source_position"]
-                kind = rel["classification"]
-                if kind not in RELATIONS or source_position not in all_positions or source_position in assigned:
-                    raise ValueError("invalid or duplicate relationship classification")
-                if not rel.get("citation") or not rel.get("target_citation") or not rel.get("target_source_sha256"):
-                    raise ValueError("relationship requires both source citations and target source hash")
-                assigned.add(source_position)
-                source = all_positions[source_position]
-                source_reports[source][kind] += 1
-                source_reports[source]["not_assessed"] -= 1
-                if kind != "exact_supported":
-                    queue.append({"id": "issue172:" + digest(encoded(["relationship", source_position, rel.get("target_position")]))[:24],
-                                  "kind": "relationship_candidate", "source_key": source,
-                                  "source_sha256": source_reports[source]["source_sha256"],
-                                  "source_position": source_position, "citation": rel["citation"],
-                                  "evidence_version": relationship_sha,
-                                  "reason": kind, "related_positions": [rel.get("target_position")], "status": "pending"})
-            if evidence.get("comparison_complete"):
-                for name, report in source_reports.items():
-                    report["no_known_counterpart"] = report["not_assessed"]
-                    report["not_assessed"] = 0
+        for name, report in source_reports.items():
+            classified = sum(report[key] for key in ("exact_supported", "likely_overlap",
+                "conflicting_revision", "ambiguous_candidate", "not_assessed"))
+            classified += report["no_known_counterpart"] or 0
+            if classified != report["candidate_result_positions"]:
+                raise ValueError(f"{name}: overlap partition mismatch")
         queue.sort(key=lambda x: x["id"])
         if len({x["id"] for x in queue}) != len(queue):
             raise ValueError("queue ID collision")
@@ -319,7 +292,7 @@ def main(argv=None):
                  "combined_import_manifest_sha256": import_manifest_sha,
                  "cross_stage_pair_leads": cross_pair_leads,
                  "provenance": provenance,
-                 "relationship_evidence_sha256": relationship_sha,
+                 "relationship_evidence_sha256": None,
                  "limitations": ["Overlap is a bounded name and compatible-date lead search over the pinned corpus and nine stages.",
                                  "A name lead does not establish a shared sporting attempt or athlete identity.",
                                  "No known counterpart means no lead in this bounded search, not proof of a distinct attempt.",
