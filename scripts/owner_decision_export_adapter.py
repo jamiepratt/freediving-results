@@ -13,9 +13,15 @@ import subprocess
 from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
-from aida_snapshot_observations import load_source_observations as load_aida
+from aida_snapshot_observations import (
+    ADAPTER_VERSION as AIDA_VERSION, EVENT_ADAPTER_VERSION as AIDA_EVENT_VERSION,
+    LEGACY_ADAPTER_VERSION as AIDA_LEGACY_VERSION,
+    load_source_observations as load_aida)
 from cmas_microplus_snapshot_observations import (
-    ADAPTER_VERSION as MICROPLUS_VERSION, load_source_observations as load_microplus)
+    ADAPTER_VERSION as MICROPLUS_VERSION,
+    ATTEMPT_ADAPTER_VERSION as MICROPLUS_ATTEMPT_VERSION,
+    load_source_observations as load_microplus,
+    load_attempt_evidence as load_microplus_attempt)
 
 
 def _digest(value):
@@ -47,6 +53,22 @@ def _verify_evidence(snapshot, snapshot_directory, item, binding,
                  isinstance(revision.get('source_name'), str),
                  'source observation snapshot binding changed')
         version = revision.get('adapter_version')
+        _require(version in (MICROPLUS_VERSION, MICROPLUS_ATTEMPT_VERSION,
+                             AIDA_VERSION, AIDA_EVENT_VERSION, AIDA_LEGACY_VERSION),
+                 'unsupported source observation adapter')
+        if version == MICROPLUS_ATTEMPT_VERSION:
+            result = load_microplus_attempt(snapshot_directory, [revision['source_name']],
+                                            record_ids=[item['id']])
+            matches = [view for view in result['evidence']['observation-versions']
+                       if view['snapshot-record-id'] == item['id'] and
+                       view['observation-revision'] == revision]
+            _require(len(matches) == 1 and
+                     matches[0]['id'] == binding['evidence_id'],
+                     'attempt view differs from verified original')
+            _require(item['citation']['source_citation'] == {
+                'source-sha256': revision['source_sha256'], 'locator': revision['citation']},
+                'attempt view citation changed')
+            return
         loader = load_microplus if version == MICROPLUS_VERSION else load_aida
         kwargs = {'adapter_version': version}
         if loader is load_aida and recovered_packet_paths:
@@ -94,11 +116,83 @@ def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision,
              'incomplete evidence bindings')
     _require(binding['observation_revisions'] == [entry['observation_revision'] for entry in bindings],
              'observation revision set changed')
-    _require(len({entry['snapshot_record_id'] for entry in bindings}) == len(bindings),
+    _require(all(isinstance(entry.get('observation_revision'), dict) for entry in bindings),
+             'invalid observation revision')
+    identity = [(entry['snapshot_record_id'], _digest(entry['observation_revision']))
+                for entry in bindings]
+    _require(len(set(identity)) == len(identity), 'duplicate observation mapping')
+    records = [record_id for record_id, _ in identity]
+    repeated = {record_id for record_id in records if records.count(record_id) > 1}
+    _require(all(entry['observation_revision'].get('adapter_version') == MICROPLUS_ATTEMPT_VERSION
+                 for entry in bindings if entry['snapshot_record_id'] in repeated),
              'duplicate snapshot record mapping')
     for item, entry in zip(evidence, bindings):
         _verify_evidence(snapshot, snapshot_directory, item, entry,
                          recovered_packet_paths)
+
+
+def build_verified_microplus_attempt_export(store, snapshot_directory, source_names,
+                                            record_id, *, decision_id,
+                                            reconciliation_run_revision,
+                                            reconciliation_event_id):
+    """Build a pending owner proposal for two acquired views of one frozen result.
+
+    The caller supplies an existing reconciliation event identity. All evidence
+    revisions and citations are derived from verified originals, without a
+    PostgreSQL ingestion job reference. Registration still replays those bytes.
+    """
+    _require(isinstance(decision_id, str) and decision_id and
+             isinstance(reconciliation_run_revision, int) and
+             reconciliation_run_revision >= 1 and
+             isinstance(reconciliation_event_id, str) and reconciliation_event_id,
+             'reconciliation decision and event required')
+    result = load_microplus_attempt(snapshot_directory, source_names,
+                                    record_ids=[record_id])
+    views = result['evidence']['observation-versions']
+    _require(len(views) == 2 and all(view['snapshot-record-id'] == record_id for view in views),
+             'two cited views of one Microplus result required')
+    binding = store._binding()
+    _require(binding is not None and binding['snapshot_sha256'] == result['snapshot_sha256'],
+             'decision store binding changed')
+    current = binding['observation_refs'].get(record_id) if binding['observation_refs'] else None
+    _require(current is not None and
+             {(_digest(view['observation-revision']), view['id']) for view in views} ==
+             {(_digest(view['observation_revision']), view['evidence_id'])
+              for view in current.get('attempt_view_refs', [])},
+             'attempt views absent from active binding')
+    revisions = [view['observation-revision'] for view in views]
+    evidence = [{'id': record_id, 'version': revision,
+                 'citation': {'evidence_id': view['id'],
+                              'observation_revision': revision,
+                              'source_citation': {'source-sha256': revision['source_sha256'],
+                                                  'locator': revision['citation']}}}
+                for view, revision in zip(views, revisions)]
+    bindings = [{'evidence_id': view['id'], 'snapshot_record_id': record_id,
+                 'observation_revision': revision}
+                for view, revision in zip(views, revisions)]
+    scope = views[0]['scope']
+    _require(all(view['scope'] == scope for view in views),
+             'Microplus cited views disagree on attempt scope')
+    proposal = {
+        'id': decision_id, 'type': 'same_attempt', 'subject_id': record_id,
+        'source_name': ', '.join(source_names),
+        'original': {'publisher_result': scope, 'cited_views': [view['id'] for view in views]},
+        'proposed': {'pair': [view['id'] for view in views], 'action': 'same_attempt'},
+        'selected_option': 'same_attempt', 'competing_options': ['distinct_attempts'],
+        'evidence': evidence, 'supporting_evidence': [], 'conflicting_evidence': [],
+        'depends_on': [], 'groups': [f"microplus-result:{scope['event']}:{scope['attempt']}"],
+        'provider_confidence': None, 'score': None,
+        'rule_version': MICROPLUS_ATTEMPT_VERSION, 'model_version': None,
+        'policy_version': 'owner-attempt-review/1', 'status': 'pending',
+        'canonical_binding': {
+            'decision_id': decision_id,
+            'reconciliation_run_revision': reconciliation_run_revision,
+            'reconciliation_event_id': reconciliation_event_id,
+            'observation_revisions': revisions, 'evidence_bindings': bindings}}
+    return {'snapshot_sha256': result['snapshot_sha256'],
+            'binding_revision': binding['revision'], 'store_revision': store.revision,
+            'reconciliation_run_revision': reconciliation_run_revision,
+            'proposals': [proposal]}
 
 
 def register_verified_export(store, snapshot_directory, envelope, *,

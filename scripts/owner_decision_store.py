@@ -15,7 +15,10 @@ from pathlib import Path
 
 from unified_evidence_query import SnapshotQuery
 from aida_snapshot_observations import load_source_observations as load_aida
-from cmas_microplus_snapshot_observations import load_source_observations as load_microplus
+from cmas_microplus_snapshot_observations import (
+    ATTEMPT_ADAPTER_VERSION as MICROPLUS_ATTEMPT_VERSION,
+    load_source_observations as load_microplus,
+    load_attempt_evidence as load_microplus_attempt)
 
 
 ACCEPTED = {'automatic_approved', 'human_approved', 'human_corrected'}
@@ -160,7 +163,7 @@ class DecisionStore:
             raise
 
     def bind_verified_snapshot(self, directory, *, expected_revision, idempotency_key,
-                               recovered_packet_paths=None):
+                               recovered_packet_paths=None, attempt_record_ids=None):
         """Bind only record IDs from a hash-verified immutable snapshot.
 
         This is the production binding entry point. Decision proposals must cite
@@ -212,6 +215,22 @@ class DecisionStore:
                     if record_id not in observation_refs:
                         raise ValueError('source observation absent from snapshot')
                     observation_refs[record_id]['source_derived_ref'] = observation['source_observation_ref']
+            if attempt_record_ids is not None:
+                if (not isinstance(attempt_record_ids, (list, tuple)) or
+                        not attempt_record_ids or
+                        any(not isinstance(record_id, str) for record_id in attempt_record_ids) or
+                        len(attempt_record_ids) != len(set(attempt_record_ids))):
+                    raise ValueError('unique Microplus attempt record IDs required')
+                microplus_names = sorted(name for name, item in snapshot.manifest.get('inputs', {}).items()
+                                         if item.get('source_schema') in
+                                         ('cmas-microplus-private-census/v1',
+                                          'cmas-microplus-private-census/v2'))
+                attempts = load_microplus_attempt(directory, microplus_names,
+                                                  record_ids=attempt_record_ids)
+                for view in attempts['evidence']['observation-versions']:
+                    record_id = view['snapshot-record-id']
+                    observation_refs[record_id].setdefault('attempt_view_refs', []).append(
+                        {'evidence_id': view['id'], 'observation_revision': view['observation-revision']})
             digest = snapshot.manifest['snapshot_sha256']
         return self.bind_snapshot(digest, evidence_ids, expected_revision=expected_revision,
                                   idempotency_key=idempotency_key,
@@ -336,9 +355,17 @@ class DecisionStore:
             if isinstance(revision, dict) and revision.get('kind') == 'source-derived':
                 citation = item.get('citation')
                 source_citation = citation.get('source_citation') if isinstance(citation, dict) else None
+                attempt_view = revision.get('adapter_version') == MICROPLUS_ATTEMPT_VERSION
+                if attempt_view:
+                    current_ref = bool(source and isinstance(citation, dict) and any(
+                        view.get('evidence_id') == citation.get('evidence_id') and
+                        view.get('observation_revision') == revision
+                        for view in source.get('attempt_view_refs', [])))
+                else:
+                    current_ref = bool(source and source.get('source_derived_ref') == revision)
                 if (evidence.get('snapshot_record_id') != item['id'] or
                         item.get('version') != revision or
-                        not source or source.get('source_derived_ref') != revision or
+                        not source or not current_ref or
                         not isinstance(source_citation, dict) or
                         citation.get('observation_revision') != revision or
                         source_citation.get('source-sha256') != revision.get('source_sha256') or

@@ -149,6 +149,53 @@
       (is (= 4 (:revision (store/private-projection app)))))
     (is (= (store/private-projection app) (store/rebuild! app)))))
 
+(deftest cited-views-of-one-snapshot-row-project-one-reversible-attempt
+  (let [snapshot-row "frozen-result-91"
+        revision (fn [source-sha view]
+                   {:kind "source-derived"
+                    :adapter_version "cmas-microplus-attempt-evidence/1"
+                    :snapshot_record_id snapshot-row
+                    :source_sha256 source-sha
+                    :citation {:json_pointer view}
+                    :observation_version view})
+        base (-> (source-fixture/attempt-fixture)
+                 (assoc-in [:observation-versions "v1" :observation-revision]
+                           (revision "aa" "/0"))
+                 (assoc-in [:observation-versions "v3" :observation-revision]
+                           (revision "bb" "/1")))
+        pair ["v1" "v3"]
+        binding {:decision_id "one-result-two-views"
+                 :evidence_bindings (mapv (fn [id]
+                                            {:evidence_id id
+                                             :snapshot_record_id snapshot-row
+                                             :observation_revision
+                                             (get-in base [:observation-versions id :observation-revision])})
+                                          pair)}
+        owner {:id "owner-store:9" :store_revision 9 :decision_id "one-result-two-views"
+               :action "approve" :proposal {:canonical_binding binding
+                                            :selected_option "same_attempt"}}
+        event {:id "owner-store:9" :action :accept :type :same-attempt
+               :pair pair :evidence {:kind :verified-scope}}
+        request {:event event :owner-event owner :binding binding
+                 :subject-snapshot (relationships/attempt-subjects base :same-attempt pair)
+                 :expected-revision 0}]
+    (store/persist! app base)
+    (is (= 1 (get-in (store/record-owner-decision! app request)
+                     [:counts :accepted-attempts])))
+    (is (= 1 (get-in (store/private-projection app) [:counts :accepted-attempts])))
+    (let [reversal (-> request
+                       (assoc :event {:id "owner-store:10" :action :reverse
+                                      :type :same-attempt :pair pair
+                                      :event-id "owner-store:9"}
+                              :owner-event (assoc owner :id "owner-store:10"
+                                                  :store_revision 10 :action "reverse")
+                              :expected-revision 1))]
+      (is (= 2 (get-in (store/record-owner-decision! app reversal)
+                       [:counts :accepted-attempts])))
+      (is (= 2 (get-in (store/record-owner-decision! app reversal)
+                       [:counts :accepted-attempts])))
+      (is (= (store/private-projection app) (store/rebuild! app))))))
+
 (defn -main [& _]
   (let [result (clojure.test/run-tests 'freediving.canonical-attempt-store-test)]
     (shutdown-agents)

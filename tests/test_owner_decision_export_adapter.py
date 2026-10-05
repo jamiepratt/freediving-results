@@ -12,9 +12,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from owner_decision_store import DecisionStore
-from owner_decision_export_adapter import register_verified_export, deliver_verified_owner_events, main
+from owner_decision_export_adapter import (register_verified_export,
+    build_verified_microplus_attempt_export, deliver_verified_owner_events, main)
 from unified_evidence_snapshot import create_db
-from scripts.cmas_microplus_snapshot_observations import load_source_observations as load_microplus
+from scripts.cmas_microplus_snapshot_observations import (
+    load_source_observations as load_microplus, load_attempt_evidence)
 from tests.test_cmas_microplus_snapshot_observations import fixture as microplus_fixture
 
 SHA = 'a' * 64
@@ -182,6 +184,94 @@ class ExportAdapterTest(unittest.TestCase):
             forged['store_revision'] = store.revision
             with self.assertRaisesRegex(ValueError, 'source observation differs'):
                 register_verified_export(store, microplus, forged)
+        finally:
+            store.close()
+
+    def test_microplus_two_cited_views_register_one_pending_attempt(self):
+        microplus = self.root / 'views'
+        microplus.mkdir()
+        name, record_id, row = microplus_fixture(microplus)
+        alternate_url = row['citation']['url'].replace('/17/', '/16/')
+        alternate_bytes = json.dumps([{'unrelated': True}, row['raw_fields']]).encode()
+        alternate_hash = hashlib.sha256(alternate_bytes).hexdigest()
+        (microplus / 'unit-16-results.json').write_bytes(alternate_bytes)
+        (microplus / 'unit-16-results.receipt.json').write_text(json.dumps({
+            'status': 200, 'sha256': alternate_hash, 'bytes': len(alternate_bytes),
+            'final_url': alternate_url}))
+        alternate = {'url': alternate_url, 'source_sha256': alternate_hash, 'json_pointer': '/1'}
+        row['alternate_citations'] = [alternate]
+        packet_path = microplus / 'packet.json'
+        packet = json.loads(packet_path.read_text())
+        packet['positions'][0] = row
+        packet['sources'].append(dict(packet['sources'][0], id='sha256:' + alternate_hash,
+                                      unit_id=16, url=alternate_url, sha256=alternate_hash,
+                                      bytes=len(alternate_bytes), row_count=2))
+        packet_path.write_text(json.dumps(packet))
+        with sqlite3.connect(microplus / 'snapshot.sqlite') as db:
+            db.execute('UPDATE records SET raw_json=?', (json.dumps(row),))
+        manifest_path = microplus / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['snapshot_sha256'] = hashlib.sha256((microplus / 'snapshot.sqlite').read_bytes()).hexdigest()
+        manifest['inputs'][name]['sha256'] = hashlib.sha256(packet_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        views = load_attempt_evidence(microplus, [name], record_ids=[record_id])
+        self.assertEqual(2, views['summary']['cited_view_observations'])
+        store = DecisionStore(self.root / 'view-decisions.sqlite')
+        try:
+            bound = store.bind_verified_snapshot(microplus, expected_revision=0,
+                                                 idempotency_key='bind-views',
+                                                 attempt_record_ids=[record_id])
+            envelope = build_verified_microplus_attempt_export(
+                store, microplus, [name], record_id, decision_id='decision-1',
+                reconciliation_run_revision=1, reconciliation_event_id='event-1')
+            proposal = envelope['proposals'][0]
+            self.assertEqual([record_id, record_id], [item['id'] for item in proposal['evidence']])
+            self.assertEqual({view['id'] for view in views['evidence']['observation-versions']},
+                             {item['citation']['evidence_id'] for item in proposal['evidence']})
+            first = register_verified_export(store, microplus, envelope)
+            self.assertEqual(first, register_verified_export(store, microplus, envelope))
+            self.assertEqual('pending', store.inspect('decision-1')['effective_status'])
+            self.assertEqual(2, len(store.inspect('decision-1')['canonical_binding']['evidence_bindings']))
+            for field, bad in [('observation_version', '0' * 64),
+                               ('citation', dict(alternate, json_pointer='/0')),
+                               ('adapter_version', 'unsupported/1')]:
+                forged = json.loads(json.dumps(envelope))
+                forged['proposals'][0]['id'] = 'forged-' + field.replace('_', '-')
+                forged['proposals'][0]['canonical_binding']['decision_id'] = forged['proposals'][0]['id']
+                revision = forged['proposals'][0]['evidence'][1]['version']
+                revision[field] = bad
+                forged['proposals'][0]['evidence'][1]['citation']['observation_revision'] = revision
+                forged['proposals'][0]['evidence'][1]['citation']['source_citation']['locator'] = revision['citation']
+                forged['proposals'][0]['canonical_binding']['observation_revisions'][1] = revision
+                forged['proposals'][0]['canonical_binding']['evidence_bindings'][1]['observation_revision'] = revision
+                forged['store_revision'] = store.revision
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    register_verified_export(store, microplus, forged)
+            store.act('decision-1', action='approve', expected_revision=store.revision,
+                      idempotency_key='approve-view')
+            approval = store.human_events()['events'][0]
+            store.acknowledge_human_event('flow-ledger', approval, 'flow-committed')
+            store.acknowledge_human_event('postgresql', approval, 'canonical-committed')
+            self.assertEqual('human_approved', store.inspect('decision-1')['effective_status'])
+            store.bind_verified_snapshot(microplus, expected_revision=store.revision,
+                                         idempotency_key='base-only-bind')
+            self.assertEqual('invalidated', store.inspect('decision-1')['effective_status'])
+            store.bind_verified_snapshot(microplus, expected_revision=store.revision,
+                                         idempotency_key='restored-view-bind',
+                                         attempt_record_ids=[record_id])
+            self.assertEqual('human_approved', store.inspect('decision-1')['effective_status'])
+            store.act('decision-1', action='reverse', expected_revision=store.revision,
+                      idempotency_key='reverse-view')
+            reversal = store.human_events()['events'][1]
+            store.acknowledge_human_event('flow-ledger', reversal, 'flow-reversed')
+            store.acknowledge_human_event('postgresql', reversal, 'canonical-reversed')
+            store.close()
+            store = DecisionStore(self.root / 'view-decisions.sqlite')
+            store.bind_verified_snapshot(microplus, expected_revision=store.revision,
+                                         idempotency_key='unchanged-view-bind',
+                                         attempt_record_ids=[record_id])
+            self.assertEqual('reversed', store.inspect('decision-1')['effective_status'])
+            self.assertEqual('verified', store.inspect('decision-1')['canonical_projection_status'])
         finally:
             store.close()
 
