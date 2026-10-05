@@ -5,6 +5,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,8 @@ class _CardLinks(HTMLParser):
         self.active = None
         self.cards = {}
         self.anchor = None
+        self.location_text = None
+        self.time_text = None
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -36,18 +39,33 @@ class _CardLinks(HTMLParser):
                 if self.active is not None or event_id in self.cards:
                     raise CalendarError("ambiguous EventON card HTML")
                 self.active = (event_id, self.depth)
-                self.cards[event_id] = {"event_url": None, "result_urls": [], "rules_urls": []}
+                self.cards[event_id] = {"event_url": None, "result_urls": [], "rules_urls": [],
+                                        "location": None, "display_time": None}
+        if tag == "p" and self.active is not None and "evo_location_name" in attrs.get("class", "").split():
+            self.location_text = ""
+        if tag == "span" and self.active is not None and "evo_eventcard_time_t" in attrs.get("class", "").split():
+            self.time_text = ""
         if tag == "a" and self.active is not None:
             self.anchor = {"href": attrs.get("href"), "itemprop": attrs.get("itemprop"), "text": ""}
 
     def handle_data(self, data):
         if self.anchor is not None:
             self.anchor["text"] += data
+        if self.location_text is not None:
+            self.location_text += data
+        if self.time_text is not None:
+            self.time_text += data
 
     def handle_endtag(self, tag):
         if tag == "a" and self.anchor is not None:
             self._record_anchor()
             self.anchor = None
+        if tag == "p" and self.location_text is not None:
+            self.cards[self.active[0]]["location"] = self.location_text.strip() or None
+            self.location_text = None
+        if tag == "span" and self.time_text is not None:
+            self.cards[self.active[0]]["display_time"] = self.time_text.strip() or None
+            self.time_text = None
         if tag == "div":
             if self.active is not None and self.depth == self.active[1]:
                 self.active = None
@@ -102,9 +120,17 @@ def inventory_month(source_bytes, year, month):
         start = source.get("event_start_unix")
         if not isinstance(title, str) or not isinstance(start, int):
             raise CalendarError(f"EventON card title or date missing for {event_id}")
+        end = source.get("event_end_unix")
+        if end is not None and not isinstance(end, int):
+            raise CalendarError(f"EventON card end date invalid for {event_id}")
         date = datetime.fromtimestamp(start, ZoneInfo("Europe/Rome")).date().isoformat()
-        card = {"event_id": event_id, "title": title, "date": date,
-                "discipline": title.split(":", 1)[0].strip(), **links}
+        date_to = datetime.fromtimestamp(end, ZoneInfo("Europe/Rome")).date().isoformat() if end is not None else None
+        displayed_dates = re.findall(r"\b\d{1,2}/\d{1,2}/\d{4}\b", links["display_time"] or "")
+        if displayed_dates:
+            date_to = datetime.strptime(displayed_dates[-1], "%d/%m/%Y").date().isoformat()
+        card = {"event_id": event_id, "title": title, "date": date, "date_to": date_to,
+                "discipline": title.split(":", 1)[0].strip() if ":" in title else None,
+                **links}
         cards.append(card)
         for url in links["result_urls"]:
             if url not in result_urls:
