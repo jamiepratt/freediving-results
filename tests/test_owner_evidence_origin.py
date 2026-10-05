@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -111,6 +112,64 @@ class PrivateOriginTest(unittest.TestCase):
         status, _, body = self.request('/owner-evidence/api/overview')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['bundle_manifest_sha256'], 'd' * 64)
+
+    def test_federation_filter_accepts_unknown_on_unmapped_snapshot(self):
+        status, _, body = self.request('/owner-evidence/api/browse?federation=unknown&kind=candidate_position&limit=1&offset=1')
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result['total'], 2)
+        self.assertEqual(result['offset'], 1)
+        self.assertEqual(len(result['records']), 1)
+        self.assertIsNone(result['records'][0]['federation'])
+        self.assertEqual(self.request('/owner-evidence/api/browse?federation=CMAS')[0], 200)
+        self.assertEqual(json.loads(self.request('/owner-evidence/api/browse?federation=CMAS')[2])['total'], 0)
+        self.assertEqual(self.request('/owner-evidence/api/browse?federation=unknown&federation=CMAS')[0], 400)
+
+    def test_federation_filter_on_mapped_snapshot_keeps_citation_and_paging(self):
+        root = Path(self.tmp.name)
+        packet = root / 'mapped-packet.json'
+        packet.write_text(json.dumps({'schema': 'synthetic/v1', 'positions': [
+            {'source_object_id': 'sha256:' + 'a' * 64, 'citation': {'page': 1, 'row': 1}},
+            {'source_object_id': 'sha256:' + 'b' * 64, 'citation': {'page': 2, 'row': 1}}]}))
+        base, mapped = root / 'base', root / 'mapped'
+        script = ROOT / 'scripts' / 'unified_evidence_snapshot.py'
+        subprocess.run([sys.executable, str(script), 'build', '--cutoff', '2026-10-01T00:00:00Z',
+                        '--input', f'packet={packet}', '--output-dir', str(base)],
+                       check=True, capture_output=True)
+        mapping = root / 'mapping.json'
+        mapping.write_text(json.dumps({'schema': 'evidence-federation-map/v1', 'entries': [{
+            'source_name': 'packet', 'source_object_id': 'sha256:' + 'a' * 64,
+            'federation': 'CMAS', 'authority': 'CMAS publisher', 'role': 'primary',
+            'citation': {'url': 'https://example.test/results.pdf', 'sha256': 'a' * 64,
+                         'locator': 'page 1 heading', 'evidence_text': 'CMAS WORLD CUP'}}]}))
+        subprocess.run([sys.executable, str(script), 'map-federations', '--base-dir', str(base),
+                        '--mapping', str(mapping), '--output-dir', str(mapped)],
+                       check=True, capture_output=True)
+        env = {**self.env, 'OWNER_EVIDENCE_SNAPSHOT_SHA256':
+               json.loads((mapped / 'manifest.json').read_text())['snapshot_sha256']}
+        server = make_server(mapped, env)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+        previous = self.server
+        self.server = server
+        self.addCleanup(lambda: setattr(self, 'server', previous))
+        status, _, body = self.request('/owner-evidence/api/browse?federation=CMAS&kind=candidate_position&limit=1&offset=0')
+        self.assertEqual(status, 200)
+        page = json.loads(body)
+        self.assertEqual((page['total'], page['limit'], page['offset']), (1, 1, 0))
+        row = page['records'][0]
+        self.assertEqual((row['federation'], row['authority'], row['role']),
+                         ('CMAS', 'CMAS publisher', 'primary'))
+        detail = json.loads(self.request('/owner-evidence/api/detail/' + row['record_id'])[2])
+        self.assertEqual(detail['federation_citation']['locator'], 'page 1 heading')
+        self.assertEqual(detail['citation'], {'page': 1, 'row': 1})
+        unknown = json.loads(self.request('/owner-evidence/api/browse?federation=unknown&kind=candidate_position')[2])
+        self.assertEqual(unknown['total'], 1)
+        overview = json.loads(self.request('/owner-evidence/api/overview')[2])
+        self.assertEqual(overview['federation_mapping']['mapped_candidate_positions'], 1)
+        self.assertEqual(overview['federation_mapping']['unknown_candidate_positions'], 1)
 
     def test_idle_origin_connection_does_not_block_authorized_overview(self):
         idle = socket.create_connection(('127.0.0.1', self.server.server_port), timeout=1)

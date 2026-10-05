@@ -272,6 +272,30 @@ test('snapshot overview distinguishes evidence records from AIDA and Eindhoven s
   for (const phrase of ['14689', '281', '92', '58', '94', 'confirmed_distinct_attempts unknown']) assert.ok(text.includes(phrase), phrase);
 });
 
+test('federation filter shows cited CMAS coverage and explicit unknown records', async () => {
+  const html = fs.readFileSync('resources/evidence_workspace.html', 'utf8');
+  assert.match(html, /name="federation"[^>]*>[^<]*<option value="">All cited federations<\/option>/);
+  assert.match(html, /<option value="unknown">Unknown<\/option>/);
+  const id = 'a'.repeat(64);
+  const {context, node, requests} = workspace({
+    '/api/overview': {coverage:'partial', counts:[{source_name:'sample',collection:'positions',kind:'candidate_position',records:2}], candidate_source_positions:2, confirmed_distinct_attempts:null,
+      federation_mapping:{mapped_records:1,unknown_records:1,mapped_candidate_positions:1,unknown_candidate_positions:1}},
+    '/api/sources':[],
+    '/api/browse?federation=CMAS&kind=candidate_position&limit=25&offset=0': {total:1,offset:0,records:[{record_id:id,source_name:'sample',kind:'candidate_position',federation:'CMAS',authority:'CMAS',role:'primary',record_path:'positions[0]'}]},
+    ['/api/detail/'+id]: {source_name:'sample',federation:'CMAS',authority:'CMAS',role:'primary',federation_citation:{url:'https://example.test/results.pdf',sha256:'a'.repeat(64),locator:'page 1 heading',evidence_text:'CMAS WORLD CUP'},citation:{page:1,row:1},raw_fields:{},parsed_fields:{}},
+  });
+  await vm.runInContext('loadOverview()', context);
+  assert.match(node('overview').visibleText, /mapped_candidate_positions 1/);
+  assert.match(node('overview').visibleText, /unknown_candidate_positions 1/);
+  context.FormData = class { *[Symbol.iterator]() { yield ['federation','CMAS']; yield ['kind','candidate_position']; yield ['limit','25']; } };
+  await vm.runInContext('browse()', context);
+  assert.ok(requests.some(r => r.path === '/api/browse?federation=CMAS&kind=candidate_position&limit=25&offset=0'));
+  assert.match(node('results').visibleText, /CMAS/);
+  await vm.runInContext(`detail('${id}')`, context);
+  assert.match(node('detail').visibleText, /CMAS WORLD CUP/);
+  assert.match(node('detail').visibleText, /page 1 heading/);
+});
+
 test('snapshot presents source positions and observation versions separately from unknown accepted attempts', async () => {
   const {context, node} = workspace({
     '/api/overview': {coverage: 'partial', counts: [

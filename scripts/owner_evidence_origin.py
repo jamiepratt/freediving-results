@@ -24,7 +24,7 @@ from private_presentation_status import PrivatePresentationStatus, StatusConflic
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
-           'session', 'discipline', 'category', 'limit', 'offset'}
+           'session', 'discipline', 'category', 'federation', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_ACTION = 16 * 1024
 MAX_EVENT_ACK = 8 * 1024 * 1024
@@ -313,7 +313,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         return parsed
 
     def _filters(self, query, fixed_kind=None):
-        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=12)
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=13)
         if set(args) - (FILTERS - ({'kind'} if fixed_kind else set())) or any(len(v) != 1 for v in args.values()):
             raise ValueError('invalid filters')
         if fixed_kind:
@@ -395,7 +395,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             query = self.server.query
             if path == '/owner-evidence/api/overview' and not parsed.query:
                 result = query.overview()
-                result['normalized_federation'] = 'unavailable in this snapshot'
+                result['normalized_federation'] = ('cited source-object mapping' if result['federation_mapping']['schema']
+                                                   else 'unavailable in this snapshot')
                 if self.server.source_bundle_sha256:
                     result['bundle_manifest_sha256'] = self.server.source_bundle_sha256
             elif path == STATUS_PATH and not parsed.query:
