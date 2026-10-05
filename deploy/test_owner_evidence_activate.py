@@ -79,6 +79,19 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 
+    def test_consolidated_queue_pin_requires_fixed_private_host_path_and_digest(self):
+        base = self.config.read_text()
+        settings = ('OWNER_EVIDENCE_ISSUE172_QUEUE_FILE=/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json\n'
+                    'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256=' + 'a' * 64 + '\n')
+        self.config.write_text(base + settings)
+        self.assertEqual(_config(self.config, os.getuid(), self.digest)['OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'], 'a' * 64)
+        for invalid in (settings.replace('a' * 64, 'invalid'),
+                        settings.replace('/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json', '/tmp/queue.json'),
+                        settings.splitlines()[0] + '\n'):
+            self.config.write_text(base + invalid)
+            with self.assertRaises(ValueError):
+                _config(self.config, os.getuid(), self.digest)
+
     def test_import_and_status_credentials_survive_private_activation(self):
         settings = ('OWNER_EVIDENCE_DECISION_API_ENABLED=1\n'
                     'OWNER_EVIDENCE_IMPORT_TOKEN=separate-random-import-token-123456\n'

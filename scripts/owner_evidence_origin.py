@@ -28,6 +28,7 @@ FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_ACTION = 16 * 1024
 MAX_EVENT_ACK = 8 * 1024 * 1024
+MAX_ISSUE172_QUEUE = 32 * 1024 * 1024
 STATUS_PATH = '/owner-evidence/api/presentation-status'
 DECISION_ACK_PATH = '/owner-evidence/api/decision-events/ack'
 DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
@@ -107,6 +108,38 @@ def _config(env):
     return secret, host, frozenset(owners), digest
 
 
+def _issue172_queue(env, snapshot_dir):
+    file_name = env.get('OWNER_EVIDENCE_ISSUE172_QUEUE_FILE')
+    expected = env.get('OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256')
+    if not file_name and not expected:
+        return None
+    if (not file_name or not expected or not re.fullmatch(r'[a-f0-9]{64}', expected)
+            or not Path(file_name).is_absolute()):
+        raise ValueError('invalid consolidated queue configuration')
+    path = Path(file_name).resolve()
+    if path.is_relative_to(Path(snapshot_dir).resolve()) or path.stat().st_size > MAX_ISSUE172_QUEUE:
+        raise ValueError('invalid consolidated queue file')
+    data = path.read_bytes()
+    if not compare_digest(sha256(data).hexdigest(), expected):
+        raise ValueError('consolidated queue digest mismatch')
+    queue = json.loads(data)
+    if (not isinstance(queue, dict) or queue.get('schema') != 'issue172-owner-queue-v1'
+            or not re.fullmatch(r'[a-f0-9]{64}', queue.get('audit_sha256', ''))
+            or not isinstance(queue.get('entries'), list)):
+        raise ValueError('invalid consolidated queue')
+    ids = set()
+    for item in queue['entries']:
+        if (not isinstance(item, dict) or not isinstance(item.get('id'), str)
+                or not item['id'] or item['id'] in ids
+                or item.get('status') != 'pending'
+                or not all(key in item for key in ('kind', 'source_key', 'source_sha256',
+                    'source_position', 'citation', 'evidence_version', 'reason', 'related_positions'))):
+            raise ValueError('invalid consolidated queue entry')
+        ids.add(item['id'])
+    return {'audit_sha256': queue['audit_sha256'], 'queue_sha256': expected,
+            'entries': queue['entries']}
+
+
 class PrivateOrigin(ThreadingHTTPServer):
     def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
         self.request_lock = threading.Lock()
@@ -132,6 +165,7 @@ class PrivateOrigin(ThreadingHTTPServer):
                 raise ValueError('source bundle configuration incomplete')
             self.source_view = OriginalSourceView(bundle_dir, bundle_sha, expected_digest) if bundle_dir else None
             self.source_bundle_sha256 = bundle_sha if self.source_view else None
+            self.issue172_queue = _issue172_queue(env, snapshot_dir)
             roster_dir = env.get('OWNER_EVIDENCE_ROSTER_DIR')
             roster_sha = env.get('OWNER_EVIDENCE_ROSTER_SHA256')
             if bool(roster_dir) != bool(roster_sha):
@@ -304,6 +338,19 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result[key] = int(result[key])
         return result
 
+    def _issue172_filters(self, query):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+        if set(args) - {'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
+            raise ValueError('invalid consolidated queue filters')
+        values = {'limit': 25, 'offset': 0}
+        for key, arg in args.items():
+            if not re.fullmatch(r'[0-9]{1,6}', arg[0]):
+                raise ValueError('invalid consolidated queue paging')
+            values[key] = int(arg[0])
+        if not 1 <= values['limit'] <= 100 or values['offset'] > 100000:
+            raise ValueError('invalid consolidated queue paging')
+        return values
+
     def _comparison_filters(self, query):
         args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
         if set(args) - {'limit', 'offset'} or any(len(v) != 1 for v in args.values()):
@@ -371,6 +418,16 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.browse(**self._filters(parsed.query))
             elif path == '/owner-evidence/api/queue':
                 result = query.queue(**self._queue_filters(parsed.query))
+            elif path == '/owner-evidence/api/issue172-queue':
+                if self.server.issue172_queue is None:
+                    return self._reply(503)
+                paging = self._issue172_filters(parsed.query)
+                entries = self.server.issue172_queue['entries']
+                result = {'schema': 'issue172-owner-queue-v1',
+                          'audit_sha256': self.server.issue172_queue['audit_sha256'],
+                          'queue_sha256': self.server.issue172_queue['queue_sha256'],
+                          'total': len(entries), **paging,
+                          'items': entries[paging['offset']:paging['offset'] + paging['limit']]}
             elif path == '/owner-evidence/api/decisions':
                 if self.server.decisions is None:
                     return self._reply(503)

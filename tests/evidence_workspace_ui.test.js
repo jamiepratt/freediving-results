@@ -26,6 +26,22 @@ function workspace(responses = {}, statuses = {}, pathname = '/owner-evidence') 
   return {context, node: document.getElementById, requests};
 }
 
+test('consolidated PDF review shows cited versions while decision review remains available', async () => {
+  const {context, node, requests} = workspace({'/api/issue172-queue?limit=25&offset=0': {
+    schema:'issue172-owner-queue-v1', audit_sha256:'a'.repeat(64), queue_sha256:'b'.repeat(64),
+    total:1, offset:0, limit:25, items:[{id:'field-1',kind:'unresolved_field', source_key:'world-cup',
+      source_sha256:'c'.repeat(64), source_position:{page:2,row:4}, citation:{page:2,row:4},
+      evidence_version:{parser_version:'v2',observation_version:'o1'}, reason:'Card unclear',
+      related_positions:[],status:'pending'}]}});
+  await vm.runInContext('loadIssue172Queue()', context);
+  assert.match(node('issue172-summary').visibleText, /1 unresolved PDF evidence item/);
+  assert.match(node('issue172-results').visibleText, /Card unclear/);
+  assert.match(node('issue172-results').visibleText, /field-1/);
+  assert.match(node('issue172-results').visibleText, /v2/);
+  assert.ok(requests.some(request => request.path === '/api/issue172-queue?limit=25&offset=0'));
+  assert.match(fs.readFileSync('resources/evidence_workspace.html','utf8'), /id="decision-workspace"/);
+});
+
 test('owner decision queue separates scoreless gaps and shows ascending provider confidence', async () => {
   const {context, node} = workspace({'/api/decisions?status=&limit=25&offset=0': {
     revision: 7, snapshot_sha256: 'snapshot-7', total: 4, scoreless_total: 1, items: [
