@@ -65,7 +65,20 @@ def checked_plan(path):
             raise ValueError('excluded input needs reason')
     reconciliation = plan.get('reconciliation')
     if reconciliation is not None:
-        if not isinstance(reconciliation, dict) or reconciliation.get('mode') != 'synthetic' or not reconciliation.get('spec'):
+        mode = reconciliation.get('mode') if isinstance(reconciliation, dict) else None
+        if mode == 'microplus_attempt':
+            names, ids = reconciliation.get('source_names'), reconciliation.get('record_ids')
+            if (not isinstance(names, list) or names != list(dict.fromkeys(names)) or not names
+                    or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name)
+                           for name in names)
+                    or not isinstance(ids, list) or not ids or len(ids) != len(set(ids))
+                    or any(not isinstance(identifier, str) or not re.fullmatch(r'[0-9a-f]{64}', identifier)
+                           for identifier in ids)
+                    or set(reconciliation) != {'mode', 'source_names', 'record_ids', 'name_evidence'}):
+                raise ValueError('Microplus reconciliation requires exact source names and record IDs')
+            if not set(names) <= {item['name'] for item in plan['inputs']}:
+                raise ValueError('Microplus reconciliation source absent from plan inputs')
+        elif mode != 'synthetic' or not reconciliation.get('spec'):
             raise ValueError('reconciliation requires a synthetic specification')
         name = reconciliation.get('name_evidence')
         if not isinstance(name, dict) or name.get('status') not in ('gap', 'checked'):
@@ -666,7 +679,7 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         status_client_id=None, status_client_secret=None, status_token=None):
     plan = checked_plan(plan_path)
     if plan.get('reconciliation') and remote_config is not None:
-        raise ValueError('synthetic reconciliation cannot activate remote presentation')
+        raise ValueError(f"{plan['reconciliation']['mode']} reconciliation cannot activate remote presentation")
     plan_hash = digest(plan_path)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if run_dir.is_symlink() or (run_dir.stat().st_mode & 0o077):
@@ -753,7 +766,10 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
 
     if plan.get('reconciliation'):
         try:
-            reconcile_local(plan['reconciliation'], run_dir, state)
+            if plan['reconciliation']['mode'] == 'microplus_attempt':
+                reconcile_microplus_attempt(plan['reconciliation'], run_dir, state)
+            else:
+                reconcile_local(plan['reconciliation'], run_dir, state)
             atomic_json(state_path, state)
         except Exception as error:
             state['reconciliation'] = {**state['reconciliation'], 'status': 'failed',
@@ -815,6 +831,110 @@ def verify_staging(run_dir, state):
     command([sys.executable, str(ROOT / 'private_source_bundle.py'), 'verify', '--bundle-dir', str(bundle)])
     if digest(snapshot / 'manifest.json') != state['local']['snapshot_manifest_sha256'] or digest(bundle / 'manifest.json') != state['local']['bundle_manifest_sha256']:
         raise ValueError('completed staging manifest changed')
+
+
+def reconcile_microplus_attempt(config, run_dir, state):
+    from cmas_microplus_snapshot_observations import load_attempt_evidence
+    from owner_decision_export_adapter import (build_verified_microplus_attempt_export,
+                                               register_verified_export)
+    from owner_decision_store import DecisionStore
+
+    snapshot = run_dir / 'snapshot'
+    if config['name_evidence']['status'] == 'checked':
+        from affiliate_name_query import AffiliateNameQuery
+        from unified_evidence_query import SnapshotQuery
+        name = config['name_evidence']
+        AffiliateNameQuery(name['path'], name['sha256'], snapshot,
+                           SnapshotQuery(snapshot)).listing()
+    selected = sorted(config['record_ids'])
+    result = load_attempt_evidence(snapshot, config['source_names'], record_ids=selected)
+    if result['snapshot_sha256'] != state['local']['snapshot_sha256']:
+        raise ValueError('Microplus evidence snapshot changed')
+    if result['summary']['cited_view_observations'] != 2 * len(selected):
+        raise ValueError('Microplus cohort requires two cited views per result')
+    directory = run_dir / 'reconciliation'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    flow_path = directory / 'flow.edn'
+    owner_path = directory / 'owner.sqlite'
+    export_path = directory / 'pending-export.json'
+    completed = state.get('reconciliation', {})
+    if completed.get('status') == 'complete':
+        if (completed.get('mode') != 'microplus_attempt'
+                or completed.get('snapshot_sha256') != result['snapshot_sha256']
+                or completed.get('flow_sha256') != digest(flow_path)
+                or completed.get('export_sha256') != digest(export_path)):
+            raise ValueError('completed Microplus reconciliation checkpoint changed')
+        store = DecisionStore(owner_path)
+        try:
+            if store.active_snapshot_sha256 != result['snapshot_sha256']:
+                raise ValueError('completed Microplus owner checkpoint changed')
+            envelope = json.loads(export_path.read_text())
+            register_verified_export(store, snapshot, envelope,
+                                     reconciliation_flow_path=flow_path)
+            for proposal in envelope['proposals']:
+                row = store.db.execute('SELECT payload_json FROM proposals WHERE id=?',
+                                       (proposal['id'],)).fetchone()
+                if row is None or json.loads(row['payload_json']) != proposal:
+                    raise ValueError('completed Microplus owner proposal changed')
+            statuses = [store.inspect('microplus-attempt-' + record_id)['effective_status']
+                        for record_id in selected]
+            completed['pending_proposals'] = statuses.count('pending')
+            completed['owner_store_revision'] = store.revision
+        finally:
+            store.close()
+        return
+    state['reconciliation'] = {'status': 'running', 'mode': 'microplus_attempt',
+                               'snapshot_sha256': result['snapshot_sha256']}
+    atomic_json(run_dir / 'state.json', state)
+    decision_ids = ['microplus-attempt-' + record_id for record_id in selected]
+    completed_flow = subprocess.run(
+        ['clojure', '-M', '-m', 'freediving.microplus-local-run'],
+        input=json.dumps({'evidence': result['evidence'], 'decision_ids': decision_ids,
+                          'flow_path': str(flow_path)}, sort_keys=True),
+        text=True, capture_output=True, check=True, cwd=ROOT.parent)
+    flow = json.loads(completed_flow.stdout)
+    if (flow.get('provider_calls') != 0 or set(flow.get('events', {})) != set(decision_ids)
+            or type(flow.get('run_revision')) is not int):
+        raise ValueError('Microplus flow result incomplete')
+    store = DecisionStore(owner_path)
+    try:
+        binding = store._binding()
+        if binding is None:
+            store.bind_verified_snapshot(snapshot, expected_revision=0,
+                                         idempotency_key='microplus-bind:' + result['snapshot_sha256'],
+                                         attempt_record_ids=selected)
+        elif binding['snapshot_sha256'] != result['snapshot_sha256']:
+            raise ValueError('Microplus owner binding changed')
+        if export_path.exists():
+            envelope = json.loads(export_path.read_text())
+        else:
+            envelopes = [build_verified_microplus_attempt_export(
+                store, snapshot, config['source_names'], record_id,
+                decision_id=decision_id,
+                reconciliation_run_revision=flow['run_revision'],
+                reconciliation_event_id=flow['events'][decision_id],
+                reconciliation_flow_path=flow_path)
+                for record_id, decision_id in zip(selected, decision_ids)]
+            envelope = {**envelopes[0],
+                        'proposals': [part['proposals'][0] for part in envelopes]}
+            atomic_json(export_path, envelope)
+        registered = register_verified_export(store, snapshot, envelope,
+                                              reconciliation_flow_path=flow_path)
+        if len(registered) != len(selected):
+            raise ValueError('Microplus pending export incomplete')
+        state['reconciliation'] = {
+            'status': 'complete', 'mode': 'microplus_attempt',
+            'snapshot_sha256': result['snapshot_sha256'],
+            'flow_sha256': digest(flow_path), 'export_sha256': digest(export_path),
+            'run_revision': flow['run_revision'], 'pending_proposals': len(selected),
+            'snapshot_positions': result['summary']['snapshot_positions'],
+            'cited_view_observations': result['summary']['cited_view_observations'],
+            'source_objects': result['summary']['source_objects'],
+            'provider_calls': 0, 'accepted_athletes': None,
+            'distinct_attempts': None, 'owner_store_revision': store.revision,
+            'name_evidence': config['name_evidence']}
+    finally:
+        store.close()
 
 
 def reconcile_local(config, run_dir, state):

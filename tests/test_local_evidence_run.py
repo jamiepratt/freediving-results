@@ -35,6 +35,146 @@ def fixture(tmp_path):
     return plan, packet, counter, inventory
 
 
+def microplus_normal_fixture(tmp_path):
+    from tests.test_cmas_microplus_snapshot_observations import fixture as microplus_fixture
+
+    name, record_id, row = microplus_fixture(tmp_path)
+    alternate_url = row['citation']['url'].replace('/17/', '/16/')
+    alternate_bytes = json.dumps([{'unrelated': True}, row['raw_fields']]).encode()
+    alternate_hash = hashlib.sha256(alternate_bytes).hexdigest()
+    (tmp_path / 'unit-16-results.json').write_bytes(alternate_bytes)
+    (tmp_path / 'unit-16-results.receipt.json').write_text(json.dumps({
+        'status': 200, 'sha256': alternate_hash, 'bytes': len(alternate_bytes),
+        'final_url': alternate_url}))
+    alternate = {'url': alternate_url, 'source_sha256': alternate_hash, 'json_pointer': '/1'}
+    row['alternate_citations'] = [alternate]
+    packet = tmp_path / 'packet.json'
+    data = json.loads(packet.read_text())
+    data.update(issue_namespace='#55', competition_scope={'ids': [28, 33, 34, 35]},
+                counts={'competitions': 4, 'units': 92, 'source_objects': 2,
+                        'source_positions': 1, 'aggregate_rows': 0, 'gaps': 0,
+                        'empty_units': 0})
+    data['positions'][0] = row
+    data['sources'].append(dict(data['sources'][0], id='sha256:' + alternate_hash,
+                                unit_id=16, url=alternate_url, sha256=alternate_hash,
+                                bytes=len(alternate_bytes), row_count=2))
+    packet.write_text(json.dumps(data))
+    inventory = tmp_path / 'inventory.json'
+    inventory.write_text(json.dumps({'sources': []}))
+    plan = tmp_path / 'plan.json'
+    plan.write_text(json.dumps({
+        'schema': 'local-evidence-run-plan/v1', 'cutoff': '2026-10-05T00:00:00Z',
+        'stages': [], 'inputs': [{'name': name, 'path': str(packet)}],
+        'excluded': [], 'source_inventory': str(inventory),
+        'reconciliation': {'mode': 'microplus_attempt', 'source_names': [name],
+                           'record_ids': [record_id], 'name_evidence': {
+                               'status': 'gap', 'reason': 'identity outside same-attempt cohort'}}}))
+    return plan, record_id
+
+
+def test_normal_run_exports_verified_microplus_attempt_without_provider(tmp_path):
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    first = run(plan, target)
+    assert first.returncode == 0, first.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert state['local']['status'] == 'complete'
+    assert state['reconciliation']['status'] == 'complete'
+    assert state['reconciliation']['mode'] == 'microplus_attempt'
+    assert state['reconciliation']['provider_calls'] == 0
+    assert state['reconciliation']['pending_proposals'] == 1
+    assert state['coverage']['confirmed_distinct_attempts'] is None
+    assert state['remote']['active'] is None
+    flow = target / 'reconciliation' / 'flow.edn'
+    owner = target / 'reconciliation' / 'owner.sqlite'
+    export = target / 'reconciliation' / 'pending-export.json'
+    hashes = [sha(path) for path in (flow, owner, export)]
+    second = run(plan, target)
+    assert second.returncode == 0, second.stderr
+    assert [sha(path) for path in (flow, owner, export)] == hashes
+
+
+def test_microplus_run_resumes_after_interrupted_export_and_preserves_correction(tmp_path):
+    sys.path.insert(0, str(SCRIPT.parent))
+    from owner_decision_store import DecisionStore
+
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    state_path = target / 'state.json'
+    state = json.loads(state_path.read_text())
+    flow_path = target / 'reconciliation/flow.edn'
+    flow_hash = sha(flow_path)
+    export_path = target / 'reconciliation/pending-export.json'
+    export_hash = sha(export_path)
+    state['reconciliation']['status'] = 'running'
+    state_path.write_text(json.dumps(state))
+    resumed = run(plan, target)
+    assert resumed.returncode == 0, resumed.stderr
+    assert sha(flow_path) == flow_hash
+    assert sha(export_path) == export_hash
+    store = DecisionStore(target / 'reconciliation/owner.sqlite')
+    try:
+        decision_id = 'microplus-attempt-' + record_id
+        store.act(decision_id, action='correct', expected_revision=store.revision,
+                  idempotency_key='human-correction', correction={'pair': []})
+        correction = store.inspect(decision_id)
+    finally:
+        store.close()
+    replayed = run(plan, target)
+    assert replayed.returncode == 0, replayed.stderr
+    replay_state = json.loads(state_path.read_text())
+    assert replay_state['reconciliation']['pending_proposals'] == 0
+    assert replay_state['reconciliation']['owner_store_revision'] > state['reconciliation']['owner_store_revision']
+    assert json.loads(export_path.read_text())['store_revision'] < replay_state['reconciliation']['owner_store_revision']
+    store = DecisionStore(target / 'reconciliation/owner.sqlite')
+    try:
+        assert store.inspect(decision_id) == correction
+    finally:
+        store.close()
+    assert sha(flow_path) == flow_hash
+    assert sha(export_path) == export_hash
+
+
+def test_microplus_run_rejects_tampered_evidence_and_unsupported_scope(tmp_path):
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    source = tmp_path / 'unit-17-results.json'
+    original = source.read_bytes()
+    source.write_bytes(b'[{}]')
+    tampered = run(plan, target)
+    assert tampered.returncode != 0
+    assert 'Microplus source receipt mismatch' in tampered.stderr
+    source.write_bytes(original)
+    wrong = json.loads(plan.read_text())
+    wrong['reconciliation']['record_ids'] = ['0' * 64]
+    different_plan = tmp_path / 'unsupported-plan.json'
+    different_plan.write_text(json.dumps(wrong))
+    unsupported = run(different_plan, tmp_path / 'unsupported-run')
+    assert unsupported.returncode != 0
+    assert 'selected Microplus record absent' in unsupported.stderr
+
+
+def test_microplus_flow_cli_rejects_inadequate_source_binding(tmp_path):
+    from scripts.cmas_microplus_snapshot_observations import load_attempt_evidence
+
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    evidence = load_attempt_evidence(target / 'snapshot', ['cmas-microplus-2026'],
+                                     record_ids=[record_id])['evidence']
+    evidence['observation-versions'][0]['scope-evidence']['fields']['attempt'] = -1
+    result = subprocess.run(
+        ['clojure', '-M', '-m', 'freediving.microplus-local-run'],
+        input=json.dumps({'evidence': evidence,
+                          'decision_ids': ['microplus-attempt-' + record_id],
+                          'flow_path': str(tmp_path / 'inadequate-flow.edn')}),
+        text=True, capture_output=True, cwd=SCRIPT.parents[1])
+    assert result.returncode != 0
+    assert 'source-bound' in result.stderr
+
+
 def test_run_resumes_completed_stage_and_binds_snapshot_bundle(tmp_path):
     plan, packet, counter, _ = fixture(tmp_path)
     target = tmp_path / 'run'
