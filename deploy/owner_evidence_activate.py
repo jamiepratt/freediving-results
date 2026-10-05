@@ -231,7 +231,8 @@ def _stage_directory(parent, name, files, uid, gid, mode):
     return destination
 
 
-def _health(values, expected, roster_digest=None, source_digest=None):
+def _health(values, expected, roster_digest=None, source_digest=None,
+            queue_digest=None, audit_digest=None):
     headers = {
         'Host': values['OWNER_EVIDENCE_ORIGIN_HOST'],
         'X-Freediving-Owner-Gateway': values['OWNER_EVIDENCE_GATEWAY_SECRET'],
@@ -259,16 +260,33 @@ def _health(values, expected, roster_digest=None, source_digest=None):
         with urllib.request.urlopen(route_request, timeout=5) as response:
             if response.status != 200 or json.load(response).get('roster_sha256') != roster_digest:
                 raise RuntimeError('private route roster health check failed')
-    for change in ({'Host': 'poc.alphacompose.com'},
-                   {'X-Freediving-Owner-Gateway': 'invalid'},
-                   {'X-Freediving-Owner-Email': 'unlisted@example.invalid'}):
-        request = urllib.request.Request(url, headers={**headers, **change})
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                raise RuntimeError('private origin accepted invalid identity')
-        except urllib.error.HTTPError as exc:
-            if exc.code != 403:
-                raise RuntimeError('private origin returned unexpected denial') from exc
+    queue_url = None
+    if queue_digest or audit_digest:
+        if not queue_digest or not audit_digest:
+            raise ValueError('queue health pins incomplete')
+        queue_url = 'http://127.0.0.1:8081/owner-evidence/api/issue172-queue?limit=1'
+        with urllib.request.urlopen(urllib.request.Request(queue_url, headers=headers), timeout=5) as response:
+            result = json.load(response)
+            items = result.get('items')
+            if (response.status != 200 or result.get('schema') != 'issue172-owner-queue-v1' or
+                    result.get('total') != 468 or result.get('queue_sha256') != queue_digest or
+                    result.get('audit_sha256') != audit_digest or
+                    not isinstance(items, list) or len(items) != 1 or
+                    not isinstance(items[0], dict) or
+                    not isinstance(items[0].get('citation'), str) or
+                    not items[0]['citation']):
+                raise RuntimeError('private queue readback failed')
+    for probe_url in (url, queue_url) if queue_url else (url,):
+        for change in ({'Host': 'poc.alphacompose.com'},
+                       {'X-Freediving-Owner-Gateway': 'invalid'},
+                       {'X-Freediving-Owner-Email': 'unlisted@example.invalid'}):
+            request = urllib.request.Request(probe_url, headers={**headers, **change})
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    raise RuntimeError('private origin accepted invalid identity')
+            except urllib.error.HTTPError as exc:
+                if exc.code != 403:
+                    raise RuntimeError('private origin returned unexpected denial') from exc
 
 
 def _checkpoint_dir(layout):
@@ -503,7 +521,9 @@ def activate_queue(queue_source, expected_queue_sha256, audit_source,
         if health:
             health()
         else:
-            _health(values, expected_snapshot_sha256)
+            _health(values, expected_snapshot_sha256,
+                    queue_digest=expected_queue_sha256,
+                    audit_digest=expected_audit_sha256)
     except BaseException:
         _restore_queue_checkpoint(layout, command, owner_uid, owner_gid)
         raise
