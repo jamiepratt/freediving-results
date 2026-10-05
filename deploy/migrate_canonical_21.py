@@ -88,7 +88,7 @@ def migrate(args):
             before[n] != expected[n] for n in before):
         raise ValueError('Canonical migration checksum or version changed')
     prior_state = target_state(TARGET, port)
-    if prior_state[:2] != (args.expected_canonical_revision,
+    if prior_state[:2] != (args.expected_attempt_revision,
                            (args.expected_events, args.expected_source_rows,
                             args.expected_identity_rows)):
         raise ValueError('Canonical prior-state CAS failed')
@@ -132,7 +132,7 @@ def main():
     parser.add_argument('--release', type=Path, required=True)
     parser.add_argument('--expected-revision', required=True)
     parser.add_argument('--expected-public-database', required=True)
-    parser.add_argument('--expected-canonical-revision', type=int, required=True)
+    parser.add_argument('--expected-attempt-revision', type=int, required=True)
     parser.add_argument('--expected-events', type=int, required=True)
     parser.add_argument('--expected-source-rows', type=int, required=True)
     parser.add_argument('--expected-identity-rows', type=int, required=True)

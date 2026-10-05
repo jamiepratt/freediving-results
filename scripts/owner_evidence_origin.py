@@ -528,10 +528,21 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 record_id = SOURCE_IMAGE_PATH.fullmatch(path).group(1)
                 image = self.server.source_view.image(query.detail(record_id))
                 return self._reply(200, image, 'image/jpeg')
-            elif SOURCE_VIEW_PATH.fullmatch(path) and not parsed.query:
+            elif SOURCE_VIEW_PATH.fullmatch(path):
                 if self.server.source_view is None:
                     return self._reply(503)
-                result = self.server.source_view.inspect(query.detail(SOURCE_VIEW_PATH.fullmatch(path).group(1)))
+                detail = query.detail(SOURCE_VIEW_PATH.fullmatch(path).group(1))
+                view = 0
+                if parsed.query:
+                    args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1)
+                    if set(args) != {'view'}:
+                        return self._reply(404)
+                    if (detail is None or detail.get('source_schema') != 'cmas-microplus-private-census/v2'
+                            or len(args['view']) != 1
+                            or not re.fullmatch(r'(?:0|[1-8])', args['view'][0])):
+                        raise ValueError('invalid source view selector')
+                    view = int(args['view'][0])
+                result = self.server.source_view.inspect(detail, view=view)
             elif DETAIL_PATH.fullmatch(path) and not parsed.query:
                 result = query.detail(DETAIL_PATH.fullmatch(path).group(1))
             else:

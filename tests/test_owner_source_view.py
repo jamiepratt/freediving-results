@@ -29,6 +29,59 @@ V7_BUNDLE = Path('/Users/jamiep/.codex/private-corpora/issue55-aida-eindhoven-bu
 V8_SNAPSHOT = Path('/Users/jamiep/.codex/private-corpora/issue55-unified-snapshot-20260928-v8/snapshot')
 V8_BUNDLE = Path('/Users/jamiep/.codex/private-corpora/issue55-v8-bundle-20260928/bundle-validated')
 V8_BUNDLE_SHA = 'ec7ce579e525a54f4920f5e4c615848c4562099266f15191f1b5c5f58df07431'
+MICROPLUS_RUN = Path('/Users/jamiep/.codex/private-corpora/issue73-microplus-normal-run-20261005/run')
+
+
+@unittest.skipUnless(MICROPLUS_RUN.exists(), 'private normal-run evidence unavailable')
+class MicroplusOriginalViewTest(unittest.TestCase):
+    def test_authenticated_origin_replays_both_originals_for_five_selected_positions(self):
+        snapshot = MICROPLUS_RUN / 'snapshot'
+        bundle = MICROPLUS_RUN / 'bundle'
+        selected = json.loads((MICROPLUS_RUN / 'reconciliation/pending-export.json').read_text())
+        ids = [row['subject_id'] for row in selected['proposals']]
+        self.assertEqual(len(ids), 5)
+        with SnapshotQuery(snapshot) as query:
+            snapshot_sha = query.manifest['snapshot_sha256']
+            details = [query.detail(record_id) for record_id in ids]
+        bundle_sha = hashlib.sha256((bundle / 'manifest.json').read_bytes()).hexdigest()
+        env = {'OWNER_EVIDENCE_GATEWAY_SECRET': SECRET, 'OWNER_EVIDENCE_ORIGIN_HOST': HOST,
+               'OWNER_EVIDENCE_EMAILS': EMAIL,
+               'OWNER_EVIDENCE_SNAPSHOT_SHA256': snapshot_sha,
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_DIR': str(bundle),
+               'OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256': bundle_sha}
+        with make_server(snapshot, env) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            def request(path, authorized=True):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                headers = {'Host': HOST}
+                if authorized:
+                    headers.update({'X-Freediving-Owner-Gateway': SECRET,
+                                    'X-Freediving-Owner-Email': EMAIL})
+                conn.request('GET', path, headers=headers)
+                response = conn.getresponse()
+                result = response.status, response.read()
+                conn.close()
+                return result
+            try:
+                for detail in details:
+                    self.assertEqual(len(detail['raw']['alternate_citations']), 1)
+                    citations = [detail['citation'], *detail['raw']['alternate_citations']]
+                    for index, citation in enumerate(citations):
+                        url = '/owner-evidence/api/source-view/' + detail['record_id']
+                        status, body = request(url + '?view=' + str(index))
+                        self.assertEqual(status, 200)
+                        shown = json.loads(body)
+                        self.assertEqual(shown['format'], 'json')
+                        self.assertEqual(shown['citation'], citation)
+                        self.assertEqual(shown['source_sha256'], citation['source_sha256'])
+                        self.assertEqual(shown['locator'], citation['json_pointer'])
+                        self.assertEqual(shown['source_value'], detail['raw_fields'])
+                    self.assertEqual(request(url + '?view=2')[0], 404)
+                    self.assertEqual(request(url + '?view=1', authorized=False)[0], 403)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
 
 
 @unittest.skipUnless(V8_SNAPSHOT.exists() and V8_BUNDLE.exists(), 'private v8 evidence unavailable')
@@ -327,6 +380,74 @@ def fixture(root, *, original_bytes=None, content_type='application/json', posit
 
 
 class SourceViewTest(unittest.TestCase):
+    def test_portable_microplus_two_originals_are_record_bound(self):
+        root = Path(self.tmp.name) / 'microplus'
+        root.mkdir()
+        row = {'Name': 'Ada', 'Result': '100'}
+        primary_data = json.dumps([row, {'Name': 'Other'}]).encode()
+        alternate_data = json.dumps([{'Name': 'Other'}, row]).encode()
+        snapshot, _, env = fixture(root, original_bytes=primary_data,
+            positions=[{'fields': row, 'locator': 'row index zero based 0'}])
+        inventory_path = root / 'inventory.json'
+        inventory = json.loads(inventory_path.read_text())
+        urls = ['https://cmas-api.microplustimingservices.com/api/units/1/results',
+                'https://cmas-api.microplustimingservices.com/api/units/2/results']
+        inventory['sources'][0]['receipt'] = {'final_url': urls[0]}
+        inventory['sources'][0]['metadata'] = {'kind': 'unit_results'}
+        alternate = root / 'alternate.json'
+        alternate.write_bytes(alternate_data)
+        inventory['sources'].append({'id': 'sha256:' + sha(alternate_data),
+            'sha256': sha(alternate_data), 'bytes': len(alternate_data),
+            'content_type': 'application/json', 'source_path': str(alternate),
+            'receipt': {'final_url': urls[1]}, 'classification': 'eligible',
+            'metadata': {'kind': 'unit_results'}})
+        inventory_path.write_text(json.dumps(inventory))
+        bundle = root / 'microplus-bundle'
+        build(inventory_path, bundle)
+        env.update(OWNER_EVIDENCE_SOURCE_BUNDLE_DIR=str(bundle),
+                   OWNER_EVIDENCE_SOURCE_BUNDLE_SHA256=sha((bundle / 'manifest.json').read_bytes()))
+        citations = [{'url': url, 'source_sha256': sha(data), 'json_pointer': pointer}
+                     for url, data, pointer in ((urls[0], primary_data, '/0'),
+                                                (urls[1], alternate_data, '/1'))]
+        with make_server(snapshot, env) as server:
+            record_id = server.query.browse(kind='candidate_position')['records'][0]['record_id']
+            original = server.query.detail(record_id)
+            detail = dict(original, source_schema='cmas-microplus-private-census/v2',
+                          source_object_id='sha256:' + citations[0]['source_sha256'],
+                          citation=citations[0], raw_fields=row,
+                          raw={'citation': citations[0], 'alternate_citations': citations[1:],
+                               'raw_fields': row})
+            server.query.detail = lambda requested: detail if requested == record_id else None
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = '/owner-evidence/api/source-view/' + record_id
+                for index, citation in enumerate(citations):
+                    status, _, body = self.request(url + '?view=' + str(index), server=server)
+                    self.assertEqual(status, 200)
+                    shown = json.loads(body)
+                    self.assertEqual((shown['source_sha256'], shown['locator'], shown['source_value']),
+                                     (citation['source_sha256'], citation['json_pointer'], row))
+                self.assertEqual(self.request(url + '?view=2', server=server)[0], 404)
+                self.assertEqual(self.request(url + '?view=bad', server=server)[0], 400)
+                self.assertEqual(self.request(url + '?view=1', server=server, authorized=False)[0], 403)
+                viewer = server.source_view
+                forged = dict(detail, source_object_id='sha256:' + citations[1]['source_sha256'])
+                wrong_pointer = dict(detail, raw={**detail['raw'],
+                    'alternate_citations': [{**citations[1], 'json_pointer': '/0'}]})
+                wrong_hash = dict(detail, raw={**detail['raw'],
+                    'alternate_citations': [{**citations[1], 'source_sha256': '0' * 64}]})
+                for bad, status in ((forged, 422), (wrong_pointer, 422),
+                                    (wrong_hash, 404)):
+                    with self.assertRaises(SourceViewError) as raised:
+                        viewer.inspect(bad, view=1)
+                    self.assertEqual(raised.exception.status, status)
+                server.query.detail = lambda requested: original if requested == record_id else None
+                self.assertEqual(self.request(url + '?view=1', server=server)[0], 400)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
     def test_retained_candidate_pdf_page_requires_exact_record_citation(self):
         root = Path(self.tmp.name) / 'retained-candidate-pdf'
         root.mkdir()

@@ -257,12 +257,24 @@ function sourcePosition(detail) {
   return info;
 }
 async function detail(id){const d=await fetchJson('/api/detail/'+id);const area=$('detail');area.replaceChildren();const basic={source_name:d.source_name,source_schema:d.source_schema,collection:d.collection,kind:d.kind,event_name:d.event_name,event_date:d.event_date,date_scope:d.date_scope,session:d.session,discipline:d.discipline,category:d.category,federation:d.federation,authority:d.authority,federation_source_role:d.role,review_status:d.review_status,record_path:d.record_path,parser_version:d.parser_version,observation_version:d.observation_version,source_object_id:d.source_object_id,acquisition_id:d.acquisition_id,input_sha256:d.input_sha256,source_sha256:d.source_sha256,snapshot_sha256:d.snapshot_sha256};entries(area,basic);area.append(sourcePosition(d));for(const [label,value] of [['Federation source-object claim citation',d.federation_citation],['Record citation',d.citation],['Raw fields',d.raw_fields],['Parsed fields',d.parsed_fields],['Retained packet record',d.raw]]){area.append(heading(label),jsonBlock(value));}const button=document.createElement('button');button.textContent='Inspect cited evidence';const view=document.createElement('div');view.className='source-view';button.addEventListener('click',()=>{button.disabled=true;view.textContent='Loading cited evidence...';showSourceView(id,view).catch(e=>{view.textContent=`Source view unavailable: ${e.message}`;}).finally(()=>{button.disabled=false;});});area.append(button,view);}
-async function showSourceView(id,area){
-  const info=await fetchJson('/api/source-view/'+id);
+async function showSourceView(id,area,viewIndex=0){
+  const info=await fetchJson('/api/source-view/'+id+(viewIndex?'?view='+viewIndex:''));
   const source=document.createElement('div'),parsed=document.createElement('div');
   const restrictedHtml=info.format==='safe_html_derivative'||info.format==='cited_html_packet';
   const title=info.format==='pdf'?`Original PDF page ${info.page}`:info.format==='jpeg'?'Original JPEG':info.format==='json'?`Original JSON ${info.locator}`:info.format==='cited_html_packet'?'Cited safe HTML packet':info.format==='safe_html_derivative'?'Safe result-table derivative':'Cited evidence';
   source.append(heading(title),heading('Source SHA-256'),cell(info.source_sha256,'p'));
+  if(info.view_count>1){
+    const choices=document.createElement('div');
+    choices.append(heading('Cited original sources'));
+    for(let index=0;index<info.view_count;index++){
+      const button=document.createElement('button');button.type='button';
+      button.textContent=`Original ${index+1} of ${info.view_count}`;
+      button.disabled=index===info.view_index;
+      button.addEventListener('click',()=>showSourceView(id,area,index).catch(error=>{area.textContent=`Source view unavailable: ${error.message}`;}));
+      choices.append(button);
+    }
+    source.append(choices);
+  }
   if(info.derivative_sha256)source.append(heading('Derivative SHA-256'),cell(info.derivative_sha256,'p'));
   if(info.receipt&&Object.keys(info.receipt).length)source.append(heading('Acquisition receipt'),jsonBlock(info.receipt));
   if(restrictedHtml){

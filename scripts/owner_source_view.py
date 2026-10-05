@@ -98,8 +98,12 @@ class OriginalSourceView:
             raise SourceViewError(422)
         return item, content_type, data
 
-    def inspect(self, detail):
+    def inspect(self, detail, view=0):
         if detail is None:
+            raise SourceViewError(404)
+        if detail.get('source_schema') == 'cmas-microplus-private-census/v2':
+            return self._microplus(detail, view)
+        if view != 0:
             raise SourceViewError(404)
         item = self.item_for(detail.get('source_object_id'))
         if detail.get('source_schema') == 'aida-selected-html-packet/v1':
@@ -215,6 +219,64 @@ class OriginalSourceView:
                 **({'verification_scope': 'Cited original PDF page only; source line and retained artifact not replayed'}
                    if retained_candidate else {}),
                 'region': citation.get('region') if isinstance(citation, dict) else citation}
+
+    def _microplus(self, detail, view):
+        raw = detail.get('raw') or {}
+        primary = detail.get('citation')
+        if not isinstance(raw, dict):
+            raise SourceViewError(422)
+        alternates = raw.get('alternate_citations')
+        if type(view) is not int or view < 0 or view > 8:
+            raise SourceViewError(404)
+        if (detail.get('kind') != 'candidate_position'
+                or detail.get('collection') != 'positions'
+                or primary != raw.get('citation')
+                or detail.get('raw_fields') != raw.get('raw_fields')
+                or not isinstance(alternates, list) or len(alternates) > 8):
+            raise SourceViewError(422)
+        if view > len(alternates):
+            raise SourceViewError(404)
+        citations = [primary, *alternates]
+        if any(not isinstance(citation, dict) or
+               set(citation) != {'url', 'source_sha256', 'json_pointer'}
+               for citation in citations) or len({json.dumps(c, sort_keys=True) for c in citations}) != len(citations):
+            raise SourceViewError(422)
+        if (not isinstance(primary.get('source_sha256'), str)
+                or detail.get('source_object_id') != 'sha256:' + primary['source_sha256']):
+            raise SourceViewError(422)
+        citation = citations[view]
+        digest = citation['source_sha256']
+        pointer = citation['json_pointer']
+        if (not isinstance(digest, str) or not HEX.fullmatch(digest)
+                or not isinstance(pointer, str)
+                or not re.fullmatch(r'/(?:0|[1-9][0-9]{0,5})', pointer)
+                or not isinstance(citation['url'], str)
+                or not re.fullmatch(r'https://cmas-api\.microplustimingservices\.com/api/units/[1-9][0-9]{0,6}/results', citation['url'])):
+            raise SourceViewError(422)
+        selected = dict(detail, source_object_id='sha256:' + digest)
+        item, content_type, data = self._source(selected)
+        receipt = item.get('receipt') or {}
+        if (content_type != 'application/json'
+                or item.get('metadata', {}).get('kind') != 'unit_results'
+                or receipt.get('final_url') != citation['url']):
+            raise SourceViewError(422)
+        try:
+            rows = json.loads(data)
+        except (UnicodeError, ValueError) as exc:
+            raise SourceViewError(503) from exc
+        index = int(pointer[1:])
+        if not isinstance(rows, list) or index >= len(rows) or rows[index] != detail['raw_fields']:
+            raise SourceViewError(422)
+        row = rows[index]
+        if len(json.dumps(row, ensure_ascii=False).encode('utf-8')) > MAX_JSON_ROW:
+            raise SourceViewError(413)
+        safe_receipt = {key: receipt[key] for key in RECEIPT_FIELDS
+                        if isinstance(receipt.get(key), str) and len(receipt[key]) <= 2048}
+        return {'format': 'json', 'locator': pointer, 'source_sha256': digest,
+                'source_bytes': item['bytes'], 'receipt': safe_receipt,
+                'snapshot_sha256': detail['snapshot_sha256'], 'citation': citation,
+                'raw_fields': detail['raw_fields'], 'parsed_fields': detail['parsed_fields'],
+                'source_value': row, 'view_index': view, 'view_count': len(citations)}
 
     def _aida_packet(self, detail, original):
         if detail.get('kind') != 'candidate_position' or original is None or original.get('status') != 'restricted':

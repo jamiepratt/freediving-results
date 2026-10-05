@@ -76,7 +76,24 @@ restores it into a disposable database, and checks the retained data digest
 before applying migration 21 in one transaction as `freediving_migrator`.
 Retry at version 21 verifies the same state without applying SQL again. The
 existing `migrate_only.py` targets the public database; `provision_canonical.py`
-requires an empty canonical target.
+requires an empty canonical target. The attempt revision is from
+`freediving.canonical_attempt_state` and can be 0 while identity events are 211.
+After installing the exact merged release and rechecking current counts, the host
+invocation for the copied 1-20, 0-attempt, 211-event, 281-source, 1-view state is:
+
+```sh
+revision=<exact-merged-40-hex-commit>
+release="/opt/freediving/releases/$revision"
+sudo -n python3 "$release/deploy/migrate_canonical_21.py" \
+  --release "$release" --expected-revision "$revision" \
+  --expected-public-database freediving_release_20260924_11 \
+  --expected-attempt-revision 0 --expected-events 211 \
+  --expected-source-rows 281 --expected-identity-rows 1
+```
+
+Replace the expected values only from a fresh read-only check. The helper does
+not activate an owner snapshot or install the release. Preserve its printed
+backup path and SHA-256 for a guarded restore if any postcheck fails.
 
 ### Migration-only operator checkpoint
 
