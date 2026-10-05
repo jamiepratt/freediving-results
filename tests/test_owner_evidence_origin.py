@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 from test_unified_evidence_query import snapshot
@@ -514,7 +515,10 @@ class PrivateOriginTest(unittest.TestCase):
         from test_owner_decision_store import proposal
         decision_path = Path(self.tmp.name) / 'large-decisions.sqlite'
         server = make_server(self.snapshot_dir, {**self.env,
-                             'OWNER_EVIDENCE_DECISION_DB': str(decision_path)})
+                             'OWNER_EVIDENCE_DECISION_DB': str(decision_path),
+                             'OWNER_EVIDENCE_STATUS_FILE': str(Path(self.tmp.name) / 'large-status.json'),
+                             'OWNER_EVIDENCE_STATUS_TOKEN': 'private-status-token-for-tests',
+                             'OWNER_EVIDENCE_STATUS_CLIENT_ID': 'status-client.access'})
         self.addCleanup(server.server_close)
         evidence_id = server.query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
         citation = {'source_position': 'synthetic-row-1'}
@@ -542,8 +546,11 @@ class PrivateOriginTest(unittest.TestCase):
             connection.close()
             return result
 
+        started = time.monotonic()
         status, body = request('/owner-evidence/api/decisions?limit=100')
+        queue_elapsed = time.monotonic() - started
         self.assertEqual(status, 200)
+        self.assertLess(queue_elapsed, 15, f'207-proposal queue took {queue_elapsed:.2f}s')
         self.assertLess(len(body), 2 * 1024 * 1024)
         queue = json.loads(body)
         self.assertEqual((queue['total'], len(queue['items'])), (207, 100))
@@ -554,6 +561,45 @@ class PrivateOriginTest(unittest.TestCase):
         detail = json.loads(detail_body)
         self.assertEqual(detail['evidence'][0]['citation'], citation)
         self.assertEqual(detail['supporting_evidence'], [large_support])
+        machine = {'Host': HOST, 'X-Freediving-Owner-Gateway': SECRET,
+                   'X-Freediving-Owner-Machine': 'status-client.access',
+                   'X-Freediving-Status-Token': 'private-status-token-for-tests',
+                   'Content-Type': 'application/json'}
+        receipt = {'schema': 'private-presentation-status/v3', 'run_id': 'large-batch',
+                   'revision': 1, 'expected_revision': 0,
+                   'local': {'snapshot_sha256': self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'],
+                             'cutoff': '2026-10-03T00:00:00Z', 'gap_count': 0},
+                   'remote': {'status': 'pending',
+                              'pending': self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'],
+                              'failed': None, 'active': None},
+                   'application': {'snapshot_sha256': self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'],
+                                   'canonical_revision': 1,
+                                   'canonical_readback_sha256': 'c' * 64,
+                                   'owner_store_revision': server.decisions.revision,
+                                   'pending_proposals': 207, 'unresolved_exclusions': 0,
+                                   'provider_calls_recorded': 0,
+                                   'publication_status': 'private'}}
+        payload = json.dumps(receipt).encode()
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=15)
+        started = time.monotonic()
+        connection.request('POST', '/owner-evidence/api/presentation-status', body=payload,
+                           headers={**machine, 'Content-Length': str(len(payload))})
+        response = connection.getresponse()
+        post_status, post_body = response.status, response.read()
+        post_elapsed = time.monotonic() - started
+        connection.close()
+        self.assertEqual(post_status, 200, post_body)
+        self.assertLess(post_elapsed, 15, f'207-proposal status POST took {post_elapsed:.2f}s')
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=15)
+        started = time.monotonic()
+        connection.request('GET', '/owner-evidence/api/presentation-status', headers=machine)
+        response = connection.getresponse()
+        get_status, get_body = response.status, response.read()
+        get_elapsed = time.monotonic() - started
+        connection.close()
+        self.assertEqual(get_status, 200, get_body)
+        self.assertLess(get_elapsed, 15, f'207-proposal status GET took {get_elapsed:.2f}s')
+        self.assertEqual(json.loads(get_body)['application']['pending_proposals'], 207)
 
 
 class RetainedSnapshotTest(unittest.TestCase):

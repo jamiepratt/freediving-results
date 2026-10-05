@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,44 @@ from unified_evidence_query import SnapshotQuery
 
 
 class OwnerDecisionSyntheticPathTest(unittest.TestCase):
+    def test_207_proposal_owner_browser_queue_stays_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_dir = snapshot(root)
+            digest = json.loads((snapshot_dir / 'manifest.json').read_text())['snapshot_sha256']
+            env = {'OWNER_EVIDENCE_GATEWAY_SECRET': 'synthetic-private-gateway-secret',
+                   'OWNER_EVIDENCE_EMAILS': 'owner@example.com',
+                   'OWNER_EVIDENCE_SNAPSHOT_SHA256': digest,
+                   'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-private.alphacompose.com',
+                   'OWNER_EVIDENCE_DECISION_DB': str(root / 'decisions.sqlite')}
+            server = make_server(snapshot_dir, env)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                evidence = server.query.browse(kind='candidate_position', limit=1)['records'][0]['record_id']
+                proposals = [proposal(f'candidate-{i:03}', evidence=evidence,
+                                      score=i / 207) for i in range(207)]
+                server.decisions.register_batch(digest, proposals,
+                                                idempotency_key='synthetic-207-proposals')
+                started = time.monotonic()
+                result = subprocess.run(
+                    ['node', str(ROOT / 'tests' / 'owner_decision_synthetic_browser.mjs'),
+                     str(server.server_port), 'large-queue'],
+                    cwd=ROOT, text=True, capture_output=True, timeout=45)
+                elapsed = time.monotonic() - started
+                self.assertEqual(result.returncode, 0, result.stderr)
+                trace = json.loads(result.stdout)
+                self.assertEqual(trace['total'], 207)
+                self.assertEqual(trace['first_page'], 'candidate-000')
+                self.assertEqual(trace['second_page'], 'candidate-025')
+                self.assertEqual(trace['citation'], {'row': 1})
+                self.assertLess(trace['queue_response_ms'], 15000)
+                self.assertLess(elapsed, 30)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+                server.server_close()
+
     def test_browser_action_reaches_signed_feed_and_preserves_correction(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

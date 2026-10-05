@@ -114,6 +114,16 @@ async function clickOwnerAction(id, actionName) {
     const base = `http://127.0.0.1:${gateway.address().port}`;
     const navigation = await page.goto(base + '/owner-evidence', {waitUntil:'domcontentloaded'});
     if (navigation.status() !== 200) throw Error(`owner page ${navigation.status()}`);
+    if (actionName === 'large-queue') {
+      await page.locator('#decision-summary').getByText('207 decisions', {exact:false}).waitFor();
+      const firstPage = await page.getByRole('button', {name:/Inspect candidate-000/}).first().textContent();
+      await page.locator('#decision-next').click();
+      const secondPage = await page.getByRole('button', {name:/Inspect candidate-025/}).first().textContent();
+      await page.getByRole('button', {name:/Inspect candidate-025/}).first().click();
+      await page.locator('#decision-detail').getByText('candidate-025', {exact:false}).first().waitFor();
+      return {first_page:firstPage.replace('Inspect ', ''),
+        second_page:secondPage.replace('Inspect ', '')};
+    }
     if (actionName === 'projection') return await page.evaluate(async () => {
       const response = await fetch('/owner-evidence/api/canonical-projection');
       if (!response.ok) throw Error(`canonical projection ${response.status}`);
@@ -145,6 +155,21 @@ async function clickOwnerAction(id, actionName) {
 const phase = process.argv[3];
 if (phase === 'ui-projection') {
   process.stdout.write(JSON.stringify(await clickOwnerAction(null, 'projection')));
+  process.exit(0);
+}
+if (phase === 'large-queue') {
+  const started = performance.now();
+  const pageResponse = await request('/owner-evidence/api/decisions?status=&limit=25&offset=0');
+  const queueResponseMs = performance.now() - started;
+  if (pageResponse.status !== 200) throw Error(`large queue ${pageResponse.status}`);
+  const page = await pageResponse.json();
+  const result = await clickOwnerAction(null, 'large-queue');
+  const detailResponse = await request('/owner-evidence/api/decisions/candidate-025');
+  if (detailResponse.status !== 200) throw Error(`large detail ${detailResponse.status}`);
+  const detail = await detailResponse.json();
+  process.stdout.write(JSON.stringify({...result, total:page.total,
+    queue_response_ms:queueResponseMs,
+    citation:detail.evidence[0].citation}));
   process.exit(0);
 }
 if (phase === 'projection') {
