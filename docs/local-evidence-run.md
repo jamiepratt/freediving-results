@@ -68,6 +68,8 @@ The private `python3 scripts/local_evidence_run.py metrics --run-dir /private/ru
 
 The Microplus two-view owner export takes a private persisted `reconciliation_flow_path` alongside the verified snapshot and selected record. It checks the run revision, latest source-bound decision event, both cited view IDs, exact observation revisions, source hashes and locators before building and again before registering a pending proposal. The path stays local; it is not copied into the owner proposal. `scripts/test-postgres.sh test-microplus-owner-delivery` exercises a generated export and signed owner actions through the local importer, flow ledger, disposable canonical PostgreSQL and owner outbox checkpoints. Its approval and reversal are test-only.
 
+For a completed normal Microplus run, `python3 scripts/local_evidence_run.py metrics --run-dir /private/run` rechecks the staged snapshot, source bundle, flow and pending export hashes. It prints a sanitized local checkpoint with selected position, cited view, source object, pending proposal and source gap counts. The reported owner revision and remote status are values recorded by the run, not a fresh owner store or authenticated host readback. Accepted athletes and confirmed distinct attempts remain unknown; this command grants no approval or publication authority.
+
 For a bounded retained Microplus attempt cohort, the normal `run` plan may use:
 
 ```json

@@ -94,6 +94,31 @@ def test_normal_run_exports_verified_microplus_attempt_without_provider(tmp_path
     assert [sha(path) for path in (flow, owner, export)] == hashes
 
 
+def test_microplus_metrics_reports_verified_local_checkpoint_without_authority(tmp_path):
+    plan, _ = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    command = [sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)]
+    measured = subprocess.run(command, capture_output=True, text=True)
+    assert measured.returncode == 0, measured.stderr
+    report = json.loads(measured.stdout)
+    state = json.loads((target / 'state.json').read_text())
+    assert report['schema'] == 'microplus-attempt-local-metrics/v1'
+    assert report['binding']['snapshot_sha256'] == state['local']['snapshot_sha256']
+    assert report['binding']['flow_sha256'] == sha(target / 'reconciliation/flow.edn')
+    assert report['binding']['export_sha256'] == sha(target / 'reconciliation/pending-export.json')
+    assert report['counts']['pending_proposals'] == 1
+    assert report['provider_calls'] == 0
+    assert report['confirmed_distinct_attempts'] is None
+    assert report['accepted_athletes'] is None
+    assert report['remote_status'] == 'pending'
+    with (target / 'reconciliation/flow.edn').open('ab') as output:
+        output.write(b'\n')
+    changed = subprocess.run(command, capture_output=True, text=True)
+    assert changed.returncode != 0
+    assert 'Microplus metrics checkpoint binding changed' in changed.stderr
+
+
 def test_microplus_run_resumes_after_interrupted_export_and_preserves_correction(tmp_path):
     sys.path.insert(0, str(SCRIPT.parent))
     from owner_decision_store import DecisionStore

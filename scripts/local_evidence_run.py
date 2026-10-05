@@ -1063,6 +1063,37 @@ def main():
                     raise ValueError('canonical checkpoint binding changed')
                 print(json.dumps(receipt, sort_keys=True))
                 return 0
+            microplus = state.get('reconciliation', {})
+            if microplus.get('mode') == 'microplus_attempt':
+                if (state.get('schema') != 'local-evidence-run/v1'
+                        or state.get('local', {}).get('status') != 'complete'
+                        or microplus.get('status') != 'complete'
+                        or microplus.get('snapshot_sha256') != state['local'].get('snapshot_sha256')
+                        or microplus.get('flow_sha256') != digest(args.run_dir / 'reconciliation' / 'flow.edn')
+                        or microplus.get('export_sha256') != digest(args.run_dir / 'reconciliation' / 'pending-export.json')):
+                    raise ValueError('Microplus metrics checkpoint binding changed')
+                from private_evidence_transfer import verified_input
+                verified_input(args.run_dir)
+                print(json.dumps({
+                    'schema': 'microplus-attempt-local-metrics/v1',
+                    'binding': {'run_id': state['run_id'],
+                                'snapshot_sha256': microplus['snapshot_sha256'],
+                                'flow_sha256': microplus['flow_sha256'],
+                                'export_sha256': microplus['export_sha256'],
+                                'run_revision': microplus['run_revision'],
+                                'owner_store_revision_at_checkpoint': microplus['owner_store_revision']},
+                    'counts': {'snapshot_positions': microplus['snapshot_positions'],
+                               'cited_view_observations': microplus['cited_view_observations'],
+                               'source_objects': microplus['source_objects'],
+                               'pending_proposals': microplus['pending_proposals'],
+                               'source_gaps': len(state['coverage']['gaps'])},
+                    'provider_calls': microplus['provider_calls'],
+                    'confirmed_distinct_attempts': state['coverage']['confirmed_distinct_attempts'],
+                    'accepted_athletes': microplus['accepted_athletes'],
+                    'remote_status': state['remote']['status'],
+                    'authority': 'verified_local_checkpoint_only',
+                }, sort_keys=True))
+                return 0
             receipt = state['reconciliation']['metrics']
             if (state['reconciliation']['status'] != 'complete'
                     or receipt['binding']['run_id'] != state['run_id']
