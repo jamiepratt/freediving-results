@@ -40,6 +40,70 @@ def snapshot(tmp_path):
 
 
 class QueryContractTest(unittest.TestCase):
+    def test_cited_federation_mapping_filters_exact_source_and_replays(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            packet = root / 'packet.json'
+            packet.write_text(json.dumps({'schema': 'synthetic/v1', 'positions': [
+                {'id': 'a', 'source_object_id': 'sha256:' + 'a' * 64,
+                 'citation': {'page': 1, 'row': 1}, 'raw_fields': {'federation': 'other'}},
+                {'id': 'b', 'source_object_id': 'sha256:' + 'b' * 64,
+                 'citation': {'page': 2, 'row': 1}, 'raw_fields': {'federation': 'CMAS'}}]}))
+            base = root / 'base'
+            subprocess.run([sys.executable, str(SCRIPT), 'build', '--cutoff', '2026-10-01T00:00:00Z',
+                            '--input', f'packet={packet}', '--output-dir', str(base)],
+                           check=True, capture_output=True)
+            mapping = root / 'mapping.json'
+            mapping.write_text(json.dumps({'schema': 'evidence-federation-map/v1', 'entries': [{
+                'source_name': 'packet', 'source_object_id': 'sha256:' + 'a' * 64,
+                'federation': 'CMAS', 'authority': 'CMAS', 'role': 'primary',
+                'citation': {'url': 'https://example.test/results.pdf', 'sha256': 'a' * 64,
+                             'locator': 'page 1 heading', 'evidence_text': 'CMAS WORLD CUP'}
+            }]}))
+            out = root / 'mapped'
+            command = [sys.executable, str(SCRIPT), 'map-federations', '--base-dir', str(base),
+                       '--mapping', str(mapping), '--output-dir', str(out)]
+            subprocess.run(command, check=True, capture_output=True)
+            with SnapshotQuery(out) as query:
+                self.assertEqual(query.browse(federation='CMAS')['total'], 1)
+                self.assertEqual(query.browse(federation='unknown')['total'], 1)
+                mapped = query.browse(federation='CMAS')['records'][0]
+                self.assertEqual(mapped['authority'], 'CMAS')
+                self.assertEqual(mapped['role'], 'primary')
+                self.assertEqual(query.detail(mapped['record_id'])['federation_citation']['locator'],
+                                 'page 1 heading')
+                self.assertEqual(query.overview()['federation_mapping']['mapped_records'], 1)
+                self.assertEqual(query.overview()['federation_mapping']['mapped_candidate_positions'], 1)
+            digest = hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest()
+            subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)],
+                           check=True, capture_output=True)
+            self.assertEqual(hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest(), digest)
+            manifest_path = out / 'manifest.json'
+            original_manifest = manifest_path.read_text()
+            forged = json.loads(original_manifest)
+            forged['snapshot_sha256'] = '0' * 64
+            manifest_path.write_text(json.dumps(forged))
+            divergent = subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)],
+                                       capture_output=True, text=True)
+            self.assertNotEqual(divergent.returncode, 0)
+            self.assertIn('replay hash mismatch', divergent.stderr)
+            self.assertEqual(hashlib.sha256((out / 'snapshot.sqlite').read_bytes()).hexdigest(), digest)
+            manifest_path.write_text(original_manifest)
+            with SnapshotQuery(base) as query:
+                self.assertEqual(query.browse(federation='unknown')['total'], 2)
+            mapping.write_text(mapping.read_text().replace('CMAS WORLD CUP', 'uncited assertion'))
+            stale = subprocess.run([sys.executable, str(SCRIPT), 'replay', '--output-dir', str(out)],
+                                   capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn('federation mapping hash mismatch', stale.stderr)
+            wrong = json.loads(mapping.read_text())
+            wrong['entries'][0]['citation']['sha256'] = 'b' * 64
+            mapping.write_text(json.dumps(wrong))
+            rejected = subprocess.run(command[:-1] + [str(root / 'rejected')],
+                                      capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('invalid or uncited federation mapping entry', rejected.stderr)
+
     def test_dive_field_decisions_are_private_version_bound_and_replayable(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

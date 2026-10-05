@@ -120,6 +120,20 @@ class SnapshotQuery:
         self.db.row_factory = sqlite3.Row
         self.has_dive_fields = self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dive_field_decisions'").fetchone() is not None
+        self.has_federation_mapping = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='federation_mapping'").fetchone() is not None
+
+    def _federation(self, source_name, source_object_id):
+        if not self.has_federation_mapping or not source_object_id:
+            return {'federation': None, 'authority': None, 'role': None,
+                    'federation_citation': None}
+        row = self.db.execute(
+            'SELECT federation,authority,role,citation_json FROM federation_mapping '
+            'WHERE source_name=? AND source_object_id=?', (source_name, source_object_id)).fetchone()
+        return ({'federation': row['federation'], 'authority': row['authority'],
+                 'role': row['role'], 'federation_citation': json.loads(row['citation_json'])}
+                if row else {'federation': None, 'authority': None, 'role': None,
+                             'federation_citation': None})
 
     def _dive_fields(self, record_id):
         if not self.has_dive_fields:
@@ -141,16 +155,32 @@ class SnapshotQuery:
         counts = [dict(row) for row in self.db.execute(
             'SELECT source_name, collection, kind, count(*) AS records FROM records '
             'GROUP BY source_name, collection, kind ORDER BY source_name, collection, kind')]
+        mapped = self.db.execute(
+            'SELECT count(*) FROM records r WHERE EXISTS '
+            '(SELECT 1 FROM federation_mapping m WHERE m.source_name=r.source_name '
+            'AND m.source_object_id=r.source_object_id AND m.federation IS NOT NULL)').fetchone()[0] if self.has_federation_mapping else 0
+        mapped_positions = self.db.execute(
+            "SELECT count(*) FROM records r WHERE r.kind='candidate_position' "
+            "AND r.collection NOT IN ('candidate_versions','observation_versions') AND EXISTS "
+            '(SELECT 1 FROM federation_mapping m WHERE m.source_name=r.source_name '
+            'AND m.source_object_id=r.source_object_id AND m.federation IS NOT NULL)').fetchone()[0] if self.has_federation_mapping else 0
+        total_records = sum(row['records'] for row in counts)
+        candidate_positions = sum(row['records'] for row in counts
+                                  if row['kind'] == 'candidate_position'
+                                  and row['collection'] not in ('candidate_versions', 'observation_versions'))
         return {
             'schema': self.manifest['schema'], 'cutoff': self.manifest['cutoff'],
             'coverage': self.manifest['coverage'],
             'confirmed_distinct_attempts': self.manifest['confirmed_distinct_attempts'],
-            'candidate_source_positions': sum(row['records'] for row in counts
-                                              if row['kind'] == 'candidate_position'
-                                              and row['collection'] not in ('candidate_versions', 'observation_versions')),
+            'candidate_source_positions': candidate_positions,
             'observation_version_records': sum(row['records'] for row in counts
                                                if row['collection'] == 'observation_versions'),
             'snapshot_sha256': self.manifest['snapshot_sha256'],
+            'federation_mapping': {'schema': (self.manifest.get('federation_mapping') or {}).get('schema'),
+                                   'mapped_records': mapped, 'unknown_records': total_records - mapped,
+                                   'total_records': total_records,
+                                   'mapped_candidate_positions': mapped_positions,
+                                   'unknown_candidate_positions': candidate_positions - mapped_positions},
             'counts': counts,
         }
 
@@ -252,7 +282,7 @@ class SnapshotQuery:
 
     def browse(self, *, source_name=None, collection=None, kind=None, event_name=None,
                date_from=None, date_to=None, session=None, discipline=None,
-               category=None, limit=50, offset=0):
+               category=None, federation=None, limit=50, offset=0):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('limit must be an integer from 1 to 100')
         if type(offset) is not int or not 0 <= offset <= 100000:
@@ -267,6 +297,18 @@ class SnapshotQuery:
                     raise ValueError(f'{column} must be a nonempty string of at most 200 characters')
                 clauses.append(f'{column} = ?')
                 args.append(value)
+        if federation is not None:
+            if not isinstance(federation, str) or not federation or len(federation) > 200 or '\x00' in federation:
+                raise ValueError('federation must be a nonempty string of at most 200 characters')
+            match = ('SELECT 1 FROM federation_mapping m WHERE m.source_name=records.source_name '
+                     'AND m.source_object_id=records.source_object_id AND m.federation IS NOT NULL')
+            if federation == 'unknown':
+                clauses.append('NOT EXISTS (' + match + ')' if self.has_federation_mapping else '1=1')
+            elif self.has_federation_mapping:
+                clauses.append('EXISTS (' + match + ' AND m.federation=?)')
+                args.append(federation)
+            else:
+                clauses.append('1=0')
         for label, value in (('date_from', date_from), ('date_to', date_to)):
             if value is not None:
                 if not isinstance(value, str) or len(value) != 10 or date.fromisoformat(value).isoformat() != value:
@@ -284,12 +326,13 @@ class SnapshotQuery:
         rows = self.db.execute(
             'SELECT record_id, source_name, collection, record_path, parent_path, kind, '
             'event_name, event_date, date_from, date_to, session, discipline, category, '
-            'page, review_status FROM records' + where +
+            'page, review_status, source_object_id FROM records' + where +
             ' ORDER BY source_name, collection, record_path, record_id LIMIT ? OFFSET ?',
             [*args, limit, offset])
         records = [dict(row) for row in rows]
         for record in records:
             record['dive_fields'] = self._dive_fields(record['record_id'])
+            record.update(self._federation(record['source_name'], record['source_object_id']))
         return {'total': total, 'limit': limit, 'offset': offset, 'records': records}
 
     def detail(self, record_id):
@@ -308,6 +351,7 @@ class SnapshotQuery:
         result['source_schema'] = source.get('source_schema')
         result['snapshot_sha256'] = self.manifest['snapshot_sha256']
         result['dive_fields'] = self._dive_fields(record_id)
+        result.update(self._federation(result['source_name'], result['source_object_id']))
         return result
 
     def _roatan_rows(self, collection):
@@ -541,7 +585,7 @@ def main(argv=None):
     for name in ('browse', 'gaps', 'relationships'):
         command = commands.add_parser(name)
         for field in ('source_name', 'collection', 'event_name', 'date_from', 'date_to',
-                      'session', 'discipline', 'category'):
+                      'session', 'discipline', 'category', 'federation'):
             command.add_argument('--' + field.replace('_', '-'))
         if name == 'browse':
             command.add_argument('--kind')

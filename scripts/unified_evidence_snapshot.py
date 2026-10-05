@@ -634,13 +634,115 @@ def verify(args):
             actual = db.execute('SELECT count(*) FROM dive_field_decisions').fetchone()[0]
             if actual != manifest['dive_field_decisions']['positions']:
                 raise ValueError('dive field decision count mismatch')
+        if manifest.get('federation_mapping'):
+            actual = db.execute('SELECT count(*) FROM federation_mapping').fetchone()[0]
+            if actual != manifest['federation_mapping']['entries']:
+                raise ValueError('federation mapping count mismatch')
+            mapping = manifest['federation_mapping']
+            mapping_path = Path(mapping['path'])
+            if mapping_path.exists() and sha(mapping_path.read_bytes()) != mapping['sha256']:
+                raise ValueError('federation mapping hash mismatch')
+            base = Path(mapping['base_path'])
+            if base.exists():
+                if sha((base / 'manifest.json').read_bytes()) != mapping['base_manifest_sha256']:
+                    raise ValueError('base manifest hash mismatch')
+                if sha((base / 'snapshot.sqlite').read_bytes()) != mapping['base_snapshot_sha256']:
+                    raise ValueError('base snapshot hash mismatch')
     print('verified')
 
+
+
+def map_federations(args):
+    """Add cited source-object claims to a verified snapshot without changing its records."""
+    base = Path(args.base_dir)
+    base_manifest_bytes = (base / 'manifest.json').read_bytes()
+    base_manifest = json.loads(base_manifest_bytes)
+    base_db = base / 'snapshot.sqlite'
+    if sha(base_db.read_bytes()) != base_manifest['snapshot_sha256']:
+        raise ValueError('base snapshot hash mismatch')
+    mapping_path = Path(args.mapping)
+    mapping_bytes = mapping_path.read_bytes()
+    if getattr(args, 'required_mapping_sha256', None) and sha(mapping_bytes) != args.required_mapping_sha256:
+        raise ValueError('federation mapping hash mismatch')
+    mapping = json.loads(mapping_bytes)
+    if mapping.get('schema') != 'evidence-federation-map/v1' or not isinstance(mapping.get('entries'), list):
+        raise ValueError('unsupported federation mapping')
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.federation-map-', dir=out) as work:
+        db_path = Path(work) / 'snapshot.sqlite'
+        shutil.copyfile(base_db, db_path)
+        with sqlite3.connect(db_path) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='federation_mapping'").fetchone():
+                raise ValueError('base snapshot already has federation mapping')
+            db.execute('''CREATE TABLE federation_mapping (
+                source_name TEXT NOT NULL, source_object_id TEXT NOT NULL,
+                federation TEXT, authority TEXT, role TEXT NOT NULL,
+                citation_json TEXT NOT NULL,
+                PRIMARY KEY (source_name, source_object_id))''')
+            for entry in mapping['entries']:
+                if not isinstance(entry, dict):
+                    raise ValueError('invalid federation mapping entry')
+                name, source_id = entry.get('source_name'), entry.get('source_object_id')
+                citation = entry.get('citation')
+                digest = source_id.removeprefix('sha256:') if isinstance(source_id, str) else ''
+                if (not isinstance(name, str) or name not in base_manifest['inputs']
+                        or base_manifest['inputs'][name]['status'] != 'included'
+                        or not isinstance(source_id, str) or not source_id.startswith('sha256:')
+                        or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)
+                        or entry.get('role') not in ('primary', 'mirror', 'corroboration')
+                        or not any(isinstance(entry.get(k), str) and entry[k].strip()
+                                   for k in ('federation', 'authority'))
+                        or any(entry.get(k) is not None and
+                               (not isinstance(entry[k], str) or not entry[k].strip())
+                               for k in ('federation', 'authority'))
+                        or not isinstance(citation, dict) or citation.get('sha256') != digest
+                        or any(not isinstance(citation.get(k), str) or not citation[k].strip()
+                               for k in ('url', 'locator', 'evidence_text'))):
+                    raise ValueError('invalid or uncited federation mapping entry')
+                if not db.execute('SELECT 1 FROM records WHERE source_name=? AND source_object_id=?',
+                                  (name, source_id)).fetchone():
+                    raise ValueError('federation mapping source object absent from snapshot')
+                try:
+                    db.execute('INSERT INTO federation_mapping VALUES (?,?,?,?,?,?)',
+                               (name, source_id, entry.get('federation'), entry.get('authority'),
+                                entry['role'], canon(citation)))
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError('duplicate federation mapping source object') from exc
+            db.commit()
+            db.execute('VACUUM')
+        manifest = dict(base_manifest)
+        manifest['federation_mapping'] = {'schema': mapping['schema'], 'path': str(mapping_path.resolve()),
+                                          'sha256': sha(mapping_bytes), 'entries': len(mapping['entries']),
+                                          'base_path': str(base.resolve()),
+                                          'base_manifest_sha256': sha(base_manifest_bytes),
+                                          'base_snapshot_sha256': base_manifest['snapshot_sha256']}
+        manifest['snapshot_sha256'] = sha(db_path.read_bytes())
+        if (getattr(args, 'expected_snapshot_sha256', None)
+                and manifest['snapshot_sha256'] != args.expected_snapshot_sha256):
+            raise ValueError('replay hash mismatch')
+        manifest_path = Path(work) / 'manifest.json'
+        manifest_path.write_text(canon(manifest) + '\n', encoding='utf-8')
+        os.replace(db_path, out / 'snapshot.sqlite')
+        os.replace(manifest_path, out / 'manifest.json')
+    print(canon({'db': str(out / 'snapshot.sqlite'), 'sha256': manifest['snapshot_sha256'],
+                 'mapping_entries': len(mapping['entries'])}))
 
 
 def replay(args):
     out = Path(args.output_dir)
     manifest = json.loads((out / 'manifest.json').read_text())
+    mapping = manifest.get('federation_mapping')
+    if mapping:
+        if sha(Path(mapping['path']).read_bytes()) != mapping['sha256']:
+            raise ValueError('federation mapping hash mismatch')
+        if sha((Path(mapping['base_path']) / 'manifest.json').read_bytes()) != mapping['base_manifest_sha256']:
+            raise ValueError('base manifest hash mismatch')
+        map_federations(argparse.Namespace(base_dir=mapping['base_path'], mapping=mapping['path'],
+                                          required_mapping_sha256=mapping['sha256'], output_dir=str(out),
+                                          expected_snapshot_sha256=manifest['snapshot_sha256']))
+        print('replayed and verified')
+        return
     decisions = manifest.get('dive_field_decisions')
     if decisions and sha(Path(decisions['path']).read_bytes()) != decisions['sha256']:
         raise ValueError('decision export hash mismatch')
@@ -699,10 +801,16 @@ def main():
     e.add_argument('--decisions-file')
     v = sub.add_parser('verify')
     v.add_argument('--output-dir', required=True)
+    f = sub.add_parser('map-federations')
+    f.add_argument('--base-dir', required=True)
+    f.add_argument('--mapping', required=True)
+    f.add_argument('--required-mapping-sha256')
+    f.add_argument('--output-dir', required=True)
     r = sub.add_parser('replay')
     r.add_argument('--output-dir', required=True)
     args = p.parse_args()
-    {'build': build, 'extend': extend, 'verify': verify, 'replay': replay}[args.command](args)
+    {'build': build, 'extend': extend, 'map-federations': map_federations,
+     'verify': verify, 'replay': replay}[args.command](args)
 
 
 if __name__ == '__main__':
