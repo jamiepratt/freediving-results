@@ -44,6 +44,7 @@
            :test-athlete-identity-db {:extra-paths ["test"] :main-opts ["-m" "freediving.athlete-identity-db-test"]}
            :test-retained-aida-apply {:extra-paths ["test"] :main-opts ["-m" "freediving.retained-aida-apply-test"]}
            :test-canonical-attempt-store {:extra-paths ["test"] :main-opts ["-m" "freediving.canonical-attempt-store-test"]}
+           :test-microplus-owner-delivery {:extra-paths ["test"] :main-opts ["-m" "freediving.microplus-owner-delivery-path-test"]}
            :test-owner-identity-route {:extra-paths ["test"] :main-opts ["-m" "freediving.owner-identity-route-test"]}
            :test-postgres {:extra-paths ["test"] :main-opts ["-m" "freediving.observations-test"]}
            :test-batch-evidence-db {:extra-paths ["test"] :main-opts ["-m" "freediving.batch-evidence-db-test"]}

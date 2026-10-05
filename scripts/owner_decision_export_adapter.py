@@ -131,13 +131,39 @@ def _verify_proposal(snapshot, snapshot_directory, proposal, run_revision,
                          recovered_packet_paths)
 
 
+def _verify_microplus_flow(flow_path, decision_id, run_revision, event_id, bindings):
+    if flow_path is None:
+        raise ValueError('persisted reconciliation flow required for Microplus attempt')
+    path = Path(flow_path)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError('persisted reconciliation flow must be a regular file')
+    request = {'flow_path': str(path.resolve()), 'decision_id': decision_id,
+               'reconciliation_run_revision': run_revision,
+               'reconciliation_event_id': event_id,
+               'evidence_bindings': bindings}
+    completed = subprocess.run(
+        ['clojure', '-M', '-m', 'freediving.reconciliation-flow-proof'],
+        input=json.dumps(request, sort_keys=True), text=True, capture_output=True,
+        cwd=Path(__file__).resolve().parents[1], timeout=60)
+    if completed.returncode:
+        raise ValueError('Microplus reconciliation event differs from persisted flow')
+    try:
+        proof = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise ValueError('invalid reconciliation flow proof') from exc
+    if proof != {'verified': True, 'event_id': event_id,
+                  'run_revision': run_revision}:
+        raise ValueError('invalid reconciliation flow proof')
+
+
 def build_verified_microplus_attempt_export(store, snapshot_directory, source_names,
                                             record_id, *, decision_id,
                                             reconciliation_run_revision,
-                                            reconciliation_event_id):
+                                            reconciliation_event_id,
+                                            reconciliation_flow_path):
     """Build a pending owner proposal for two acquired views of one frozen result.
 
-    The caller supplies an existing reconciliation event identity. All evidence
+    The persisted flow must contain the exact source-bound event. All evidence
     revisions and citations are derived from verified originals, without a
     PostgreSQL ingestion job reference. Registration still replays those bytes.
     """
@@ -170,6 +196,9 @@ def build_verified_microplus_attempt_export(store, snapshot_directory, source_na
     bindings = [{'evidence_id': view['id'], 'snapshot_record_id': record_id,
                  'observation_revision': revision}
                 for view, revision in zip(views, revisions)]
+    _verify_microplus_flow(reconciliation_flow_path, decision_id,
+                           reconciliation_run_revision, reconciliation_event_id,
+                           bindings)
     scope = views[0]['scope']
     _require(all(view['scope'] == scope for view in views),
              'Microplus cited views disagree on attempt scope')
@@ -196,7 +225,8 @@ def build_verified_microplus_attempt_export(store, snapshot_directory, source_na
 
 
 def register_verified_export(store, snapshot_directory, envelope, *,
-                             recovered_packet_paths=None):
+                             recovered_packet_paths=None,
+                             reconciliation_flow_path=None):
     """Verify all bindings before the first idempotent DecisionStore.register call.
 
     A verified snapshot must already be bound by DecisionStore.bind_verified_snapshot.
@@ -224,6 +254,13 @@ def register_verified_export(store, snapshot_directory, envelope, *,
             _verify_proposal(snapshot, snapshot_directory, proposal,
                              envelope.get('reconciliation_run_revision'),
                              recovered_packet_paths)
+            binding = proposal['canonical_binding']
+            if any(entry['observation_revision'].get('adapter_version') ==
+                   MICROPLUS_ATTEMPT_VERSION for entry in binding['evidence_bindings']):
+                _verify_microplus_flow(
+                    reconciliation_flow_path, proposal['id'],
+                    envelope['reconciliation_run_revision'],
+                    binding['reconciliation_event_id'], binding['evidence_bindings'])
     return store.register_batch(envelope['snapshot_sha256'], proposals,
                                 idempotency_key='reconciliation-export:' + _digest(proposals),
                                 expected_revision=envelope['store_revision'])
