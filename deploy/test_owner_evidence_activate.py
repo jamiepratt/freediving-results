@@ -703,6 +703,53 @@ class ActivationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _health(values, self.digest)
 
+    def test_local_health_waits_for_origin_startup_beyond_five_seconds(self):
+        values = {'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-origin.alphacompose.com',
+                  'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',
+                  'OWNER_EVIDENCE_EMAILS': 'owner@example.com'}
+        clock = [0.0]
+
+        class Response(io.BytesIO):
+            status = 200
+
+        def response(request, timeout):
+            if clock[0] < 6:
+                raise urllib.error.URLError('origin starting')
+            headers = {key.lower(): value for key, value in request.header_items()}
+            if (headers['host'] != values['OWNER_EVIDENCE_ORIGIN_HOST'] or
+                    headers['x-freediving-owner-gateway'] != values['OWNER_EVIDENCE_GATEWAY_SECRET'] or
+                    headers['x-freediving-owner-email'] != values['OWNER_EVIDENCE_EMAILS']):
+                raise urllib.error.HTTPError(request.full_url, 403, 'denied', {}, None)
+            return Response(json.dumps({'snapshot_sha256': self.digest}).encode())
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with (mock.patch('owner_evidence_activate.time.monotonic', side_effect=lambda: clock[0]),
+              mock.patch('owner_evidence_activate.time.sleep', side_effect=advance),
+              mock.patch('owner_evidence_activate.urllib.request.urlopen', side_effect=response)):
+            _health(values, self.digest)
+        self.assertGreaterEqual(clock[0], 6)
+
+    def test_local_health_stops_when_origin_never_starts(self):
+        values = {'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-origin.alphacompose.com',
+                  'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',
+                  'OWNER_EVIDENCE_EMAILS': 'owner@example.com'}
+        clock = [0.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with (mock.patch('owner_evidence_activate.time.monotonic', side_effect=lambda: clock[0]),
+              mock.patch('owner_evidence_activate.time.sleep', side_effect=advance),
+              mock.patch('owner_evidence_activate.urllib.request.urlopen',
+                         side_effect=urllib.error.URLError('origin unavailable')) as requests):
+            with self.assertRaises(urllib.error.URLError):
+                _health(values, self.digest)
+        self.assertGreaterEqual(clock[0], 25)
+        self.assertLessEqual(clock[0], 30)
+        self.assertLessEqual(requests.call_count, 61)
+
     def test_local_health_checks_pinned_route_roster(self):
         values = {'OWNER_EVIDENCE_ORIGIN_HOST': 'owner-origin.alphacompose.com',
                   'OWNER_EVIDENCE_GATEWAY_SECRET': 'some-private-gateway-secret',

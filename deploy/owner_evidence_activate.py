@@ -22,6 +22,7 @@ import urllib.request
 
 
 SERVICE = 'freediving-owner-evidence.service'
+HEALTH_STARTUP_TIMEOUT = 30
 FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/owner_decision_store.py',
          'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
          'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
@@ -260,9 +261,13 @@ def _health(values, expected, roster_digest=None, source_digest=None,
     }
     url = 'http://127.0.0.1:8081/owner-evidence/api/overview'
     request = urllib.request.Request(url, headers=headers)
-    for attempt in range(20):
+    deadline = time.monotonic() + HEALTH_STARTUP_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise urllib.error.URLError('private origin readiness timeout')
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with urllib.request.urlopen(request, timeout=min(5, remaining)) as response:
                 overview = json.load(response)
                 if (response.status != 200 or overview.get('snapshot_sha256') != expected or
                         (source_digest and overview.get('bundle_manifest_sha256') != source_digest)):
@@ -271,9 +276,10 @@ def _health(values, expected, roster_digest=None, source_digest=None,
         except urllib.error.HTTPError:
             raise
         except urllib.error.URLError:
-            if attempt == 19:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise
-            time.sleep(0.25)
+            time.sleep(min(0.5, remaining))
     if roster_digest:
         route_request = urllib.request.Request(
             'http://127.0.0.1:8081/owner-evidence/api/routes', headers=headers)
