@@ -17,7 +17,14 @@ class LedgerError(ValueError):
 
 
 class Keyword(str):
-    pass
+    def __eq__(self, other):
+        return type(other) is Keyword and str.__eq__(self, other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash((Keyword, str(self)))
 
 
 class Parser:

@@ -247,6 +247,7 @@ class ExportAdapterTest(unittest.TestCase):
                              'reconciliation_run_revision': flow['run_revision'],
                              'reconciliation_event_id': flow['event_id'],
                              'evidence_bindings': proof_binding['evidence_bindings']}
+            typed_sources = {}
 
             def parity(name, mutate=None, expected=False):
                 candidate = copy.deepcopy(ledger)
@@ -256,11 +257,21 @@ class ExportAdapterTest(unittest.TestCase):
                 source = self.root / ('parity-' + name + '.edn')
                 source.write_text(pr_str({Keyword(':sha256'): hashlib.sha256(
                     payload.encode()).hexdigest(), Keyword(':ledger'): candidate}))
+                if name.startswith('typed-'):
+                    typed_sources[name] = source
                 request = dict(proof_request, flow_path=str(source))
                 clojure = subprocess.run(
                     ['clojure', '-M', '-m', 'freediving.reconciliation-flow-proof'],
                     input=json.dumps(request), text=True, capture_output=True,
                     cwd=Path(__file__).resolve().parents[1])
+                if name.startswith('typed-'):
+                    loaded = subprocess.run(
+                        ['clojure', '-M', '-e',
+                         '(require (quote freediving.reconciliation-flow)) '
+                         '(freediving.reconciliation-flow/load-ledger! (clojure.string/trim (slurp *in*)))'],
+                        input=str(source), text=True, capture_output=True,
+                        cwd=Path(__file__).resolve().parents[1])
+                    self.assertEqual(0, loaded.returncode, loaded.stderr)
                 try:
                     verify_host_flow(source, request['decision_id'],
                                      request['reconciliation_run_revision'],
@@ -274,6 +285,10 @@ class ExportAdapterTest(unittest.TestCase):
 
             event = lambda candidate: candidate[Keyword(':events')][-1]
             parity('valid', expected=True)
+            parity('typed-family-string', lambda candidate: event(candidate).__setitem__(
+                Keyword(':family'), ':same-attempt'))
+            parity('typed-family-key-string', lambda candidate: event(candidate).__setitem__(
+                ':family', event(candidate).pop(Keyword(':family'))))
             parity('newer', lambda candidate: candidate[Keyword(':events')].append(
                 copy.deepcopy(event(candidate))))
             parity('event-id', lambda candidate: event(candidate).__setitem__(
@@ -335,6 +350,24 @@ class ExportAdapterTest(unittest.TestCase):
                        '--snapshot', str(microplus), '--export', str(export_path),
                        '--flow', str(flow_path)]
             env = dict(os.environ, PATH='')
+            for name, typed_source in typed_sources.items():
+                first_write_db = self.root / (name + '.sqlite')
+                with sqlite3.connect(first_write_db) as copy_db:
+                    store.db.backup(copy_db)
+                rejected_command = command[:]
+                rejected_command[rejected_command.index('--decision-db') + 1] = str(first_write_db)
+                rejected_command[rejected_command.index('--flow') + 1] = str(typed_source)
+                rejected = subprocess.run(rejected_command, cwd=staged, env=env,
+                                          text=True, capture_output=True)
+                self.assertNotEqual(0, rejected.returncode, name)
+                self.assertIn('persisted flow', rejected.stderr, name)
+                rejected_store = DecisionStore(first_write_db)
+                try:
+                    self.assertEqual(store.revision, rejected_store.revision, name)
+                    with self.assertRaises(KeyError):
+                        rejected_store.inspect('decision-1')
+                finally:
+                    rejected_store.close()
             staged_result = subprocess.run(command, cwd=staged, env=env,
                                            text=True, capture_output=True)
             self.assertEqual(0, staged_result.returncode, staged_result.stderr)
