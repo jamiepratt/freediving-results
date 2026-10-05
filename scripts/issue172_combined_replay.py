@@ -202,8 +202,10 @@ def replay(spec_path, output_dir, expected_sources):
     require(len({r["source_sha256"] for r in records}) == len(records), "duplicate source bytes")
     all_ids = [row["id"] for stage, _ in checked for row in stage["observation_versions"]]
     require(len(all_ids) == len(set(all_ids)), "duplicate observation version across sources")
-    all_positions = [row["source_position"]["id"] for stage, _ in checked
-                     for row in stage["observation_versions"]]
+    all_positions = [position for stage, _ in checked for position in
+                     ([row["source_position"]["id"] for row in stage["observation_versions"]]
+                      + [row["id"] for row in stage["unresolved_positions"]]
+                      + [row["id"] for row in stage.get("non_primary_positions", [])])]
     require(len(all_positions) == len(set(all_positions)),
             "duplicate source position across sources")
     checked.sort(key=lambda pair: pair[1]["name"])

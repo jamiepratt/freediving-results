@@ -90,6 +90,19 @@ def test_duplicate_position_or_partial_failure_never_publishes(tmp_path):
     assert not f["output"].exists()
 
 
+def test_duplicate_non_primary_citation_across_sources_is_rejected(tmp_path):
+    f = fixture(tmp_path)
+    stage_path = Path(f["entries"][1]["stage"]["path"])
+    stage = json.loads(stage_path.read_text())
+    stage["non_primary_positions"][0]["id"] = "aggregate:a"
+    f["entries"][1]["stage"]["sha256"] = saved(stage_path, stage)
+    saved(f["spec"], {"schema": "issue172-combined-input/v1", "sources": f["entries"]})
+    result = f["run"]()
+    assert result.returncode != 0
+    assert "duplicate source position across sources" in result.stderr
+    assert not f["output"].exists()
+
+
 def test_changed_parser_retains_prior_version_and_source(tmp_path):
     f = fixture(tmp_path, names=("a",))
     assert f["run"]().returncode == 0
