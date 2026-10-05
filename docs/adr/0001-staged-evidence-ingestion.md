@@ -1,8 +1,10 @@
 # ADR 0001: Separate discovery, acquisition and deterministic extraction
 
 Date: 2026-10-02. Status: accepted project direction from the owner request.
-Implementation status: partial. Detailed contracts remain in
+Implementation status: source-bound discovery, routing, scan verification,
+refresh and offline replay contracts were validated under
 [issue #62](https://github.com/jamiepratt/freediving-results/issues/62).
+Coverage remains limited to supported sources and declared passes.
 
 Reconciliation follow-up: [ADR 0003](0003-automatic-evidence-reconciliation.md)
 settles the later automatic reconciliation policy. Deferral language below records
@@ -49,7 +51,7 @@ versions with their retrieval provenance. Archive reuse establishes local byte
 integrity, not publisher freshness. Checking every result on every run is rejected
 for unnecessary requests; checking only on explicit request is rejected because
 publisher corrections can otherwise remain undiscovered. Exact intervals and
-freshness-state rules remain implementation details in #62. This is a policy
+freshness-state rules were specified under #62. This is a policy
 decision, not creation of a scheduled automation.
 
 Generalize parsers incrementally. Keep existing source restrictions until another
@@ -89,7 +91,7 @@ the source. Preserve both outputs and verification evidence; unresolved readings
 remain explicit. Agreement between passes is not proof of correctness because
 both can make the same mistake. Mandatory human verification of every row is
 not the default. Sampling details and escalation criteria belong to the
-implementation contract in #62.
+implementation contract recorded under #62.
 
 Discovery includes event calendars and lists, individual results, local and
 international federation/organizer evidence, native-script athlete names and
@@ -114,10 +116,10 @@ deferred. Record evidence needed for those decisions without making them.
 - Always using an LLM for every row is rejected for routine supported formats.
   Requiring deterministic code to discover every unfamiliar source is also too
   restrictive; LLM assistance remains available where it adds value.
-- The existing `supported?` functions and source-hash guards are implementation
-  evidence, not yet a uniform cross-format registry. The recognizer API,
-  verification sampling, refresh intervals and checkpoint representation remain
-  implementation details in #62; this decision does not select their design.
+- Source-bound adapters now route supported PDF, HTML, JSON, image and workbook
+  positions through a shared contract. The recognizer API, verification sampling,
+  refresh intervals and checkpoint representation were implemented under #62;
+  this decision did not select their design.
 
 ## Evidence
 

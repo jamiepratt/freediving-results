@@ -136,8 +136,9 @@ name mappings and annual rankings is scope, not verified coverage.
 - Clojure suite: `clojure -M:test`. Choose narrower tests for the changed module;
   database tests need the isolated setup documented in the README.
 - Acquisition reuse checks: `python3 -m unittest discover -s test -p test_source_inventory.py`.
-- Future work and unresolved choices belong in GitHub:
-  [ingestion design #62](https://github.com/jamiepratt/freediving-results/issues/62),
+- Future work and unresolved choices belong in GitHub issues. The completed
+  [ingestion design #62](https://github.com/jamiepratt/freediving-results/issues/62)
+  records the bounded discovery and replay acceptance evidence. Related history:
   [2025-2026 census #55](https://github.com/jamiepratt/freediving-results/issues/55),
   [owner workspace #54](https://github.com/jamiepratt/freediving-results/issues/54),
   [attempt comparison #27](https://github.com/jamiepratt/freediving-results/issues/27).
