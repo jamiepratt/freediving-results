@@ -216,6 +216,15 @@ class ExportAdapterTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         views = load_attempt_evidence(microplus, [name], record_ids=[record_id])
         self.assertEqual(2, views['summary']['cited_view_observations'])
+        flow_path = self.root / 'microplus-flow.edn'
+        generated = subprocess.run(
+            ['clojure', '-Sdeps', '{:paths ["src" "resources" "test"]}', '-M', '-m',
+             'freediving.microplus-flow-fixture'],
+            input=json.dumps({'evidence': views['evidence'], 'decision_id': 'decision-1',
+                              'flow_path': str(flow_path)}),
+            text=True, capture_output=True, check=True,
+            cwd=Path(__file__).resolve().parents[1])
+        flow = json.loads(generated.stdout)
         store = DecisionStore(self.root / 'view-decisions.sqlite')
         try:
             bound = store.bind_verified_snapshot(microplus, expected_revision=0,
@@ -223,13 +232,17 @@ class ExportAdapterTest(unittest.TestCase):
                                                  attempt_record_ids=[record_id])
             envelope = build_verified_microplus_attempt_export(
                 store, microplus, [name], record_id, decision_id='decision-1',
-                reconciliation_run_revision=1, reconciliation_event_id='event-1')
+                reconciliation_run_revision=flow['run_revision'],
+                reconciliation_event_id=flow['event_id'],
+                reconciliation_flow_path=flow_path)
             proposal = envelope['proposals'][0]
             self.assertEqual([record_id, record_id], [item['id'] for item in proposal['evidence']])
             self.assertEqual({view['id'] for view in views['evidence']['observation-versions']},
                              {item['citation']['evidence_id'] for item in proposal['evidence']})
-            first = register_verified_export(store, microplus, envelope)
-            self.assertEqual(first, register_verified_export(store, microplus, envelope))
+            first = register_verified_export(store, microplus, envelope,
+                                             reconciliation_flow_path=flow_path)
+            self.assertEqual(first, register_verified_export(
+                store, microplus, envelope, reconciliation_flow_path=flow_path))
             self.assertEqual('pending', store.inspect('decision-1')['effective_status'])
             self.assertEqual(2, len(store.inspect('decision-1')['canonical_binding']['evidence_bindings']))
             for field, bad in [('observation_version', '0' * 64),
@@ -246,7 +259,8 @@ class ExportAdapterTest(unittest.TestCase):
                 forged['proposals'][0]['canonical_binding']['evidence_bindings'][1]['observation_revision'] = revision
                 forged['store_revision'] = store.revision
                 with self.subTest(field=field), self.assertRaises(ValueError):
-                    register_verified_export(store, microplus, forged)
+                    register_verified_export(store, microplus, forged,
+                                             reconciliation_flow_path=flow_path)
             store.act('decision-1', action='approve', expected_revision=store.revision,
                       idempotency_key='approve-view')
             approval = store.human_events()['events'][0]
