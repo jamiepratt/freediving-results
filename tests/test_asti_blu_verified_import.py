@@ -160,6 +160,35 @@ class AstiBluVerifiedImportTest(unittest.TestCase):
         self.assertEqual(stage["counts"]["verified_staged_versions"], 0)
         self.assertEqual(stage["counts"]["unresolved_positions"], 1)
 
+    def test_second_source_image_addendum_binds_sealed_pass(self):
+        sealed = self.root / "second-sealed.json"
+        sealed_sha = put(sealed, self.second)
+        self.second["schema"] = "asti-blu-comparable-pass/v1"
+        self.second["basis_sha256"] = sealed_sha
+        addendum = self.root / "second-addendum.json"
+        record = {"schema": "source-image-audit-addendum-v1",
+                  "basis_sha256": sealed_sha, "original_source_sha256": self.source,
+                  "declared_distance": {"count": 72}, "score_dashes": {"count": 23},
+                  "club_repeat": {"positions": 14}, "sealed_pass_unchanged": True}
+        addendum_sha = put(addendum, record)
+        options = ("--second-sealed", str(sealed), "--second-sealed-sha256", sealed_sha,
+                   "--second-addendum", str(addendum),
+                   "--second-addendum-sha256", addendum_sha)
+        result = self.run_cli(*options)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stage = json.loads((self.root / "stage.json").read_text())
+        self.assertEqual(stage["input_sha256"]["second_addendum"], addendum_sha)
+        compare_path = self.root / "compare.json"
+        result = self.run_cli(*options, "--compare-only", "--output", str(compare_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("second_addendum_sha256", json.loads(compare_path.read_text()))
+        record["basis_sha256"] = "0" * 64
+        put(addendum, record)
+        self.assertEqual(self.run_cli(*options[:-1], sha(addendum.read_bytes()),
+                                      "--output", str(self.root / "rejected.json")).returncode, 2)
+        self.assertEqual(self.run_cli(*options[:-1], "0" * 64,
+                                      "--output", str(self.root / "rejected.json")).returncode, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

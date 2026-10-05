@@ -315,6 +315,32 @@ def build(args):
                 and addendum.get("base_sha256") == basis.get("first", args.packet_sha256),
                 "first source-image addendum source or basis mismatch")
         addendum_hash = args.first_addendum_sha256
+    second_addendum_hash = None
+    if args.second_addendum is not None or args.second_addendum_sha256 is not None:
+        require(args.second_addendum is not None and args.second_addendum_sha256 is not None,
+                "second source-image addendum requires pinned bytes")
+        second_addendum = bound_json(args.second_addendum, args.second_addendum_sha256,
+                                     "second source-image addendum")
+        require(second_addendum.get("schema") == "source-image-audit-addendum-v1"
+                and second_addendum.get("original_source_sha256") == source
+                and second_addendum.get("basis_sha256") == basis.get("second")
+                and second_addendum.get("sealed_pass_unchanged") is True,
+                "second source-image addendum source or sealed basis mismatch")
+        if source == SOURCE_SHA256:
+            declared = second_addendum.get("declared_distance", {})
+            score = second_addendum.get("score_dashes", {})
+            clubs = second_addendum.get("club_repeat", {})
+            require(declared.get("count") == 72 and isinstance(declared.get("cells"), list)
+                    and len(declared["cells"]) == 72
+                    and score.get("count") == 23 and isinstance(score.get("cells"), list)
+                    and len(score["cells"]) == 23
+                    and clubs.get("positions") == 14 and clubs.get("pages") == [1, 19],
+                    "official source-image addendum QA accounting mismatch")
+        second_addendum_hash = args.second_addendum_sha256
+    if source == SOURCE_SHA256 and second.get("schema") == COMPARABLE_SCHEMA and \
+            not args.compare_only:
+        require(second_addendum_hash is not None,
+                "official comparable second pass needs pinned source-image addendum")
     receipt = bound_json(args.receipt, args.receipt_sha256, "receipt")
     receipt_valid(receipt, pdf, source, args.receipt)
     historical_hash = None
@@ -559,7 +585,8 @@ def build(args):
                          "receipt": args.receipt_sha256, "inspections": args.inspections_sha256,
                          "comparison": args.comparison_sha256,
                          "inspection_parent": args.inspection_parent_sha256,
-                         "sealed_basis": basis, "first_addendum": addendum_hash},
+                         "sealed_basis": basis, "first_addendum": addendum_hash,
+                         "second_addendum": second_addendum_hash},
         "historical_packet_sha256": historical_hash,
         "first_normalization_parent_sha256": parent_derivative_hash,
         "render_sha256": [renders[n] for n in sorted(renders)],
@@ -579,7 +606,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("pdf", "packet", "second-pass", "receipt", "output",
                  "inspections", "import-stage", "sqlite-store", "first-sealed",
-                 "second-sealed", "first-addendum", "comparison", "inspection-parent"):
+                 "second-sealed", "first-addendum", "second-addendum", "comparison",
+                 "inspection-parent"):
         parser.add_argument(f"--{name}", type=Path)
     for name in ("expected-source-sha256", "packet-sha256", "second-pass-sha256",
                  "receipt-sha256", "inspections-sha256", "parser-version", "stage-sha256"):
@@ -587,6 +615,7 @@ def main(argv=None):
     parser.add_argument("--historical-packet", type=Path)
     parser.add_argument("--first-parent-derivative", type=Path)
     for name in ("first-sealed-sha256", "second-sealed-sha256", "first-addendum-sha256",
+                 "second-addendum-sha256",
                  "historical-packet-sha256", "first-parent-derivative-sha256",
                  "comparison-sha256", "inspection-parent-sha256"):
         parser.add_argument(f"--{name}")
