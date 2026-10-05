@@ -33,4 +33,17 @@ disposable PostgreSQL cluster. The retained workbook gate is
 `clojure -M:test-retained-workbook-batch` with the three private
 `RETAINED_GIA_WORKBOOK`, `RETAINED_GIA_RECEIPT_MANIFEST`, and
 `RETAINED_GIA_CENSUS_PACKET` paths set. It requires the exact retained packet
-digest before validating its cited cells and 898 source positions.
+digest before validating its 5,175 cited cells and 898 source positions.
+If those packet bytes are unavailable, generate a separate private replacement
+with `scripts/gia_2025_workbook_census.py --workbook ORIGINAL.xlsx
+--expected-sha256 352ebb0c4119f35cb254d1a4b999e89ee86ed09c5ca3c81be7d60c33102f187b
+--receipt-manifest ACQUISITION-MANIFEST.json --output REPLACEMENT.json`.
+The explicit manifest must contain one matching HTTP 200 acquisition receipt
+with the original byte count and source hash. Record the replacement packet's
+own digest and provenance separately; matching position and cell counts do not
+make it the missing packet. The pinned retained packet gate still requires the
+historical digest. A replacement needs separate source-bound replay and owner
+acceptance before it can stand in for that packet. To retain the related team
+aggregate exclusion, place its verified
+`408dc419f22536d319976077851563cbbe316891bab8b328d348df275b8b987f.xlsx`
+beside the individual workbook; the same manifest supplies its receipt.

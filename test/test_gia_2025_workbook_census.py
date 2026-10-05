@@ -73,6 +73,30 @@ class GiaWorkbookCensusTest(unittest.TestCase):
             self.assertIn('SHA-256', result.stderr)
             self.assertFalse(output.exists())
 
+    def test_explicit_acquisition_manifest_is_bound_to_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'tiny.xlsx'
+            output = root / 'packet.json'
+            manifest = root / 'acquisition.json'
+            tiny_workbook(source)
+            sha = hashlib.sha256(source.read_bytes()).hexdigest()
+            receipt = {'sha256': sha, 'bytes': source.stat().st_size,
+                       'final_url': 'https://example.test/original.xlsx', 'http_status': 200}
+            manifest.write_text(json.dumps({'sources': [receipt]}))
+            result = subprocess.run([sys.executable, str(CLI), '--workbook', str(source),
+                                     '--expected-sha256', sha, '--receipt-manifest', str(manifest),
+                                     '--output', str(output)], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(receipt, json.loads(output.read_text())['source']['acquisition'])
+            manifest.write_text(json.dumps({'sources': [{**receipt, 'bytes': receipt['bytes'] - 1}]}))
+            output.unlink()
+            result = subprocess.run([sys.executable, str(CLI), '--workbook', str(source),
+                                     '--expected-sha256', sha, '--receipt-manifest', str(manifest),
+                                     '--output', str(output)], capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(output.exists())
+
     def test_portable_workbook_preserves_formula_cache_and_distinct_row_roles(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'tiny.xlsx'

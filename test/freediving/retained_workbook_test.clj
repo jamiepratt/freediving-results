@@ -56,6 +56,23 @@
       (is (= [:individual-result :aggregate]
              (mapv #(get-in % [:coordinates :evidence-role]) (:routed routed)))))))
 
+(deftest census-with-missing-cited-cells-is-rejected
+  (let [kinds {"Classifica Generale " {"standings" 366 "formula_placeholder" 9}
+               "NAPOLI 2025" {"combined_score" 96}
+               "PAVIA 2025" {"distance_result" 143}
+               "ROMA 2025" {"discipline_result" 140}
+               "FIRENZE 2025" {"dynamic_result" 65 "static_result" 7 "secondary_score" 72}}
+        sheets (mapv (fn [[sheet counts]]
+                       {:name sheet
+                        :rows (mapv (fn [n kind]
+                                      {:sheet sheet :row n :kind kind
+                                       :cells {(str "A" n) {:citation (str sheet "!A" n)}}})
+                                    (range 1 (inc (reduce + (vals counts))))
+                                    (mapcat (fn [[kind count]] (repeat count kind)) counts))})
+                     kinds)
+        packet {:schema "gia-2025-individual-workbook-census/v1" :sheets sheets}]
+    (is (false? (#'freediving.retained-workbook/valid-census? packet)))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.retained-workbook-test)]
     (when (pos? (+ (:fail result) (:error result))) (System/exit 1))))

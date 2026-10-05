@@ -201,6 +201,7 @@
                             [(field sheet :name)
                              (frequencies (map #(field % :kind) (field sheet :rows)))]) sheets)))
          (= 898 (count rows))
+         (= 5175 (reduce + (map #(count (field % :cells)) rows)))
          (= (count rows)
             (count (set (map (juxt #(field % :sheet) #(field % :row)
                                    #(field % :kind)) rows)))))))

@@ -202,7 +202,7 @@ def source_receipt(path, sha):
     return None
 
 
-def excluded_team_source(path):
+def excluded_team_source(path, receipt_manifest=None):
     sha = '408dc419f22536d319976077851563cbbe316891bab8b328d348df275b8b987f'
     related = path.parent / (sha + '.xlsx')
     if not related.exists():
@@ -214,13 +214,29 @@ def excluded_team_source(path):
     if tuple(sheets) != ('Classifiche  società 2024',):
         raise ValueError('Unexpected related team workbook sheets')
     title = sheets['Classifiche  società 2024'][1]['B1']
-    return {'sha256': sha, 'acquisition': source_receipt(related, sha),
+    acquisition = (acquisition_from_manifest(receipt_manifest, sha, related.stat().st_size)
+                   if receipt_manifest else source_receipt(related, sha))
+    return {'sha256': sha, 'acquisition': acquisition,
             'sheet_name': 'Classifiche  società 2024', 'title_cell': title,
             'classification': 'club aggregate standings only',
             'exclusion_reason': 'No individual athlete result rows. Sheet name says 2024 while B1 title says GIA 2025.'}
 
 
-def census(path, expected_sha):
+def acquisition_from_manifest(path, sha, source_bytes):
+    manifest = json.loads(path.read_text())
+    receipts = manifest.get('sources')
+    if not isinstance(receipts, list):
+        raise ValueError('Acquisition manifest must contain sources')
+    matches = [item for item in receipts if item.get('sha256') == sha]
+    if len(matches) != 1:
+        raise ValueError('Acquisition manifest must contain one matching source receipt')
+    receipt = matches[0]
+    if receipt.get('bytes') != source_bytes or receipt.get('http_status') != 200 or not receipt.get('final_url'):
+        raise ValueError('Acquisition receipt does not verify source bytes and response')
+    return receipt
+
+
+def census(path, expected_sha, receipt_manifest=None):
     data = path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
     if sha != expected_sha:
@@ -229,11 +245,13 @@ def census(path, expected_sha):
     if tuple(sheets) != SHEETS:
         raise ValueError(f'Unexpected sheets: {list(sheets)}')
     reports = [sheet_census(name, sheets[name], dimensions[name]) for name in SHEETS]
+    acquisition = (acquisition_from_manifest(receipt_manifest, sha, len(data))
+                   if receipt_manifest else source_receipt(path, sha))
     return {'schema': 'gia-2025-individual-workbook-census/v1',
-            'source': {'sha256': sha, 'bytes': len(data), 'acquisition': source_receipt(path, sha),
+            'source': {'sha256': sha, 'bytes': len(data), 'acquisition': acquisition,
                        'workbook_name': path.name},
             'scope': 'Giro d\'Italia in Apnea 2025 individual workbook source positions',
-            'sheets': reports, 'excluded_related_source': excluded_team_source(path),
+            'sheets': reports, 'excluded_related_source': excluded_team_source(path, receipt_manifest),
             'confirmed_distinct_attempts': None,
             'limits': ['Dates are supported by overall standings row 4 and the Napoli title; year by the workbook and sheet titles.',
                        'Source rows and scores are not confirmed distinct attempts.',
@@ -246,12 +264,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workbook', required=True, type=Path)
     parser.add_argument('--expected-sha256', required=True)
+    parser.add_argument('--receipt-manifest', type=Path,
+                        help='Retained acquisition manifest containing the original source receipt')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         if not re.fullmatch(r'[0-9a-f]{64}', args.expected_sha256):
             raise ValueError('Expected SHA-256 must be lowercase hex')
-        packet = census(args.workbook, args.expected_sha256)
+        packet = census(args.workbook, args.expected_sha256, args.receipt_manifest)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True) + '\n')
     except (OSError, ValueError, KeyError) as error:
