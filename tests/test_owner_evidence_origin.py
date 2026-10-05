@@ -1,4 +1,5 @@
 import http.client
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,40 @@ SECRET = 'a-private-gateway-secret-for-tests'
 
 
 class PrivateOriginTest(unittest.TestCase):
+    def test_consolidated_queue_is_private_bounded_and_independent_of_decision_store(self):
+        queue = {'schema': 'issue172-owner-queue-v1', 'audit_sha256': 'a' * 64,
+                 'entries': [{'id': f'item-{index}', 'kind': 'unresolved_field',
+                              'source_key': 'pdf', 'source_sha256': 'b' * 64,
+                              'source_position': {'page': 1, 'row': index},
+                              'citation': {'page': 1, 'row': index},
+                              'evidence_version': {'parser_version': 'v1'},
+                              'reason': 'unreadable card', 'related_positions': [],
+                              'status': 'pending'} for index in range(1000)]}
+        path = Path(self.tmp.name) / 'queue.json'
+        path.write_text(json.dumps(queue))
+        env = {**self.env, 'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE': str(path),
+               'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256': sha256(path.read_bytes()).hexdigest()}
+        server = make_server(self.snapshot_dir, env)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+        previous = self.server
+        self.server = server
+        self.addCleanup(lambda: setattr(self, 'server', previous))
+        status, headers, body = self.request('/owner-evidence/api/issue172-queue?limit=2&offset=1')
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result['total'], 1000)
+        self.assertEqual([item['id'] for item in result['items']], ['item-1', 'item-2'])
+        self.assertEqual(result['audit_sha256'], 'a' * 64)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.request('/owner-evidence/api/issue172-queue?limit=101')[0], 400)
+        self.assertEqual(self.request('/owner-evidence/api/issue172-queue', headers=[('Host', HOST)])[0], 403)
+        self.assertEqual(self.request('/owner-evidence/api/decisions')[0], 503)
+        with self.assertRaises(ValueError):
+            make_server(self.snapshot_dir, {**env, 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256': '0' * 64})
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

@@ -79,7 +79,9 @@ def _config(path, owner_uid, expected):
                                           'OWNER_EVIDENCE_IMPORT_TOKEN',
                                           'OWNER_EVIDENCE_IMPORT_CLIENT_ID',
                                           'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
-                                          'OWNER_EVIDENCE_STATUS_CLIENT_ID'} or
+                                          'OWNER_EVIDENCE_STATUS_CLIENT_ID',
+                                          'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE',
+                                          'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             (expected is not None and values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected) or
             not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_SNAPSHOT_SHA256'])):
@@ -94,6 +96,12 @@ def _config(path, owner_uid, expected):
         raise ValueError('invalid private environment')
     status_keys = {'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                    'OWNER_EVIDENCE_STATUS_CLIENT_ID'}
+    queue_keys = {'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE', 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'}
+    if queue_keys & values.keys():
+        if (not queue_keys <= values.keys() or
+                values['OWNER_EVIDENCE_ISSUE172_QUEUE_FILE'] != '/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json' or
+                not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'])):
+            raise ValueError('invalid consolidated queue environment')
     if status_keys & values.keys():
         if not status_keys <= values.keys() or values['OWNER_EVIDENCE_STATUS_FILE'] != '/var/lib/freediving-owner-evidence/status/presentation-status.json' or not 24 <= len(values['OWNER_EVIDENCE_STATUS_TOKEN']) <= 256 or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', values['OWNER_EVIDENCE_STATUS_CLIENT_ID']):
             raise ValueError('invalid private status environment')
