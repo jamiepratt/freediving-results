@@ -92,6 +92,11 @@
                    (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=20"))]
                      (when-not (= checksum (:sha256 old)) (fail! "Source identity migration checksum conflict"))
                      (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(20,?)" checksum))))
+                 (let [sql (slurp (io/resource "migrations/021-automatic-identity-invalidation.sql"))
+                       checksum (.formatHex (HexFormat/of) (.digest (MessageDigest/getInstance "SHA-256") (.getBytes sql "UTF-8")))]
+                   (if-let [old (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=21"))]
+                     (when-not (= checksum (:sha256 old)) (fail! "Automatic identity invalidation migration checksum conflict"))
+                     (do (execute! c sql) (execute! c "INSERT INTO freediving.schema_migrations VALUES(21,?)" checksum))))
                  (execute! c "DROP TRIGGER stamp_dive_field_decisions ON freediving.dive_field_decisions")
                  (execute! c (str "CREATE TRIGGER stamp_dive_field_decisions BEFORE INSERT ON freediving.dive_field_decisions FOR EACH ROW EXECUTE FUNCTION freediving.stamp_dive_field_decision('" ingest-role "','" reviewer-role "')"))
                  (execute! c "DROP TRIGGER stamp_athlete_identity_event ON freediving.athlete_identity_events")

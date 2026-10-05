@@ -11,6 +11,7 @@
            [java.util HexFormat]))
 
 (def rule-version "athlete-identity/1")
+(def ^:dynamic *replaying-events?* false)
 (def default-ambiguous-names #{"amy smith" "john smith" "maria silva"})
 (defn- fail! [message data] (throw (ex-info message data)))
 (defn- name-key [name]
@@ -198,7 +199,7 @@
   (let [index (build-index rows)]
     {:version rule-version :rows (:rows index) :events []}))
 
-(declare pair project dependency-reversal-event)
+(declare pair project dependency-reversal-event append-event)
 
 (defn- complete-model-answer? [answer receipt config]
   (let [probabilities (:probabilities answer)
@@ -338,6 +339,70 @@
   (let [reversed (set (keep #(when (= :reverse (:action %)) (:event-id %)) events))]
     (filter #(and (= :accept (:action %)) (not (reversed (:id %)))
                   (or (not= :model (:actor-kind %)) (model-current? rows %))) events)))
+(defn- automatic-invalidation [rows event]
+  (let [[a b] (:pair event)
+        target (rows a)
+        other (rows b)
+        retrieval (when target (retrieve (build-index (vals rows)) target))
+        candidates (:candidates retrieval)
+        model? (= :model (:actor-kind event))
+        old (if model?
+              (mapv (fn [id] {:observation-id id})
+                    (remove #{a} (get-in event [:model-proof :decision :candidates])))
+              (get-in event [:evidence :alternatives]))
+        old-ids (set (map :observation-id old))
+        current-ids (set (map :observation-id candidates))
+        old-versions (if model?
+                       (get-in event [:model-proof :decision :subject :observation-versions])
+                       (into {} (map (juxt :observation-id :citation)
+                                     (get-in event [:evidence :observations]))))
+        current-versions (into {} (map (fn [id] [id (:citation (rows id))])
+                                       (if model? (cons a (map :observation-id candidates)) [a b])))
+        contradiction (some (fn [candidate]
+                              (let [row (rows (:observation-id candidate))]
+                                (and (some? (person-id row))
+                                     (some (fn [linked]
+                                             (and (person-id linked)
+                                                  (= (first (person-id row)) (first (person-id linked)))
+                                                  (not= (person-id row) (person-id linked))))
+                                           [target other])))) candidates)
+        still-approved (cond model? (model-current? rows event)
+                             (:source-binding event)
+                             (and (aida-source-person? target) (aida-source-person? other)
+                                  (= (person-id target) (person-id other))
+                                  (= (name-key (:source-name target)) (name-key (:source-name other))))
+                             :else (let [decision (decide (build-index (vals (dissoc rows a))) target {})]
+                                     (and (= :approve (:status decision)) (= b (:candidate-id decision)))))
+        reason (cond contradiction :publisher-person-contradiction
+                     (not= old-ids current-ids) :candidate-set-changed
+                     (not= old-versions current-versions) :evidence-version-changed
+                     (not still-approved) :automatic-rule-no-longer-approves)]
+    (when reason
+      {:id (str "automatic-invalidation:" (:id event))
+       :action :reverse :actor-kind :automatic :event-id (:id event)
+       :rule-version rule-version :reason reason
+       :source-binding (or (:source-binding event)
+                           (when (every? #(str/starts-with? % "source-observation:") [a b])
+                             {:snapshot-sha256 (get-in target [:citation :snapshot_sha256])
+                              :refs {a (:citation target) b (:citation other)}}))
+       :prior-decision-revision (:approval-revision event)
+       :prior-evidence (if model? (:model-proof event) (:evidence event))
+       :current-evidence {:observation-versions current-versions
+                          :candidates candidates :omitted (:omitted retrieval)
+                          :candidate-count (:candidate-count retrieval)
+                          :rule-version rule-version}
+       :pair (:pair event)})))
+(defn recheck-automatic-links
+  "Append a cited invalidation for each affected automatic approval after an import."
+  [ledger]
+  (reduce (fn [current [index event]]
+            (if (and (#{:automatic :model} (:actor-kind event)) (= :accept (:action event))
+                     (not-any? #(and (= :reverse (:action %)) (= (:id event) (:event-id %)))
+                               (:events current)))
+              (if-let [invalidation (automatic-invalidation (:rows current)
+                                                            (assoc event :approval-revision (inc index)))]
+                (append-event current invalidation) current)
+              current)) ledger (map-indexed vector (:events ledger))))
 (defn- components [ids edges]
   (reduce (fn [groups {:keys [pair]}]
             (let [[a b] pair ga (get groups a) gb (get groups b) joined (set/union ga gb)]
@@ -372,6 +437,19 @@
                                                                       (:candidates (retrieve index (rows id)))))
                                  :source-name (:source-name (rows id)) :citation (:citation (rows id))}]) groups))]
     {:revision (count (:events ledger)) :athletes ids
+     :pending-automatic-review
+     (->> (:events ledger)
+          (map-indexed vector)
+          (keep (fn [[index event]]
+                  (when (and (= :automatic (:actor-kind event))
+                             (= :reverse (:action event))
+                             (not-any? #(and (= :human (:actor-kind %))
+                                             (#{:accept :reject :reverse} (:action %))
+                                             (= (:pair event) (:pair %)))
+                                       (drop (inc index) (:events ledger))))
+                    (select-keys event [:id :event-id :pair :reason :prior-decision-revision
+                                        :prior-evidence :current-evidence]))))
+          vec)
      :groups (into {} (map (fn [members] [(group-id members) (vec (sort members))]) (distinct (vals groups))))
      :negative-pairs (negative-pairs (:events ledger))
      :accepted-group-count (count (filter #(> (count %) 1) (distinct (vals groups))))
@@ -411,6 +489,10 @@
                 refs (into {} (map (fn [id] [id (:citation (rows id))]) bound-pair))]
             (when-not (and (or (= :human (:actor-kind event))
                                (and (= :automatic (:actor-kind event))
+                                    (= :reverse (:action event))
+                                    (or (= (:source-binding prior) binding)
+                                        (= :model (:actor-kind prior))))
+                               (and (= :automatic (:actor-kind event))
                                     (= :accept (:action event))
                                     (every? #(aida-source-person? (rows %)) bound-pair)
                                     (apply = (map #(person-id (rows %)) bound-pair))
@@ -441,7 +523,8 @@
                    (or (not= rule-version (:rule-version event))
                        (and pair (blocked pair))))
           (fail! "Automatic identity rule stale or human-blocked" {:event event}))
-        (when (and (= :automatic (:actor-kind event)) (:source-binding event))
+        (when (and (= :automatic (:actor-kind event)) (= :accept (:action event))
+                   (:source-binding event))
           (let [id (person-id (rows (first pair)))
                 group-members (set (for [[observation-id row] rows
                                          :when (= id (person-id row))] observation-id))]
@@ -457,9 +540,15 @@
                          (active-edges events rows)))
           (fail! "Changed model evidence requires reversal before relinking" {:id (:id event)}))
         (when (= :reverse (:action event))
-          (when-not (and (#{:human :model} (:actor-kind event)) (= :accept (:action prior))
+          (when-not (and (#{:human :model :automatic} (:actor-kind event)) (= :accept (:action prior))
                          (not-any? #(= (:event-id event) (:event-id %)) events))
             (fail! "Only active accepted links can be reversed" {:event event})))
+        (when (and (not *replaying-events?*)
+                   (= :automatic (:actor-kind event)) (= :reverse (:action event))
+                   (not= event (automatic-invalidation rows
+                                                       (assoc prior :approval-revision
+                                                              (inc (.indexOf events prior))))))
+          (fail! "Automatic invalidation lacks current changed evidence" {:id (:id event)}))
         (when (and (= :model (:actor-kind event)) (= :reverse (:action event)))
           (let [proof (:model-dependency-proof event)
                 recreated (when (and prior (not (:request event)))
@@ -493,7 +582,9 @@
         (update ledger :events conj (cond-> (assoc event :pair (or pair (:pair prior)))
                                       (= :model (:actor-kind event))
                                       (assoc :request (or (:request event) event))))))))
-(defn replay [rows events] (reduce append-event (empty-ledger rows) events))
+(defn replay [rows events]
+  (binding [*replaying-events?* true]
+    (reduce append-event (empty-ledger rows) events)))
 
 (defn dependency-reversal-event
   "Build an auditable model reversal when its approval or dependency is no longer current."
@@ -576,7 +667,7 @@
   (mapv (comp edn/read-string :body_edn)
         (query connection "SELECT body_edn FROM freediving.source_identity_observations ORDER BY observation_id")))
 
-(declare write-canonical-view!)
+(declare write-canonical-view! reconcile-import!)
 
 (defn- read-ledger [^Connection connection]
   (let [rows (into (observation-rows connection) (source-rows connection))
@@ -656,7 +747,7 @@
                 (.setString statement 2 snapshot-sha256)
                 (.setString statement 3 body)
                 (.executeUpdate statement)))))
-        (let [result (write-canonical-view! connection (read-ledger connection))]
+        (let [result (reconcile-import! connection)]
           (.commit connection) result))
       (catch Exception error (.rollback connection) (throw error)))))
 
@@ -681,6 +772,25 @@
       (.executeUpdate statement))
     projection))
 
+(defn reconcile-import!
+  "Recheck automatic edges and update the private view in the caller's transaction."
+  [^Connection connection]
+  (when (:present (first (query connection
+                                "SELECT to_regclass('freediving.athlete_identity_events') IS NOT NULL AS present")))
+    (query connection "SELECT pg_advisory_xact_lock(781246919)")
+    (let [ledger (read-ledger connection)
+          checked (recheck-automatic-links ledger)]
+      (doseq [[index event] (map-indexed vector (drop (count (:events ledger)) (:events checked)))]
+        (with-open [statement (.prepareStatement connection
+                                                 "INSERT INTO freediving.athlete_identity_events(revision,id,action,actor_kind,body_edn) VALUES(?,?,?,?,?)")]
+          (.setInt statement 1 (+ (count (:events ledger)) index 1))
+          (.setString statement 2 (:id event))
+          (.setString statement 3 (name (:action event)))
+          (.setString statement 4 (name (:actor-kind event)))
+          (.setString statement 5 (binding [*print-length* nil *print-level* nil] (pr-str event)))
+          (.executeUpdate statement)))
+      (write-canonical-view! connection checked))))
+
 (defn rebuild-private-canonical-view!
   "Atomically recover the private identity view from immutable observations and events."
   [url]
@@ -689,7 +799,7 @@
     (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
     (try
       (query connection "SELECT pg_advisory_xact_lock(781246919)")
-      (let [projection (write-canonical-view! connection (read-ledger connection))]
+      (let [projection (reconcile-import! connection)]
         (.commit connection) projection)
       (catch Exception error (.rollback connection) (throw error)))))
 
@@ -1019,11 +1129,20 @@
                                     (= :accept (:action %))
                                     (= (:id decision) (:model-decision-id %)))
                               (:events ledger)))
+          imported (last (filter #(and (= :automatic (:actor-kind %))
+                                       (= :reverse (:action %))
+                                       (= (:id model) (:event-id %)))
+                                 (:events ledger)))
           reverse-id (str "flow-identity-reversal:" (:id human))
           existing (some #(when (= reverse-id (:id %)) %) (:events ledger))]
       (cond
         existing (record-event! url (:request existing))
         (nil? model) (project ledger)
+        imported (record-event! url {:id reverse-id :action :reject :actor-kind :human
+                                     :pair (:pair model)
+                                     :source-binding (:source-binding imported)
+                                     :reason (or (:reason human) "Private identity correction")
+                                     :flow-human-event-id (:id human)})
         (some #(= (:id model) (:event-id %)) (:events ledger)) (project ledger)
         :else (record-event! url {:id reverse-id :action :reverse :actor-kind :human
                                   :event-id (:id model)
@@ -1046,11 +1165,17 @@
                                  (= (:id decision)
                                     (get-in % [:model-dependency-proof :decision-id])))
                            (:events ledger)))
+         imported (last (filter #(and (= :automatic (:actor-kind %))
+                                      (= :reverse (:action %))
+                                      (= (:id decision)
+                                         (get-in % [:prior-evidence :decision :id])))
+                                (:events ledger)))
          active (last (filter #(and (= :model (:actor-kind %)) (= :accept (:action %))
                                     (= (:id decision) (:model-decision-id %)))
                               (active-edges (:events ledger) (:rows ledger))))]
      (cond
        active (record-event! url (dependency-reversal-event ledger flow-ledger decision
                                                             config canonical-statuses expected-revision))
+       imported (project ledger)
        old (record-event! url (:request old))
        :else (fail! "No model identity event to invalidate" {:decision-id (:id decision)})))))

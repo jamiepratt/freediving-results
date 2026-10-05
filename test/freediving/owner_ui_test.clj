@@ -30,7 +30,10 @@
                     const p=ui.athletePresentation({projection:{'accepted-group-count':1,'provisional-record-count':2,'unresolved-count':1,scope:'retained-observations',athletes:{a:{'observation-id':'a','source-name':'Ada Diver','provisional-id':'athlete:a','group-id':'athlete:a',origin:'accepted-link','decision-origin':['automatic'],'unresolved-candidates':[]},b:{'observation-id':'b','source-name':'Bea Diver','provisional-id':'athlete:b','group-id':'athlete:b',origin:'provisional','decision-origin':[],'unresolved-candidates':['c']}}},history:[{id:'link',action:'accept','actor-kind':'automatic'}]});
                     assert.equal(p.accepted,1);assert.equal(p.provisional,2);assert.equal(p.unresolved,1);
                     assert.deepEqual(p.rows.map(r=>[r.status,r.origin,r.unresolved]),[['Accepted link','automatic',0],['Provisional record','Source observation',1]]);
-                    assert.equal(p.history[0].id,'link');")]
+                    assert.equal(p.history[0].id,'link');
+                    const pending=ui.athletePresentation({projection:{'pending-automatic-review':[{id:'automatic-invalidation:link','event-id':'link',pair:['a','b'],reason:'candidate-set-changed','prior-decision-revision':1,'prior-evidence':{alternatives:[{id:'b'}]},'current-evidence':{candidates:[{id:'b'},{id:'c'}]}}]},history:[{id:'automatic-invalidation:link',revision:2}]});
+                    assert.equal(pending.pendingAutomaticReview.length,1);
+                    assert.deepEqual(pending.pendingAutomaticReview[0],{id:'automatic-invalidation:link',pair:['a','b'],reason:'candidate-set-changed',approvalRevision:1,invalidationRevision:2,priorEvidence:{alternatives:[{id:'b'}]},currentEvidence:{candidates:[{id:'b'},{id:'c'}]}});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (deftest scored-identity-proposal-binds-exact-pair
   (let [r (shell/sh "node" "-e"

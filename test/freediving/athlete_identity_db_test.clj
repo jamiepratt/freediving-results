@@ -161,7 +161,7 @@
     (let [later (fixture/synthetic 1 "canonical-view/2")]
       (fixture/publish! later)
       (observations/import! app (:root later) (get-in later [:artifact :job-id]))
-      (is (thrown? clojure.lang.ExceptionInfo (identity/private-canonical-view app)))
+      (is (= 4 (:provisional-record-count (identity/private-canonical-view app))))
       (is (= 4 (:provisional-record-count
                 (identity/rebuild-private-canonical-view! reviewer))))
       (is (= 0 (:accepted-group-count (identity/private-canonical-view app)))))))
@@ -231,6 +231,100 @@
     (is (= :distinctive-exact-name (get-in (first (identity/private-history app)) [:decision :reason])))
     (is (= 1 (get-in (first (identity/private-history app)) [:evidence :candidate-count])))))
 
+(deftest importing-a-name-competitor-appends-an-invalidation
+  (let [rename (fn [source]
+                 (update-in source [:artifact :candidates]
+                            (fn [rows] (mapv #(-> %
+                                                  (assoc-in [:parsed :source-name] "Distinctive Diver")
+                                                  (assoc-in [:raw :fields :source-name] "Distinctive Diver")) rows))))
+        first-source (rename (fixture/synthetic 1 "identity-recheck/1"))
+        later-source (rename (fixture/synthetic 1 "identity-recheck/2"))
+        job (get-in first-source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")]
+    (fixture/publish! first-source)
+    (observations/import! app (:root first-source) job)
+    (identity/record-event! app {:id "auto-ab" :action :accept :actor-kind :automatic
+                                 :pair [a b] :rule-version identity/rule-version})
+    (fixture/publish! later-source)
+    (observations/import! app (:root later-source) (get-in later-source [:artifact :job-id]))
+    (let [history (identity/private-history app)
+          view (identity/private-canonical-view reviewer)]
+      (is (= [:accept :reverse] (mapv :action history)))
+      (is (= :candidate-set-changed (:reason (last history))))
+      (is (= 1 (:prior-decision-revision (last history))))
+      (is (= 0 (:accepted-group-count view)))
+      (is (= 4 (:provisional-record-count view)))
+      (is (= 2 (:revision view)))
+      (is (= 4 (count (:athletes view))))
+      (is (= 1 (count (:pending-automatic-review view)))))
+    (identity/record-event! reviewer {:id "owner-reviewed-invalidation"
+                                      :action :reject :actor-kind :human
+                                      :pair [a b] :reason "separate athletes"})
+    (is (empty? (:pending-automatic-review (identity/private-canonical-view reviewer))))
+    (is (= 3 (:revision (identity/private-canonical-view reviewer))))))
+
+(deftest imported-publisher-conflict-is-pending-with-exact-history
+  (let [person-source (fn [parser person-id]
+                        (update-in (fixture/synthetic 1 parser) [:artifact :candidates]
+                                   (fn [rows]
+                                     (mapv #(-> %
+                                                (assoc-in [:parsed :source-name] "Distinctive Diver")
+                                                (assoc-in [:raw :fields :source-name] "Distinctive Diver")
+                                                (assoc-in [:parsed :publisher-person-scope] "CMAS")
+                                                (assoc-in [:parsed :publisher-person-id] person-id)
+                                                (assoc-in [:parsed :publisher-id-semantics] :verified-person)) rows))))
+        first-source (person-source "identity-person/1" "person-1")
+        unrelated (fixture/synthetic 1 "identity-person/unrelated")
+        conflict (person-source "identity-person/2" "person-2")
+        job (get-in first-source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")]
+    (fixture/publish! first-source)
+    (observations/import! app (:root first-source) job)
+    (identity/record-event! app {:id "person-link" :action :accept :actor-kind :automatic
+                                 :pair [a b] :rule-version identity/rule-version})
+    (fixture/publish! unrelated)
+    (observations/import! app (:root unrelated) (get-in unrelated [:artifact :job-id]))
+    (is (= 1 (:revision (identity/private-canonical-view app))))
+    (fixture/publish! conflict)
+    (observations/import! app (:root conflict) (get-in conflict [:artifact :job-id]))
+    (is (= :skipped (:status (observations/import! app (:root conflict)
+                                                   (get-in conflict [:artifact :job-id])))))
+    (let [history (identity/private-history app)
+          view (identity/private-canonical-view app)
+          pending (first (:pending-automatic-review view))]
+      (is (= 2 (count history)))
+      (is (= :publisher-person-contradiction (:reason pending)))
+      (is (= 1 (:prior-decision-revision pending)))
+      (is (= (:evidence (first history)) (:prior-evidence pending)))
+      (is (= 3 (count (get-in pending [:current-evidence :candidates]))))
+      (is (= 0 (:accepted-group-count view)))
+      (is (= 6 (:provisional-record-count view))))))
+
+(deftest human-split-survives-later-import-and-blocks-reapplication
+  (let [source (update-in (fixture/synthetic 1 "identity-split/1") [:artifact :candidates]
+                          (fn [rows] (mapv #(-> %
+                                                (assoc-in [:parsed :source-name] "Distinctive Diver")
+                                                (assoc-in [:raw :fields :source-name] "Distinctive Diver")) rows)))
+        job (get-in source [:artifact :job-id])
+        pair [(str "local-observation:" job ":0") (str "local-observation:" job ":1")]
+        unrelated (fixture/synthetic 1 "identity-split/unrelated")]
+    (fixture/publish! source)
+    (observations/import! app (:root source) job)
+    (identity/record-event! app {:id "initial-auto" :action :accept :actor-kind :automatic
+                                 :pair pair :rule-version identity/rule-version})
+    (identity/record-event! reviewer {:id "owner-split" :action :reverse :actor-kind :human
+                                      :event-id "initial-auto" :reason "distinct people"})
+    (fixture/publish! unrelated)
+    (observations/import! app (:root unrelated) (get-in unrelated [:artifact :job-id]))
+    (is (= 2 (:revision (identity/private-canonical-view app))))
+    (is (= 0 (:accepted-group-count (identity/private-canonical-view app))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (identity/record-event! app {:id "retry-auto" :action :accept :actor-kind :automatic
+                                              :pair pair :rule-version identity/rule-version})))
+    (is (empty? (:pending-automatic-review (identity/private-canonical-view app))))))
+
 (deftest model-link-records-canonical-group-without-human-attestation
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "identity-model/1")
         job (:job-id artifact)
@@ -269,6 +363,57 @@
         (is (= 0 (:accepted-group-count
                   (identity/sync-model-correction! reviewer corrected decision config))))
         (is (= 2 (count (identity/private-history app))))))))
+
+(deftest importing-new-candidate-explicitly-invalidates-model-link
+  (let [source (fixture/synthetic 1 "identity-model-import/1")
+        unrelated (update-in (fixture/synthetic 1 "identity-model-import/unrelated")
+                             [:artifact :candidates]
+                             (fn [rows] (mapv #(-> %
+                                                   (assoc-in [:parsed :source-name] "Other Athlete")
+                                                   (assoc-in [:raw :fields :source-name] "Other Athlete")) rows)))
+        later (fixture/synthetic 1 "identity-model-import/2")
+        job (get-in source [:artifact :job-id])
+        a (str "local-observation:" job ":0")
+        b (str "local-observation:" job ":1")
+        config {:provider :jev :model "jev-1.13.0" :version "test-config/1"}
+        policy {:version "test-policy/1"
+                :thresholds {:identity {:same-person {:min-confidence 0.9
+                                                      :min-probability 0.9 :min-margin 0.2}}}}]
+    (fixture/publish! source)
+    (observations/import! app (:root source) job)
+    (let [decision (identity/private-jev-decision app a b)
+          approved (flow/run! (flow/empty-ledger) [decision]
+                              {:config config :policy policy
+                               :execute! (fn [_] {:model "jev-1.13.0" :usage {}
+                                                  :answers {(:id decision)
+                                                            {:type "choice" :choice "same_person" :confidence 0.96
+                                                             :probabilities {"same_person" 0.94
+                                                                             "different_person" 0.04
+                                                                             "unknown" 0.02}}}})})]
+      (identity/record-model-event! app approved decision config policy 0)
+      (fixture/publish! unrelated)
+      (observations/import! app (:root unrelated) (get-in unrelated [:artifact :job-id]))
+      (is (= 1 (:revision (identity/private-canonical-view app))))
+      (fixture/publish! later)
+      (observations/import! app (:root later) (get-in later [:artifact :job-id]))
+      (is (= :skipped (:status (observations/import! app (:root later)
+                                                     (get-in later [:artifact :job-id])))))
+      (let [history (identity/private-history app)
+            view (identity/private-canonical-view app)]
+        (is (= [:model :automatic] (mapv :actor-kind history)))
+        (is (= [:accept :reverse] (mapv :action history)))
+        (is (= :candidate-set-changed (:reason (last history))))
+        (is (= 1 (:prior-decision-revision (last history))))
+        (is (= 3 (count (get-in (last history) [:current-evidence :candidates]))))
+        (is (= 0 (:accepted-group-count view)))
+        (is (= 2 (:revision view)))
+        (is (= 1 (count (:pending-automatic-review view)))))
+      (let [corrected (flow/append-human-event approved
+                                               {:id "owner-model-rejection" :decision-id (:id decision)
+                                                :status :rejected :reason "different people"})]
+        (identity/sync-model-correction! reviewer corrected decision config)
+        (is (= 1 (count (:negative-pairs (identity/private-canonical-view reviewer)))))
+        (is (empty? (:pending-automatic-review (identity/private-canonical-view reviewer))))))))
 
 (deftest failed-flow-dependency-reverses-persisted-model-identity
   (let [{:keys [root artifact] :as source} (fixture/synthetic 1 "identity-dependency/1")
