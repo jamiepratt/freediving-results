@@ -3,6 +3,8 @@
 
 import hashlib
 import json
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 try:
@@ -17,6 +19,12 @@ except ModuleNotFoundError:
 
 ADAPTER_VERSION = 'cmas-microplus-snapshot-observation/1'
 SCHEMAS = ('cmas-microplus-private-census/v1', 'cmas-microplus-private-census/v2')
+ATTEMPT_ADAPTER_VERSION = 'cmas-microplus-attempt-evidence/1'
+ATTEMPT_SCOPE_FIELDS = {
+    'event': 'competition_id', 'day': 'event_date_raw', 'session': 'unit_id',
+    'round': 'phase_id', 'discipline': 'discipline_raw',
+    'participant': 'athlete_id', 'attempt': 'result_id',
+}
 
 
 def _sha(raw):
@@ -208,3 +216,90 @@ def load_source_observations(snapshot_dir, source_names, *, source_dir=None,
             'summary': {'supported': len(observations), 'source_gaps': 0,
                         'confirmed_distinct_attempts': None,
                         'approved_athletes': None}}
+
+
+def load_attempt_evidence(snapshot_dir, source_names, *, record_ids, source_dir=None):
+    """Verify selected individual results and retain every acquired citation view.
+
+    Scope uses the payload's competition, date, unit, phase, discipline, participant
+    and result IDs. A requested endpoint can return another unit's results, so its
+    transport unit never supplies sporting scope. Alternate citations are separate
+    acquired views of a snapshot position, not additional sporting attempts.
+    This input carries no decision events or publication approval.
+    """
+    _require(isinstance(record_ids, (list, tuple)) and record_ids
+             and all(isinstance(value, str) for value in record_ids)
+             and len(record_ids) == len(set(record_ids)),
+             'unique selected Microplus record IDs required')
+    verified = load_source_observations(snapshot_dir, source_names, source_dir=source_dir)
+    indexed = {row['snapshot_record_id']: row for row in verified['observations']}
+    _require(set(record_ids) <= indexed.keys(), 'selected Microplus record absent')
+    sources, positions, versions = {}, [], []
+    for record_id in sorted(record_ids):
+        row = indexed[record_id]
+        fields = row['source_fields']
+        scope = {key: fields[field] for key, field in ATTEMPT_SCOPE_FIELDS.items()}
+        _require(all(type(scope[key]) is int and scope[key] > 0 for key in
+                     ('event', 'session', 'round', 'participant', 'attempt'))
+                 and isinstance(scope['discipline'], str) and scope['discipline'].strip()
+                 and isinstance(scope['day'], str),
+                 'Microplus complete publisher attempt scope required')
+        try:
+            day = date.fromisoformat(scope['day'][:10]).isoformat()
+            final = Decimal(str(fields['result_final_raw']))
+            valid_final = final.is_finite() and final > 0
+        except (ValueError, InvalidOperation):
+            valid_final = False
+            day = None
+        _require(day == row['event_date'] and valid_final,
+                 'Microplus dated individual result required')
+        same_result = [other for other in verified['observations']
+                       if (other['source_fields']['competition_id'],
+                           other['source_fields']['result_id']) ==
+                          (scope['event'], scope['attempt'])]
+        _require(len(same_result) == 1, 'Microplus publisher result ID ambiguous')
+        for citation in sorted([row['citation'], *row['alternate_citations']], key=_canonical):
+            source_id = 'microplus-view:' + _sha(citation['url'].encode())
+            source_hash = citation['source_sha256']
+            position_id = 'microplus-cited-position:' + _sha(_canonical(
+                [record_id, citation]).encode())
+            version_id = 'microplus-attempt-observation:' + _sha(_canonical(
+                [ATTEMPT_ADAPTER_VERSION, row['source_observation_ref'], citation]).encode())
+            _require(source_id not in sources or sources[source_id]['sha256'] == source_hash,
+                     'Microplus acquired view has conflicting source versions')
+            sources[source_id] = {
+                'id': source_id, 'sha256': source_hash,
+                'url': citation['url'], 'publisher': 'cmas-microplus',
+                'transport-unit-id': int(citation['url'].split('/units/')[1].split('/')[0]),
+            }
+            positions.append({'id': position_id, 'source-id': source_id,
+                              'locator': citation, 'snapshot-record-id': record_id})
+            versions.append({
+                'id': version_id, 'position-id': position_id,
+                'snapshot-record-id': record_id, 'parser-version': ATTEMPT_ADAPTER_VERSION,
+                'role': 'individual-result', 'scope': scope,
+                'scope-evidence': {
+                    'position-id': position_id, 'source-id': source_id,
+                    'source-sha256': source_hash, 'citation': citation,
+                    'fields': scope, 'bindings': {
+                        key: {'path': ['raw', key], 'value': value,
+                              'publisher-field': ATTEMPT_SCOPE_FIELDS[key]}
+                        for key, value in scope.items()}},
+                'values': {'raw': scope, 'source-fields': fields},
+                'observation-revision': {
+                    **row['source_observation_ref'],
+                    'adapter_version': ATTEMPT_ADAPTER_VERSION,
+                    'source_sha256': source_hash, 'citation': citation,
+                    'observation_version': version_id.split(':', 1)[1],
+                    'snapshot_observation_ref': row['source_observation_ref'],
+                },
+            })
+    return {
+        'schema': ATTEMPT_ADAPTER_VERSION, 'snapshot_sha256': verified['snapshot_sha256'],
+        'evidence': {'sources': sorted(sources.values(), key=lambda source: source['id']),
+                     'positions': positions, 'observation-versions': versions},
+        'summary': {'snapshot_positions': len(record_ids),
+                    'cited_view_observations': len(versions),
+                    'source_objects': len({source['sha256'] for source in sources.values()}),
+                    'confirmed_distinct_attempts': None},
+    }
