@@ -345,12 +345,19 @@
         other (rows b)
         retrieval (when target (retrieve (build-index (vals rows)) target))
         candidates (:candidates retrieval)
-        old (get-in event [:evidence :alternatives])
+        model? (= :model (:actor-kind event))
+        old (if model?
+              (mapv (fn [id] {:observation-id id})
+                    (remove #{a} (get-in event [:model-proof :decision :candidates])))
+              (get-in event [:evidence :alternatives]))
         old-ids (set (map :observation-id old))
         current-ids (set (map :observation-id candidates))
-        old-versions (into {} (map (juxt :observation-id :citation)
-                                   (get-in event [:evidence :observations])))
-        current-versions (into {} (map (fn [id] [id (:citation (rows id))]) [a b]))
+        old-versions (if model?
+                       (get-in event [:model-proof :decision :subject :observation-versions])
+                       (into {} (map (juxt :observation-id :citation)
+                                     (get-in event [:evidence :observations]))))
+        current-versions (into {} (map (fn [id] [id (:citation (rows id))])
+                                       (if model? (cons a (map :observation-id candidates)) [a b])))
         contradiction (some (fn [candidate]
                               (let [row (rows (:observation-id candidate))]
                                 (and (some? (person-id row))
@@ -359,23 +366,27 @@
                                                   (= (first (person-id row)) (first (person-id linked)))
                                                   (not= (person-id row) (person-id linked))))
                                            [target other])))) candidates)
-        still-approved (if (:source-binding event)
-                         (and (aida-source-person? target) (aida-source-person? other)
-                              (= (person-id target) (person-id other))
-                              (= (name-key (:source-name target)) (name-key (:source-name other))))
-                         (let [decision (decide (build-index (vals (dissoc rows a))) target {})]
-                           (and (= :approve (:status decision)) (= b (:candidate-id decision)))))
+        still-approved (cond model? (model-current? rows event)
+                             (:source-binding event)
+                             (and (aida-source-person? target) (aida-source-person? other)
+                                  (= (person-id target) (person-id other))
+                                  (= (name-key (:source-name target)) (name-key (:source-name other))))
+                             :else (let [decision (decide (build-index (vals (dissoc rows a))) target {})]
+                                     (and (= :approve (:status decision)) (= b (:candidate-id decision)))))
         reason (cond contradiction :publisher-person-contradiction
-                     (not= old-versions current-versions) :evidence-version-changed
                      (not= old-ids current-ids) :candidate-set-changed
+                     (not= old-versions current-versions) :evidence-version-changed
                      (not still-approved) :automatic-rule-no-longer-approves)]
     (when reason
       {:id (str "automatic-invalidation:" (:id event))
        :action :reverse :actor-kind :automatic :event-id (:id event)
        :rule-version rule-version :reason reason
-       :source-binding (:source-binding event)
+       :source-binding (or (:source-binding event)
+                           (when (every? #(str/starts-with? % "source-observation:") [a b])
+                             {:snapshot-sha256 (get-in target [:citation :snapshot_sha256])
+                              :refs {a (:citation target) b (:citation other)}}))
        :prior-decision-revision (:approval-revision event)
-       :prior-evidence (:evidence event)
+       :prior-evidence (if model? (:model-proof event) (:evidence event))
        :current-evidence {:observation-versions current-versions
                           :candidates candidates :omitted (:omitted retrieval)
                           :candidate-count (:candidate-count retrieval)
@@ -385,8 +396,9 @@
   "Append a cited invalidation for each affected automatic approval after an import."
   [ledger]
   (reduce (fn [current [index event]]
-            (if (and (= :automatic (:actor-kind event)) (= :accept (:action event))
-                     (some #{(:id event)} (map :id (active-edges (:events current) (:rows current)))))
+            (if (and (#{:automatic :model} (:actor-kind event)) (= :accept (:action event))
+                     (not-any? #(and (= :reverse (:action %)) (= (:id event) (:event-id %)))
+                               (:events current)))
               (if-let [invalidation (automatic-invalidation (:rows current)
                                                             (assoc event :approval-revision (inc index)))]
                 (append-event current invalidation) current)
@@ -478,7 +490,8 @@
             (when-not (and (or (= :human (:actor-kind event))
                                (and (= :automatic (:actor-kind event))
                                     (= :reverse (:action event))
-                                    (= (:source-binding prior) binding))
+                                    (or (= (:source-binding prior) binding)
+                                        (= :model (:actor-kind prior))))
                                (and (= :automatic (:actor-kind event))
                                     (= :accept (:action event))
                                     (every? #(aida-source-person? (rows %)) bound-pair)
@@ -1116,11 +1129,20 @@
                                     (= :accept (:action %))
                                     (= (:id decision) (:model-decision-id %)))
                               (:events ledger)))
+          imported (last (filter #(and (= :automatic (:actor-kind %))
+                                       (= :reverse (:action %))
+                                       (= (:id model) (:event-id %)))
+                                 (:events ledger)))
           reverse-id (str "flow-identity-reversal:" (:id human))
           existing (some #(when (= reverse-id (:id %)) %) (:events ledger))]
       (cond
         existing (record-event! url (:request existing))
         (nil? model) (project ledger)
+        imported (record-event! url {:id reverse-id :action :reject :actor-kind :human
+                                     :pair (:pair model)
+                                     :source-binding (:source-binding imported)
+                                     :reason (or (:reason human) "Private identity correction")
+                                     :flow-human-event-id (:id human)})
         (some #(= (:id model) (:event-id %)) (:events ledger)) (project ledger)
         :else (record-event! url {:id reverse-id :action :reverse :actor-kind :human
                                   :event-id (:id model)
@@ -1143,11 +1165,17 @@
                                  (= (:id decision)
                                     (get-in % [:model-dependency-proof :decision-id])))
                            (:events ledger)))
+         imported (last (filter #(and (= :automatic (:actor-kind %))
+                                      (= :reverse (:action %))
+                                      (= (:id decision)
+                                         (get-in % [:prior-evidence :decision :id])))
+                                (:events ledger)))
          active (last (filter #(and (= :model (:actor-kind %)) (= :accept (:action %))
                                     (= (:id decision) (:model-decision-id %)))
                               (active-edges (:events ledger) (:rows ledger))))]
      (cond
        active (record-event! url (dependency-reversal-event ledger flow-ledger decision
                                                             config canonical-statuses expected-revision))
+       imported (project ledger)
        old (record-event! url (:request old))
        :else (fail! "No model identity event to invalidate" {:decision-id (:id decision)})))))
