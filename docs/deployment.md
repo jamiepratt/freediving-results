@@ -186,6 +186,46 @@ also makes its origin unavailable. Private data remains on the VPS/local archive
 
 ## Owner evidence remote activation checkpoint
 
+### Consolidated image-PDF queue
+
+The issue #172 queue is a separate read-only file on the private origin. Rebuild
+its audit against the **currently active** snapshot before staging it. Verify the
+queue's audit digest, the audit's snapshot digest, all nine pinned source stages,
+and the 799 candidate accounting (750 verified, 49 unresolved). The expected
+queue has 468 stable entries: 49 field questions and 419 relationship candidates.
+Keep the audit, queue, originals and transcripts outside Git.
+
+First verify the exact active snapshot, installed private app version, current
+owner decision revision, a current decision-store backup with isolated restore
+check, Access owner policy, direct-origin denial and authenticated owner access.
+The installed app must already contain `/owner-evidence/api/issue172-queue`.
+The normal public release does not install this private app or queue. Stage the
+matching private code through the guarded owner activation procedure below,
+preserving the active snapshot and source bundle; do not change the owner
+decision store. Then copy the pinned audit and queue to a root-only import
+directory on the private host and run the helper there:
+
+```sh
+sudo -n python3 /var/lib/freediving-owner-evidence/import/code/deploy/owner_evidence_activate.py \
+  --queue-source /var/lib/freediving-owner-evidence/import/issue172/owner-queue-v1.json \
+  --expected-queue-sha256 "$QUEUE_SHA256" \
+  --audit-source /var/lib/freediving-owner-evidence/import/issue172/audit-v1.json \
+  --expected-audit-sha256 "$AUDIT_SHA256" \
+  --queue-snapshot-sha256 "$ACTIVE_SNAPSHOT_SHA256"
+```
+
+The helper requires an exact active snapshot binding, copies the queue to
+`/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json`, pins its
+hash in the root-only environment, restarts the private service, checks the
+authenticated loopback queue route, and retains a root-private rollback
+checkpoint. An unchanged rerun returns `unchanged`. Read back the custom-domain
+owner page and queue API, all 468 entries by paging, decision revision and public
+health. Check expired/unauthorized Access and direct-origin denial, and measure
+latency with the live proposal count. If any acceptance check fails, run the
+helper's `--rollback-queue-sha256 "$QUEUE_SHA256"` from the same private code
+installation, then verify the prior private snapshot and decisions still read.
+Do not close #172 before authenticated custom-domain readback succeeds.
+
 ### Candidate code checkpoint for private host setup
 
 `deploy/private_owner_preflight.py` prepares a code-only archive for a later,
