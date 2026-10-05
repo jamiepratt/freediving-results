@@ -216,6 +216,7 @@ def check_historical(document, source, byte_count, sizes):
     require(isinstance(pages, list) and len(pages) == 25,
             "historical packet page coverage mismatch")
     positions = {}
+    athlete_count = aggregate_count = duplicate_count = 0
     for number, page in enumerate(pages, 1):
         require(page.get("page") == number, "historical packet page order mismatch")
         for kind, section in (("source", "rows"), ("aggregate", "aggregate_rows")):
@@ -234,11 +235,20 @@ def check_historical(document, source, byte_count, sizes):
                         and fields_valid(row.get("fields")),
                         "historical packet row identity or citation mismatch")
                 positions[key] = row
+                if kind == "source":
+                    athlete_count += 1
+                    duplicate_count += row.get("duplicate_of") is not None
+                else:
+                    aggregate_count += 1
     counts = document.get("counts", {})
-    require(len(positions) == 183 and counts.get("source_positions") == 155
-            and counts.get("aggregate_rows_excluded") == 28
-            and counts.get("duplicate_rendered_rows") == 7,
+    require(len(positions) == athlete_count + aggregate_count
+            and counts.get("source_positions") == athlete_count
+            and counts.get("aggregate_rows_excluded") == aggregate_count
+            and counts.get("duplicate_rendered_rows") == duplicate_count,
             "historical packet position accounting mismatch")
+    if source == SOURCE_SHA256:
+        require((athlete_count, aggregate_count, duplicate_count) == (155, 28, 7),
+                "official historical Firenze accounting mismatch")
     return positions
 
 
@@ -485,7 +495,13 @@ def build(args):
         historical_row = historical_positions[key] if historical_positions else None
         inspection = checked.get(key)
         raw = inspection["fields_raw"] if inspection else row["fields"]
-        retained_raw = historical_row["fields"] if historical_row else raw
+        retained_raw = dict(historical_row["fields"]) if historical_row else dict(raw)
+        if historical_row and inspection:
+            for field, historical_field in HISTORICAL_FIELDS.items():
+                if field in inspection["fields_raw"] and historical_field in retained_raw:
+                    retained_raw[historical_field] = inspection["fields_raw"][field]
+            if "penalty_raw" in inspection and "Penalità" in retained_raw:
+                retained_raw["Penalità"] = inspection["penalty_raw"]
         position = {"id": row["id"], "page": key[0], "row": key[2],
                     "citation": row["citation"]}
         selected_status = {name: inspection[name] if inspection and name in inspection

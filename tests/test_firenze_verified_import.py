@@ -273,6 +273,43 @@ class FirenzeImportTest(unittest.TestCase):
         self.assertEqual(version["first_pass_raw_fields"]["name"], "Athlete")
         self.assertEqual(version["second_pass_raw_fields"]["name"], "Athlete")
 
+    def test_inspection_corrects_selected_full_raw_field_and_keeps_historical_original(self):
+        for document in (self.first, self.second):
+            for number in (24, 25):
+                document["pages"][number - 1]["rows"][0]["fields"] = {
+                    "position_raw": "1", "cognome_raw": "Corrected", "nome_raw": "Test",
+                    "anno_di_nascita_raw": "1990", "societa_raw": "Club",
+                    "result_columns_raw": "10"}
+                document["pages"][number - 1]["rows"][0]["penalty_raw"] = "BO"
+        historical = self.pass_document("historical")
+        for number in (24, 25):
+            historical["pages"][number - 1]["rows"][0]["fields"] = {
+                "Posizione": "1", "Cognome": "Wrong", "Nome": "Test",
+                "Anno di nascita": "1990", "Società": "Club", "Punteggio": "10",
+                "Penalità": "DQ"}
+            historical["pages"][number - 1]["rows"][0]["penalty_raw"] = "DQ"
+        historical_path = self.root / "historical.json"
+        historical_hash = save(historical_path, historical)
+        self.inspect(24, 1, "source", "historical_conflict")
+        self.inspections["records"][0]["fields_raw"] = self.first["pages"][23]["rows"][0]["fields"]
+        self.inspections["records"][0]["source_image_correction"] = "printed surname inspected"
+        self.inspections["records"][0]["penalty_raw"] = "BO"
+        self.inspect(25, 1, "source", "historical_conflict")
+        self.inspections["records"][1]["fields_raw"] = self.first["pages"][24]["rows"][0]["fields"]
+        self.inspections["records"][1]["source_image_correction"] = "repeated printed surname inspected"
+        self.inspections["records"][1]["penalty_raw"] = "BO"
+        save(self.inspections_path, self.inspections)
+        result = self.call("--historical-packet", str(historical_path),
+            "--historical-packet-sha256", historical_hash,
+            "--inspections", str(self.inspections_path),
+            "--inspections-sha256", digest(self.inspections_path.read_bytes()))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        version = json.loads(self.output.read_text())["observation_versions"][0]
+        self.assertEqual(version["raw_fields"]["Cognome"], "Corrected")
+        self.assertEqual(version["historical_fields_raw"]["Cognome"], "Wrong")
+        self.assertEqual(version["raw_fields"]["Penalità"], "BO")
+        self.assertEqual(version["historical_fields_raw"]["Penalità"], "DQ")
+
 
 if __name__ == "__main__":
     unittest.main()
