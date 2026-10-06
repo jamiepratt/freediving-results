@@ -11,11 +11,13 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
+import tempfile
 import threading
 from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
-from owner_source_view import OriginalSourceView, SourceViewError
+from owner_source_view import OriginalSourceView, SourceViewError, _limit_renderer, MAX_IMAGE
 from route_roster_query import RouteRosterQuery
 from owner_decision_store import ConflictError
 from private_presentation_status import PrivatePresentationStatus, StatusConflict, status_digest, validate_authority
@@ -26,9 +28,12 @@ CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; 
 FILTERS = {'source_name', 'collection', 'kind', 'event_name', 'date_from', 'date_to',
            'session', 'discipline', 'category', 'federation', 'limit', 'offset'}
 MAX_RESPONSE = 2 * 1024 * 1024
+MAX_INSPECTOR_RESPONSE = 4 * 1024 * 1024
 MAX_ACTION = 16 * 1024
 MAX_EVENT_ACK = 8 * 1024 * 1024
 MAX_ISSUE172_QUEUE = 32 * 1024 * 1024
+INSPECTOR_FILTERS = {'federation', 'environment', 'discipline', 'year', 'gender',
+                     'category', 'representation', 'review', 'publication', 'limit', 'offset'}
 STATUS_PATH = '/owner-evidence/api/presentation-status'
 DECISION_ACK_PATH = '/owner-evidence/api/decision-events/ack'
 DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
@@ -40,6 +45,8 @@ COMPARISON_PATH = re.compile(r'^/owner-evidence/api/comparison/([a-f0-9]{64})$')
 ROATAN_PATH = re.compile(r'^/owner-evidence/api/roatan/([1-9][0-9]{0,5})/(0|[1-9][0-9]{0,2})$')
 SOURCE_PAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 SOURCE_IMAGE_PATH = re.compile(r'^/owner-evidence/api/source-view/([a-f0-9]{64})/image$')
+INSPECTOR_SOURCE_PATH = re.compile(r'^/owner-evidence/api/attempt-inspector/source/([a-f0-9]{64})$')
+INSPECTOR_PAGE_PATH = re.compile(r'^/owner-evidence/api/attempt-inspector/source/([a-f0-9]{64})/page/([1-9][0-9]{0,2})$')
 HOST_PATTERN = re.compile(r'^[a-z0-9-]+\.alphacompose\.com$')
 EMAIL_PATTERN = re.compile(r'^[^\s,@]+@[^\s,@]+\.[^\s,@]+$')
 STATIC = {
@@ -148,6 +155,11 @@ class PrivateOrigin(ThreadingHTTPServer):
         if self.canonical_reader is None and env.get('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'):
             from private_canonical_status import create_reader
             self.canonical_reader = create_reader(env)
+        self.comparison_reader = None
+        self.inspector_sources = {}
+        if env.get('OWNER_EVIDENCE_COMPARISON_CONFIG'):
+            from private_attempt_inspector import create_reader
+            self.comparison_reader = create_reader(env)
         self.assets = _assets()
         try:
             self.query = SnapshotQuery(snapshot_dir)
@@ -275,6 +287,75 @@ class PrivateOrigin(ThreadingHTTPServer):
         sock.settimeout(5)
         return sock, address
 
+    @staticmethod
+    def retained_row_id(row):
+        binding = {'reference': row.get('reference'),
+                   'coordinates': row.get('candidate', {}).get('coordinates')}
+        return sha256(json.dumps(binding, sort_keys=True, separators=(',', ':'),
+                                 ensure_ascii=False).encode('utf-8')).hexdigest()
+
+    def bind_inspector_sources(self, result, filters):
+        rows = result.get('rows', [])
+        offset = result.get('pagination', {}).get('offset', filters.get('offset', 0))
+        if len(self.inspector_sources) > 1000:
+            self.inspector_sources.clear()
+        for index, row in enumerate(rows):
+            reference = row.get('reference', {})
+            source_hash = reference.get('source-sha256', '')
+            artifact_hash = reference.get('artifact-sha256', '')
+            if not all(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value)
+                       for value in (source_hash, artifact_hash)):
+                row['source_access'] = {'status': 'unavailable', 'reason': 'Exact retained source binding absent'}
+                continue
+            row_id = self.retained_row_id(row)
+            self.inspector_sources[row_id] = {**filters, 'offset': offset + index, 'limit': 1}
+            access = {'status': 'retained_derivative', 'retained_row_id': row_id,
+                      'reason': 'Verified pinned retained artifact; original source access unavailable',
+                      'original_replay': 'restricted_original_required' if row.get('source', {}).get('federation') == 'AIDA' else 'original_unavailable'}
+            # Existing snapshot viewers require a unique exact row and raw-field binding.
+            coordinates = row.get('candidate', {}).get('coordinates')
+            raw = row.get('candidate', {}).get('raw', {})
+            matches = []
+            for record in self.query.db.execute(
+                    "SELECT record_id FROM records WHERE source_object_id=? AND kind='candidate_position'",
+                    ('sha256:' + source_hash,)):
+                detail = self.query.detail(record['record_id'])
+                if (coordinates in (detail['citation'], detail['raw'].get('coordinates'))
+                        and (raw == detail['raw_fields'] or raw.get('fields') == detail['raw_fields'])):
+                    matches.append(detail)
+            if len(matches) == 1 and self.source_view is not None:
+                try:
+                    self.source_view.inspect(matches[0])
+                    access.update(status='verified', record_id=matches[0]['record_id'],
+                                  reason='Verified exact immutable snapshot row and cited private source')
+                except SourceViewError:
+                    pass
+            if hasattr(self.comparison_reader, 'source_available') and row.get('source', {}).get('federation') == 'CMAS':
+                try:
+                    if self.comparison_reader.source_available(row):
+                        access.update(original_page=coordinates.get('page'),
+                                      original_replay='available_private_pdf',
+                                      reason='Configured pinned PDF; exact cited page verified on opening')
+                except (ValueError, OSError, SourceViewError):
+                    pass
+            row['source_access'] = access
+        return result
+
+    def inspector_row(self, row_id):
+        filters = self.inspector_sources.get(row_id)
+        if filters is None or self.comparison_reader is None:
+            raise SourceViewError(404)
+        try:
+            result = self.comparison_reader(filters, self.status_authority())
+        except StatusConflict:
+            raise
+        except Exception as exc:
+            raise SourceViewError(503) from exc
+        rows = result.get('rows', [])
+        if len(rows) != 1 or self.retained_row_id(rows[0]) != row_id:
+            raise SourceViewError(404)
+        return rows[0]
+
 
 def _serialized_request(method):
     def run(self):
@@ -291,8 +372,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def _reply(self, status, body=b'', content_type='text/plain; charset=utf-8'):
-        if len(body) > MAX_RESPONSE:
+    def _reply(self, status, body=b'', content_type='text/plain; charset=utf-8', *, max_response=MAX_RESPONSE):
+        if len(body) > max_response:
             status, body, content_type = 413, b'', 'text/plain; charset=utf-8'
         self.send_response(status)
         for name, value in (
@@ -433,8 +514,25 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result[key] = int(result[key])
         return result
 
-    def _json(self, value):
-        self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+    def _json(self, value, *, max_response=MAX_RESPONSE):
+        self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'),
+                    'application/json; charset=utf-8', max_response=max_response)
+
+    def _inspector_filters(self, query):
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=11)
+        if set(args) - INSPECTOR_FILTERS or any(len(values) != 1 for values in args.values()):
+            raise ValueError('invalid comparison filters')
+        result = {key: values[0] for key, values in args.items() if values[0]}
+        if any(len(value) > 200 for value in result.values()):
+            raise ValueError('comparison filter exceeds bound')
+        for key in ('limit', 'offset'):
+            if key in result:
+                if not re.fullmatch(r'[0-9]{1,6}', result[key]):
+                    raise ValueError('invalid comparison paging')
+                result[key] = int(result[key])
+        if not 1 <= result.get('limit', 25) <= 100:
+            raise ValueError('invalid comparison page size')
+        return result
 
     @_serialized_request
     def do_GET(self):
@@ -485,6 +583,49 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 result = query.source(args['name'][0])
             elif path == '/owner-evidence/api/browse':
                 result = query.browse(**self._filters(parsed.query))
+            elif path == '/owner-evidence/api/attempt-inspector':
+                filters = self._inspector_filters(parsed.query)
+                if self.server.comparison_reader is None:
+                    return self._reply(503)
+                authority = self.server.status_authority()
+                try:
+                    result = self.server.comparison_reader(filters, authority)
+                    result = self.server.bind_inspector_sources(result, filters)
+                except ValueError:
+                    raise
+                except Exception:
+                    return self._reply(503)
+            elif INSPECTOR_SOURCE_PATH.fullmatch(path) and not parsed.query:
+                row = self.server.inspector_row(INSPECTOR_SOURCE_PATH.fullmatch(path).group(1))
+                candidate = row.get('candidate', {})
+                result = {'format': 'cited_retained_derivative',
+                          'source_sha256': row['reference']['source-sha256'],
+                          'derivative_sha256': row['reference']['artifact-sha256'],
+                          'citation': candidate.get('coordinates'), 'reference': row['reference'],
+                          'source_value': candidate.get('raw'), 'raw_fields': candidate.get('raw'),
+                          'parsed_fields': candidate.get('parsed'),
+                          'retained_versions': row.get('retained-versions', []),
+                          'original_replay': 'restricted_original_required' if row.get('source', {}).get('federation') == 'AIDA' else 'private_pdf_requires_exact_page_binding'}
+            elif INSPECTOR_PAGE_PATH.fullmatch(path) and not parsed.query:
+                row_id, page = INSPECTOR_PAGE_PATH.fullmatch(path).groups()
+                row, page = self.server.inspector_row(row_id), int(page)
+                coordinates = row.get('candidate', {}).get('coordinates', {})
+                if (row.get('source', {}).get('federation') != 'CMAS'
+                        or coordinates.get('page') != page
+                        or not hasattr(self.server.comparison_reader, 'source_bytes')):
+                    return self._reply(404)
+                data = self.server.comparison_reader.source_bytes(row)
+                with tempfile.TemporaryFile(mode='w+b') as output:
+                    rendered = subprocess.run(['pdftoppm', '-f', str(page), '-l', str(page),
+                        '-scale-to', '1400', '-singlefile', '-png', '-'], input=data,
+                        stdout=output, stderr=subprocess.DEVNULL, timeout=15, check=False,
+                        preexec_fn=_limit_renderer)
+                    if output.seek(0, 2) >= MAX_IMAGE:
+                        return self._reply(413)
+                    output.seek(0); image = output.read(MAX_IMAGE)
+                if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
+                    return self._reply(422)
+                return self._reply(200, image, 'image/png')
             elif path == '/owner-evidence/api/queue':
                 result = query.queue(**self._queue_filters(parsed.query))
             elif path == '/owner-evidence/api/issue172-queue':
@@ -622,11 +763,12 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             return self._reply(404)
         except ValueError:
             return self._reply(400)
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError, subprocess.SubprocessError):
             return self._reply(503)
         if result is None:
             return self._reply(404)
-        return self._json(result)
+        return self._json(result, max_response=MAX_INSPECTOR_RESPONSE if
+                          path == '/owner-evidence/api/attempt-inspector' else MAX_RESPONSE)
 
     do_HEAD = do_GET
 

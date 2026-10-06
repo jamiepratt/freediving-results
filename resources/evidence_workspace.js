@@ -4,6 +4,76 @@ let offset = 0, total = 0, active = 'browse', queueOffset = 0, comparisonOffset 
 let routeOffset = 0;
 let issue172Offset = 0;
 const routeAuthorities = new Map();
+let inspectorOffset=0, inspectorRows=[], inspectorPageSize=25;
+const inspectorFilterNames=['federation','environment','discipline','year','gender','category','representation','review','publication'];
+function inspectorValue(value){return value==null?'unknown':typeof value==='object'?JSON.stringify(value):String(value);}
+function renderAttemptInspector(result){
+  const coverage=result.counts || result.coverage || {},readiness=result.readiness || {},paging=result.pagination || {};
+  const summary=$('inspector-summary');summary.replaceChildren();
+  summary.append(cell(`${coverage.source_positions ?? 'unknown'} source positions; ${coverage.retained_observation_versions ?? 'unknown'} retained observation versions. Distinct sporting attempts: ${coverage.distinct_sporting_attempts ?? 'unknown'}. ${result.coverage?.ranked ?? readiness.ranked_positions ?? 0} ranked positions. Cutoff: ${result.cutoff || 'unknown'}. Eligible peer cohorts: ${coverage.eligible_peer_cohorts ?? 'unknown'}. Current authority: ${inspectorValue(result.authority)}.`, 'p'));
+  for(const gap of result.gaps || [])summary.append(cell(inspectorValue(gap),'p'));
+  const options=result.filter_options || {};
+  for(const name of inspectorFilterNames){
+    const select=$('inspector-'+name), selected=select.value;
+    select.replaceChildren();const all=cell('All '+name,'option');all.value='';select.append(all);
+    for(const value of options[name] || []){const option=cell(inspectorValue(value),'option');option.value=String(value);select.append(option);}select.value=selected;
+  }
+  inspectorRows=result.rows || [];inspectorPageSize=paging.limit || 25;
+  const table=document.createElement('table');table.append(makeRow(['Source / exact row','Version / sport','Finality / review / publication','Comparison / rank','Inspect'],'th'));
+  inspectorRows.forEach((row,index)=>{
+    const reference=row.reference || {},source=row.source || {},candidate=row.candidate || {},parsed=candidate.parsed || {};
+    const tr=makeRow([`${row.source_id || reference.source_id || source.source_id || 'unknown'} / ${inspectorValue(row.row_coordinate || reference.row_coordinate || candidate.coordinates)}`,
+      `${row.version_id || reference.version_id || 'unknown'} / ${row.federation || source.federation || parsed.federation || 'unknown'} ${row.discipline || parsed.discipline || 'unknown'}`,
+      `${inspectorValue(row.finality)} / ${inspectorValue(row.review)} / ${inspectorValue(row.publication)}`,
+      `${row['comparison-status'] || row.comparison_status || 'withheld'} / ${row.rank ?? 'withheld'}`]);
+    const button=cell('Inspect retained row','button');button.type='button';button.addEventListener('click',()=>showInspectorRow(index));
+    const td=document.createElement('td');td.append(button);tr.append(td);table.append(tr);
+  });
+  const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table);$('inspector-results').replaceChildren(scroll);
+  summary.append(cell(`Showing ${inspectorRows.length} of ${paging.total ?? inspectorRows.length} filtered source positions, offset ${paging.offset ?? 0}.`, 'p'));
+  $('inspector-previous').disabled=(paging.offset || 0)===0;
+  $('inspector-next').disabled=(paging.offset || 0)+inspectorRows.length >= (paging.total || 0);
+}
+function showInspectorRow(index){
+  const row=inspectorRows[index];if(!row)return;
+  const area=$('inspector-detail');area.replaceChildren(heading('Exact retained source row'));
+  entries(area,{reference:row.reference,source:row.source,coordinates:row.candidate?.coordinates,
+    finality:row.finality,review:row.review,publication:row.publication,
+    comparison_status:row['comparison-status'] || row.comparison_status,rank:row.rank ?? 'withheld',reasons:row.reasons,peer_status:row.peer_status,peer_reasons:row.peer_reasons});
+  area.append(heading('Raw source fields'),jsonBlock(row.candidate?.raw || {}),heading('Parsed fields'),jsonBlock(row.candidate?.parsed || {}));
+  area.append(heading('Retained observation versions'));
+  for(const version of row['retained-versions'] || row.retained_versions || []){const box=document.createElement('div');box.append(jsonBlock(version));area.append(box);}
+  const access=row.source_access || {status:'unavailable',reason:'No verified snapshot row binding; restricted originals remain blocked'};
+  area.append(heading('Verified private source access'));entries(area,access);
+  if(access.status==='verified' && /^[a-f0-9]{64}$/.test(access.record_id || '')){
+    const view=document.createElement('div');view.className='source-view';const button=cell('Open verified cited source','button');button.type='button';
+    button.addEventListener('click',()=>run(()=>showSourceView(access.record_id,view),'inspector-detail'));area.append(button,view);
+  }
+  if(/^[a-f0-9]{64}$/.test(access.retained_row_id || '')){
+    const view=document.createElement('div');view.className='source-view';const button=cell('Open cited retained derivative','button');button.type='button';
+    button.addEventListener('click',()=>{showInspectorSource(access.retained_row_id,view).catch(error=>{view.textContent='Source context unavailable: '+error.message;});});area.append(button,view);
+    if(Number.isInteger(access.original_page)){
+      const original=cell('Show cited original PDF page '+access.original_page,'button');original.type='button';
+      original.addEventListener('click',()=>{const image=document.createElement('img');image.alt='Verified cited original PDF page '+access.original_page;
+        image.src='/api/attempt-inspector/source/'+access.retained_row_id+'/page/'+access.original_page;view.replaceChildren(image);});area.append(original);
+    }
+  }
+}
+async function showInspectorSource(rowId,area){
+  area.replaceChildren();const info=await fetchJson('/api/attempt-inspector/source/'+rowId);
+  area.append(heading('Verified retained derivative source context'));
+  entries(area,{source_sha256:info.source_sha256,derivative_sha256:info.derivative_sha256,citation:info.citation,reference:info.reference,original_replay:info.original_replay});
+  area.append(heading('Cited source value'),jsonBlock(info.source_value),heading('Parsed fields'),jsonBlock(info.parsed_fields));
+}
+async function loadAttemptInspector(){
+  // Withdraw visible rows before every refresh, including denied or failed requests.
+  inspectorRows=[];$('inspector-results').replaceChildren();$('inspector-detail').replaceChildren();
+  $('inspector-summary').textContent='Checking fresh current authority; ranks withheld while loading.';
+  const params=new URLSearchParams(new FormData($('inspector-filters')));for(const [key,value] of [...params])if(!value)params.delete(key);
+  if(!params.has('limit'))params.set('limit','25');params.set('offset',inspectorOffset);
+  try{renderAttemptInspector(await fetchJson('/api/attempt-inspector?'+params));}
+  catch(error){$('inspector-summary').textContent='Private comparison unavailable; current authority unverified and ranks withheld. '+error.message;throw error;}
+}
 function cell(text, tag='td') { const n=document.createElement(tag); n.textContent=text==null?'unknown':String(text); return n; }
 function heading(text) { const n=document.createElement('h3'); n.textContent=text; return n; }
 function jsonBlock(value) { const n=document.createElement('pre'); n.textContent=JSON.stringify(value,null,2); return n; }
@@ -471,6 +541,13 @@ async function submitDecisionAction(id,action,reason,option=null){
 }
 document.addEventListener('DOMContentLoaded',()=>{run(loadRoatan,'roatan-detail');run(loadOverview);run(browse);run(loadQueue,'queue-summary');run(loadComparisons,'comparison-summary');$('comparison-previous').addEventListener('click',()=>{comparisonOffset=Math.max(0,comparisonOffset-25);run(loadComparisons,'comparison-summary');});$('comparison-next').addEventListener('click',()=>{comparisonOffset+=25;run(loadComparisons,'comparison-summary');});$('filters').addEventListener('submit',e=>{e.preventDefault();offset=0;run(browse);});$('queue-filters').addEventListener('submit',e=>{e.preventDefault();queueOffset=0;run(loadQueue,'queue-summary');});$('queue-previous').addEventListener('click',()=>{queueOffset=Math.max(0,queueOffset-Number($('queue-filters').elements.limit.value));run(loadQueue,'queue-summary');});$('queue-next').addEventListener('click',()=>{queueOffset+=Number($('queue-filters').elements.limit.value);run(loadQueue,'queue-summary');});$('show-source').addEventListener('click',()=>run(sourceDetail));for(const name of ['candidates','gaps','relationships'])$(name).addEventListener('click',()=>{active=name==='candidates'?'browse':name;if(name==='candidates')document.querySelector('[name=kind]').value='candidate_position';offset=0;run(browse);});$('previous').addEventListener('click',()=>{offset=Math.max(0,offset-Number(document.querySelector('[name=limit]').value));run(browse);});$('next').addEventListener('click',()=>{offset+=Number(document.querySelector('[name=limit]').value);run(browse);});});
 document.addEventListener('DOMContentLoaded',()=>{run(loadIssue172Queue,'issue172-summary');$('issue172-previous').addEventListener('click',()=>{issue172Offset=Math.max(0,issue172Offset-25);run(loadIssue172Queue,'issue172-summary');});$('issue172-next').addEventListener('click',()=>{issue172Offset+=25;run(loadIssue172Queue,'issue172-summary');});});
+document.addEventListener('DOMContentLoaded',()=>{
+  const refresh=()=>{loadAttemptInspector().catch(()=>{});};refresh();
+  $('inspector-filters').addEventListener('submit',event=>{event.preventDefault();inspectorOffset=0;refresh();});
+  $('inspector-refresh').addEventListener('click',refresh);
+  $('inspector-previous').addEventListener('click',()=>{inspectorOffset=Math.max(0,inspectorOffset-inspectorPageSize);refresh();});
+  $('inspector-next').addEventListener('click',()=>{inspectorOffset+=inspectorPageSize;refresh();});
+});
 document.addEventListener('DOMContentLoaded',()=>{
   run(async()=>{await loadRoutes();await loadRouteLeads();},'route-summary');
   run(loadAffiliateNames,'affiliate-summary');

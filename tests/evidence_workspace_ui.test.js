@@ -26,6 +26,48 @@ function workspace(responses = {}, statuses = {}, pathname = '/owner-evidence') 
   return {context, node: document.getElementById, requests};
 }
 
+test('private attempt inspector separates denominators and shows retained versions with evidence gaps', async () => {
+  const {context,node,requests}=workspace({'/api/attempt-inspector?limit=25&offset=0': {
+    schema:'private-attempt-inspector/v1', cutoff:'2026-10-01T12:39:47Z',
+    readiness:{'source-positions':138}, authority:{status:'absent'}, coverage:{ranked:0,withheld:138},
+    counts:{source_positions:138,retained_observation_versions:276,distinct_sporting_attempts:null,eligible_peer_cohorts:0},
+    gaps:['AIDA final publication and post-penalty semantics unverified'],
+    pagination:{total:1,limit:25,offset:0}, filter_options:{federation:['AIDA','CMAS']},
+    rows:[{source_id:'synthetic-source',version_id:'synthetic-v2',row_coordinate:{table:1,row:3},reference:{'source-sha256':'a'.repeat(64),'artifact-sha256':'b'.repeat(64),ordinal:1},
+      source:{federation:'AIDA'},candidate:{raw:{fields:{card:'<script>test</script>'}},parsed:{discipline:'DNF',gender:'women'}},
+      finality:'unknown',review:'unreviewed',publication:'private','comparison-status':'withheld',reasons:['missing current exact-row evidence'],
+      'retained-versions':[{reference:{version_id:'synthetic-v1'},candidate:{parsed:{result:41}}},
+        {reference:{version_id:'synthetic-v2'},candidate:{parsed:{result:42}}}],
+      source_access:{status:'unavailable',reason:'No verified snapshot row binding'}}]}});
+  await vm.runInContext('loadAttemptInspector()',context);
+  for(const phrase of ['138 source positions','276 retained observation versions','Distinct sporting attempts: unknown','0 ranked positions','2026-10-01T12:39:47Z','AIDA final publication'])assert.ok(node('inspector-summary').visibleText.includes(phrase),phrase);
+  assert.match(node('inspector-results').visibleText,/synthetic-source/);
+  context.inspectorIndex=0;
+  vm.runInContext('showInspectorRow(inspectorIndex)',context);
+  const detail=node('inspector-detail').visibleText;
+  for(const phrase of ['synthetic-v1','synthetic-v2','41','42','<script>test</script>','missing current exact-row evidence','No verified snapshot row binding'])assert.ok(detail.includes(phrase),phrase);
+  assert.equal(requests.length,1);
+  assert.ok(requests.every(request=>request.options.cache==='no-store'));
+});
+
+test('private inspector submits sport filters and clears prior ranks when fresh authority fails', async () => {
+  const path='/api/attempt-inspector?federation=CMAS&discipline=DNF&representation=FRA&limit=50&offset=0';
+  const statuses={};
+  const {context,node,requests}=workspace({[path]:{coverage:{source_positions:1,retained_observation_versions:2},
+    readiness:{status:'synthetic eligible',ranked_positions:1},pagination:{total:1,limit:50,offset:0},
+    rows:[{reference:{source_id:'isolated-synthetic'},candidate:{parsed:{}},comparison_status:'eligible',rank:1}]}},statuses);
+  context.FormData=class { *[Symbol.iterator](){yield ['federation','CMAS'];yield ['discipline','DNF'];yield ['representation','FRA'];yield ['limit','50'];} };
+  await vm.runInContext('loadAttemptInspector()',context);
+  assert.match(node('inspector-results').visibleText,/eligible \/ 1/);
+  vm.runInContext('showInspectorRow(0)',context);
+  statuses[path]=503;
+  await assert.rejects(vm.runInContext('loadAttemptInspector()',context),/HTTP 503/);
+  assert.equal(node('inspector-results').visibleText,'');
+  assert.equal(node('inspector-detail').visibleText,'');
+  assert.match(node('inspector-summary').visibleText,/ranks withheld/);
+  assert.deepEqual(requests.map(request=>request.path),[path,path]);
+});
+
 test('current owner status separates canonical cohorts from historical identity receipt', () => {
   const {context,node}=workspace();
   context.receipt={schema:'private-presentation-status/v4',run_id:'normal-run',

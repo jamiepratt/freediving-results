@@ -137,6 +137,92 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['normalized_federation'], 'unavailable in this snapshot')
 
+    def test_attempt_inspector_is_private_and_collects_fresh_authority(self):
+        # Isolated transport fixture: no real retained rows or authority.
+        authority = {'synthetic_revision': 1}
+        self.server.status_authority = lambda: dict(authority)
+        self.server.comparison_reader = lambda filters, current: {
+            'schema': 'private-attempt-inspector/v1', 'filters': filters,
+            'authority': current, 'rows': [], 'ranks': []}
+        path = '/owner-evidence/api/attempt-inspector?federation=AIDA&limit=25&offset=0'
+        status, headers, body = self.request(path)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result['filters'], {'federation': 'AIDA', 'limit': 25, 'offset': 0})
+        self.assertEqual(result['authority']['synthetic_revision'], 1)
+        authority['synthetic_revision'] = 2
+        self.assertEqual(json.loads(self.request(path)[2])['authority']['synthetic_revision'], 2)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.request(path, headers=[('Host', HOST)])[0], 403)
+        for query in ('federation=AIDA&federation=CMAS', 'unknown=1', 'limit=101', 'offset=-1'):
+            self.assertEqual(self.request('/owner-evidence/api/attempt-inspector?' + query)[0], 400)
+
+    def test_private_inspector_accepts_bounded_full_version_page_without_raising_other_route_caps(self):
+        padding = 'synthetic' * (3 * 1024 * 1024 // 9)
+        self.server.comparison_reader = lambda filters, current: {
+            'schema': 'private-attempt-inspector/v1', 'rows': [], 'synthetic_padding': padding}
+        path = '/owner-evidence/api/attempt-inspector?limit=100'
+        self.assertEqual(self.request(path)[0], 200)
+        self.server.query.overview = lambda: {'synthetic_padding': padding, 'federation_mapping': {'schema': None}}
+        self.assertEqual(self.request('/owner-evidence/api/overview')[0], 413)
+        padding += 'synthetic' * (2 * 1024 * 1024 // 9)
+        self.assertEqual(self.request(path)[0], 413)
+
+    def test_retained_inspector_source_context_rechecks_exact_private_row(self):
+        retained = {'reference': {'source-sha256': 'a' * 64, 'artifact-sha256': 'b' * 64, 'ordinal': 0},
+                    'candidate': {'coordinates': {'page': 5, 'row': 1},
+                                  'raw': {'fields': {'card': 'synthetic WHITE'}},
+                                  'parsed': {'discipline': 'DNF'}},
+                    'source': {'federation': 'AIDA'}, 'rank': None}
+        self.server.comparison_reader = lambda filters, current: {
+            'schema': 'private-attempt-inspector/v1', 'pagination': {'offset': 0, 'limit': 25, 'total': 1},
+            'rows': [retained]}
+        status, _, body = self.request('/owner-evidence/api/attempt-inspector')
+        self.assertEqual(status, 200)
+        access = json.loads(body)['rows'][0]['source_access']
+        self.assertEqual(access['status'], 'retained_derivative')
+        path = '/owner-evidence/api/attempt-inspector/source/' + access['retained_row_id']
+        status, headers, body = self.request(path)
+        self.assertEqual(status, 200)
+        source = json.loads(body)
+        self.assertEqual(source['format'], 'cited_retained_derivative')
+        self.assertEqual(source['source_sha256'], 'a' * 64)
+        self.assertEqual(source['derivative_sha256'], 'b' * 64)
+        self.assertEqual(source['source_value'], retained['candidate']['raw'])
+        self.assertEqual(source['original_replay'], 'restricted_original_required')
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.request(path, headers=[('Host', HOST)])[0], 403)
+        previous_reader = self.server.comparison_reader
+        def unavailable(*args):
+            raise RuntimeError('isolated unavailable private evidence')
+        self.server.comparison_reader = unavailable
+        self.assertEqual(self.request(path)[0], 503)
+        self.server.comparison_reader = previous_reader
+        retained['candidate']['coordinates'] = {'page': 5, 'row': 2}
+        self.assertEqual(self.request(path)[0], 404)
+
+    def test_retained_inspector_pdf_is_private_and_exact_page_bound(self):
+        from test_owner_source_view import pdf_bytes
+        retained = {'reference': {'source-sha256': 'a' * 64, 'artifact-sha256': 'b' * 64, 'ordinal': 0},
+                    'candidate': {'coordinates': {'page': 1, 'row': 1}, 'raw': {}, 'parsed': {}},
+                    'source': {'federation': 'CMAS'}}
+        def reader(filters, current):
+            return {'schema': 'private-attempt-inspector/v1', 'pagination': {'offset': 0, 'total': 1}, 'rows': [retained]}
+        reader.source_available = lambda row: row['source']['federation'] == 'CMAS'
+        reader.source_bytes = lambda row: pdf_bytes()
+        self.server.comparison_reader = reader
+        body = json.loads(self.request('/owner-evidence/api/attempt-inspector')[2])
+        access = body['rows'][0]['source_access']
+        self.assertEqual(access['original_page'], 1)
+        path = '/owner-evidence/api/attempt-inspector/source/' + access['retained_row_id'] + '/page/'
+        status, headers, body = self.request(path + '1')
+        self.assertEqual((status, headers['Content-Type']), (200, 'image/png'))
+        self.assertTrue(body.startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertEqual(self.request(path + '2')[0], 404)
+        self.assertEqual(self.request(path + '1', headers=[('Host', HOST)])[0], 403)
+        retained['source']['federation'] = 'AIDA'
+        self.assertEqual(self.request(path + '1')[0], 404)
+
     def test_overview_reports_verified_source_bundle_binding(self):
         self.server.source_bundle_sha256 = 'd' * 64
         status, _, body = self.request('/owner-evidence/api/overview')
