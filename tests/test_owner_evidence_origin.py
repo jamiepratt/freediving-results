@@ -556,6 +556,69 @@ class PrivateOriginTest(unittest.TestCase):
         headers[-1] = ('Content-Length', str(len(bad)))
         self.assertEqual(self.request(path, method='POST', headers=headers, body=bad)[0], 400)
 
+    def test_pending_delivery_owner_reversal_and_restoration_preserve_signed_history(self):
+        from test_owner_decision_store import DecisionStoreTest
+        import hashlib
+        import hmac
+        fixture = DecisionStoreTest()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        digest, p = fixture.source_bound_proposal('pending-approval')
+        fixture.store.register(digest, p, idempotency_key='register-pending')
+        self.server.decisions = fixture.store
+        self.addCleanup(lambda: setattr(self.server, 'decisions', None))
+        self.server.import_token = 'separate-owner-import-token-for-tests'
+        self.server.import_client_id = 'abc12345.access'
+        path = '/owner-evidence/api/decisions/pending-approval'
+        listing = json.loads(self.request('/owner-evidence/api/decisions')[2])
+        csrf = listing['csrf_token']
+
+        def write(action, revision, key):
+            payload = json.dumps({'action': action, 'expected_revision': revision,
+                                  'idempotency_key': key, 'reason': 'synthetic owner review',
+                                  'csrf_token': csrf}).encode()
+            headers = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                       ('X-Freediving-Owner-Email', EMAIL), ('Origin', 'https://poc.alphacompose.com'),
+                       ('Content-Type', 'application/json'), ('X-Freediving-CSRF', csrf),
+                       ('Content-Length', str(len(payload)))]
+            status, _, body = self.request(path + '/actions', method='POST', headers=headers, body=payload)
+            return status, json.loads(body) if body else None
+
+        status, approved = write('approve', listing['revision'], 'approve-pending')
+        self.assertEqual(status, 200)
+        self.assertEqual(approved['effective_status'], 'projection_pending')
+        history = fixture.store.human_events()
+        status, _, body = self.request(path + '/preview?action=reverse')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['review_after']['pending-approval'], 'reversed')
+        self.assertEqual(json.loads(body)['after']['pending-approval'], 'projection_pending')
+        self.assertEqual(fixture.store.human_events(), history)
+        revision = approved['store_revision']
+        status, reversed_decision = write('reverse', revision, 'reverse-pending')
+        self.assertEqual(status, 200)
+        self.assertEqual(reversed_decision['status'], 'reversed')
+        self.assertEqual(write('reverse', revision, 'reverse-pending'), (status, reversed_decision))
+        self.assertEqual(write('approve', revision, 'stale-restoration')[0], 409)
+        status, _, body = self.request(path + '/preview?action=approve')
+        self.assertEqual(status, 200)
+        revision = json.loads(body)['revision']
+        status, restored = write('approve', revision, 'restore-pending')
+        self.assertEqual(status, 200)
+        self.assertEqual(restored['status'], 'human_approved')
+        self.assertEqual(restored['effective_status'], 'projection_pending')
+        headers = [('Host', HOST), ('X-Freediving-Owner-Gateway', SECRET),
+                   ('X-Freediving-Owner-Machine', self.server.import_client_id),
+                   ('X-Freediving-Import-Token', self.server.import_token)]
+        status, _, body = self.request('/owner-evidence/api/decision-events?after_revision=0', headers=headers)
+        self.assertEqual(status, 200)
+        envelope = json.loads(body)
+        self.assertEqual(envelope['signature'], hmac.new(self.server.import_token.encode(),
+                         envelope['payload_json'].encode(), hashlib.sha256).hexdigest())
+        self.assertEqual([e['action'] for e in json.loads(envelope['payload_json'])['events']],
+                         ['approve', 'reverse', 'approve'])
+        self.assertEqual(fixture.store.delivery_checkpoints(), {'flow-ledger': 0, 'postgresql': 0})
+        self.assertEqual(fixture.store.projection()['active_decisions'], [])
+
     def test_real_decision_store_is_bound_to_verified_snapshot(self):
         from test_owner_decision_store import proposal
         decision_path = Path(self.tmp.name) / 'durable-decisions' / 'ledger.sqlite'

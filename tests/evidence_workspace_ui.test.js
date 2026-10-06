@@ -157,7 +157,8 @@ test('Human approved queue and same attempt detail show saved review and separat
   assert.match(detail, /Human approved/);
   assert.match(detail, /canonical delivery pending/);
   assert.match(detail, /221/);
-  assert.doesNotMatch(detail, /Accepted canonical attempt|Preview Reverse|Preview correction/);
+  assert.doesNotMatch(detail, /Accepted canonical attempt/);
+  assert.match(detail, /Preview Reverse/);
 });
 
 test('reversal previews dependent impact before writing with revision, CSRF and retry key', async () => {
@@ -183,6 +184,31 @@ test('reversal previews dependent impact before writing with revision, CSRF and 
   assert.equal(body.idempotency_key, 'retry-key');
   assert.equal(body.reason, 'correction');
   assert.equal(body.csrf_token, 'csrf-9');
+});
+
+test('reversed approval offers safe restoration while invalidated or corrected decisions stay guarded', async () => {
+  const {context, node, requests} = workspace({
+    '/api/decisions/reversed': {id: 'reversed', status: 'reversed', effective_status: 'projection_pending', available_actions: ['approve'], evidence: [], history: []},
+    '/api/decisions/stale': {id: 'stale', status: 'human_approved', effective_status: 'invalidated', available_actions: [], evidence: [], history: []},
+    '/api/decisions/blocked': {id: 'blocked', status: 'reversed', effective_status: 'projection_pending', available_actions: [], evidence: [], history: []},
+    '/api/decisions/corrected': {id: 'corrected', status: 'human_corrected', effective_status: 'projection_pending', available_actions: ['reverse', 'correct'], selected_option: 'one', competing_options: ['two'], correction: {action: 'two'}, evidence: [], history: []},
+    '/api/decisions/reversed/preview?action=approve': {revision: 9, decision_id: 'reversed', action: 'approve', before: {reversed: 'projection_pending'}, after: {reversed: 'projection_pending'}, review_after: {reversed: 'human_approved'}},
+  });
+  await vm.runInContext("inspectDecision('reversed')", context);
+  assert.match(node('decision-detail').visibleText, /Preview approve/);
+  const actions = node('decision-detail').children.find(element => element.className === 'decision-actions');
+  await actions.children[0].click();
+  await new Promise(setImmediate);
+  assert.match(node('decision-preview').visibleText, /Confirm approve/);
+  assert.equal(requests.filter(request => request.options?.method === 'POST').length, 0);
+  for (const id of ['stale', 'blocked']) {
+    await vm.runInContext(`inspectDecision('${id}')`, context);
+    assert.doesNotMatch(node('decision-detail').visibleText, /Preview (Reverse|approve|correction)/);
+  }
+  await vm.runInContext("inspectDecision('corrected')", context);
+  assert.match(node('decision-detail').visibleText, /Preview Reverse/);
+  assert.match(node('decision-detail').visibleText, /Preview correction: one/);
+  assert.doesNotMatch(node('decision-detail').visibleText, /Preview correction: two|Preview approve/);
 });
 
 test('owner previews a distinct correction option and confirms that exact option', async () => {

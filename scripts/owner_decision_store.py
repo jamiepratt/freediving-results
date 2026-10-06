@@ -563,7 +563,18 @@ class DecisionStore:
                     'correction': correction, 'history': history}
 
     def inspect(self, decision_id):
-        return self._inspect(decision_id, self._binding())
+        current = self._inspect(decision_id, self._binding())
+        candidates = (['approve', 'reject', 'correct'] if current['status'] == 'pending' else
+                      ['reverse', 'correct'] if current['status'] in ACCEPTED else
+                      ['approve'] if current['status'] == 'reversed' else [])
+        available = []
+        for action in candidates:
+            try:
+                self._validate_review_action(current, action)
+            except ConflictError:
+                continue
+            available.append(action)
+        return current | {'available_actions': available}
 
     def _inspect(self, decision_id, binding):
         p = self._base(decision_id)
@@ -665,6 +676,29 @@ class DecisionStore:
                     changed = True
         return sorted(affected)
 
+    def _validate_review_action(self, current, action):
+        # Delivery state is separate from the validity of the current owner review.
+        status = (current['status'] if current['effective_status'] == 'projection_pending'
+                  else current['effective_status'])
+        restoring = action == 'approve' and status == 'reversed'
+        if action in ('approve', 'correct') and status not in ('pending', *ACCEPTED) and not restoring:
+            raise ConflictError('decision cannot be approved in current state')
+        if action == 'reject' and status != 'pending':
+            raise ConflictError('only pending decisions can be rejected')
+        if action == 'reverse' and status not in ACCEPTED:
+            raise ConflictError('only active approvals can be reversed')
+        if action == 'approve' and (current['status'] == 'human_corrected' or current['correction'] is not None):
+            raise ConflictError('human correction cannot be overwritten by approval')
+        if restoring:
+            binding = self._binding()
+            if (binding is None or current['missing_evidence_ids'] or
+                    not self._revisions_current(current, binding)):
+                raise ConflictError('restoration requires current evidence')
+        if action in ('approve', 'correct') and any(
+                self._inspect(dependency, self._binding())['effective_status'] not in ACCEPTED
+                for dependency in current['depends_on']):
+            raise ConflictError('approval requires active prerequisites')
+
     def preview(self, decision_id, *, action, option=None):
         if action not in ACTIONS:
             raise ValueError('invalid action')
@@ -674,15 +708,17 @@ class DecisionStore:
             if (not isinstance(option, str) or option not in
                     [current['selected_option'], *current['competing_options']] or option == current_option):
                 raise ValueError('invalid correction option')
-            if current['effective_status'] not in ('pending', *ACCEPTED):
-                raise ConflictError('decision cannot be corrected in current state')
         elif option is not None:
             raise ValueError('option only valid for correction')
+        self._validate_review_action(current, action)
         affected = self._affected(decision_id)
         before = {ident: self.inspect(ident)['effective_status'] for ident in affected}
         after = dict(before)
         after[decision_id] = {'approve': 'human_approved', 'reject': 'rejected',
                               'reverse': 'reversed', 'correct': 'human_corrected'}[action]
+        review_after = {decision_id: after[decision_id]}
+        if self._has_source_derived_revision(current):
+            after[decision_id] = 'projection_pending'
         while True:
             changed = False
             for ident in affected:
@@ -699,6 +735,7 @@ class DecisionStore:
                 'affected_decisions': affected, 'affected_groups': sorted(set(
                     group for ident in affected for group in self._base(ident)['groups'])),
                 'before': before, 'after': after,
+                'review_after': review_after,
                 'original': current['original'], 'proposed': current['proposed'],
                 'canonical_projection_status': 'unavailable'}
 
@@ -717,19 +754,7 @@ class DecisionStore:
             return old
         try:
             current = self.inspect(decision_id)
-            status = current['effective_status']
-            if action in ('approve', 'correct') and status not in ('pending', 'automatic_approved', 'human_approved', 'human_corrected'):
-                raise ConflictError('decision cannot be approved in current state')
-            if action == 'reject' and status != 'pending':
-                raise ConflictError('only pending decisions can be rejected')
-            if action == 'reverse' and status not in ACCEPTED:
-                raise ConflictError('only active approvals can be reversed')
-            if action == 'approve' and current['status'] == 'human_corrected':
-                raise ConflictError('human correction cannot be overwritten by approval')
-            if action in ('approve', 'correct') and any(
-                    self.inspect(dependency)['effective_status'] not in ACCEPTED
-                    for dependency in current['depends_on']):
-                raise ConflictError('approval requires active prerequisites')
+            self._validate_review_action(current, action)
             revision = self._next_revision()
             self._event(revision, decision_id, action, actor, reason, correction)
             binding = self._binding()

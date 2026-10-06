@@ -249,6 +249,95 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertEqual(self.store.projection()['active_decisions'], [])
         self.assertEqual(len(self.store.human_events()['events']), 5)
 
+    def test_pending_delivery_approval_can_be_previewed_and_reversed_without_canonical_acceptance(self):
+        digest, p = self.source_bound_proposal('approved')
+        self.store.register(digest, p, idempotency_key='register-approved')
+        self.store.act('approved', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-approved')
+        revision = self.store.revision
+        history = self.store.human_events()['events']
+        preview = self.store.preview('approved', action='reverse')
+        self.assertEqual(preview['before'], {'approved': 'projection_pending'})
+        self.assertEqual(preview['review_after'], {'approved': 'reversed'})
+        self.assertEqual(preview['after'], {'approved': 'projection_pending'})
+        self.assertEqual(self.store.revision, revision)
+        self.assertEqual(self.store.human_events()['events'], history)
+        reversed_decision = self.store.act('approved', action='reverse', expected_revision=revision,
+                                           idempotency_key='reverse-approved')
+        self.assertEqual(reversed_decision['status'], 'reversed')
+        self.assertEqual(reversed_decision['effective_status'], 'projection_pending')
+        self.assertEqual(reversed_decision, self.store.act(
+            'approved', action='reverse', expected_revision=revision, idempotency_key='reverse-approved'))
+        self.assertEqual([e['action'] for e in self.store.human_events()['events']], ['approve', 'reverse'])
+        self.assertEqual(self.store.projection()['active_decisions'], [])
+        self.assertEqual(self.store.projection()['overlay_decision_counts_by_group'], {})
+        self.assertEqual(self.store.delivery_checkpoints(), {'flow-ledger': 0, 'postgresql': 0})
+        self.assertEqual(self.store.inspect('approved')['available_actions'], ['approve'])
+
+    def test_pending_delivery_correction_has_consistent_preview_and_reversal_guards(self):
+        digest, p = self.source_bound_proposal('corrected')
+        self.store.register(digest, p, idempotency_key='register-corrected')
+        self.store.act('corrected', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-corrected')
+        preview = self.store.preview('corrected', action='correct', option='two')
+        self.assertEqual(preview['after_option'], 'two')
+        self.assertEqual(preview['review_after']['corrected'], 'human_corrected')
+        self.assertEqual(preview['after']['corrected'], 'projection_pending')
+        corrected = self.store.act('corrected', action='correct', correction={'action': 'two'},
+                                   expected_revision=preview['revision'], idempotency_key='correct-corrected')
+        self.assertEqual(corrected['status'], 'human_corrected')
+        with self.assertRaises(ValueError):
+            self.store.preview('corrected', action='correct', option='two')
+        reverse = self.store.preview('corrected', action='reverse')
+        self.store.act('corrected', action='reverse', expected_revision=reverse['revision'],
+                       idempotency_key='reverse-corrected')
+        self.assertEqual(self.store.inspect('corrected')['correction'], {'action': 'two'})
+        self.assertEqual(self.store.projection()['active_decisions'], [])
+        self.assertEqual(self.store.inspect('corrected')['available_actions'], [])
+        for operation in (lambda: self.store.preview('corrected', action='approve'),
+                          lambda: self.store.act('corrected', action='approve',
+                                                  expected_revision=self.store.revision,
+                                                  idempotency_key='overwrite-correction')):
+            with self.assertRaisesRegex(ConflictError, 'human correction'):
+                operation()
+
+    def test_reversed_approval_restoration_requires_current_evidence_and_active_prerequisites(self):
+        digest, p = self.source_bound_proposal('dependent')
+        record_id = p['evidence'][0]['id']
+        self.store.register(digest, proposal('root', evidence=record_id), idempotency_key='register-root')
+        self.store.act('root', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-root')
+        p['depends_on'] = ['root']
+        self.store.register(digest, p, idempotency_key='register-dependent')
+        for action in ('approve', 'reverse'):
+            self.store.act('dependent', action=action, expected_revision=self.store.revision,
+                           idempotency_key=action + '-dependent')
+        self.assertEqual(self.store.inspect('dependent')['available_actions'], ['approve'])
+        self.store.act('root', action='reverse', expected_revision=self.store.revision,
+                       idempotency_key='reverse-root')
+        revision = self.store.revision
+        events = self.store.human_events()
+        self.assertEqual(self.store.inspect('dependent')['available_actions'], [])
+        for operation in (lambda: self.store.preview('dependent', action='approve'),
+                          lambda: self.store.act('dependent', action='approve', expected_revision=revision,
+                                                 idempotency_key='restore-without-root')):
+            with self.assertRaisesRegex(ConflictError, 'active prerequisites'):
+                operation()
+        self.assertEqual(self.store.human_events(), events)
+        self.store.act('root', action='approve', expected_revision=revision, idempotency_key='restore-root')
+        for changed_digest, evidence in [(SNAP_B, (record_id,)), (SNAP_A, ())]:
+            self.bind(changed_digest, evidence=evidence)
+            revision = self.store.revision
+            events = self.store.human_events()
+            self.assertEqual(self.store.inspect('dependent')['available_actions'], [])
+            for operation in (lambda: self.store.preview('dependent', action='approve'),
+                              lambda: self.store.act('dependent', action='approve', expected_revision=revision,
+                                                     idempotency_key='restore-stale-' + changed_digest)):
+                with self.assertRaisesRegex(ConflictError, 'current evidence'):
+                    operation()
+            self.assertEqual(self.store.human_events(), events)
+        self.assertEqual(self.store.projection()['active_decisions'], [])
+
     def test_review_filters_keep_current_corrections_rejections_and_reversals_pending_delivery(self):
         digest, first = self.source_bound_proposal('corrected')
         for ident, action in [('corrected', 'correct'), ('rejected', 'reject'), ('reversed', 'approve')]:
@@ -292,6 +381,15 @@ class DecisionStoreTest(unittest.TestCase):
             self.assertEqual(self.store.queue(status='human_corrected')['total'], 0)
             self.assertEqual(self.store.queue(status='projection_pending')['total'], 0)
             self.assertEqual(self.store.queue(status='invalidated')['total'], 2)
+            for ident in ('approved', 'corrected'):
+                self.assertEqual(self.store.inspect(ident)['available_actions'], [])
+                for action in ('reverse', 'correct'):
+                    with self.assertRaises(ConflictError):
+                        self.store.preview(ident, action=action, **({'option': 'two'} if action == 'correct' else {}))
+                    with self.assertRaises(ConflictError):
+                        self.store.act(ident, action=action, expected_revision=self.store.revision,
+                                       idempotency_key=ident + '-' + action + '-' + snapshot_digest,
+                                       correction={'action': 'two'} if action == 'correct' else None)
         self.assertEqual(self.store.inspect('approved')['status'], 'human_approved')
         self.assertEqual(self.store.inspect('corrected')['status'], 'human_corrected')
 
@@ -311,6 +409,9 @@ class DecisionStoreTest(unittest.TestCase):
         self.assertEqual(self.store.queue(status='human_approved')['total'], 0)
         self.assertEqual(self.store.inspect('dependent')['status'], 'human_approved')
         self.assertEqual(self.store.inspect('dependent')['effective_status'], 'invalidated')
+        self.assertEqual(self.store.inspect('dependent')['available_actions'], [])
+        with self.assertRaises(ConflictError):
+            self.store.preview('dependent', action='reverse')
 
     def test_human_approved_filter_counts_and_pages_delivered_pending_and_scoreless_reviews(self):
         digest, first = self.source_bound_proposal('delivered', score=.5)

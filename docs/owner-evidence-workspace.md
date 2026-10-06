@@ -24,6 +24,22 @@ Current human review filters include decisions awaiting canonical delivery;
 Human approved and Human corrected exclude approvals invalidated by stale evidence
 or inactive prerequisites. Canonical delivery pending remains a separate filter.
 
+To reverse a current approval, choose **Human approved**, click **Inspect** on
+the decision, then **Preview Reverse** and **Confirm reverse**. These controls
+also work while canonical delivery is pending. A preview writes no event; its
+**Review after** shows the saved review change and **After** retains
+`projection_pending` until both canonical delivery destinations acknowledge the
+new event. Reversal preserves the approval and reversal in history.
+
+To restore an original approval, choose **Reversed**, click **Inspect**, then
+**Preview approve** and **Confirm approve**. Restoration requires current cited
+evidence and active accepted prerequisites. Historical human corrections cannot
+be overwritten by ordinary approval, including after reversal; reversed
+corrections currently have no restoration control. A stale snapshot, missing
+evidence or inactive prerequisite removes the affected action controls. A
+concurrent review requires reloading and previewing again. Neither reversal nor
+restoration completes canonical delivery or grants publication approval.
+
 For a trusted local import, run
 `python3 scripts/owner_decision_export_adapter.py deliver --decision-db DB --config CONFIG`.
 `CONFIG` is a private, owner-owned EDN file with mode 0600 containing the pinned

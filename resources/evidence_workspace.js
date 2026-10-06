@@ -410,10 +410,10 @@ function renderDecisionDetail(item){
     panel.append(button,detailArea,sourceArea);area.append(panel);
   }
   const actions=document.createElement('div');actions.className='decision-actions';
-  const effective=item.effective_status || item.status;
-  const available=effective==='pending'?['approve','reject']:['automatic_approved','human_approved','human_corrected'].includes(effective)?['reverse']:[];
-  for(const action of available){const button=document.createElement('button');button.type='button';button.textContent=`Preview ${action === 'reverse' ? 'Reverse' : action}`;button.addEventListener('click',()=>run(()=>previewDecisionAction(item.id,action),'decision-detail'));actions.append(button);}
-  if(['pending','automatic_approved','human_approved','human_corrected'].includes(effective)){
+  const effective=item.effective_status==='projection_pending'?item.status:(item.effective_status || item.status);
+  const available=item.available_actions || (effective==='pending'?['approve','reject','correct']:['automatic_approved','human_approved','human_corrected'].includes(effective)?['reverse','correct']:[]);
+  for(const action of available.filter(action=>action!=='correct')){const button=document.createElement('button');button.type='button';button.textContent=`Preview ${action === 'reverse' ? 'Reverse' : action}`;button.addEventListener('click',()=>run(()=>previewDecisionAction(item.id,action),'decision-detail'));actions.append(button);}
+  if(available.includes('correct')){
     const current=(item.correction || {}).action || item.selected_option;
     for(const option of new Set([item.selected_option,...(item.competing_options || [])])){
       if(typeof option!=='string' || option===current)continue;
@@ -433,7 +433,9 @@ async function previewDecisionAction(id,action,option=null){
   const area=$('decision-preview');area.replaceChildren(heading(`${action} impact preview`));
   entries(area,{decision_id:result.decision_id,revision:result.revision,affected_decisions:result.affected_decisions,affected_groups:result.affected_groups,canonical_projection_status:result.canonical_projection_status});
   if(action==='correct')area.append(cell(`Correct from ${result.before_option} to ${result.after_option}. Canonical edges and dependent links will be recalculated after delivery; the ledger status preview does not verify their final effect.`, 'p'));
-  area.append(heading('Before'),jsonBlock(result.before),heading('After'),jsonBlock(result.after));
+  area.append(heading('Before'),jsonBlock(result.before));
+  if(result.review_after)area.append(heading('Review after'),jsonBlock(result.review_after));
+  area.append(heading('After'),jsonBlock(result.after));
   const reason=document.createElement('input');reason.type='text';reason.maxLength=500;reason.placeholder='Reason for audit history';reason.setAttribute?.('aria-label','Reason for decision action');
   const commit=document.createElement('button');commit.type='button';commit.textContent=action==='correct'?`Confirm correction to ${option}`:`Confirm ${action}`;
   commit.addEventListener('click',()=>run(()=>submitDecisionAction(id,action,reason.value,option),'decision-action-status'));
