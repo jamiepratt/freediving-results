@@ -35,3 +35,25 @@
                    "<div style='visibility: hidden'>%s</div>" "<template>%s</template>" "<noscript>%s</noscript>"]
           heading ["<h1>Hidden championship</h1>" "<div class='site-header__branding'><img alt='Hidden championship'></div>"]]
     (is (nil? (:event-name (evidence/context (artifact (str (format wrapper heading) (fixture/document fixture/cells)))))))))
+
+(deftest scoped-replay-reuses-context-without-transferring-acquisition-or-row-trust
+  (let [a (artifact (str "<h1>Synthetic championship</h1>" (fixture/document fixture/cells)))
+        payload (first (:candidates a))
+        read-row #(evidence/bound-context! % payload 0 (:source-sha256 a))
+        scoped (requiring-resolve 'freediving.html-evidence/with-verified-replay-cache)]
+    (is (= (read-row a) (scoped #(do (read-row a) (read-row a)))))
+    (scoped
+     #(do
+        (read-row a)
+        ;; Even an unselected candidate is replay-checked when the same job/source is presented.
+        (is (thrown? Exception
+                     (read-row (update a :candidates conj (assoc payload :coordinates {:table 1 :row 99})))))
+        (is (thrown? Exception (read-row (assoc a :raw-html "changed source"))))
+        (is (thrown? Exception (read-row (assoc a :parser-version "aida-html/2"))))
+        (let [changed (assoc-in (assoc a :acquisitions [{:acquisition-id "new"}])
+                                [:acquisitions 0 :manifest :provenance :browser-state :selected-date]
+                                "2025-06-29")]
+          (is (= [:acquisition-date-conflict] (:context-errors (read-row changed)))))
+        (is (thrown? Exception (evidence/bound-context! a (assoc-in payload [:parsed :points] "forged") 0 (:source-sha256 a))))))
+    ;; A later request receives its own scope and repeats provenance validation.
+    (is (thrown? Exception (scoped #(read-row (assoc a :source-sha256 "changed binding")))))))

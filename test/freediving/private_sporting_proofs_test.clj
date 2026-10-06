@@ -198,7 +198,9 @@
     (fixture/sql! fixture/admin "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.extraction_reviews,freediving.pdf_extraction_reviews,freediving.review_proposals,freediving.review_decisions,freediving.publication_decisions,freediving.publication_policy_events,freediving.revision_proposals,freediving.revision_decisions,freediving.event_selections TO proof_extra")
     (let [result (read-proof (assoc config :jdbc_url url))]
       (is (= "mapped" (get-in result [:rows 0 :diagnostics :mapping :state])))
-      (is (not-any? #(clojure.string/includes? (pr-str result) %) ["PRIVATE-OWNER" "PRIVATE-REASON" ":artifact_bytes" ":payload_edn" ":body_edn" "Éxample"]))
+      (is (not-any? #(clojure.string/includes? (pr-str result) %) ["PRIVATE-OWNER" "PRIVATE-REASON" ":artifact_bytes" ":payload_edn" ":body_edn"]))
+      (is (= "Éxample" (get-in result [:rows 0 :source_review :parsed :source-name])))
+      (is (not (clojure.string/includes? (pr-str (update result :rows #(mapv (fn [row] (dissoc row :source_review)) %))) "Éxample")))
       (is (= (:binding_sha256 result) (:binding_sha256 (read-proof (assoc config :jdbc_url url :rows []))))))
     (is (thrown? Exception (read-proof (assoc config :jdbc_url url :mode "relationships"))))
     (is (thrown? Exception (read-proof (assoc config :jdbc_url (System/getenv "FREEDIVING_TEST_PUBLIC_URL")))))
@@ -238,7 +240,7 @@
     (fixture/sql! fixture/admin "UPDATE freediving.pdf_extraction_reviews SET body_edn=replace(body_edn,':source-kind :pdf',':source-kind :html')")
     (is (empty? (get-in (read-proof config) [:rows 0 :upstream])))))
 
-(deftest html-review-is-only-the-current-explicit-source-visual-validation
+(deftest html-publication-validation-never-grants-independent-source-accuracy
   (let [target (publication-fixture/html-sample)
         stored (observations/inspect fixture/app (:job-id target))
         reference (assoc (revisions/reference fixture/app target) :parser-version (get-in stored [:artifact :parser-version]))
@@ -251,8 +253,9 @@
                                                   (assoc-in request [:attestations :source-visual-accuracy] false))))
       (publication/decide! publication-fixture/reviewer request)
       (let [current (read-proof config)]
-        (is (= "verified" (get-in current [:rows 0 :upstream :review :value])))
-        (is (= "verified-by-current-html-source-validation" (get-in current [:rows 0 :diagnostics :review :state]))))
+        (is (nil? (get-in current [:rows 0 :upstream :review])))
+        (is (= "unreviewed" (get-in current [:rows 0 :diagnostics :review :state])))
+        (is (true? (get-in current [:rows 0 :diagnostics :publication :validated]))))
       (publication/decide! publication-fixture/reviewer (assoc request :id "html-revoked" :base-revision 1 :action :revoke :attestations {}))
       (is (nil? (get-in (read-proof config) [:rows 0 :upstream :review]))))))
 

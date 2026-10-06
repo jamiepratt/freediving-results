@@ -372,7 +372,7 @@
         (= mode "relationships") (assoc-in [:diagnostics :same-attempt]
                                            (relationship-diagnostic relationship-state (:reference row) (:coordinates row)))))
     (catch Exception _ (gap row "scope-mismatch" "source-parser-row-or-current-authority-integrity-failed"))))
-(defn read-proofs
+(defn- read-proofs-in-scope
   "One global authority pin independent of requested rows. Recheck after all owned
    API reads; concurrent mutation refuses the entire result, including old links."
   [{:keys [jdbc_url database rows mode] :as config}]
@@ -409,6 +409,11 @@
     (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint c mode))))
            "Canonical sporting authority changed during read")
     result))
+(defn read-proofs
+  "Read exact current proofs with request-local immutable HTML replay reuse."
+  [config]
+  (evidence/with-verified-replay-cache #(read-proofs-in-scope config)))
+
 (defn command [config]
   (if (= "source-review" (:op config))
     ((requiring-resolve 'freediving.source-accuracy-review/execute!) (dissoc config :op))

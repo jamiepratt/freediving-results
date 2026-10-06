@@ -42,19 +42,35 @@
     (assoc (select-keys (:context artifact) [:event-date :selected-discipline :selected-gender])
            :event-name (:value heading) :event-name-evidence heading
            :acquisition-context acquisitions :context-errors errors)))
+(def ^:dynamic *verified-replays* nil)
+(defn with-verified-replay-cache
+  "Reuse exact immutable artifact replay/context inside one synchronous request only."
+  [f]
+  (binding [*verified-replays* (atom {})] (f)))
+
+(defn- verified-replay [artifact]
+  (or (when *verified-replays* (get @*verified-replays* artifact))
+      (let [source (:raw-html artifact)
+            _ (when-not (= (:source-sha256 artifact) (sha256 (.getBytes ^String source "UTF-8")))
+                (throw (ex-info "HTML source provenance mismatch" {})))
+            replayed (html/parse-html source)]
+        (when-not (= replayed (select-keys artifact (keys replayed)))
+          (throw (ex-info "HTML retained source replay or observation mismatch" {})))
+        (let [verified {:replayed replayed :context (context artifact)}]
+          (when *verified-replays* (swap! *verified-replays* assoc artifact verified))
+          verified))))
+
 (defn bound-context!
   "Replay source hash/parser and bind the precise stored candidate ordinal. No authority is conferred."
   [artifact payload ordinal source-sha256]
   (when-not (and (html? artifact) (= html/parser-version (:parser-version artifact))
-                 (string? (:raw-html artifact)) (= source-sha256 (:source-sha256 artifact))
-                 (= source-sha256 (sha256 (.getBytes ^String (:raw-html artifact) "UTF-8"))))
+                 (string? (:raw-html artifact)) (= source-sha256 (:source-sha256 artifact)))
     (throw (ex-info "HTML source provenance mismatch" {})))
-  (let [replayed (html/parse-html (:raw-html artifact))]
-    (when-not (and (= replayed (select-keys artifact (keys replayed)))
-                   (nat-int? ordinal) (< ordinal (count (:candidates replayed)))
+  (let [{:keys [replayed context]} (verified-replay artifact)]
+    (when-not (and (nat-int? ordinal) (< ordinal (count (:candidates replayed)))
                    (= payload (nth (:candidates replayed) ordinal)))
       (throw (ex-info "HTML retained source replay or observation mismatch" {})))
-    (merge (context artifact)
+    (merge context
            {:coordinates (coordinates artifact payload)
             :headers (:headers (first (filter #(= (:table %) (get-in payload [:coordinates :table])) (:tables artifact))))
             :raw-row (get-in payload [:raw :html]) :cells (get-in payload [:raw :cells])})))
