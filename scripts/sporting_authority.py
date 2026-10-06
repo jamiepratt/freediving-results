@@ -61,7 +61,7 @@ def final_value(value):
 
 def unknown_fact(value):
     if isinstance(value, dict):
-        return any(unknown_fact(item) for item in value.values())
+        return all(unknown_fact(item) for item in value.values())
     return value is None or value == 'unknown'
 
 

@@ -162,3 +162,33 @@ class RuleBindingAuthorityTest(unittest.TestCase):
         self.assertEqual(self.authority.review()['revision'], 1)
         self.assertEqual(self.authority.review()['proposals'][0]['authority_status'], 'stale')
         self.assertIsNone(self.authority.current('9' * 64)['payload']['publication'])
+
+    def test_partial_listing_cannot_bypass_independent_publisher_proof(self):
+        proposal = synthetic_proposal(self.context)
+        proposal['publication']['rows'][0]['facts']['listing']['value'] = {'publisher': 'CMAS', 'kind': 'unknown'}
+        self.context['rows'][0]['upstream'].pop('listing')
+        with self.assertRaisesRegex(ValueError, 'upstream.*listing'):
+            self.authority.stage(proposal, expected_revision=0, idempotency_key='partial-listing')
+        self.assertEqual(self.authority.review()['revision'], 0)
+
+    def test_partial_international_sanction_cannot_bypass_independent_publisher_proof(self):
+        proposal = synthetic_proposal(self.context)
+        proposal['publication']['rows'][0]['facts']['international-sanction']['value'] = {
+            'authority': 'unknown', 'level': 'international', 'status': 'verified'}
+        self.context['rows'][0]['upstream'].pop('international-sanction')
+        with self.assertRaisesRegex(ValueError, 'upstream.*international-sanction'):
+            self.authority.stage(proposal, expected_revision=0, idempotency_key='partial-sanction')
+        self.assertEqual(self.authority.review()['revision'], 0)
+
+    def test_entirely_unknown_listing_and_sanction_can_be_staged_as_unknown(self):
+        proposal = synthetic_proposal(self.context)
+        facts = proposal['publication']['rows'][0]['facts']
+        facts['listing']['value'] = {'publisher': 'unknown', 'kind': 'unknown'}
+        facts['international-sanction']['value'] = {'authority': 'unknown', 'level': 'unknown', 'status': 'unknown'}
+        for name in ('listing', 'international-sanction'):
+            self.context['rows'][0]['upstream'].pop(name)
+        self.authority.stage(proposal, expected_revision=0, idempotency_key='unknown-source-facts')
+        staged = self.authority.review()['proposals'][0]['proposal']['publication']['rows'][0]['facts']
+        self.assertEqual(staged['listing']['value'], facts['listing']['value'])
+        self.assertEqual(staged['international-sanction']['value'], facts['international-sanction']['value'])
+        self.assertIsNone(self.authority.current('9' * 64)['payload']['publication'])
