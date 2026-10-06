@@ -23,7 +23,10 @@ IMMUTABLE_COUNTS = ('athlete_identity_events', 'source_identity_observations',
 
 
 def data_digest(database, port):
+    # PostgreSQL 17 otherwise generates a fresh psql restriction key per dump.
+    # These dumps are hashed only, never executed as SQL.
     data = postgres('pg_dump', '--data-only', '--no-owner', '--no-acl',
+                    '--restrict-key=' + '0' * 64,
                     '--exclude-table=freediving.schema_migrations', '-h',
                     '/var/run/postgresql', '-p', port, '-d', database)
     return hashlib.sha256(data).hexdigest()
