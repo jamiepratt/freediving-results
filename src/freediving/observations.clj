@@ -228,6 +228,7 @@
      (with-open [c (connect url)]
        (.setAutoCommit c false)
        (try
+         (query c "SELECT pg_advisory_xact_lock(781246935)")
          ;; One job lock spans conflict check and all rows, including concurrent reruns.
          (query c "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))" job-id)
          (if-let [existing (first (query c "SELECT artifact_sha256,artifact_bytes,source_sha256,parser_version,schema_version FROM freediving.extractions WHERE job_id=?" job-id))]

@@ -21,7 +21,7 @@
 (defn- transaction [url f]
   (with-open [c (DriverManager/getConnection url)]
     (.setAutoCommit c false)
-    (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
+    (try (query c "SELECT pg_advisory_xact_lock(781246935)") (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
 (defn installed? [c] (some? (:table_name (first (query c "SELECT to_regclass('freediving.event_selections') AS table_name")))))
 (defn migrate! [url reviewer]
   (when-not (and (string? reviewer) (re-matches #"[a-z_][a-z0-9_]*" reviewer)) (fail! "Invalid role"))

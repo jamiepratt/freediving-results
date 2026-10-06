@@ -47,7 +47,7 @@
     (try (let [result (f c)] (.commit c) result)
          (catch Exception e (.rollback c) (throw e)))))
 (defn- mode-tables [mode]
-  (if (= mode "source") (take 11 tables)
+  (if (#{"source" "review"} mode) (take 11 tables)
       ["extractions" "observations" "canonical_attempt_evidence" "canonical_attempt_events" "canonical_attempt_state"]))
 (defn- capability! [c mode]
   (let [role (first (query c "SELECT rolname,rolsuper,rolcreatedb,rolcreaterole,rolinherit,rolreplication,rolbypassrls,rolcanlogin FROM pg_roles WHERE rolname=current_user"))
@@ -59,8 +59,9 @@
     (need! (and (:rolcanlogin role)
                 (not-any? true? ((juxt :rolsuper :rolcreatedb :rolcreaterole :rolinherit :rolreplication :rolbypassrls) role))
                 (not (:unsafe unsafe))
-                (= "on" (:value (first (query c "SELECT current_setting('default_transaction_read_only') AS value"))))
-                (= (set (map #(hash-map :schema "freediving" :name % :privilege "SELECT") (mode-tables mode))) (set privileges)))
+                (= (if (= mode "review") "off" "on") (:value (first (query c "SELECT current_setting('default_transaction_read_only') AS value"))))
+                (= (set (concat (map #(hash-map :schema "freediving" :name % :privilege "SELECT") (mode-tables mode))
+                                (when (= mode "review") (map #(hash-map :schema "freediving" :name % :privilege "INSERT") ["extraction_reviews" "pdf_extraction_reviews"])))) (set privileges)))
            "Sporting proof reader capability changed")))
 (defn- authority [c mode]
   (into {} (map (fn [table] [(keyword table) (query c (str "SELECT * FROM freediving." table))]) (mode-tables mode))))
@@ -91,12 +92,13 @@
                        (every? pos-int? (vals coordinates)) (< (:column-start coordinates) (:column-end coordinates)))))
          "Invalid exact sporting row request"))
 (defn- gap [row state reason]
-  (assoc row :upstream {} :diagnostics {:mapping {:state state :reasons [reason]}
-                                        :review {:state "unknown"}
-                                        :same-attempt {:state "unknown" :reasons ["exact-distinctness-authority-required"]}
-                                        :source-conflict {:state "unresolved" :reasons ["exact-source-conflict-authority-required"]}
-                                        :source-selection {:state "unknown"}
-                                        :publication {:state "unknown"}}))
+  (assoc row :source_review {:enabled false :reason reason}
+         :upstream {} :diagnostics {:mapping {:state state :reasons [reason]}
+                                    :review {:state "unknown"}
+                                    :same-attempt {:state "unknown" :reasons ["exact-distinctness-authority-required"]}
+                                    :source-conflict {:state "unresolved" :reasons ["exact-source-conflict-authority-required"]}
+                                    :source-selection {:state "unknown"}
+                                    :publication {:state "unknown"}}))
 (defn- base-reference [row extraction]
   {:job-id (:job_id row) :ordinal (:ordinal row) :candidate-id (:candidate_id row)
    :source-sha256 (:source_sha256 extraction) :artifact-sha256 (:artifact_sha256 extraction)
@@ -137,6 +139,50 @@
       {:row row :artifact artifact :payload payload})))
 (defn- target-events [state table reference]
   (vec (sort-by :revision (filter #(= ((juxt :job-id :ordinal) reference) ((juxt :job_id :ordinal) %)) (get state table)))))
+(defn source-review-capability! [c] (capability! c "review"))
+(defn source-binding [c] (fingerprint c "source"))
+(defn source-review-target
+  "Validate exact PDF geometry; optional state reuses the proof request snapshot."
+  ([c row] (source-review-target c row (authority c "source")))
+  ([_c row state]
+   (row-request! row)
+   (let [target (exact-target state row)]
+     (need! target "Canonical import required for source accuracy review")
+     (let [{:keys [artifact payload]} target coordinates (:coordinates row)
+           context (when (evidence/html? artifact)
+                     (evidence/bound-context! artifact payload (get-in row [:reference :ordinal]) (get-in row [:reference :source-sha256])))]
+       (if context
+         (need! (and (= #{:table :row} (set (keys coordinates)))
+                     (string? (:event-date context)) (seq (:event-date context))
+                     (= (:event-date context) (get-in payload [:parsed :event-date]))
+                     (empty? (:context-errors context))
+                     (seq (:acquisition-context context))
+                     (every? #(and (= (:event-date context) (:selected-date %))
+                                   (= :rendered-dom (:representation %))
+                                   (string? (:rendered-sha256 %))
+                                   (re-matches #"[0-9a-f]{64}" (:rendered-sha256 %))
+                                   (some #{(:rendered-sha256 %)} (:evidence-sha256 artifact)))
+                             (:acquisition-context context)))
+                "Selected date and rendered acquisition provenance required")
+         (need! (and (not (evidence/html? artifact))
+                     (= #{:page :line :column-start :column-end} (set (keys coordinates)))
+                     (every? pos-int? (vals coordinates))
+                     (< (:column-start coordinates) (:column-end coordinates))
+                     (some #(and (= (get-in % [:manifest :content-type]) "application/pdf")
+                                 (= (get-in % [:manifest :sha256]) (get-in row [:reference :source-sha256])))
+                           (:acquisitions artifact))
+                     (some #(and (= (:line coordinates) (:line %))
+                                 (string? (:text %))
+                                 (<= (:column-end coordinates) (inc (count (:text %)))))
+                           (get-in artifact [:pages (dec (:page coordinates)) :lines])))
+                "Exact PDF page, line and column geometry required"))
+       (assoc target :context context)))))
+(defn review-evidence [{:keys [reference coordinates]} artifact context]
+  (merge reference coordinates
+         {:source-kind (if (evidence/html? artifact) :html :pdf) :schema-version (:schema-version artifact)
+          :acquisition-id (get-in artifact [:acquisitions 0 :acquisition-id])
+          :observation-id (str "local-observation:" (:job-id reference) ":" (:ordinal reference))}
+         (when context {:selected-date (:event-date context)})))
 (defn- extraction-proof [state reference artifact coordinates]
   (let [table (if (= 4 (:schema-version artifact)) :extraction_reviews :pdf_extraction_reviews)
         rows (target-events state table reference)
@@ -154,13 +200,22 @@
                   (= reference (select-keys (:evidence receipt) reference-keys))
                   (= (select-keys coordinates [:page :line])
                      (select-keys (:evidence receipt) [:page :line]))
-                  (= :pdf (get-in receipt [:evidence :source-kind]))
+                  (if (= :html (get-in receipt [:evidence :source-kind]))
+                    (and (evidence/html? artifact)
+                         (= coordinates (select-keys (:evidence receipt) [:table :row]))
+                         (= (get-in artifact [:context :event-date]) (get-in receipt [:evidence :selected-date])))
+                    (= :pdf (get-in receipt [:evidence :source-kind])))
+                  (or (nil? (:attestations receipt))
+                      (and (= {:source-visual-accuracy true} (:attestations receipt))
+                           (= coordinates (select-keys (:evidence receipt) (keys coordinates)))))
                   (= (:schema-version artifact) (get-in receipt [:evidence :schema-version]))
                   (= (str "local-observation:" (:job-id reference) ":" (:ordinal reference))
                      (get-in receipt [:evidence :observation-id]))
                   (some #(and (= (:acquisition-id %) (get-in receipt [:evidence :acquisition-id]))
                               (= (:source-sha256 reference) (get-in % [:manifest :sha256]))
-                              (= "application/pdf" (get-in % [:manifest :content-type]))) (:acquisitions artifact)))
+                              (if (evidence/html? artifact)
+                                (boolean (re-matches #"(?i)text/html(?:;.*)?" (get-in % [:manifest :content-type])))
+                                (= "application/pdf" (get-in % [:manifest :content-type])))) (:acquisitions artifact)))
              "Extraction receipt scope changed"))
     (reduce (fn [active [row receipt]]
               (case (:action receipt)
@@ -240,7 +295,7 @@
                                              (:job-id reference) (:ordinal reference) (:candidate-id reference) (:artifact-sha256 reference))))}))
 (defn- mapped-proof [c state mode relationship-state revision-state publication-state plan row]
   (try
-    (if-let [{:keys [artifact]} (exact-target state row)]
+    (if-let [{:keys [artifact payload]} (exact-target state row)]
       (let [reference (:reference row) coordinates (:coordinates row)
             mapped (assoc-in (gap row "mapped" "full-exact-source-binding-verified")
                              [:diagnostics :mapping :source_view_sha256]
@@ -253,19 +308,22 @@
                 validations (target-events state :publication_decisions reference)
                 latest (last validations)
                 _ (checked-validations! validations reference coordinates)
-                review (if (and (evidence/html? artifact) (:eligible? diagnosis))
-                         {:state "verified-by-current-html-source-validation" :revision (:revision diagnosis)
-                          :event_sha256 (digest latest) :history_sha256 (mapv digest validations)
-                          :authority "current-html-source-visual-validation"
-                          :current_event (let [record (edn/read-string (:body_edn latest))]
-                                           {:id (:id latest) :revision (:revision latest) :action (:action latest)
-                                            :reason (subs (:reason record) 0 (min 500 (count (:reason record))))})
-                          :proof {:value "verified" :event_sha256 (digest latest)}} review)
                 eligible (and (:eligible? diagnosis) (some #(= (:id latest) (:id %)) (:validations plan)))
                 public-ref (when eligible (public-reference c reference))
                 proof (when eligible {:value "approved" :event_sha256 (digest {:validation latest :policy (:publication_policy_events state)
                                                                                :selection (:metadata plan)}) :reference public-ref})]
             (cond-> (-> mapped
+                        (assoc :source_review
+                               (try
+                                 (let [context (:context (source-review-target c row state))]
+                                   {:enabled true :reason "exact-canonical-source-version"
+                                    :evidence (review-evidence row artifact context)
+                                    :raw (:raw payload) :parsed (:parsed payload)
+                                    :context context :anomalies (:flags payload)
+                                    :revision (:revision review) :active_event (when (= "accepted" (:state review)) (get-in review [:current_event :id]))
+                                    :versions (mapv #(select-keys % [:job_id :parser_version :artifact_sha256 :source_sha256])
+                                                    (filter #(= (:source-sha256 reference) (:source_sha256 %)) (:extractions state)))})
+                                 (catch Exception e {:enabled false :reason (.getMessage e)})))
                         (assoc-in [:diagnostics :review] (dissoc review :proof))
                         (assoc-in [:diagnostics :source-revision] (revision-diagnostic revision-state reference))
                         (assoc-in [:diagnostics :source-selection]
@@ -275,6 +333,28 @@
                                    :event_sha256 (digest (:metadata plan))})
                         (assoc-in [:diagnostics :publication]
                                   {:state (if eligible "approved" "not-approved")
+                                   :ready_for_validation (boolean (:ready? diagnosis))
+                                   :validated (boolean (:eligible? diagnosis))
+                                   :selected (boolean eligible) :delivered nil
+                                   :delivery_state "not-verified"
+                                   :delivery_reasons ["Actual public delivery observation required"]
+                                   :version_binding reference :observation_binding (:observation diagnosis)
+                                   :source_accuracy_revision (:revision review)
+                                   :validation_reasons (filterv #{:validation-required :validation-revoked :review-revision-changed} (:reasons diagnosis))
+                                   :policy_reasons (filterv #{:policy-inactive :policy-version-changed :html-policy-required} (:reasons diagnosis))
+                                   :selection_reasons (if (and (:eligible? diagnosis) (not eligible)) [:current-selection-required] [])
+                                   :substantive_errors (filterv #(or (and (vector? %) (#{:substantive-source-flag :invalid-field :unresolved-extraction-error} (first %)))
+                                                                     (#{:unparsed :unsupported-html-layout :missing-source-context :missing-source-citation
+                                                                        :missing-event-heading :missing-event-date :missing-performance-or-status :missing-discipline-context
+                                                                        :missing-source-name :acquisition-date-conflict :acquisition-discipline-conflict :acquisition-gender-conflict} %))
+                                                                (:reasons diagnosis))
+                                   :no_substantive_errors (not-any? #(or (and (vector? %) (#{:substantive-source-flag :invalid-field :unresolved-extraction-error} (first %)))
+                                                                         (#{:unparsed :unsupported-html-layout :missing-source-context :missing-source-citation
+                                                                            :missing-event-heading :missing-event-date :missing-performance-or-status :missing-discipline-context
+                                                                            :missing-source-name :acquisition-date-conflict :acquisition-discipline-conflict :acquisition-gender-conflict} %))
+                                                                    (:reasons diagnosis))
+                                   :html_policy_transition (when (evidence/html? artifact)
+                                                             {:enabled false :reason "Policy transition requires separate authority review and preservation of current public results"})
                                    :revision (:revision diagnosis) :review_revision (:review-revision diagnosis)
                                    :policy_version (:policy-version diagnosis)
                                    :active_policy_version (:active-policy-version diagnosis)
@@ -329,8 +409,12 @@
     (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint c mode))))
            "Canonical sporting authority changed during read")
     result))
+(defn command [config]
+  (if (= "source-review" (:op config))
+    ((requiring-resolve 'freediving.source-accuracy-review/execute!) (dissoc config :op))
+    (read-proofs config)))
 (defn -main [& _]
-  (try (println (json/write-str (read-proofs (json/read-str (slurp *in*) :key-fn keyword))))
+  (try (println (json/write-str (command (json/read-str (slurp *in*) :key-fn keyword))))
        (catch Exception _
          (binding [*out* *err*] (println "Private sporting proof readback unavailable"))
          (System/exit 1))))

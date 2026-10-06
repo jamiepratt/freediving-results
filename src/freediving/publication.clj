@@ -22,7 +22,7 @@
 (defn- transaction [url f]
   (with-open [c (connect url)]
     (.setAutoCommit c false)
-    (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
+    (try (query c "SELECT pg_advisory_xact_lock(781246935)") (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
 (def current-policy "extraction-publication/1")
 (def html-policy "extraction-publication/2")
 (def supported-policies #{current-policy html-policy})

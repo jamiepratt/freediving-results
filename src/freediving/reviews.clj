@@ -29,9 +29,12 @@
   (with-open [s (.prepareStatement c sql)]
     (doseq [[i v] (map-indexed vector args)] (.setObject s (inc i) v)) (.executeUpdate s)))
 (defn- transaction [url f]
-  (with-open [c (connect url)]
-    (.setAutoCommit c false)
-    (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
+  (if (instance? Connection url)
+    (f url)
+    (with-open [c (connect url)]
+      (.setAutoCommit c false)
+      (try (query c "SELECT pg_advisory_xact_lock(781246935)") (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e))))))
+(def ^:dynamic *source-accuracy-guard* nil)
 (defn migrate! [admin-url ingest-role reviewer-role]
   (doseq [role [ingest-role reviewer-role]]
     (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
@@ -475,26 +478,31 @@
 (defn- extraction-capability! [c]
   (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.extraction_reviews','INSERT') AS allowed")))
     (fail! "Owner extraction review database capability required")))
+(declare http-source-receipt?)
+(defn- html-accuracy-reference! [c ref]
+  (let [row {:reference (select-keys ref [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256 :parser-version])
+             :coordinates (select-keys ref [:table :row])}
+        {:keys [artifact context]} ((requiring-resolve 'freediving.private-sporting-proofs/source-review-target) c row)]
+    (when-not (= ref ((requiring-resolve 'freediving.private-sporting-proofs/review-evidence) row artifact context))
+      (fail! "Exact HTML source accuracy evidence mismatch"))))
 (defn- extraction-request! [request]
   (when-not (and (map? request)
-                 (= #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256
-                      :owner-response :actor :reason}
+                 (= (cond-> #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256 :owner-response :actor :reason}
+                      (http-source-receipt? request) (conj :attestations :source-binding-sha256))
                     (set (keys request)))
                  (every? nonblank? ((juxt :id :job-id :actor :reason) request))
                  (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
                  (string? (:owner-receipt-sha256 request))
                  (re-matches #"[0-9a-f]{64}" (:owner-receipt-sha256 request))
-                 (= #{:task-id :user-message-id :response-annotation-index :selected-text}
-                    (set (keys (:owner-response request))))
-                 (every? nonblank? ((juxt :task-id :user-message-id :selected-text)
-                                    (:owner-response request)))
-                 (nat-int? (get-in request [:owner-response :response-annotation-index]))
+                 (or (http-source-receipt? request)
+                     (and (= #{:task-id :user-message-id :response-annotation-index :selected-text} (set (keys (:owner-response request))))
+                          (every? nonblank? ((juxt :task-id :user-message-id :selected-text) (:owner-response request)))
+                          (nat-int? (get-in request [:owner-response :response-annotation-index]))))
                  (= (select-keys request [:job-id :ordinal])
                     (select-keys (:evidence request) [:job-id :ordinal]))
-                 (when-let [[_ from to] (re-matches #"Accept ([0-9]+)-([0-9]+)"
-                                                    (get-in request [:owner-response :selected-text]))]
-                   (<= (parse-long from) (get-in request [:evidence :row-index-zero-based])
-                       (parse-long to))))
+                 (or (http-source-receipt? request)
+                     (when-let [[_ from to] (re-matches #"Accept ([0-9]+)-([0-9]+)" (get-in request [:owner-response :selected-text]))]
+                       (<= (parse-long from) (get-in request [:evidence :row-index-zero-based]) (parse-long to)))))
     (fail! "Invalid owner extraction acceptance request")))
 (defn accept-extraction! [url request]
   (extraction-request! request)
@@ -502,23 +510,26 @@
                (fn [c]
                  (extraction-capability! c)
                  (lock! c request)
-                 (json-reference! c (:evidence request))
-                 (or (existing c "extraction_reviews" (:id request) request)
-                     (let [state (extraction-state c request)]
-                       (when-not (= (:base-revision request) (:revision state))
-                         (fail! "Stale extraction review revision"))
-                       (when (= :accepted (:status state))
-                         (fail! "Extraction position already accepted"))
-                       (let [record (assoc request :action :accept :revision (inc (:revision state))
-                                           :request request)]
-                         (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
-                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
-                                   "accept" nil (encode record))
-                         (existing c "extraction_reviews" (:id request) request)))))))
+                 (if (http-source-receipt? request) (html-accuracy-reference! c (:evidence request)) (json-reference! c (:evidence request)))
+                 (let [prior (existing c "extraction_reviews" (:id request) request)]
+                   (when *source-accuracy-guard* (*source-accuracy-guard* c (boolean prior)))
+                   (or prior
+                       (let [state (extraction-state c request)]
+                         (when-not (= (:base-revision request) (:revision state))
+                           (fail! "Stale extraction review revision"))
+                         (when (= :accepted (:status state))
+                           (fail! "Extraction position already accepted"))
+                         (let [record (assoc request :action :accept :revision (inc (:revision state))
+                                             :request request)]
+                           (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                     (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                     "accept" nil (encode record))
+                           (existing c "extraction_reviews" (:id request) request))))))))
 (defn revoke-extraction! [url request]
   (when-not (and (map? request)
-                 (= #{:id :job-id :ordinal :base-revision :event-id :actor :reason}
-                    (set (keys request)))
+                 (= (if (http-source-receipt? request)
+                      #{:id :job-id :ordinal :base-revision :event-id :evidence :actor :reason :owner-response :owner-receipt-sha256 :source-binding-sha256 :attestations}
+                      #{:id :job-id :ordinal :base-revision :event-id :actor :reason}) (set (keys request)))
                  (every? nonblank? ((juxt :id :job-id :event-id :actor :reason) request))
                  (nat-int? (:ordinal request)) (nat-int? (:base-revision request)))
     (fail! "Invalid extraction revocation request"))
@@ -526,24 +537,30 @@
                (fn [c]
                  (extraction-capability! c)
                  (lock! c request)
-                 (or (existing c "extraction_reviews" (:id request) request)
-                     (let [state (extraction-state c request)]
-                       (when-not (= (:base-revision request) (:revision state))
-                         (fail! "Stale extraction review revision"))
-                       (when-not (= (:event-id request) (:active-event state))
-                         (fail! "Only the active extraction acceptance can be revoked"))
-                       (let [record (assoc request :action :revoke :revision (inc (:revision state))
-                                           :request request)]
-                         (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
-                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
-                                   "revoke" (:event-id request) (encode record))
-                         (existing c "extraction_reviews" (:id request) request)))))))
+                 (when (http-source-receipt? request) (html-accuracy-reference! c (:evidence request)))
+                 (let [prior (existing c "extraction_reviews" (:id request) request)]
+                   (when *source-accuracy-guard* (*source-accuracy-guard* c (boolean prior)))
+                   (or prior
+                       (let [state (extraction-state c request)]
+                         (when-not (= (:base-revision request) (:revision state))
+                           (fail! "Stale extraction review revision"))
+                         (when-not (and (= (:event-id request) (:active-event state))
+                                        (or (not (http-source-receipt? request))
+                                            (= (:evidence request) (:evidence (some #(when (= (:event-id request) (:id %)) %) (extraction-events c request))))))
+                           (fail! "Only the active extraction acceptance can be revoked"))
+                         (let [record (assoc request :action :revoke :revision (inc (:revision state))
+                                             :request request)]
+                           (execute! c "INSERT INTO freediving.extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                     (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                     "revoke" (:event-id request) (encode record))
+                           (existing c "extraction_reviews" (:id request) request))))))))
 
 (def ^:private pdf-reference-keys
   #{:source-kind :schema-version :job-id :ordinal :acquisition-id :source-sha256
     :artifact-sha256 :parser-version :candidate-id :observation-id :page :line})
 (defn- pdf-reference! [c ref]
-  (when-not (and (map? ref) (= pdf-reference-keys (set (keys ref)))
+  (when-not (and (map? ref) (or (= pdf-reference-keys (set (keys ref)))
+                                (= (conj pdf-reference-keys :column-start :column-end) (set (keys ref))))
                  (= :pdf (:source-kind ref)) (#{1 2 3} (:schema-version ref))
                  (every? nonblank? ((juxt :job-id :acquisition-id :source-sha256
                                           :artifact-sha256 :parser-version :candidate-id :observation-id) ref))
@@ -578,6 +595,10 @@
                       (str "local-observation:" (:job-id ref) ":" (:ordinal ref)))
                    (= candidate payload)
                    (= position (select-keys ref [:page :line]))
+                   (or (not (contains? ref :column-start))
+                       (and (every? pos-int? ((juxt :column-start :column-end) ref))
+                            (< (:column-start ref) (:column-end ref))
+                            (= (:coordinates candidate) (select-keys ref [:page :line :column-start :column-end]))))
                    (some #(= (:line ref) (:line %))
                          (get-in artifact [:pages (dec (:page ref)) :lines]))
                    (= "result-row" (:kind o)))
@@ -601,25 +622,30 @@
 (defn- pdf-capability! [c]
   (when-not (:allowed (first (query c "SELECT has_table_privilege(current_user,'freediving.pdf_extraction_reviews','INSERT') AS allowed")))
     (fail! "Owner PDF extraction review database capability required")))
+(defn- http-source-receipt? [request]
+  (and (= {:source-visual-accuracy true} (:attestations request))
+       (= #{:type :request-id :owner} (set (keys (:owner-response request))))
+       (= :authenticated-owner-http (get-in request [:owner-response :type]))
+       (= (:id request) (get-in request [:owner-response :request-id]))
+       (= (:actor request) (get-in request [:owner-response :owner]))
+       (re-matches #"[0-9a-f]{64}" (or (:source-binding-sha256 request) ""))))
 (defn- pdf-accept-request! [request]
-  (when-not (and (map? request)
-                 (= #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256
-                      :owner-response :actor :reason} (set (keys request)))
-                 (every? nonblank? ((juxt :id :job-id :actor :reason) request))
-                 (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
-                 (string? (:owner-receipt-sha256 request))
-                 (re-matches #"[0-9a-f]{64}" (:owner-receipt-sha256 request))
-                 (= #{:task-id :user-message-id :response-annotation-index :selected-text}
-                    (set (keys (:owner-response request))))
-                 (every? nonblank? ((juxt :task-id :user-message-id :selected-text)
-                                    (:owner-response request)))
-                 (nat-int? (get-in request [:owner-response :response-annotation-index]))
-                 (= (select-keys request [:job-id :ordinal])
-                    (select-keys (:evidence request) [:job-id :ordinal]))
-                 (when-let [[_ from to] (re-matches #"Accept extraction ([0-9]+)-([0-9]+)"
-                                                    (get-in request [:owner-response :selected-text]))]
-                   (<= (parse-long from) (:ordinal request) (parse-long to))))
-    (fail! "Invalid owner PDF extraction acceptance request")))
+  (let [legacy-keys #{:id :job-id :ordinal :base-revision :evidence :owner-receipt-sha256 :owner-response :actor :reason}
+        http? (http-source-receipt? request)]
+    (when-not (and (map? request)
+                   (= (if http? (conj legacy-keys :attestations :source-binding-sha256) legacy-keys) (set (keys request)))
+                   (every? nonblank? ((juxt :id :job-id :actor :reason) request))
+                   (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
+                   (string? (:owner-receipt-sha256 request))
+                   (re-matches #"[0-9a-f]{64}" (:owner-receipt-sha256 request))
+                   (= (select-keys request [:job-id :ordinal]) (select-keys (:evidence request) [:job-id :ordinal]))
+                   (or (and http? (contains? (:evidence request) :column-start))
+                       (and (= #{:task-id :user-message-id :response-annotation-index :selected-text} (set (keys (:owner-response request))))
+                            (every? nonblank? ((juxt :task-id :user-message-id :selected-text) (:owner-response request)))
+                            (nat-int? (get-in request [:owner-response :response-annotation-index]))
+                            (when-let [[_ from to] (re-matches #"Accept extraction ([0-9]+)-([0-9]+)" (get-in request [:owner-response :selected-text]))]
+                              (<= (parse-long from) (:ordinal request) (parse-long to))))))
+      (fail! "Invalid owner PDF extraction acceptance request"))))
 (defn accept-pdf-extraction! [url request]
   (pdf-accept-request! request)
   (transaction url
@@ -627,21 +653,25 @@
                  (pdf-capability! c)
                  (lock! c request)
                  (pdf-reference! c (:evidence request))
-                 (or (existing c "pdf_extraction_reviews" (:id request) request)
-                     (let [state (pdf-state c request)]
-                       (when-not (= (:base-revision request) (:revision state))
-                         (fail! "Stale PDF extraction review revision"))
-                       (when (= :accepted (:status state))
-                         (fail! "PDF extraction position already accepted"))
-                       (let [record (assoc request :action :accept :revision (inc (:revision state))
-                                           :request request)]
-                         (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
-                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
-                                   "accept" nil (encode record))
-                         (existing c "pdf_extraction_reviews" (:id request) request)))))))
+                 (let [prior (existing c "pdf_extraction_reviews" (:id request) request)]
+                   (when *source-accuracy-guard* (*source-accuracy-guard* c (boolean prior)))
+                   (or prior
+                       (let [state (pdf-state c request)]
+                         (when-not (= (:base-revision request) (:revision state))
+                           (fail! "Stale PDF extraction review revision"))
+                         (when (= :accepted (:status state))
+                           (fail! "PDF extraction position already accepted"))
+                         (let [record (assoc request :action :accept :revision (inc (:revision state))
+                                             :request request)]
+                           (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                     (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                     "accept" nil (encode record))
+                           (existing c "pdf_extraction_reviews" (:id request) request))))))))
 (defn revoke-pdf-extraction! [url request]
   (when-not (and (map? request)
-                 (= #{:id :job-id :ordinal :base-revision :event-id :evidence :actor :reason}
+                 (= (if (http-source-receipt? request)
+                      #{:id :job-id :ordinal :base-revision :event-id :evidence :actor :reason :owner-response :owner-receipt-sha256 :source-binding-sha256 :attestations}
+                      #{:id :job-id :ordinal :base-revision :event-id :evidence :actor :reason})
                     (set (keys request)))
                  (every? nonblank? ((juxt :id :job-id :event-id :actor :reason) request))
                  (nat-int? (:ordinal request)) (nat-int? (:base-revision request))
@@ -653,20 +683,22 @@
                  (pdf-capability! c)
                  (lock! c request)
                  (pdf-reference! c (:evidence request))
-                 (or (existing c "pdf_extraction_reviews" (:id request) request)
-                     (let [state (pdf-state c request)
-                           accepted (some #(when (= (:event-id request) (:id %)) %) (pdf-events c request))]
-                       (when-not (= (:base-revision request) (:revision state))
-                         (fail! "Stale PDF extraction review revision"))
-                       (when-not (and (= (:event-id request) (:active-event state))
-                                      (= (:evidence request) (:evidence accepted)))
-                         (fail! "Only the active source-bound PDF acceptance can be revoked"))
-                       (let [record (assoc request :action :revoke :revision (inc (:revision state))
-                                           :request request)]
-                         (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
-                                   (:id request) (:job-id request) (:ordinal request) (:revision record)
-                                   "revoke" (:event-id request) (encode record))
-                         (existing c "pdf_extraction_reviews" (:id request) request)))))))
+                 (let [prior (existing c "pdf_extraction_reviews" (:id request) request)]
+                   (when *source-accuracy-guard* (*source-accuracy-guard* c (boolean prior)))
+                   (or prior
+                       (let [state (pdf-state c request)
+                             accepted (some #(when (= (:event-id request) (:id %)) %) (pdf-events c request))]
+                         (when-not (= (:base-revision request) (:revision state))
+                           (fail! "Stale PDF extraction review revision"))
+                         (when-not (and (= (:event-id request) (:active-event state))
+                                        (= (:evidence request) (:evidence accepted)))
+                           (fail! "Only the active source-bound PDF acceptance can be revoked"))
+                         (let [record (assoc request :action :revoke :revision (inc (:revision state))
+                                             :request request)]
+                           (execute! c "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,event_id,body_edn) VALUES(?,?,?,?,?,?,?)"
+                                     (:id request) (:job-id request) (:ordinal request) (:revision record)
+                                     "revoke" (:event-id request) (encode record))
+                           (existing c "pdf_extraction_reviews" (:id request) request))))))))
 (defn- field-events [c source-position-id]
   (mapv (fn [row]
           (merge (edn/read-string (:body_edn row))

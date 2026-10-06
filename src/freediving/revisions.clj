@@ -25,7 +25,7 @@
 (defn- transaction [url f]
   (with-open [c (connect url)]
     (.setAutoCommit c false)
-    (try (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
+    (try (query c "SELECT pg_advisory_xact_lock(781246935)") (let [v (f c)] (.commit c) v) (catch Exception e (.rollback c) (throw e)))))
 (defn migrate! [admin-url ingest-role reviewer-role]
   (doseq [role [ingest-role reviewer-role]]
     (when-not (and (string? role) (re-matches #"[a-z_][a-z0-9_]*" role)) (fail! "Invalid role")))
