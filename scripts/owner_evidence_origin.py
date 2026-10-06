@@ -2,22 +2,26 @@
 """Owner evidence origin behind the verified Cloudflare Worker gate."""
 
 import argparse
+from contextlib import contextmanager
 from hmac import compare_digest
 import hmac
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import sqlite3
 import subprocess
-import tempfile
+import sys
 import threading
+import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 
 from unified_evidence_query import SnapshotQuery
-from owner_source_view import OriginalSourceView, SourceViewError, _limit_renderer, MAX_IMAGE
+from owner_source_view import OriginalSourceView, SourceViewError, render_pdf
 from route_roster_query import RouteRosterQuery
 from owner_decision_store import ConflictError
 from private_presentation_status import PrivatePresentationStatus, StatusConflict, status_digest, validate_authority
@@ -33,6 +37,9 @@ MAX_INSPECTOR_RESPONSE = 4 * 1024 * 1024
 MAX_ACTION = 16 * 1024
 MAX_EVENT_ACK = 8 * 1024 * 1024
 MAX_ISSUE172_QUEUE = 32 * 1024 * 1024
+READ_BUDGET_SECONDS = 12
+MAX_EXPENSIVE_READS = 4
+MAX_REQUEST_THREADS = 16
 INSPECTOR_FILTERS = {'federation', 'environment', 'discipline', 'year', 'gender',
                      'category', 'representation', 'review', 'publication', 'limit', 'offset',
                      'age_class', 'peer_anchor', 'geography', 'peer_token', 'sanction_scope', 'listing_filter'}
@@ -152,7 +159,9 @@ def _issue172_queue(env, snapshot_dir):
 
 class PrivateOrigin(ThreadingHTTPServer):
     def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
-        self.request_lock = threading.Lock()
+        self.request_lock = threading.RLock()
+        self.read_slots = threading.BoundedSemaphore(MAX_EXPENSIVE_READS)
+        self.request_slots = threading.BoundedSemaphore(MAX_REQUEST_THREADS)
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
         self.canonical_reader = canonical_reader
         if self.canonical_reader is None and env.get('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'):
@@ -229,39 +238,84 @@ class PrivateOrigin(ThreadingHTTPServer):
 
     def server_close(self):
         super().server_close()
+        if hasattr(self.comparison_reader, 'close'):
+            self.comparison_reader.close()
+        if hasattr(self.canonical_reader, 'close'):
+            self.canonical_reader.close()
         self.query.close()
         if self.decisions is not None and hasattr(self.decisions, 'close'):
             self.decisions.close()
         if getattr(self, 'sporting', None) is not None:
             self.sporting.close()
 
-    def status_authority(self):
-        """Collect fresh origin authority; no local-run store grants this status."""
-        owner = self.decisions
-        if owner is None or self.import_token is None:
-            return None
-        revision, snapshot = owner.revision, owner.active_snapshot_sha256
-        events, cursor = [], 0
-        while True:
-            page = owner.human_events(after_revision=cursor)
-            if page['store_revision'] != revision:
-                raise StatusConflict('owner changed during status collection')
-            events.extend(page['events'])
-            if len(events) > 100000:
-                raise ValueError('owner status feed exceeds bound')
-            if len(page['events']) < 100:
-                break
-            cursor = page['next_revision']
-        feed = {'store_revision': revision, 'events': events}
-        payload = json.dumps(feed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
-        binding = owner._binding()
-        metrics = {}
-        for row in owner.db.execute('SELECT id FROM proposals'):
-            decision = owner._inspect(row['id'], binding)
-            status = decision['effective_status']
-            metrics[status] = metrics.get(status, 0) + 1
+    def process_request(self, request, client_address):
+        # Bound socket-parsing threads too, including unauthenticated idle clients.
+        if not self.request_slots.acquire(blocking=False):
+            try:
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n'
+                                b'Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n')
+            finally:
+                self.shutdown_request(request)
+            return
         try:
-            readback = self.canonical_reader() if self.canonical_reader else None
+            super().process_request(request, client_address)
+        except Exception:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
+
+    def handle_error(self, request, client_address):
+        # BaseServer tracebacks may include private exception values. Never emit
+        # headers, remote addresses, paths or exception text here.
+        logging.getLogger('private-origin').info(json.dumps({
+            'event': 'private-request-error', 'kind': type(sys.exception()).__name__}))
+
+    @contextmanager
+    def read_lock(self, deadline=None):
+        acquired = (self.request_lock.acquire(timeout=max(0, deadline - time.monotonic()))
+                    if deadline is not None else self.request_lock.acquire())
+        if not acquired:
+            raise SourceViewError(503)
+        try:
+            yield
+        finally:
+            self.request_lock.release()
+
+    def status_authority(self, *, deadline=None):
+        """Collect fresh origin authority; no local-run store grants this status."""
+        with self.read_lock(deadline):
+            owner = self.decisions
+            if owner is None or self.import_token is None:
+                return None
+            revision, snapshot = owner.revision, owner.active_snapshot_sha256
+            events, cursor = [], 0
+            while True:
+                page = owner.human_events(after_revision=cursor)
+                if page['store_revision'] != revision:
+                    raise StatusConflict('owner changed during status collection')
+                events.extend(page['events'])
+                if len(events) > 100000:
+                    raise ValueError('owner status feed exceeds bound')
+                if len(page['events']) < 100:
+                    break
+                cursor = page['next_revision']
+            feed = {'store_revision': revision, 'events': events}
+            payload = json.dumps(feed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+            binding = owner._binding()
+            metrics = {}
+            for row in owner.db.execute('SELECT id FROM proposals'):
+                decision = owner._inspect(row['id'], binding)
+                status = decision['effective_status']
+                metrics[status] = metrics.get(status, 0) + 1
+        try:
+            readback = (self.canonical_reader(deadline=deadline)
+                        if getattr(self.canonical_reader, 'deadline_supported', False) else
+                        self.canonical_reader() if self.canonical_reader else None)
         except Exception:
             readback = None
         canonical = {}
@@ -284,8 +338,9 @@ class PrivateOrigin(ThreadingHTTPServer):
                                 payload.encode('utf-8'), sha256).hexdigest(),
                      'owner_metrics': metrics, 'canonical': canonical}
         validate_authority(authority)
-        if owner.revision != revision or owner.active_snapshot_sha256 != snapshot:
-            raise StatusConflict('owner changed during status collection')
+        with self.read_lock(deadline):
+            if owner.revision != revision or owner.active_snapshot_sha256 != snapshot:
+                raise StatusConflict('owner changed during status collection')
         return authority
 
     def get_request(self):
@@ -300,11 +355,12 @@ class PrivateOrigin(ThreadingHTTPServer):
         return sha256(json.dumps(binding, sort_keys=True, separators=(',', ':'),
                                  ensure_ascii=False).encode('utf-8')).hexdigest()
 
-    def bind_inspector_sources(self, result, filters):
+    def bind_inspector_sources(self, result, filters, *, deadline=None):
         rows = result.get('rows', [])
         offset = result.get('pagination', {}).get('offset', filters.get('offset', 0))
-        if len(self.inspector_sources) > 1000:
-            self.inspector_sources.clear()
+        with self.read_lock(deadline):
+            if len(self.inspector_sources) > 1000:
+                self.inspector_sources.clear()
         for index, row in enumerate(rows):
             reference = row.get('reference', {})
             source_hash = reference.get('source-sha256', '')
@@ -314,7 +370,8 @@ class PrivateOrigin(ThreadingHTTPServer):
                 row['source_access'] = {'status': 'unavailable', 'reason': 'Exact retained source binding absent'}
                 continue
             row_id = self.retained_row_id(row)
-            self.inspector_sources[row_id] = {**filters, 'offset': offset + index, 'limit': 1}
+            with self.read_lock(deadline):
+                self.inspector_sources[row_id] = {**filters, 'offset': offset + index, 'limit': 1}
             access = {'status': 'retained_derivative', 'retained_row_id': row_id,
                       'reason': 'Verified pinned retained artifact; original source access unavailable',
                       'original_replay': 'restricted_original_required' if row.get('source', {}).get('federation') == 'AIDA' else 'original_unavailable'}
@@ -322,13 +379,14 @@ class PrivateOrigin(ThreadingHTTPServer):
             coordinates = row.get('candidate', {}).get('coordinates')
             raw = row.get('candidate', {}).get('raw', {})
             matches = []
-            for record in self.query.db.execute(
-                    "SELECT record_id FROM records WHERE source_object_id=? AND kind='candidate_position'",
-                    ('sha256:' + source_hash,)):
-                detail = self.query.detail(record['record_id'])
-                if (coordinates in (detail['citation'], detail['raw'].get('coordinates'))
-                        and (raw == detail['raw_fields'] or raw.get('fields') == detail['raw_fields'])):
-                    matches.append(detail)
+            with self.read_lock(deadline):
+                for record in self.query.db.execute(
+                        "SELECT record_id FROM records WHERE source_object_id=? AND kind='candidate_position'",
+                        ('sha256:' + source_hash,)):
+                    detail = self.query.detail(record['record_id'])
+                    if (coordinates in (detail['citation'], detail['raw'].get('coordinates'))
+                            and (raw == detail['raw_fields'] or raw.get('fields') == detail['raw_fields'])):
+                        matches.append(detail)
             if len(matches) == 1 and self.source_view is not None:
                 try:
                     self.source_view.inspect(matches[0])
@@ -347,14 +405,15 @@ class PrivateOrigin(ThreadingHTTPServer):
             row['source_access'] = access
         return result
 
-    def inspector_row(self, row_id):
-        filters = self.inspector_sources.get(row_id)
+    def inspector_row(self, row_id, *, deadline=None):
+        with self.read_lock(deadline):
+            filters = self.inspector_sources.get(row_id)
         if filters is None or self.comparison_reader is None:
             raise SourceViewError(404)
         try:
             # Source context verifies immutable pins and exact row coordinates.
             # Sporting authority is collected only by the ranking endpoint.
-            result = self.comparison_reader(filters, None)
+            result = self.read_comparison(filters, None, deadline=deadline)
         except Exception as exc:
             raise SourceViewError(503) from exc
         rows = result.get('rows', [])
@@ -362,12 +421,86 @@ class PrivateOrigin(ThreadingHTTPServer):
             raise SourceViewError(404)
         return rows[0]
 
+    def read_comparison(self, filters, authority, *, deadline=None):
+        # Legacy isolated transport fixtures retain the two-argument boundary.
+        if hasattr(self.comparison_reader, 'verify_current'):
+            return self.comparison_reader(filters, authority, deadline=deadline)
+        return self.comparison_reader(filters, authority)
+
+    def comparison_token(self, authority):
+        try:
+            return (self.comparison_reader.verify_current(authority)
+                    if hasattr(self.comparison_reader, 'verify_current') else None)
+        except (ValueError, OSError):
+            raise SourceViewError(503) from None
+
+    def inspector_authority(self, *, deadline=None):
+        authority = (self.status_authority(deadline=deadline)
+                     if self.decisions is not None else self.status_authority())
+        with self.read_lock(deadline):
+            history = self.sporting._history() if self.sporting is not None else []
+            sporting_head = history[-1][0]['head_sha256'] if history else None
+        return authority, sporting_head
+
+    def authority_still_current(self, authority, sporting_head):
+        owner = self.decisions
+        if authority is not None and owner is not None:
+            if (owner.revision != authority.get('owner_store_revision')
+                    or owner.active_snapshot_sha256 != authority.get('snapshot_sha256')):
+                return False
+        history = self.sporting._history() if self.sporting is not None else []
+        return (history[-1][0]['head_sha256'] if history else None) == sporting_head
+
 
 def _serialized_request(method):
     def run(self):
         # Parse sockets concurrently, then keep shared SQLite operations sequential.
         with self.server.request_lock:
             return method(self)
+    return run
+
+
+def _bounded_get(method):
+    def run(self):
+        self.close_connection = True
+        if not self._authorized():
+            return self._reply(403)
+        try:
+            path = self._path().path
+        except ValueError:
+            return self._reply(404)
+        self.read_deadline = time.monotonic() + READ_BUDGET_SECONDS
+        if path == STATUS_PATH:
+            return method(self)
+        expensive = (path == '/owner-evidence/api/attempt-inspector'
+                     or any(pattern.fullmatch(path) for pattern in
+                            (INSPECTOR_SOURCE_PATH, INSPECTOR_PAGE_PATH, SOURCE_VIEW_PATH,
+                             SOURCE_PAGE_PATH, SOURCE_IMAGE_PATH)))
+        if not expensive:
+            try:
+                with self.server.read_lock(self.read_deadline):
+                    return method(self)
+            except SourceViewError as exc:
+                return self._reply(exc.status)
+        started = time.monotonic()
+        self.read_deadline = started + READ_BUDGET_SECONDS
+        self.read_request_id = uuid.uuid4().hex
+        self.response_status = 503
+        admitted = self.server.read_slots.acquire(blocking=False)
+        try:
+            if not admitted:
+                return self._reply(503)
+            return method(self)
+        except (BrokenPipeError, ConnectionResetError):
+            self.response_status = 499
+        finally:
+            if admitted:
+                self.server.read_slots.release()
+            # Correlation and durations only: no URL, filters, owner or source data.
+            logging.getLogger('private-origin').info(json.dumps({
+                'event': 'private-read', 'request_id': self.read_request_id,
+                'status': self.response_status, 'elapsed_ms': round((time.monotonic() - started) * 1000),
+                'admission_wait_ms': 0, 'phases_ms': getattr(self, 'read_phases', {})}))
     return run
 
 
@@ -379,9 +512,18 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         pass
 
     def _reply(self, status, body=b'', content_type='text/plain; charset=utf-8', *, max_response=MAX_RESPONSE):
+        if status == 200 and hasattr(self, 'read_request_id') and time.monotonic() >= self.read_deadline:
+            status, body, content_type = 503, b'', 'text/plain; charset=utf-8'
         if len(body) > max_response:
             status, body, content_type = 413, b'', 'text/plain; charset=utf-8'
+        self.response_status = status
         self.send_response(status)
+        if self.close_connection:
+            self.send_header('Connection', 'close')
+        if status == 503:
+            self.send_header('Retry-After', '1')
+        if hasattr(self, 'read_request_id'):
+            self.send_header('X-Private-Request-Id', self.read_request_id)
         for name, value in (
                 ('Content-Type', content_type), ('Content-Length', str(len(body))),
                 ('Cache-Control', 'no-store'), ('Content-Security-Policy', CSP),
@@ -524,6 +666,12 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         self._reply(200, json.dumps(value, ensure_ascii=False).encode('utf-8'),
                     'application/json; charset=utf-8', max_response=max_response)
 
+    def _remaining(self):
+        remaining = self.read_deadline - time.monotonic()
+        if remaining <= 0:
+            raise SourceViewError(503)
+        return remaining
+
     def _inspector_filters(self, query):
         args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=17)
         if set(args) - INSPECTOR_FILTERS or any(len(values) != 1 for values in args.values()):
@@ -540,7 +688,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
             raise ValueError('invalid comparison page size')
         return result
 
-    @_serialized_request
+    @_bounded_get
     def do_GET(self):
         if not self._authorized():
             return self._reply(403)
@@ -566,22 +714,23 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
                           'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'], 'bundle_manifest_sha256': None}
                 owner = self.server.decisions
-                authority = self.server.status_authority()
-                if isinstance(self.server.presentation_status, PrivatePresentationStatus):
-                    self.server.presentation_status = PrivatePresentationStatus(self.server.presentation_status.path)
-                result = (self.server.presentation_status.read(
-                    active, owner_revision=owner.revision if owner else None,
-                    owner_snapshot=owner.active_snapshot_sha256 if owner else None,
-                    include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None,
-                    **({'authority': authority} if authority is not None else {})) if self.server.presentation_status else
-                          {'status': 'unavailable', 'remote': {'active': active}})
-                if (authority is not None and isinstance(self.server.presentation_status, PrivatePresentationStatus)
-                        and self.server.presentation_status.current
-                        and self._one('X-Freediving-Status-Token') is not None):
-                    result['refresh_pin'] = {'revision': self.server.presentation_status.current['revision'],
-                        'authority_sha256': status_digest(authority),
-                        'owner_store_revision': authority['owner_store_revision'],
-                        'export_sha256': authority['canonical']['same_attempt']['export_sha256']}
+                authority = self.server.status_authority(deadline=self.read_deadline)
+                with self.server.read_lock(self.read_deadline):
+                    if isinstance(self.server.presentation_status, PrivatePresentationStatus):
+                        self.server.presentation_status = PrivatePresentationStatus(self.server.presentation_status.path)
+                    result = (self.server.presentation_status.read(
+                        active, owner_revision=owner.revision if owner else None,
+                        owner_snapshot=owner.active_snapshot_sha256 if owner else None,
+                        include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None,
+                        **({'authority': authority} if authority is not None else {})) if self.server.presentation_status else
+                              {'status': 'unavailable', 'remote': {'active': active}})
+                    if (authority is not None and isinstance(self.server.presentation_status, PrivatePresentationStatus)
+                            and self.server.presentation_status.current
+                            and self._one('X-Freediving-Status-Token') is not None):
+                        result['refresh_pin'] = {'revision': self.server.presentation_status.current['revision'],
+                            'authority_sha256': status_digest(authority),
+                            'owner_store_revision': authority['owner_store_revision'],
+                            'export_sha256': authority['canonical']['same_attempt']['export_sha256']}
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
             elif path == '/owner-evidence/api/source':
@@ -595,16 +744,31 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 filters = self._inspector_filters(parsed.query)
                 if self.server.comparison_reader is None:
                     return self._reply(503)
-                authority = self.server.status_authority()
+                phase = time.monotonic()
+                authority, sporting_head = self.server.inspector_authority(deadline=self.read_deadline)
+                self.read_phases = {'authority_before': round((time.monotonic() - phase) * 1000)}
+                with self.server.read_lock(self.read_deadline):
+                    token = self.server.comparison_token(authority)
                 try:
-                    result = self.server.comparison_reader(filters, authority)
-                    result = self.server.bind_inspector_sources(result, filters)
-                except ValueError:
-                    raise
+                    phase = time.monotonic()
+                    result = self.server.read_comparison(filters, authority, deadline=self.read_deadline)
+                    result = self.server.bind_inspector_sources(result, filters, deadline=self.read_deadline)
+                    self.read_phases['inspection'] = round((time.monotonic() - phase) * 1000)
                 except Exception:
                     return self._reply(503)
+                phase = time.monotonic()
+                current_authority, current_head = self.server.inspector_authority(deadline=self.read_deadline)
+                self.read_phases['authority_publication'] = round((time.monotonic() - phase) * 1000)
+                with self.server.read_lock(self.read_deadline):
+                    current_token = self.server.comparison_token(current_authority)
+                    if (current_authority != authority or current_head != sporting_head or current_token != token
+                            or not self.server.authority_still_current(current_authority, current_head)):
+                        return self._reply(409)
+                    if time.monotonic() >= self.read_deadline:
+                        return self._reply(503)
+                    return self._json(result, max_response=MAX_INSPECTOR_RESPONSE)
             elif INSPECTOR_SOURCE_PATH.fullmatch(path) and not parsed.query:
-                row = self.server.inspector_row(INSPECTOR_SOURCE_PATH.fullmatch(path).group(1))
+                row = self.server.inspector_row(INSPECTOR_SOURCE_PATH.fullmatch(path).group(1), deadline=self.read_deadline)
                 candidate = row.get('candidate', {})
                 result = {'format': 'cited_retained_derivative',
                           'source_sha256': row['reference']['source-sha256'],
@@ -616,23 +780,19 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                           'original_replay': 'restricted_original_required' if row.get('source', {}).get('federation') == 'AIDA' else 'private_pdf_requires_exact_page_binding'}
             elif INSPECTOR_PAGE_PATH.fullmatch(path) and not parsed.query:
                 row_id, page = INSPECTOR_PAGE_PATH.fullmatch(path).groups()
-                row, page = self.server.inspector_row(row_id), int(page)
+                row, page = self.server.inspector_row(row_id, deadline=self.read_deadline), int(page)
                 coordinates = row.get('candidate', {}).get('coordinates', {})
                 if (row.get('source', {}).get('federation') != 'CMAS'
                         or coordinates.get('page') != page
                         or not hasattr(self.server.comparison_reader, 'source_bytes')):
                     return self._reply(404)
-                data = self.server.comparison_reader.source_bytes(row)
-                with tempfile.TemporaryFile(mode='w+b') as output:
-                    rendered = subprocess.run(['pdftoppm', '-f', str(page), '-l', str(page),
-                        '-scale-to', '1400', '-singlefile', '-png', '-'], input=data,
-                        stdout=output, stderr=subprocess.DEVNULL, timeout=15, check=False,
-                        preexec_fn=_limit_renderer)
-                    if output.seek(0, 2) >= MAX_IMAGE:
-                        return self._reply(413)
-                    output.seek(0); image = output.read(MAX_IMAGE)
-                if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
-                    return self._reply(422)
+                try:
+                    data = (self.server.comparison_reader.source_bytes(row, deadline=self.read_deadline)
+                            if hasattr(self.server.comparison_reader, 'verify_current') else
+                            self.server.comparison_reader.source_bytes(row))
+                except (ValueError, OSError):
+                    raise SourceViewError(503) from None
+                image = render_pdf(data, page, timeout=self._remaining())
                 return self._reply(200, image, 'image/png')
             elif path == '/owner-evidence/api/queue':
                 result = query.queue(**self._queue_filters(parsed.query))
@@ -736,18 +896,23 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 if self.server.source_view is None:
                     return self._reply(503)
                 record_id, page = SOURCE_PAGE_PATH.fullmatch(path).groups()
-                image = self.server.source_view.page(query.detail(record_id), int(page))
+                with self.server.read_lock(self.read_deadline):
+                    detail = query.detail(record_id)
+                image = self.server.source_view.page(detail, int(page), timeout=self._remaining())
                 return self._reply(200, image, 'image/png')
             elif SOURCE_IMAGE_PATH.fullmatch(path) and not parsed.query:
                 if self.server.source_view is None:
                     return self._reply(503)
                 record_id = SOURCE_IMAGE_PATH.fullmatch(path).group(1)
-                image = self.server.source_view.image(query.detail(record_id))
+                with self.server.read_lock(self.read_deadline):
+                    detail = query.detail(record_id)
+                image = self.server.source_view.image(detail)
                 return self._reply(200, image, 'image/jpeg')
             elif SOURCE_VIEW_PATH.fullmatch(path):
                 if self.server.source_view is None:
                     return self._reply(503)
-                detail = query.detail(SOURCE_VIEW_PATH.fullmatch(path).group(1))
+                with self.server.read_lock(self.read_deadline):
+                    detail = query.detail(SOURCE_VIEW_PATH.fullmatch(path).group(1))
                 view = 0
                 if parsed.query:
                     args = parse_qs(parsed.query, strict_parsing=True, max_num_fields=1)
@@ -914,6 +1079,7 @@ def make_server(snapshot_dir, env=None, port=0, canonical_reader=None):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--snapshot-dir', required=True)
     parser.add_argument('--port', type=int, default=8081)

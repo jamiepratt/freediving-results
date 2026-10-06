@@ -1,12 +1,14 @@
 """Bounded, record-bound access to verified private PDF, JPEG and JSON originals."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import resource
 import subprocess
 import sys
 import tempfile
+import threading
 
 from private_source_bundle import verify
 from vestico_safe_derivative import (HEADERS as VESTICO_HEADERS, PARSER_VERSION as VESTICO_PARSER,
@@ -20,6 +22,7 @@ MAX_SOURCE = 100 * 1024 * 1024
 MAX_JPEG = 2 * 1024 * 1024
 MAX_JSON_ROW = 128 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
+RENDER_SLOTS = threading.BoundedSemaphore(1)
 RECEIPT_FIELDS = ('discovery_url', 'final_url', 'retrieved_at', 'selected_view')
 
 
@@ -32,13 +35,35 @@ def _limit_renderer():
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_hard))
     if sys.platform.startswith('linux'):
         _, memory_hard = resource.getrlimit(resource.RLIMIT_AS)
-        memory_limit = min(1024 * 1024 * 1024, memory_hard) if memory_hard != resource.RLIM_INFINITY else 1024 * 1024 * 1024
+        memory_limit = min(256 * 1024 * 1024, memory_hard) if memory_hard != resource.RLIM_INFINITY else 256 * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_hard))
 
 
 class SourceViewError(Exception):
     def __init__(self, status):
         self.status = status
+
+
+def render_pdf(data, page, *, timeout=12):
+    """Apply resource limits inside a fresh child, never preexec_fn in threads."""
+    if not RENDER_SLOTS.acquire(blocking=False):
+        raise SourceViewError(503)
+    try:
+        with tempfile.TemporaryFile(mode='w+b') as output:
+            rendered = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                       '--render-pdf', str(page)], input=data, stdout=output,
+                                      stderr=subprocess.DEVNULL, timeout=timeout, check=False)
+            if output.seek(0, 2) >= MAX_IMAGE:
+                raise SourceViewError(413)
+            output.seek(0)
+            image = output.read(MAX_IMAGE)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SourceViewError(503) from exc
+    finally:
+        RENDER_SLOTS.release()
+    if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise SourceViewError(422)
+    return image
 
 
 class OriginalSourceView:
@@ -379,29 +404,23 @@ class OriginalSourceView:
                 'snapshot_sha256': detail['snapshot_sha256'],
                 'original_replay': 'restricted_original_required'}
 
-    def page(self, detail, requested_page):
+    def page(self, detail, requested_page, *, timeout=12):
         info = self.inspect(detail)
         if info['format'] != 'pdf' or requested_page != info['page']:
             raise SourceViewError(404)
         _, _, data = self._source(detail)
-        try:
-            with tempfile.TemporaryFile(mode='w+b') as output:
-                rendered = subprocess.run(['pdftoppm', '-f', str(requested_page), '-l', str(requested_page),
-                                           '-scale-to', '1400', '-singlefile', '-png', '-'],
-                                          input=data, stdout=output, stderr=subprocess.DEVNULL,
-                                          timeout=15, check=False, preexec_fn=_limit_renderer)
-                size = output.seek(0, 2)
-                if size >= MAX_IMAGE:
-                    raise SourceViewError(413)
-                output.seek(0)
-                image = output.read(MAX_IMAGE)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SourceViewError(503) from exc
-        if rendered.returncode or not image.startswith(b'\x89PNG\r\n\x1a\n'):
-            raise SourceViewError(422)
-        return image
+        return render_pdf(data, requested_page, timeout=timeout)
 
     def image(self, detail):
         if self.inspect(detail)['format'] != 'jpeg':
             raise SourceViewError(404)
         return self._source(detail)[2]
+
+
+if __name__ == '__main__':
+    if (len(sys.argv) != 3 or sys.argv[1] != '--render-pdf'
+            or not re.fullmatch(r'[1-9][0-9]{0,2}', sys.argv[2])):
+        raise SystemExit(2)
+    _limit_renderer()
+    os.execvp('pdftoppm', ['pdftoppm', '-f', sys.argv[2], '-l', sys.argv[2],
+                         '-scale-to', '1400', '-singlefile', '-png', '-'])

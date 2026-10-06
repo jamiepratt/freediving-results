@@ -336,6 +336,51 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['snapshot_sha256'], self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256'])
 
+    def test_private_comparison_budget_exhaustion_is_retriable(self):
+        def reader(filters, authority):
+            raise ValueError('owned runtime exhausted its bounded request budget')
+        self.server.comparison_reader = reader
+        status, headers, body = self.request('/owner-evidence/api/attempt-inspector')
+        self.assertEqual(status, 503)
+        self.assertEqual(headers['Retry-After'], '1')
+        self.assertEqual(body, b'')
+        self.assertEqual(self.request('/owner-evidence/api/attempt-inspector?limit=101')[0], 400)
+
+    def test_slow_owned_inspection_does_not_queue_current_status(self):
+        # Owned subprocess stand-in isolates transport/queueing from JVM work.
+        marker = Path(self.tmp.name) / 'read-entered'
+        release = Path(self.tmp.name) / 'read-release'
+        script = ("import pathlib,time; pathlib.Path(" + repr(str(marker)) + ").touch(); "
+                  "p=pathlib.Path(" + repr(str(release)) + "); "
+                  "exec('while not p.exists():\\n time.sleep(0.01)')")
+        def reader(filters, current):
+            subprocess.run([sys.executable, '-c', script], check=True, timeout=3)
+            return {'schema': 'private-attempt-inspector/v1', 'rows': [], 'ranks': []}
+        self.server.comparison_reader = reader
+        results = []
+        thread = threading.Thread(target=lambda: results.append(
+            self.request('/owner-evidence/api/attempt-inspector')[0]))
+        thread.start()
+        try:
+            until = time.monotonic() + 1
+            while not marker.exists() and time.monotonic() < until:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists())
+            started = time.monotonic()
+            # Release eventually even on the old whole-request lock.
+            timer = threading.Timer(0.6, release.touch)
+            timer.start()
+            status, _, body = self.request('/owner-evidence/api/presentation-status')
+            elapsed = time.monotonic() - started
+            timer.join()
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)['status'], 'unavailable')
+            self.assertLess(elapsed, 0.3, 'status waited behind expensive inspection')
+        finally:
+            release.touch()
+            thread.join(timeout=4)
+        self.assertEqual(results, [200])
+
     def test_authorized_decision_actions_do_not_overlap(self):
         import hmac
         from hashlib import sha256

@@ -68,6 +68,24 @@ test('private inspector submits sport filters and clears prior ranks when fresh 
   assert.deepEqual(requests.map(request=>request.path),[path,path]);
 });
 
+test('older inspection completing after a newer failed refresh cannot restore ranks', async () => {
+  const {context,node}=workspace();
+  const pending=[];
+  context.fetch=()=>new Promise(resolve=>pending.push(resolve));
+  const earlier=vm.runInContext('loadAttemptInspector()',context);
+  const newer=vm.runInContext('loadAttemptInspector()',context);
+  pending[1]({ok:false,status:503});
+  await assert.rejects(newer,/HTTP 503/);
+  pending[0]({ok:true,status:200,json:async()=>({coverage:{ranked:1},
+    pagination:{total:1,limit:25,offset:0},rows:[{source_id:'stale-synthetic',candidate:{parsed:{}},
+      comparison_status:'eligible',rank:1,comparison_lists:[{href:'/api/attempt-inspector?peer_anchor=stale'}]}]})});
+  await earlier;
+  assert.equal(node('inspector-results').visibleText,'');
+  assert.equal(node('inspector-detail').visibleText,'');
+  assert.match(node('inspector-summary').visibleText,/ranks withheld/);
+  assert.match(node('inspector-summary').visibleText,/Refresh/);
+});
+
 test('current owner status separates canonical cohorts from historical identity receipt', () => {
   const {context,node}=workspace();
   context.receipt={schema:'private-presentation-status/v4',run_id:'normal-run',

@@ -5,6 +5,7 @@ let routeOffset = 0;
 let issue172Offset = 0;
 const routeAuthorities = new Map();
 let inspectorOffset=0, inspectorRows=[], inspectorPageSize=25, inspectorPeerPath=null;
+let inspectorLoadGeneration=0;
 const inspectorFilterNames=['federation','environment','discipline','year','gender','category','age_class','representation','review','publication'];
 function inspectorValue(value){return value==null?'unknown':typeof value==='object'?JSON.stringify(value):String(value);}
 function renderAttemptInspector(result){
@@ -91,14 +92,20 @@ async function showInspectorSource(rowId,area){
   area.append(heading('Cited source value'),jsonBlock(info.source_value),heading('Parsed fields'),jsonBlock(info.parsed_fields));
 }
 async function loadAttemptInspector(peerHref){
+  const generation=++inspectorLoadGeneration;
   if(peerHref)inspectorPeerPath=peerHref;
   // Withdraw visible rows before every refresh, including denied or failed requests.
   inspectorRows=[];$('inspector-results').replaceChildren();$('inspector-detail').replaceChildren();
   $('inspector-summary').textContent='Checking fresh current authority; ranks withheld while loading.';
   const params=inspectorPeerPath ? new URLSearchParams(inspectorPeerPath.split('?')[1]) : new URLSearchParams(new FormData($('inspector-filters')));for(const [key,value] of [...params])if(!value)params.delete(key);
   if(!params.has('limit'))params.set('limit','25');params.set('offset',inspectorOffset);
-  try{renderAttemptInspector(await fetchJson('/api/attempt-inspector?'+params));}
-  catch(error){$('inspector-summary').textContent='Private comparison unavailable; current authority unverified and ranks withheld. '+error.message;throw error;}
+  try{const result=await fetchJson('/api/attempt-inspector?'+params);if(generation===inspectorLoadGeneration)renderAttemptInspector(result);}
+  catch(error){
+    if(generation!==inspectorLoadGeneration)return;
+    inspectorRows=[];$('inspector-results').replaceChildren();$('inspector-detail').replaceChildren();
+    $('inspector-summary').textContent='Private comparison unavailable; current authority unverified and ranks withheld. Wait briefly, then Refresh. '+error.message;
+    throw error;
+  }
 }
 function cell(text, tag='td') { const n=document.createElement(tag); n.textContent=text==null?'unknown':String(text); return n; }
 function heading(text) { const n=document.createElement('h3'); n.textContent=text; return n; }
