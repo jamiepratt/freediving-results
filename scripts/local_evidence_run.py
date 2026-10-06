@@ -74,7 +74,9 @@ def checked_plan(path):
                     or not isinstance(ids, list) or not ids or len(ids) != len(set(ids))
                     or any(not isinstance(identifier, str) or not re.fullmatch(r'[0-9a-f]{64}', identifier)
                            for identifier in ids)
-                    or set(reconciliation) != {'mode', 'source_names', 'record_ids', 'name_evidence'}):
+                    or not {'mode', 'source_names', 'record_ids', 'name_evidence'} <= set(reconciliation)
+                    or not set(reconciliation) <= {'mode', 'source_names', 'record_ids', 'name_evidence',
+                                                   'owner_sync_config', 'retained_reconciliation'}):
                 raise ValueError('Microplus reconciliation requires exact source names and record IDs')
             if not set(names) <= {item['name'] for item in plan['inputs']}:
                 raise ValueError('Microplus reconciliation source absent from plan inputs')
@@ -674,11 +676,130 @@ def command(argv):
     subprocess.run(argv, check=True)
 
 
+def private_owner_config(path):
+    if not path:
+        return None
+    path = Path(path)
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o077):
+        raise ValueError('owner synchronization config must be an owner-only regular file')
+    return path.resolve(strict=True)
+
+
+def adopt_retained_snapshot(plan, run_dir):
+    """Use exact retained bytes for an explicitly bounded unchanged input cohort.
+
+    This does not carry decisions to regenerated observation versions. Both
+    snapshots replay the same pinned packet and original citation bytes; the
+    broader frozen presentation remains a separately identified artifact.
+    """
+    pinned = plan.get('retained_snapshot')
+    if pinned is None:
+        return None
+    config = plan.get('reconciliation') or {}
+    if (config.get('mode') != 'microplus_attempt' or not isinstance(pinned, dict)
+            or set(pinned) != {'path', 'manifest_sha256', 'sqlite_sha256', 'snapshot_sha256'}
+            or {item['name'] for item in plan['inputs']} != set(config['source_names'])
+            or plan['excluded']):
+        raise ValueError('retained snapshot requires an exact bounded Microplus input cohort')
+    source = Path(pinned['path'])
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError('retained snapshot directory unavailable')
+    verified_file(source / 'manifest.json', pinned['manifest_sha256'])
+    verified_file(source / 'snapshot.sqlite', pinned['sqlite_sha256'])
+    manifest = json.loads((source / 'manifest.json').read_text())
+    if (manifest['snapshot_sha256'] != pinned['snapshot_sha256']
+            or pinned['sqlite_sha256'] != pinned['snapshot_sha256']
+            or manifest['cutoff'] != plan['cutoff']):
+        raise ValueError('retained snapshot binding changed')
+    for item in plan['inputs']:
+        original = manifest['inputs'].get(item['name'])
+        if not original or original['sha256'] != digest(item['path']):
+            raise ValueError('retained snapshot input provenance changed')
+        verified_file(original['path'], original['sha256'])
+    from cmas_microplus_snapshot_observations import load_attempt_evidence
+    from unified_evidence_query import SnapshotQuery
+    generated = run_dir / 'snapshot'
+    retained_generated = run_dir / 'regenerated-snapshot'
+    if generated.is_symlink() or retained_generated.is_symlink():
+        raise ValueError('retained snapshot checkpoint is a symlink')
+    if retained_generated.exists():
+        generated = retained_generated
+    # The adapter checks the entire packet, original source hashes, receipts,
+    # citation pointers, raw rows, parser contract, and source-native scope.
+    for directory in (generated, source):
+        load_attempt_evidence(directory, config['source_names'], record_ids=config['record_ids'])
+    with SnapshotQuery(generated) as fresh, SnapshotQuery(source) as frozen:
+        for identifier in config['record_ids']:
+            left = fresh.db.execute('SELECT * FROM records WHERE record_id=?', (identifier,)).fetchone()
+            right = frozen.db.execute('SELECT * FROM records WHERE record_id=?', (identifier,)).fetchone()
+            if left is None or right is None or dict(left) != dict(right):
+                raise ValueError('retained snapshot observation version or citation changed')
+    command([sys.executable, str(ROOT / 'unified_evidence_snapshot.py'), 'verify',
+             '--output-dir', str(source)])
+    if not retained_generated.exists():
+        generated.rename(retained_generated)
+    target = run_dir / 'snapshot'
+    if not target.exists():
+        stage = Path(tempfile.mkdtemp(prefix='.retained-snapshot-', dir=run_dir))
+        try:
+            for name, expected in [('manifest.json', pinned['manifest_sha256']),
+                                   ('snapshot.sqlite', pinned['sqlite_sha256'])]:
+                shutil.copyfile(verified_file(source / name, expected), stage / name)
+                os.chmod(stage / name, 0o600)
+            stage.rename(target)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    verified_file(target / 'manifest.json', pinned['manifest_sha256'])
+    verified_file(target / 'snapshot.sqlite', pinned['sqlite_sha256'])
+    return {'schema': 'verified-retained-snapshot-adoption/v1',
+            'snapshot_sha256': pinned['snapshot_sha256'],
+            'snapshot_manifest_sha256': pinned['manifest_sha256'],
+            'regenerated_snapshot_sha256': digest(retained_generated / 'snapshot.sqlite'),
+            'regenerated_manifest_sha256': digest(retained_generated / 'manifest.json'),
+            'source_names': config['source_names'], 'record_ids': sorted(config['record_ids']),
+            'input_sha256': {item['name']: digest(item['path']) for item in plan['inputs']},
+            'scope': 'selected_unchanged_microplus_cohort_only'}
+
+
+def seed_retained_reconciliation(config, directory):
+    retained = config.get('retained_reconciliation')
+    if retained is None:
+        return
+    if not isinstance(retained, dict) or set(retained) != {'flow', 'owner', 'export'}:
+        raise ValueError('retained reconciliation requires flow, owner and immutable export')
+    filenames = {'flow': 'flow.edn', 'owner': 'owner.sqlite', 'export': 'pending-export.json'}
+    # Validate all source pins before any seed copy. Existing files are current
+    # checkpoints and can contain later signed history or owner corrections.
+    sources = {}
+    for role, item in retained.items():
+        if not isinstance(item, dict) or set(item) != {'path', 'sha256'}:
+            raise ValueError('invalid retained reconciliation pin')
+        sources[role] = verified_file(item['path'], item['sha256'])
+    for role, source in sources.items():
+        target = directory / filenames[role]
+        if target.is_symlink():
+            raise ValueError('retained reconciliation checkpoint is a symlink')
+        if not target.exists():
+            fd, temporary = tempfile.mkstemp(prefix='.retained-seed-', dir=directory)
+            os.close(fd)
+            try:
+                shutil.copyfile(source, temporary)
+                verified_file(temporary, retained[role]['sha256'])
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+
 def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
         publisher_requests_stopped=False, vps_reachable=None, remote_factory=None,
         status_client_id=None, status_client_secret=None, status_token=None):
     plan = checked_plan(plan_path)
-    if plan.get('reconciliation') and remote_config is not None:
+    if plan.get('reconciliation', {}).get('mode') == 'synthetic' and remote_config is not None:
         raise ValueError(f"{plan['reconciliation']['mode']} reconciliation cannot activate remote presentation")
     plan_hash = digest(plan_path)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -698,6 +819,9 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
     try:
         if state['local']['status'] == 'complete':
             verify_staging(run_dir, state)
+            if plan.get('retained_snapshot') is not None:
+                if adopt_retained_snapshot(plan, run_dir) != state['local'].get('adoption'):
+                    raise ValueError('completed retained snapshot adoption changed')
         else:
             for stage in plan['stages']:
                 saved = state['stages'].get(stage['name'])
@@ -712,6 +836,9 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
                 state['stages'][stage['name']] = {'status': 'complete', 'outputs': outputs}
                 atomic_json(state_path, state)
             snapshot = run_dir / 'snapshot'
+            if (not snapshot.exists() and plan.get('retained_snapshot') is not None
+                    and (run_dir / 'regenerated-snapshot').exists()):
+                adopt_retained_snapshot(plan, run_dir)
             if not snapshot.exists():
                 build_dir = Path(tempfile.mkdtemp(prefix='.snapshot-stage-', dir=run_dir))
                 os.chmod(build_dir, 0o700)
@@ -728,6 +855,7 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
                     if build_dir.exists():
                         shutil.rmtree(build_dir)
             command([sys.executable, str(ROOT / 'unified_evidence_snapshot.py'), 'verify', '--output-dir', str(snapshot)])
+            adoption = adopt_retained_snapshot(plan, run_dir)
             snapshot_manifest = json.loads((snapshot / 'manifest.json').read_text())
             inventory = json.loads(Path(plan['source_inventory']).read_text())
             sources = inventory['sources']
@@ -757,6 +885,11 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
             state['local'] = {'status': 'complete', 'snapshot_sha256': snapshot_manifest['snapshot_sha256'],
                               'snapshot_manifest_sha256': digest(snapshot / 'manifest.json'),
                               'bundle_manifest_sha256': digest(bundle / 'manifest.json')}
+            if adoption is not None:
+                state['local']['adoption'] = adoption
+                state['coverage']['scope'] = 'selected_retained_microplus_cohort'
+                state['coverage']['source_names'] = adoption['source_names']
+                state['coverage']['record_ids'] = adoption['record_ids']
             state['remote']['pending'] = state['local']['snapshot_sha256']
             atomic_json(state_path, state)
     except Exception as error:
@@ -831,6 +964,12 @@ def verify_staging(run_dir, state):
     command([sys.executable, str(ROOT / 'private_source_bundle.py'), 'verify', '--bundle-dir', str(bundle)])
     if digest(snapshot / 'manifest.json') != state['local']['snapshot_manifest_sha256'] or digest(bundle / 'manifest.json') != state['local']['bundle_manifest_sha256']:
         raise ValueError('completed staging manifest changed')
+    adoption = state['local'].get('adoption')
+    if adoption is not None:
+        generated = run_dir / 'regenerated-snapshot'
+        if (digest(generated / 'manifest.json') != adoption['regenerated_manifest_sha256']
+                or digest(generated / 'snapshot.sqlite') != adoption['regenerated_snapshot_sha256']):
+            raise ValueError('completed regenerated snapshot changed')
 
 
 def microplus_metrics(run_dir, state):
@@ -919,10 +1058,14 @@ def microplus_metrics(run_dir, state):
     return {
         'schema': 'microplus-attempt-local-metrics/v1',
         'binding': {'run_id': state['run_id'], 'snapshot_sha256': receipt['snapshot_sha256'],
+                    'snapshot_adoption': state['local'].get('adoption'),
                     'flow_sha256': receipt['flow_sha256'], 'export_sha256': receipt['export_sha256'],
                     'run_revision': receipt['run_revision'],
                     'owner_store_revision_at_checkpoint': receipt['owner_store_revision'],
                     'owner_store_revision_current': revision,
+                    'owner_store_scope': 'local_run_copy_only',
+                    'owner_store_revision_synchronized': receipt.get('owner_store_revision_synchronized'),
+                    'synchronized_revision_scope': 'last_successful_signed_feed_only',
                     'history_versions': flow['history_versions']},
         'counts': {'snapshot_positions': receipt['snapshot_positions'],
                    'cited_view_observations': receipt['cited_view_observations'],
@@ -956,6 +1099,7 @@ def reconcile_microplus_attempt(config, run_dir, state):
     from owner_decision_store import DecisionStore
 
     snapshot = run_dir / 'snapshot'
+    owner_config = private_owner_config(config.get('owner_sync_config'))
     if config['name_evidence']['status'] == 'checked':
         from affiliate_name_query import AffiliateNameQuery
         from unified_evidence_query import SnapshotQuery
@@ -973,6 +1117,7 @@ def reconcile_microplus_attempt(config, run_dir, state):
     flow_path = directory / 'flow.edn'
     owner_path = directory / 'owner.sqlite'
     export_path = directory / 'pending-export.json'
+    seed_retained_reconciliation(config, directory)
     completed = state.get('reconciliation', {})
     if completed.get('status') == 'complete':
         if (completed.get('mode') != 'microplus_attempt'
@@ -998,7 +1143,8 @@ def reconcile_microplus_attempt(config, run_dir, state):
             completed['owner_store_revision'] = store.revision
         finally:
             store.close()
-        return
+        if not owner_config:
+            return
     state['reconciliation'] = {'status': 'running', 'mode': 'microplus_attempt',
                                'snapshot_sha256': result['snapshot_sha256']}
     atomic_json(run_dir / 'state.json', state)
@@ -1006,7 +1152,8 @@ def reconcile_microplus_attempt(config, run_dir, state):
     completed_flow = subprocess.run(
         ['clojure', '-M', '-m', 'freediving.microplus-local-run'],
         input=json.dumps({'evidence': result['evidence'], 'decision_ids': decision_ids,
-                          'flow_path': str(flow_path)}, sort_keys=True),
+                          'flow_path': str(flow_path), 'snapshot_sha256': result['snapshot_sha256'],
+                          'owner_sync_config': str(owner_config) if owner_config else None}, sort_keys=True),
         text=True, capture_output=True, check=True, cwd=ROOT.parent)
     flow = json.loads(completed_flow.stdout)
     if (flow.get('provider_calls') != 0 or set(flow.get('events', {})) != set(decision_ids)
@@ -1027,7 +1174,7 @@ def reconcile_microplus_attempt(config, run_dir, state):
             envelopes = [build_verified_microplus_attempt_export(
                 store, snapshot, config['source_names'], record_id,
                 decision_id=decision_id,
-                reconciliation_run_revision=flow['run_revision'],
+                reconciliation_run_revision=flow.get('proposal_run_revision', flow['run_revision']),
                 reconciliation_event_id=flow['events'][decision_id],
                 reconciliation_flow_path=flow_path)
                 for record_id, decision_id in zip(selected, decision_ids)]
@@ -1042,12 +1189,15 @@ def reconcile_microplus_attempt(config, run_dir, state):
             'status': 'complete', 'mode': 'microplus_attempt',
             'snapshot_sha256': result['snapshot_sha256'],
             'flow_sha256': digest(flow_path), 'export_sha256': digest(export_path),
-            'run_revision': flow['run_revision'], 'pending_proposals': len(selected),
+            'run_revision': flow['run_revision'],
+            'pending_proposals': sum(store.inspect(identifier)['effective_status'] == 'pending'
+                                     for identifier in decision_ids),
             'snapshot_positions': result['summary']['snapshot_positions'],
             'cited_view_observations': result['summary']['cited_view_observations'],
             'source_objects': result['summary']['source_objects'],
             'provider_calls': 0, 'accepted_athletes': None,
             'distinct_attempts': None, 'owner_store_revision': store.revision,
+            'owner_store_revision_synchronized': flow.get('owner_store_revision_synchronized'),
             'name_evidence': config['name_evidence']}
     finally:
         store.close()

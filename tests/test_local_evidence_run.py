@@ -1200,3 +1200,135 @@ def test_retained_runner_cli_recovers_frozen_source_and_checks_staged_bytes(tmp_
                             capture_output=True, text=True)
     assert unsafe.returncode != 0
     assert 'invalid recovered packet binding' in unsafe.stderr
+
+
+def adopted_microplus_fixture(tmp_path):
+    """A frozen presentation contains more evidence than the bounded rerun."""
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    frozen_plan = tmp_path / 'frozen-plan.json'
+    data = json.loads(plan.read_text())
+    extra = tmp_path / 'unrelated.json'
+    extra.write_text(json.dumps({'schema': 'synthetic/v1', 'positions': []}))
+    data['inputs'].append({'name': 'unrelated', 'path': str(extra)})
+    frozen_plan.write_text(json.dumps(data))
+    frozen = tmp_path / 'frozen'
+    result = run(frozen_plan, frozen)
+    assert result.returncode == 0, result.stderr
+    sys.path.insert(0, str(SCRIPT.parent))
+    from owner_decision_store import DecisionStore
+    store = DecisionStore(frozen / 'reconciliation/owner.sqlite')
+    try:
+        store.act('microplus-attempt-' + record_id, action='correct',
+                  expected_revision=store.revision, idempotency_key='prior-correction',
+                  correction={'pair': []})
+        revision = store.revision
+    finally:
+        store.close()
+    data = json.loads(plan.read_text())
+    snapshot = frozen / 'snapshot'
+    data['retained_snapshot'] = {
+        'path': str(snapshot), 'manifest_sha256': sha(snapshot / 'manifest.json'),
+        'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+        'snapshot_sha256': json.loads((snapshot / 'manifest.json').read_text())['snapshot_sha256']}
+    data['reconciliation']['retained_reconciliation'] = {
+        role: {'path': str(frozen / 'reconciliation' / filename),
+               'sha256': sha(frozen / 'reconciliation' / filename)}
+        for role, filename in [('flow', 'flow.edn'), ('owner', 'owner.sqlite'),
+                               ('export', 'pending-export.json')]}
+    names = tmp_path / 'names.json'
+    names.write_text(json.dumps({
+        'schema': 'affiliate-name-input/v1',
+        'snapshot': {'manifest_sha256': sha(snapshot / 'manifest.json'),
+                     'sqlite_sha256': sha(snapshot / 'snapshot.sqlite'),
+                     'cutoff': data['cutoff']},
+        'sources': [], 'assertions': [], 'gaps': [], 'roster': {}}))
+    data['reconciliation']['name_evidence'] = {'status': 'checked', 'path': str(names),
+                                              'sha256': sha(names)}
+    plan.write_text(json.dumps(data))
+    return plan, record_id, frozen, revision
+
+
+def test_normal_microplus_adopts_verified_frozen_binding_and_preserves_correction(tmp_path):
+    plan, record_id, frozen, revision = adopted_microplus_fixture(tmp_path)
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode == 0, result.stderr
+    state = json.loads((target / 'state.json').read_text())
+    assert sha(target / 'snapshot/snapshot.sqlite') == sha(frozen / 'snapshot/snapshot.sqlite')
+    assert sha(target / 'regenerated-snapshot/snapshot.sqlite') != sha(frozen / 'snapshot/snapshot.sqlite')
+    assert state['local']['adoption']['record_ids'] == [record_id]
+    assert state['local']['adoption']['source_names'] == ['cmas-microplus-2026']
+    assert state['reconciliation']['owner_store_revision'] == revision
+    assert state['reconciliation']['pending_proposals'] == 0
+    assert sha(target / 'reconciliation/pending-export.json') == sha(frozen / 'reconciliation/pending-export.json')
+    before = [sha(target / 'reconciliation' / name) for name in ('owner.sqlite', 'flow.edn', 'pending-export.json')]
+    assert run(plan, target).returncode == 0
+    assert [sha(target / 'reconciliation' / name) for name in ('owner.sqlite', 'flow.edn', 'pending-export.json')] == before
+
+
+def test_normal_microplus_adoption_rejects_changed_packet_before_owner_copy(tmp_path):
+    plan, _, _, _ = adopted_microplus_fixture(tmp_path)
+    data = json.loads(plan.read_text())
+    packet = Path(data['inputs'][0]['path'])
+    changed = json.loads(packet.read_text())
+    changed['positions'][0]['alternate_citations'] = []
+    packet.write_text(json.dumps(changed))
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode != 0
+    assert 'retained snapshot input provenance changed' in result.stderr
+    assert not (target / 'reconciliation/owner.sqlite').exists()
+
+
+def test_normal_microplus_adoption_rejects_missing_original_citation(tmp_path):
+    plan, _, _, _ = adopted_microplus_fixture(tmp_path)
+    (tmp_path / 'unit-16-results.json').unlink()
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode != 0
+    assert 'Microplus source or receipt missing' in result.stderr
+    assert not (target / 'reconciliation/owner.sqlite').exists()
+
+
+def test_normal_microplus_adoption_rerun_checks_plan_input_provenance(tmp_path):
+    plan, _, _, _ = adopted_microplus_fixture(tmp_path)
+    data = json.loads(plan.read_text())
+    # Exact bytes at a different retained path still have verified provenance.
+    packet = tmp_path / 'separate-packet.json'
+    packet.write_bytes(Path(data['inputs'][0]['path']).read_bytes())
+    data['inputs'][0]['path'] = str(packet)
+    plan.write_text(json.dumps(data))
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    before = sha(target / 'reconciliation/owner.sqlite')
+    packet.write_bytes(b'{}')
+    result = run(plan, target)
+    assert result.returncode != 0
+    assert 'retained snapshot input provenance changed' in result.stderr
+    assert sha(target / 'reconciliation/owner.sqlite') == before
+
+
+def test_normal_microplus_adoption_refuses_export_after_newer_owner_binding(tmp_path):
+    plan, record_id, frozen, _ = adopted_microplus_fixture(tmp_path)
+    sys.path.insert(0, str(SCRIPT.parent))
+    from owner_decision_store import DecisionStore
+    store = DecisionStore(frozen / 'reconciliation/owner.sqlite')
+    try:
+        store.bind_verified_snapshot(frozen / 'snapshot', expected_revision=store.revision,
+                                     idempotency_key='newer-owner-binding',
+                                     attempt_record_ids=[record_id])
+        revision = store.revision
+    finally:
+        store.close()
+    data = json.loads(plan.read_text())
+    data['reconciliation']['retained_reconciliation']['owner']['sha256'] = sha(frozen / 'reconciliation/owner.sqlite')
+    plan.write_text(json.dumps(data))
+    target = tmp_path / 'run'
+    result = run(plan, target)
+    assert result.returncode != 0
+    assert 'decision store binding changed' in result.stderr
+    store = DecisionStore(target / 'reconciliation/owner.sqlite')
+    try:
+        assert store.revision == revision
+    finally:
+        store.close()
