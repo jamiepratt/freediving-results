@@ -402,6 +402,159 @@ class SportingProofStartupHTTPTest(unittest.TestCase):
         self.assertEqual(calls, [[]])
         self.assertCountEqual(closed, ['proof', 'comparison'])
 
+class SportingAuthorityConcurrencyHTTPTest(unittest.TestCase):
+    def challenge(self, f):
+        body = {'schema': 'sporting-authority-challenge/v1', 'nonce': '9' * 64}
+        return f.request('/owner-evidence/api/sporting-authority/current', body, headers={
+            'Host': '127.0.0.1:' + str(f.server.server_port), 'Content-Type': 'application/json',
+            'X-Freediving-Sporting-HMAC': hmac.new(f.secret.encode(), canonical(body), hashlib.sha256).hexdigest()})
+
+    def test_authenticated_read_only_signer_overlaps_owner_proof_collection(self):
+        import copy
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        f = Fixture(); self.addCleanup(f.close)
+        signer_entered, proof_entered, status_entered = threading.Event(), threading.Event(), threading.Event()
+        overlaps = []
+        def signed_context():
+            with f.server.read_lock():
+                value = copy.deepcopy(f.context)
+            signer_entered.set()
+            overlaps.append(proof_entered.wait(0.7) and status_entered.wait(0.7))
+            return value
+        def proof_context():
+            with f.server.read_lock():
+                proof_entered.set()
+                return copy.deepcopy(f.context)
+        def status_authority(*, deadline=None):
+            with f.server.read_lock(deadline):
+                status_entered.set()
+            return None
+        f.server.status_authority = status_authority
+        f.server.sporting.context_reader = signed_context
+        f.server.sporting_proof_context = proof_context
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            signed = pool.submit(self.challenge, f)
+            self.assertTrue(signer_entered.wait(2))
+            proof = pool.submit(f.request, '/owner-evidence/api/sporting-authority/proofs')
+            status = pool.submit(f.request, '/owner-evidence/api/presentation-status')
+            self.assertEqual(status.result(timeout=3)[0], 200)
+            self.assertEqual(proof.result(timeout=3)[0], 200)
+            self.assertEqual(signed.result(timeout=3)[0], 200)
+        self.assertTrue(overlaps)
+        self.assertTrue(all(overlaps), 'read-only signer held the owner mutation lock across context collection')
+        self.assertEqual(f.server.sporting._history(), [])
+
+    def test_real_owner_mutations_stay_serialized_while_signer_lock_scope_changes(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        f = Fixture(); self.addCleanup(f.close)
+        self.assertEqual(f.stage(synthetic_proposal(synthetic_context())['publication'])[0], 200)
+        current = f.review()
+        first_entered, second_entered, release = threading.Event(), threading.Event(), threading.Event()
+        original = f.server.sporting.act
+        def act(*args, **kwargs):
+            if kwargs['action'] == 'source-approve':
+                first_entered.set()
+                if not release.wait(2):
+                    raise ValueError('isolated serialization barrier timed out')
+            else:
+                second_entered.set()
+            return original(*args, **kwargs)
+        f.server.sporting.act = act
+        def request(action, revision):
+            return f.request('/owner-evidence/api/sporting-authority/actions', {
+                'id': f.proposal_id, 'action': action, 'reason': 'Synthetic explicit concurrent owner review',
+                'expected_revision': revision, 'idempotency_key': action,
+                'csrf_token': current['csrf_token']})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(request, 'source-approve', 1)
+            self.assertTrue(first_entered.wait(2))
+            second = pool.submit(request, 'select-cohort', 2)
+            try:
+                self.assertFalse(second_entered.wait(0.1))
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=3)[0], 200)
+            self.assertEqual(second.result(timeout=3)[0], 200)
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(f.review()['revision'], 3)
+
+    def test_full_proof_admission_refuses_overlap_without_queueing(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        f = Fixture(); self.addCleanup(f.close)
+        entered, release = threading.Event(), threading.Event()
+        def proof_context():
+            entered.set()
+            if not release.wait(2):
+                raise ValueError('isolated proof barrier timed out')
+            return f.context
+        f.server.sporting_proof_context = proof_context
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(f.request, '/owner-evidence/api/sporting-authority/proofs')
+            self.assertTrue(entered.wait(2))
+            try:
+                second = pool.submit(f.request, '/owner-evidence/api/sporting-authority/proofs')
+                self.assertEqual(second.result(timeout=0.5)[0], 503)
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=3)[0], 200)
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/proofs')[0], 200)
+
+
+    def test_owner_reversal_during_signer_read_withholds_old_publication(self):
+        import copy
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        f = Fixture(); self.addCleanup(f.close)
+        self.assertEqual(f.stage(synthetic_proposal(synthetic_context())['publication'])[0], 200)
+        for action in ('source-approve', 'select-cohort', 'publish'):
+            self.assertEqual(f.action(action)[0], 200)
+        review = f.review()
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def context():
+            calls.append(True)
+            if len(calls) == 1:
+                entered.set()
+                if not release.wait(2):
+                    raise ValueError('isolated signer reversal barrier timed out')
+            return copy.deepcopy(f.context)
+        f.server.sporting.context_reader = context
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            signed = pool.submit(self.challenge, f)
+            self.assertTrue(entered.wait(2))
+            reversal = pool.submit(f.request, '/owner-evidence/api/sporting-authority/actions', {
+                'id': f.proposal_id, 'action': 'reverse', 'reason': 'Synthetic explicit racing owner withdrawal',
+                'expected_revision': review['revision'], 'idempotency_key': 'race-withdrawal', 'csrf_token': review['csrf_token']})
+            try:
+                self.assertEqual(reversal.result(timeout=0.7)[0], 200)
+            finally:
+                release.set()
+            status, envelope = signed.result(timeout=3)
+        self.assertEqual(status, 200)
+        self.assertIsNone(envelope['payload']['publication'])
+        self.assertEqual(envelope['payload']['status'], 'unavailable')
+        self.assertEqual(envelope['payload']['revision'], 5)
+        self.assertEqual(envelope['payload']['events'][-1]['action'], 'reverse')
+
+    def test_proof_read_lock_timeout_releases_admission_for_fresh_retry(self):
+        import http.client
+        from owner_source_view import SourceViewError
+        f = Fixture(); self.addCleanup(f.close)
+        def unavailable():
+            raise SourceViewError(503)
+        f.server.sporting_proof_context = unavailable
+        connection = http.client.HTTPConnection('127.0.0.1', f.server.server_port, timeout=3)
+        connection.request('GET', '/owner-evidence/api/sporting-authority/proofs', headers={
+            'Host': HOST, 'X-Freediving-Owner-Gateway': GATE, 'X-Freediving-Owner-Email': OWNER})
+        response = connection.getresponse(); response.read(); connection.close()
+        self.assertEqual(response.status, 503)
+        self.assertEqual(response.getheader('Retry-After'), '1')
+        f.server.sporting_proof_context = lambda: f.context
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/proofs')[0], 200)
+
 
 if __name__ == '__main__':
     unittest.main()

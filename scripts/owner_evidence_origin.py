@@ -40,6 +40,8 @@ MAX_ISSUE172_QUEUE = 32 * 1024 * 1024
 READ_BUDGET_SECONDS = 12
 MAX_EXPENSIVE_READS = 4
 MAX_REQUEST_THREADS = 16
+SPORTING_READ_PATHS = frozenset(sporting_authority_http.PREFIX + suffix for suffix in
+                               ('/proofs', '/review', '/preview'))
 INSPECTOR_FILTERS = {'federation', 'environment', 'discipline', 'year', 'gender',
                      'category', 'representation', 'review', 'publication', 'limit', 'offset',
                      'age_class', 'peer_anchor', 'geography', 'peer_token', 'sanction_scope', 'listing_filter'}
@@ -161,6 +163,7 @@ class PrivateOrigin(ThreadingHTTPServer):
     def __init__(self, snapshot_dir, env, port=0, canonical_reader=None):
         self.request_lock = threading.RLock()
         self.read_slots = threading.BoundedSemaphore(MAX_EXPENSIVE_READS)
+        self.sporting_read_slots = threading.BoundedSemaphore(1)
         self.request_slots = threading.BoundedSemaphore(MAX_REQUEST_THREADS)
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
         self.canonical_reader = canonical_reader
@@ -468,7 +471,15 @@ class PrivateOrigin(ThreadingHTTPServer):
 
 def _serialized_request(method):
     def run(self):
-        # Parse sockets concurrently, then keep shared SQLite operations sequential.
+        # The exact loopback challenge is read-only. Its body/HMAC validation
+        # remains in the handler; immutable history and owner snapshots retain
+        # their short read locks and before/after currentness checks.
+        if sporting_authority_http.is_machine(self):
+            try:
+                return method(self)
+            except SourceViewError as exc:
+                return self._reply(exc.status)
+        # Keep every owner/import mutation sequential on the shared SQLite stores.
         with self.server.request_lock:
             return method(self)
     return run
@@ -503,16 +514,25 @@ def _bounded_get(method):
         self.read_deadline = started + READ_BUDGET_SECONDS
         self.read_request_id = uuid.uuid4().hex
         self.response_status = 503
-        admitted = self.server.read_slots.acquire(blocking=False)
+        sporting_slot = self.server.sporting_read_slots if path in SPORTING_READ_PATHS else None
+        sporting_admitted = sporting_slot.acquire(blocking=False) if sporting_slot is not None else True
+        admitted = False
         try:
+            if not sporting_admitted:
+                return self._reply(503)
+            admitted = self.server.read_slots.acquire(blocking=False)
             if not admitted:
                 return self._reply(503)
             return method(self)
+        except SourceViewError as exc:
+            return self._reply(exc.status)
         except (BrokenPipeError, ConnectionResetError):
             self.response_status = 499
         finally:
             if admitted:
                 self.server.read_slots.release()
+            if sporting_slot is not None and sporting_admitted:
+                sporting_slot.release()
             # Correlation and durations only: no URL, filters, owner or source data.
             logging.getLogger('private-origin').info(json.dumps({
                 'event': 'private-read', 'request_id': self.read_request_id,
