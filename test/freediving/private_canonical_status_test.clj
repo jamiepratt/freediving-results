@@ -30,4 +30,8 @@
                (get-in receipt [:scopes :same_attempt]))))
       (is (empty? (:scopes (status/read-status (assoc-in config [:exports :same_attempt :export :proposals] []))))))
     (with-redefs [attempt/private-readback (constantly (assoc readback :database "wrong"))]
+      (is (empty? (:scopes (status/read-status config)))))
+    (with-redefs [attempt/private-readback
+                  (constantly (update-in readback [:ledger :events] conj
+                                         {:id "owner-store:228" :type :source-revision}))]
       (is (empty? (:scopes (status/read-status config)))))))

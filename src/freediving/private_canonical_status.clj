@@ -29,6 +29,7 @@
     (need! (every? #(= snapshot (get-in % [:observation-revision :snapshot_sha256]))
                    (vals (:observation-versions ledger))))
     (need! (seq events))
+    (need! (= (count events) (count (:events ledger))))
     (doseq [event events]
       (let [{:keys [owner-event binding]} (:owner-request event)
             proposal (get-in owner-event [:proposal])]
