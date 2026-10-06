@@ -1,6 +1,12 @@
 (function () {
   'use strict';
   const keys = ['q', 'federation', 'discipline', 'category', 'date', 'page', 'comparison'];
+  const comparisonKeys = ['comparison', 'federation', 'representation', 'sanction_scope', 'listing_filter'];
+  function comparisonURL(path, search) { return '/api' + path + search; }
+  function sportingLink(value) {
+    if (typeof value !== 'string' || !/^\/comparison\/(attempts|peers)\/[a-f0-9]{64}(\?|$)/.test(value)) return null;
+    try { const url = new URL(value, 'https://comparison.invalid'); return url.origin === 'https://comparison.invalid' && !url.hash ? url.pathname + url.search : null; } catch (_) { return null; }
+  }
   function searchURL(values) {
     const p = new URLSearchParams();
     keys.forEach(k => { if (values[k]) p.set(k, values[k]); });
@@ -102,10 +108,11 @@
     const title = '2026 pool DNF women - comparison';
     if (!gap || gap.target !== '2026-pool-dnf-women') {
       const panel = section(title, 'Both-federation comparison is awaiting verified public scope and peer authority.');
-      panel.append(link('View comparison coverage and scoped published records', '/?comparison=2026-pool-dnf-women'));
+      panel.append(link('View comparison coverage and scoped published records', '/?comparison=2026-pool-dnf-women'), el('p'), link('Open sporting comparison', '/comparison?comparison=2026-pool-dnf-women'));
       return panel;
     }
     const panel = section(title, 'CMAS and AIDA source coverage is separate from sporting comparison eligibility.');
+    panel.append(link('Open sporting comparison', '/comparison?comparison=2026-pool-dnf-women'));
     panel.append(el('p', display(gap['published-source-records']) + ' published source records across the pilot; ' + display(gap['target-source-records']) + ' target source records; ' + display(gap['eligible-comparison-peers']) + ' eligible comparison peers.'));
     panel.append(el('p', 'Distinct sporting attempts: unknown. Unpublished or unverified records do not mean missing competitions or zero dives.', 'muted'));
     const window = gap['year-window'] || {};
@@ -122,6 +129,93 @@
     }); table.append(body);
     const scroll = el('div', null, 'table-scroll'); scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', 'Comparison availability'); scroll.append(table); panel.append(scroll);
     return panel;
+  }
+  function comparisonMetadata(data) {
+    const panel = section('Comparison scope and evidence', 'Ranks describe this current eligible peer cohort. Equal comparison scores share competition ranks; row order does not break ties.');
+    const coverage = data.coverage || {};
+    panel.append(el('p', display(coverage['eligible-comparison-peers']) + ' eligible comparison peers · ' + display(coverage.provided) + ' supplied attempts · ' + display(coverage.withheld) + ' withheld.'));
+    const facts = [['Scope', data.scope], ['Filters', data.filters], ['Scoring policy', data.policy], ['Evidence coverage cutoff', data['evidence-coverage-cutoff'] || 'unknown'], ['Projection readback time', data['projection-read-at'] || 'unknown'], ['Current authority', data['authority-revision'] || data['authority-digest'] || 'See exact peer provenance']];
+    facts.forEach(([title, value]) => panel.append(el('p', title + ': ' + display(value), 'muted')));
+    (data['scope-gaps'] || []).forEach(gap => panel.append(el('p', display(gap), 'muted')));
+    return panel;
+  }
+  function comparisonFilters(data) {
+    const form = el('form', null, 'search-form'); form.setAttribute('aria-label', 'Filter sporting comparison');
+    const p = new URLSearchParams(location.search), filters = data.filters || {}, grid = el('div', null, 'filters');
+    const target = el('input'); target.type = 'hidden'; target.name = 'comparison'; target.value = '2026-pool-dnf-women'; form.append(target);
+    [['federation', 'Federation', ['', 'CMAS', 'AIDA']], ['representation', 'Represented country', null], ['sanction_scope', 'Event sanction', ['default', 'broad']], ['listing_filter', 'Event listing', ['all', 'international', 'national-local-only']]].forEach(([key, title, options]) => {
+      const wrap = el('div'), lab = el('label', title), input = el(options ? 'select' : 'input');
+      input.name = key; input.id = 'comparison-' + key; lab.htmlFor = input.id;
+      if (options) options.forEach(value => { const option = el('option', value === '' ? 'CMAS and AIDA' : value === 'default' ? 'Verified international sanction' : value === 'broad' ? 'Broader sanction scope' : label(value)); option.value = value; input.append(option); });
+      else { input.type = 'text'; input.maxLength = 3; input.placeholder = 'All countries'; }
+      input.value = p.get(key) || filters[key] || (options ? options[0] : ''); wrap.append(lab, input); grid.append(wrap);
+    });
+    form.append(grid, el('p', 'Represented country is source evidence, not citizenship. Event listing and sanction are independent.', 'muted'));
+    const submit = el('button', 'Apply comparison filters'); submit.type = 'submit'; form.append(submit);
+    form.addEventListener('submit', e => { e.preventDefault(); const fields = Object.fromEntries(new FormData(form)), query = new URLSearchParams(); comparisonKeys.forEach(key => { if (fields[key]) query.set(key, fields[key]); }); navigate('/comparison?' + query); });
+    return form;
+  }
+  function sportingCitations(citations) {
+    const panel = section('Comparison source evidence');
+    (citations || []).forEach(citation => {
+      const entry = el('p', display(citation.publisher) + ' · ' + display(citation.relationship));
+      const url = citationURL(citation['final-url'] || citation['discovery-url'] || citation.url);
+      if (url) { const source = link('Open source citation', url); source.rel = 'noopener noreferrer'; entry.append(el('span', ' · '), source); }
+      panel.append(entry);
+      ['page', 'line', 'table', 'row', 'source-sha256', 'revision', 'finality'].filter(key => citation[key] != null).forEach(key => panel.append(el('p', label(key) + ': ' + display(citation[key]), 'muted')));
+    });
+    if (!(citations || []).length) panel.append(el('p', 'Public citation unavailable.'));
+    return panel;
+  }
+  function sportingAttempt(row, detailed, currentAuthority) {
+    const card = section(display(row['source-name']));
+    card.append(el('p', display(row.federation) + ' · ' + display(row.status), 'eyebrow'));
+    const summary = el('div', null, 'summary');
+    const placing = el('div'); placing.append(el('span', 'Official event placing'), el('strong', display(row['official-event-placing']))); summary.append(placing);
+    ['national', 'continental', 'international'].forEach(scope => {
+      const rank = (row.ranks || []).find(rank => rank.scope === scope) || {}, box = el('div');
+      box.append(el('span', label(scope)));
+      const ranked = currentAuthority && row.status === 'ranked' && rank.status === 'ranked' && Number.isInteger(rank.rank) && rank.rank > 0;
+      box.append(el('strong', ranked ? 'Rank ' + rank.rank : 'Rank withheld'));
+      box.append(el('p', 'Peer denominator: ' + (!currentAuthority || rank['eligible-peer-denominator'] == null ? 'unknown' : display(rank['eligible-peer-denominator'])), 'muted'));
+      const href = ranked && sportingLink(rank.url);
+      if (href) box.append(link('View exact ' + scope + ' peers', href));
+      if (rank.reason) box.append(el('p', display(rank.reason), 'muted'));
+      summary.append(box);
+    }); card.append(summary);
+    if (currentAuthority && row.provisional) card.append(el('p', 'Provisional comparison: conflicting source authority remains disclosed. The selected current authority defines these ranks.', 'provisional'));
+    if (currentAuthority && row.status === 'ranked' && row.score) card.append(el('p', 'Achieved comparison score: ' + display(row.score.value) + ' · Scoring policy: ' + display(row.score.policy)));
+    if (currentAuthority && row.final && !row.hypothetical) card.append(el('p', 'Final post-penalty value: ' + display(row.final.value) + ' ' + display(row.final.unit) + ' · Basis: ' + display(row.final.basis)));
+    if (currentAuthority && row.hypothetical) {
+      const hypothetical = row.hypothetical;
+      card.append(el('h3', 'Disqualified attempt - hypothetical only'), el('p', 'Excluded from achieved ranks and peer denominators. Verified source-achieved value: ' + display(hypothetical.value) + ' ' + display(hypothetical.unit) + '. Hypothetical rank: ' + display(hypothetical.rank) + '. Eligible peer denominator: ' + display(hypothetical['eligible-peer-denominator']) + '.'), sportingCitations(hypothetical.citation ? [hypothetical.citation] : []));
+      if (hypothetical.score) card.append(el('p', 'Hypothetical comparison score: ' + display(hypothetical.score.value) + ' · Policy: ' + display(hypothetical.score.policy)));
+    }
+    const href = sportingLink(row['detail-url']);
+    if (!detailed && href) card.append(link('View comparison attempt and evidence', href));
+    if (detailed) {
+      [['Source category', row['source-category']], ['Source gender', row['source-gender']], ['Comparable category', row['comparable-category']], ['Age class', row['age-class']], ['Para class', row['para-class']], ['Represented country', row['represented-country']], ['Event listing', row['event-listing']], ['Event sanction', row['event-sanction']]].forEach(([title, value]) => card.append(el('p', title + ': ' + (value == null ? 'unknown' : display(value)), 'muted')));
+      card.append(el('p', 'Source gender, age, para class and category equivalence are separate evidence. Represented country does not establish citizenship.', 'muted'), sportingCitations(row.citations));
+      const source = internalLink('results', row['result-id']); if (source) card.append(link('View published source record', source));
+    }
+    return card;
+  }
+  function sportingComparison(data, path) {
+    main.append(link('Published source records', '/?comparison=2026-pool-dnf-women', 'back-link'), el('p', 'SPORTING COMPARISON', 'eyebrow'));
+    const detail = path.startsWith('/comparison/attempts/'), peers = path.startsWith('/comparison/peers/');
+    main.append(el('h1', detail ? 'Comparison attempt' : peers ? 'Exact comparison peers' : '2026 pool DNF women - comparison'));
+    main.append(comparisonMetadata(data));
+    if (peers) {
+      const panel = section('Exact peer provenance'), descriptor = data.descriptor || {};
+      ['geography', 'anchor-represented-country', 'anchor-sports-continent', 'category', 'denominator', 'comparison-policy', 'represented-geography-policy', 'sanction-scope', 'listing-filter', 'provisional'].forEach(key => panel.append(el('p', key + ': ' + (descriptor[key] == null ? 'unknown' : display(descriptor[key])), 'muted')));
+      const exact = el('details'); exact.append(el('summary', 'Complete peer descriptor and peer-ids'), el('pre', JSON.stringify(descriptor, null, 2), 'peer-descriptor')); panel.append(exact); main.append(panel);
+    }
+    if (!detail && !peers) main.append(comparisonFilters(data));
+    else main.append(link('Current comparison list', '/comparison' + location.search));
+    const rows = detail ? (data.attempt ? [data.attempt] : []) : data.rows || [];
+    rows.forEach(row => main.append(sportingAttempt(row, detail || peers, data.status === 'ranked')));
+    if (!rows.length) main.append(el('div', 'Rank withheld. No currently eligible comparison peers. Unverified or unpublished evidence does not mean zero sporting attempts.', 'empty'));
+    status.textContent = rows.length ? rows.length + ' comparison attempts loaded.' : 'Comparison ranks withheld.';
   }
   function resultCards(rows) {
     const list = el('div', null, 'result-list');
@@ -188,13 +282,14 @@
   }
   async function load() {
     const token = ++sequence; main.replaceChildren(); status.textContent = 'Loading public records…'; main.setAttribute('aria-busy', 'true'); banner.hidden = true;
-    const path = location.pathname; const search = path === '/';
+    const path = location.pathname; const search = path === '/', sporting = path === '/comparison' || path.startsWith('/comparison/');
     try {
-      const response = await fetch(search ? searchURL(values()) : '/api' + path, {cache: 'no-store', credentials: 'omit', headers: {'Accept': 'application/json'}});
+      const response = await fetch(sporting ? comparisonURL(path, location.search) : search ? searchURL(values()) : '/api' + path, {cache: 'no-store', credentials: 'omit', headers: {'Accept': 'application/json'}});
       if (!response.ok) throw new Error(response.status === 404 ? 'unavailable' : 'error');
       const data = await response.json(); if (token !== sequence) return;
       banner.hidden = !data.demo;
-      if (search) {
+      if (sporting) sportingComparison(data, path);
+      else if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
         main.append(comparisonGap(data.comparison));
         main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage, with unpublished and unreviewed gaps · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
@@ -211,7 +306,7 @@
         const names = [...new Set(data.results.map(r => (r.effective || {})['source-name']).filter(Boolean))]; main.append(el('p', 'Names in these sources: ' + names.join(' · '), 'source-names'), resultCards(data.results)); status.textContent = data.results.length + ' linked public records.';
       }
     } catch (e) {
-      if (token !== sequence) return; main.replaceChildren(); main.append(el('h1', e.message === 'unavailable' ? 'Record unavailable' : 'Results unavailable'), el('p', e.message === 'unavailable' ? 'This public record is unavailable.' : 'Public results could not be loaded. Please try again.', 'lead'), link('Return to search', '/')); const retry = el('button', 'Try again'); retry.addEventListener('click', load); main.append(retry); status.textContent = 'Public records unavailable.';
+      if (token !== sequence) return; main.replaceChildren(); main.append(el('h1', sporting ? 'Comparison unavailable' : e.message === 'unavailable' ? 'Record unavailable' : 'Results unavailable'), el('p', sporting ? 'Current comparison authority could not be confirmed. Ranks are withheld. Exact peer links must match the current policy, source selection and filters.' : e.message === 'unavailable' ? 'This public record is unavailable.' : 'Public results could not be loaded. Please try again.', 'lead'), link('Return to search', '/')); const retry = el('button', 'Try again'); retry.addEventListener('click', load); main.append(retry); status.textContent = sporting ? 'Comparison ranks withheld.' : 'Public records unavailable.';
     } finally { if (token === sequence) main.removeAttribute('aria-busy'); }
   }
   document.addEventListener('click', e => { const a = e.target.closest('a'); if (!a || !a.href || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button) return; const u = new URL(a.href); if (u.origin === location.origin && !u.hash) { e.preventDefault(); navigate(u.pathname + u.search); main.focus(); window.scrollTo(0, 0); } });

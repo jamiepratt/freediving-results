@@ -152,6 +152,9 @@ function text(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')}
  console.log('public comparison gap and source placing passed');
 })().catch(e=>{console.error(e);process.exitCode=1});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest public-sporting-comparison-rendered-navigation-contract
+  (let [r (shell/sh "node" "test/freediving/public_comparison_ui_test.js")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.public-ui-test)]
     (shutdown-agents)
