@@ -259,6 +259,37 @@ public verification. Roll back Worker code by checking out the matching commit a
 running `python3 deploy/publish-edge.py`. Do not restore a database backup over new
 submissions without an explicit recovery decision.
 
+Normal activation at schema 21 or 22 now retains a separate root-private
+`public-app-<candidate>-<timestamp>-<pid>.json` checkpoint before migration.
+Hosts still at schema 7 or 20 must first use the separately guarded migration-only
+checkpoint from a preserved schema-21 release to reach exact schema 21, then verify the prior app and its restricted
+role before taking this fresh activation checkpoint. Legacy schema rollback
+compatibility requires a separate assessment; this new guard refuses those states
+before mutation.
+It binds both complete immutable release trees, the prior installed unit,
+configuration hashes, public read capabilities, migration checksums and every
+existing public-database table digest. Migration 22 installs one scoring-policy
+version marker; it seeds no sporting authority or member facts.
+
+For a failed candidate readiness check, the normal workflow verifies that
+checkpoint and restores only the previous app and unit. When the prior app had
+only the original two projection grants, it first revokes SELECT on the new
+`public_sporting_comparison` view so the prior startup whitelist can pass. It
+refuses corrections, policy changes, sporting facts, extra capabilities or
+release/configuration drift. Revocation checks retained table digests under
+PostgreSQL SHARE locks. Schema 22 remains installed; a forward release retry
+restores the exact new view grant through the checksummed migration path.
+
+Before an operator rollback, run the candidate's helper with `assess`, its exact
+`--candidate /opt/freediving/releases/<commit>` and the recorded
+`--checkpoint /var/backups/freediving/public-app-<candidate>-<timestamp>-<pid>.json`.
+This action reads only. After fresh assessment, `rollback` applies the guarded
+ACL/app/unit change; then run `systemctl daemon-reload`, restart
+`freediving-public`, and run the previous release's `deploy/health.py` followed by
+the public custom-domain verification. Use `python3 -B` for these helpers to
+preserve release trees. A failed guard requires a new assessment; never restore
+a database, source snapshot or authority ledger to make it pass.
+
 Pre-deployment PostgreSQL custom-format dumps are in `/var/backups/freediving`
 (root-only). They are local recovery copies, not an independently verified offsite
 backup. Offsite backup integration and restore drills remain tracked in issue #1.
