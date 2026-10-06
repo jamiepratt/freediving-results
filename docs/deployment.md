@@ -383,6 +383,23 @@ Set Worker secret `OWNER_EVIDENCE_STATUS_CLIENT_ID` to that exact client ID. The
 
 Before enabling the status writer, create a dedicated Cloudflare Access service token and add exactly one Service Auth policy for that token to the existing owner evidence Access application. Keep the exact owner-email Allow policy. The guarded Cloudflare preflight resolves the configured status Client ID through the Access Service Tokens Read API and checks the token ID against that Service Auth policy. A read token without this permission, a missing service token, or a broader policy blocks activation. The preflight checks Worker secret names, not their hidden values; its guarded activation writes the verified Client ID binding. Keep the status token and service Client Secret outside Git and the private code archive.
 
+For signed owner decision feed and ACK, configure a separate import client and
+origin token in the same root-owned file:
+
+```text
+OWNER_EVIDENCE_IMPORT_CLIENT_ID=<dedicated Cloudflare Access service client ID ending in .access>
+OWNER_EVIDENCE_IMPORT_TOKEN=<independent random ASCII token, 24 to 256 characters>
+```
+
+The import client and token must differ from the status writer's credentials.
+Add a separate Service Auth policy containing only this service token to the
+existing owner evidence Access application. Retain the exact owner-email Allow
+and status-writer policies. The guarded Cloudflare preflight resolves both
+client IDs with Access Service Tokens Read, requires these three exact policies,
+and sets the Worker `OWNER_EVIDENCE_IMPORT_CLIENT_ID` binding. Feed and ACK
+requests also need the import Client Secret, stored outside Git and the private
+code archive. Do not use the owner browser identity for machine requests.
+
 Do not reuse the public gateway secret. The origin reads only the pinned private
 SQLite snapshot, not PostgreSQL or review credentials. Retain the verified source
 snapshot and its manifest in a separate private backup before activation. Check
@@ -442,7 +459,7 @@ A 403, wrong policy, owner mismatch, origin failure, tunnel drift or DNS conflic
 stops here. Once those checks pass and the public site is healthy, the explicit
 activation command adds the private tunnel ingress and proxied CNAME, deploys
 the prepared private-route Worker code with `wrangler --profile alphacompose`,
-then sets all five private Worker bindings in one secret bulk deployment. The
+then sets the verified private Worker bindings in one secret bulk deployment. The
 new route fails closed until those bindings are present:
 
 ```sh
