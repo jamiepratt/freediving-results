@@ -44,6 +44,7 @@ Older references to an issue being open are historical, not current status.
 | Document | Status and read trigger |
 | --- | --- |
 | [2025 onward inventory](docs/2025-onward-source-inventory-20260926.md) | September batch history, with later additions. Consult exact pass/date before claiming coverage. |
+| [7 October bounded 2024 discovery](docs/historical-2024-inventory-20261007.md) | Dated route/lead manifest, explicit access and unchecked gaps, existing 2020 format replay, and closed ordinary 2023 staging gate. Consult before claiming historical coverage. |
 | [5 October source refresh](docs/issue55-refresh-20261005.md) | Two bounded passes across 15 retained route records; private receipts and explicit child, calendar and access gaps. |
 | [6 October retained reconciliation audit](docs/retained-corpus-reconciliation-audit-20261006.md) | Frozen source/year/family denominators, stratified structural audit, isolated reversal/cache controls and bounded genuine private review. Read before claiming reconciliation accuracy or #73 acceptance. |
 | [October Microplus census](docs/cmas-microplus-census-20261001.md) | Later timing acquisition and Nordic PDF accounting; supersedes specific September access gaps. |
