@@ -14,6 +14,7 @@ from prepare_database import endpoint, read_config
 
 VIEW='freediving.public_sporting_comparison'
 BASE_SELECT=['freediving.public_event_coverage','freediving.public_results']
+PUBLIC_SPORTING_DIRECTORY=Path('/var/lib/freediving-sporting-authority')
 BRIDGE_TABLES={'public_sporting_bridge_receipts'}
 NEW_TABLES={'public_sporting_policy_events','public_sporting_authority_events','public_sporting_members'}
 
@@ -82,11 +83,11 @@ def role_guard(state):
 
 def bridge_files(layout):
     paths=[layout.config/'sporting-authority.env']
-    directory=layout.config/'sporting-authority'
-    if directory.is_symlink():raise ValueError('Linked sporting capability directory')
-    if directory.exists():paths.extend(sorted(directory.rglob('*')))
+    for directory in (layout.config/'sporting-authority',PUBLIC_SPORTING_DIRECTORY):
+        if directory.is_symlink():raise ValueError('Linked sporting capability directory')
+        if directory.exists():paths.extend(sorted(directory.rglob('*')))
     if any(p.is_symlink() for p in paths):raise ValueError('Linked sporting capability input')
-    return {str(p.relative_to(layout.config)):{'sha256':sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists() if not p.is_dir()}
+    return {str(p):{'sha256':sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists() if not p.is_dir()}
 
 def capture(candidate,layout=Layout(),reader=None):
     candidate=release(candidate,layout)

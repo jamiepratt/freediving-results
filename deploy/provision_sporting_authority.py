@@ -20,8 +20,9 @@ import sys
 @dataclass(frozen=True)
 class Layout:
     private: Path=Path('/var/lib/freediving-owner-evidence/sporting-bridge')
-    public: Path=Path('/etc/freediving/sporting-authority')
+    public: Path=Path('/var/lib/freediving-sporting-authority')
     units: Path=Path('/etc/systemd/system')
+    env_dir: Path=Path('/etc/freediving')
 
 
 def digest(path):
@@ -38,7 +39,7 @@ def unlinked(path):
 def files(layout):
     return (layout.private/'signing.pem',layout.private/'request.key',
             layout.private/'config.json',layout.public/'config.json',
-            layout.public.parent/'sporting-authority.env',layout.public.parent/'sporting-owner.env',
+            layout.env_dir/'sporting-authority.env',layout.env_dir/'sporting-owner.env',
             layout.units/'freediving-owner-evidence.service.d/sporting-authority.conf')
 
 
@@ -47,7 +48,69 @@ def public_der(signing):
                           stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=True,timeout=10).stdout
 
 
-def verify(layout=Layout(),owner_uid=None,owner_gid=None,public_gid=None):
+def service_access(path,uid,gid,*,boundary=None):
+    """Check actual ancestor modes and, as root, read as the exact service identity."""
+    unlinked(path)
+    for ancestor in path.parents:
+        info=ancestor.stat();bits=(info.st_mode>>6)&7 if info.st_uid==uid else (info.st_mode>>3)&7 if info.st_gid==gid else info.st_mode&7
+        if uid!=0 and not bits&1:raise ValueError('Service traversal refused')
+        if boundary is not None and ancestor==boundary:break
+    info=path.stat();bits=(info.st_mode>>6)&7 if info.st_uid==uid else (info.st_mode>>3)&7 if info.st_gid==gid else info.st_mode&7
+    if uid!=0 and not bits&4:raise ValueError('Service read refused')
+    if os.geteuid()==0 and boundary is None:
+        result=subprocess.run([sys.executable,'-I','-c','import pathlib,sys;pathlib.Path(sys.argv[1]).read_bytes();print("verified")',str(path)],
+                              user=uid,group=gid,extra_groups=[],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
+        if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('Actual service read refused')
+
+
+def atomic_write(path,data,mode,gid):
+    unlinked(path)
+    temporary=path.with_name(path.name+'.relocating')
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(data);stream.flush();os.fsync(stream.fileno())
+        os.chown(temporary,os.geteuid(),gid);temporary.chmod(mode)
+        os.replace(temporary,path)
+        directory=os.open(path.parent,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:temporary.unlink(missing_ok=True)
+
+
+def relocate_public(layout,owner_uid,owner_gid,public_gid,receipt_sha,config_sha,env_sha,*,public_uid=None):
+    """Relocate an exact installed capability without regenerating any authority."""
+    receipt=layout.private/'provision.json';environment=layout.env_dir/'sporting-authority.env'
+    for path,pin in ((receipt,receipt_sha),(environment,env_sha)):
+        if not isinstance(pin,str) or not re.fullmatch('[0-9a-f]{64}',pin) or digest(path)!=pin:raise ValueError('Relocation pin changed')
+    if not isinstance(config_sha,str) or not re.fullmatch('[0-9a-f]{64}',config_sha):raise ValueError('Exact config pin required')
+    record=json.loads(receipt.read_text())
+    if str(layout.public/'config.json') in record['files']:
+        if digest(layout.public/'config.json')!=config_sha:raise ValueError('Relocated config changed')
+        return verify(layout,owner_uid,owner_gid,public_gid,public_uid=public_uid)
+    old=Layout(layout.private,layout.env_dir/'sporting-authority',layout.units,layout.env_dir)
+    if digest(old.public/'config.json')!=config_sha:raise ValueError('Original config changed')
+    new_env=('FREEDIVING_SPORTING_AUTHORITY_CONFIG='+str(layout.public/'config.json')+'\n').encode()
+    verify(old,owner_uid,owner_gid,public_gid,relocated_env_hash=hashlib.sha256(new_env).hexdigest())
+    unlinked(layout.public)
+    if layout.public.exists():
+        info=layout.public.stat()
+        if not layout.public.is_dir() or (info.st_uid,info.st_gid,info.st_mode&0o777)!=(os.geteuid(),public_gid,0o750):raise ValueError('Unsafe relocation directory')
+    else:
+        layout.public.mkdir(mode=0o750);os.chown(layout.public,os.geteuid(),public_gid);layout.public.chmod(0o750)
+    destination=layout.public/'config.json'
+    if destination.exists():
+        info=destination.stat()
+        if digest(destination)!=config_sha or (info.st_uid,info.st_gid,info.st_mode&0o777)!=(os.geteuid(),public_gid,0o640):raise ValueError('Relocation target changed')
+    else:atomic_write(destination,(old.public/'config.json').read_bytes(),0o640,public_gid)
+    if public_uid is not None:service_access(destination,public_uid,public_gid)
+    atomic_write(environment,new_env,0o600,os.getegid())
+    updated={'schema':'sporting-capability-provision/v1','files':{str(p):digest(p) for p in files(layout)}}
+    atomic_write(receipt,(json.dumps(updated,sort_keys=True)+'\n').encode(),0o600,os.getegid())
+    return verify(layout,owner_uid,owner_gid,public_gid,public_uid=public_uid)
+
+
+def verify(layout=Layout(),owner_uid=None,owner_gid=None,public_gid=None,*,public_uid=None,relocated_env_hash=None):
     root_uid,root_gid=os.geteuid(),os.getegid()
     for directory,uid,gid,mode in ((layout.private,root_uid,owner_gid,0o750),
                                   (layout.public,root_uid,public_gid,0o750),
@@ -65,11 +128,14 @@ def verify(layout=Layout(),owner_uid=None,owner_gid=None,public_gid=None):
     if info.st_uid!=root_uid or info.st_mode&0o777!=0o600:raise ValueError('Capability receipt boundary changed')
     record=json.loads(record_path.read_text())
     expected={str(p):digest(p) for p in files(layout)}
+    environment=str(layout.env_dir/'sporting-authority.env')
+    if relocated_env_hash is not None and expected.get(environment)==relocated_env_hash:
+        expected[environment]=record['files'].get(environment)
     if record.get('schema')!='sporting-capability-provision/v1' or expected!=record['files']:
         raise ValueError('Capability changed')
     for path in files(layout):
         gid=owner_gid if path.parent==layout.private else public_gid if path.parent==layout.public else root_gid
-        mode=0o600 if path.parent==layout.public.parent else 0o644 if path.parent.parent==layout.units else 0o640
+        mode=0o600 if path.parent==layout.env_dir else 0o644 if path.parent.parent==layout.units else 0o640
         info=path.stat()
         if (info.st_uid,info.st_gid,info.st_mode&0o777)!=(root_uid,gid,mode):raise ValueError('Capability file boundary changed')
     private=json.loads((layout.private/'config.json').read_text())
@@ -81,6 +147,7 @@ def verify(layout=Layout(),owner_uid=None,owner_gid=None,public_gid=None):
     if private!={'schema':'sporting-authority-service/v1','ledger_path':str(layout.private/'ledger/authority.sqlite'),
                 'signing_key_path':str(layout.private/'signing.pem'),'request_key_path':str(layout.private/'request.key')}:
         raise ValueError('Private authority binding differs')
+    if public_uid is not None:service_access(layout.public/'config.json',public_uid,public_gid)
     return {'result':'PASS','authority_seeded':False,'key_id':public['key_id'],
             'public_config':str(layout.public/'config.json'),'owner_config':str(layout.private/'config.json')}
 
@@ -121,10 +188,10 @@ def provision(layout,owner_uid,owner_gid,public_gid,pins):
     unlinked(dropin);dropin.mkdir(parents=True,exist_ok=True,mode=0o755)
     info=dropin.stat()
     if info.st_uid!=root_uid or info.st_mode&0o022:raise ValueError('Unsafe private unit directory')
-    write(dropin/'sporting-authority.conf',('[Service]\nEnvironmentFile='+str(layout.public.parent/'sporting-owner.env')+'\nReadWritePaths='+str(ledger)+'\n').encode(),root_gid,0o644)
-    write(layout.public.parent/'sporting-owner.env',('OWNER_EVIDENCE_SPORTING_CONFIG='+str(layout.private/'config.json')+'\n').encode(),root_gid,0o600)
+    write(dropin/'sporting-authority.conf',('[Service]\nEnvironmentFile='+str(layout.env_dir/'sporting-owner.env')+'\nReadWritePaths='+str(ledger)+'\n').encode(),root_gid,0o644)
+    write(layout.env_dir/'sporting-owner.env',('OWNER_EVIDENCE_SPORTING_CONFIG='+str(layout.private/'config.json')+'\n').encode(),root_gid,0o600)
     # Publish public capability last. Absent or incomplete authority always withholds.
-    write(layout.public.parent/'sporting-authority.env',('FREEDIVING_SPORTING_AUTHORITY_CONFIG='+str(layout.public/'config.json')+'\n').encode(),root_gid,0o600)
+    write(layout.env_dir/'sporting-authority.env',('FREEDIVING_SPORTING_AUTHORITY_CONFIG='+str(layout.public/'config.json')+'\n').encode(),root_gid,0o600)
     record={'schema':'sporting-capability-provision/v1','files':{str(p):digest(p) for p in files(layout)}}
     write(layout.private/'provision.json',(json.dumps(record,sort_keys=True)+'\n').encode(),root_gid,0o600)
     return verify(layout,owner_uid,owner_gid,public_gid)
@@ -132,21 +199,28 @@ def provision(layout,owner_uid,owner_gid,public_gid,pins):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('prepare','verify'))
+    parser.add_argument('action',choices=('prepare','verify','relocate-public'))
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--public-env-sha256')
     parser.add_argument('--owner-env-sha256')
+    parser.add_argument('--provision-sha256')
+    parser.add_argument('--public-config-sha256')
+    parser.add_argument('--authority-env-sha256')
     args=parser.parse_args()
     try:
         if os.geteuid()!=0:raise ValueError('Root host checkpoint required')
         owner=pwd.getpwnam('freediving-evidence');public=pwd.getpwnam('freediving')
         layout=Layout()
-        if args.action=='verify':result=verify(layout,owner.pw_uid,owner.pw_gid,public.pw_gid)
+        if args.action=='verify':result=verify(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,public_uid=public.pw_uid)
+        elif args.action=='relocate-public':
+            if not args.execute:raise ValueError('Explicit pinned relocation required')
+            result=relocate_public(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,args.provision_sha256,args.public_config_sha256,args.authority_env_sha256,public_uid=public.pw_uid)
         elif args.execute:
             pins={Path('/etc/freediving/public.env'):args.public_env_sha256,
                   Path('/var/lib/freediving-owner-evidence/active.env'):args.owner_env_sha256}
             if any(p is None for p in pins.values()):raise ValueError('Exact environment pins required')
-            result=provision(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,pins)
+            provision(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,pins)
+            result=verify(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,public_uid=public.pw_uid)
         else:result={'executed':False,'authority_seeded':False,'public_config':str(layout.public/'config.json'),'owner_config':str(layout.private/'config.json')}
         print(json.dumps(result,sort_keys=True));return 0
     except Exception:

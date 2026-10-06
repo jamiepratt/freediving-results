@@ -52,6 +52,8 @@ def _pg_tables(database):
     return result
 
 
+PUBLIC_SPORTING_CONFIG=Path('/var/lib/freediving-sporting-authority/config.json')
+
 def capture_sporting_guard(layout):
     """Pin capabilities and a transaction-consistent SQLite schema/row snapshot.
 
@@ -61,7 +63,7 @@ def capture_sporting_guard(layout):
     bridge=layout.state/'sporting-bridge'
     paths=[bridge/name for name in ('config.json','signing.pem','request.key','provision.json')]
     paths.extend([layout.config.parent/'sporting-owner.env',layout.config.parent/'sporting-authority.env',
-                  layout.config.parent/'sporting-authority/config.json',
+                  layout.config.parent/'sporting-authority/config.json',PUBLIC_SPORTING_CONFIG,
                   layout.units/'freediving-owner-evidence.service.d/sporting-authority.conf'])
     if bridge.is_symlink() or any(p.is_symlink() for p in paths):raise ValueError('linked sporting guard input')
     if not bridge.exists():

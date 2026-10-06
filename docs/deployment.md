@@ -668,7 +668,7 @@ Then use the normal committed `deploy/release.sh` path. Preparation generates th
 Ed25519 signer only on the host. Its private config/key/request credential are
 root/evidence-group0750/0640 under the separate sporting-bridge directory. Only
 its ledger child is service-owned0700 and writable. No source decision is seeded.
-The public config is root/public-group0750/0640 and contains only a pinned public
+The public config under `/var/lib/freediving-sporting-authority` is root/public-group0750/0640 and contains only a pinned public
 verification key and independent request credential. Root-only optional environment
 files bind these capabilities without editing existing deployment secrets. A
 root-owned private unit drop-in adds only that configuration and writable ledger.
@@ -689,3 +689,42 @@ owner actions. The empty installed bridge is code/runtime evidence only;
 real source, selection and live comparison acceptance gates.
 
 Private comparison activation also pins the optional bridge capability and queries its current committed SQLite schema and rows in a read-only transaction. Its checkpoint hashes these pins and table digests without backing up ledger bytes or keys. A changed signer, request capability, schema or genuine source event refuses stale activation or rollback before derived files change. A sporting capability added after an older checkpoint also requires a fresh assessment.
+
+
+### Relocate an existing public bridge capability
+
+Older bridge provisioning put its public config beneath root-only
+`/etc/freediving`. The public service cannot traverse that0700 parent. Preserve
+that directory, its secrets and existing owner/source ledger. Stage the exact
+updated helper, then use its pinned relocation command before activating the
+matching new public release:
+
+```sh
+sudo -n python3 <staged-new-code>/deploy/provision_sporting_authority.py relocate-public --execute \
+  --provision-sha256 <sha256-of-sporting-bridge/provision.json> \
+  --public-config-sha256 <sha256-of-existing-public-config.json> \
+  --authority-env-sha256 <sha256-of-/etc/freediving/sporting-authority.env>
+sudo -n python3 <staged-new-code>/deploy/provision_sporting_authority.py verify
+```
+
+The hashes must come from a fresh guarded host assessment. Relocation verifies
+all retained receipt hashes, ownership and modes before writing. It copies the
+existing config bytes only to the intended protected host path
+`/var/lib/freediving-sporting-authority/config.json`; it never generates a new
+signer/request key or copies authority history. It updates only the public
+sporting environment path and provision receipt. Legacy config remains protected
+for assessment. Existing database credentials, private environment, signer,
+request key, source pins, ledger bytes and `/etc/freediving`0700 stay unchanged.
+A retry under fresh exact installed pins is idempotent. A known interrupted
+public environment swap can resume only when the old receipt and both config
+hashes still match. Unknown drift refuses overwrite.
+
+Verification checks every ancestor's traversal permissions and, when invoked as
+root, reads the public config in a subprocess with the exact public UID/GID and
+no supplementary groups. That probe emits no config or credentials. Capture a
+new complete private/public deployment guard after relocation. Both guard
+helpers retain old and new config hashes/ownership/modes, including the active
+verification capability. Then run normal `deploy/release.sh`; the matching new
+helper verifies the relocated capability before migration/activation, and its
+service restart consumes the new environment path. An old deployment checkpoint
+or helper cannot establish the new guarded state.

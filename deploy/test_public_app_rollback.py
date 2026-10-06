@@ -71,6 +71,21 @@ class PublicRollbackTests(unittest.TestCase):
                     rollback.rollback(checkpoint,candidate,layout,reader=lambda:copy.deepcopy(live))
                 self.assertEqual(layout.current.resolve(),candidate.resolve())
 
+    def test_relocated_public_config_hash_and_permission_drift_are_guarded(self):
+        with self.case() as (prior,candidate,layout,before,live,checkpoint):
+            directory=layout.config.parent/'relocated-sporting';directory.mkdir()
+            config=directory/'config.json';config.write_text('synthetic')
+            with mock.patch.object(rollback,'PUBLIC_SPORTING_DIRECTORY',directory):
+                layout.current.unlink();layout.current.symlink_to(prior)
+                layout.unit.write_bytes((prior/'deploy/freediving-public.service').read_bytes())
+                checkpoint=rollback.capture(candidate,layout,reader=lambda:copy.deepcopy(live))
+                self.assertIn(str(config),checkpoint['bridge_files'])
+                layout.current.unlink();layout.current.symlink_to(candidate)
+                layout.unit.write_bytes((candidate/'deploy/freediving-public.service').read_bytes())
+                config.chmod(0o600)
+                with self.assertRaisesRegex(ValueError,'configuration changed'):
+                    rollback.assess(checkpoint,candidate,layout,reader=lambda:copy.deepcopy(live))
+
     def test_old_app_restarts_after_new_grant_without_restoring_data(self):
         with self.case() as (prior,candidate,layout,before,live,checkpoint):
             calls=[]

@@ -7,6 +7,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import comparison_activate
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from owner_evidence_activate import Layout
 from comparison_activate import capture_guard, activate_comparison, rollback_comparison, stage_payload
@@ -77,6 +79,18 @@ class ComparisonActivationTests(unittest.TestCase):
         pins=self.guard();(bridge/'signing.pem').write_text('changed')
         with self.assertRaisesRegex(ValueError,'live guard changed'):
             activate_comparison(self.new,self.config,self.layout,pins,**self.kw)
+
+    def test_relocated_public_verifier_is_part_of_private_activation_guard(self):
+        bridge=self.layout.state/'sporting-bridge';bridge.mkdir()
+        for name in ('config.json','signing.pem','request.key','provision.json'):(bridge/name).write_text('synthetic '+name)
+        (bridge/'ledger').mkdir()
+        public=self.root/'relocated-public.json';public.write_text('synthetic public verifier')
+        with mock.patch.object(comparison_activate,'PUBLIC_SPORTING_CONFIG',public):
+            pins=self.guard()
+            self.assertIn(str(public),pins['sporting']['files'])
+            public.chmod(0o600)
+            with self.assertRaisesRegex(ValueError,'live guard changed'):
+                activate_comparison(self.new,self.config,self.layout,pins,**self.kw)
 
     def test_activation_changes_only_private_app_and_comparison_configuration(self):
         result=activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
