@@ -644,3 +644,20 @@ test('mapped private detail shows official placing before geographic lists and f
   assert.match(node('inspector-summary').visibleText,/Peer authority changed/);
   assert.equal(node('inspector-results').visibleText.includes('1 / 4'),false);
 });
+
+
+test('copied peer links use the protected hosted endpoint while local links keep their API path', async () => {
+  const href='/api/attempt-inspector?peer_anchor=synthetic&geography=international&peer_token='+ 'a'.repeat(64);
+  const links = element => [ ...(element.tagName==='a' ? [element] : []), ...element.children.flatMap(links) ];
+  for(const [pathname,prefix] of [['/owner-evidence','/owner-evidence'],['/owner-evidence/','/owner-evidence'],
+                                 ['/',''],['/owner-evidence-untrusted','']]){
+    const {context,node,requests}=workspace({[href+'&limit=25&offset=0']:{rows:[],pagination:{total:0,limit:25,offset:0}}}, {}, pathname);
+    context.result={rows:[{candidate:{},comparison_lists:[{geography:'international',rank:1,denominator:1,href}]}]};
+    vm.runInContext('renderAttemptInspector(result);showInspectorRow(0)',context);
+    const link=links(node('inspector-detail'))[0];
+    assert.equal(link.href,prefix+href,pathname);
+    assert.equal(new URL(link.href,'https://poc.alphacompose.com').pathname,prefix+'/api/attempt-inspector');
+    link.click();await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(requests[0].path,href+'&limit=25&offset=0','internal fetch path remains unprefixed');
+  }
+});

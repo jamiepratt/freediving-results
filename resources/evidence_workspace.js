@@ -35,6 +35,11 @@ function renderAttemptInspector(result){
   $('inspector-previous').disabled=(paging.offset || 0)===0;
   $('inspector-next').disabled=(paging.offset || 0)+inspectorRows.length >= (paging.total || 0);
 }
+function inspectorPeerHref(href){
+  if(typeof href!=='string' || !/^\/api\/attempt-inspector\?peer_anchor=/.test(href))return null;
+  const hosted=location.pathname==='/owner-evidence' || location.pathname?.startsWith('/owner-evidence/');
+  return hosted ? '/owner-evidence'+href : href;
+}
 function showInspectorRow(index){
   const row=inspectorRows[index];if(!row)return;
   const area=$('inspector-detail');area.replaceChildren(heading('Official event placing'));
@@ -45,8 +50,9 @@ function showInspectorRow(index){
     const label=({national:'National',continental:'Continental',international:'International'})[list.geography] || list.geography;
     const tr=makeRow([label,`${list.rank ?? 'withheld'} / ${list.denominator ?? 0}`,`${list.status || 'unknown'}${list.provisional ? ' - provisional' : ''}`]);
     const td=document.createElement('td');
-    if(list.href && /^\/api\/attempt-inspector\?peer_anchor=/.test(list.href)){
-      const link=cell('Open exact '+label+' peers','a');link.href=list.href;
+    const href=inspectorPeerHref(list.href);
+    if(href){
+      const link=cell('Open exact '+label+' peers','a');link.href=href;
       link.addEventListener('click',event=>{event.preventDefault();inspectorOffset=0;run(()=>loadAttemptInspector(list.href),'inspector-summary');});td.append(link);
     }else td.append(cell('No eligible peer link','span'));
     tr.append(td);lists.append(tr);
