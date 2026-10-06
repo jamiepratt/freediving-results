@@ -36,6 +36,44 @@ class PrivateActivationChecks(unittest.TestCase):
             with self.subTest(policies=policies, expected=expected), self.assertRaises(ValueError):
                 check_access(app, policies, ['owner@example.com'], expected)
 
+    def test_import_service_auth_requires_exact_separate_policy(self):
+        app = {'type': 'self_hosted', 'domain': DOMAIN, 'aud': 'A'*32}
+        owner = {'decision': 'allow', 'include': [{'email': {'email': 'owner@example.com'}}]}
+        status = {'decision': 'non_identity',
+                  'include': [{'service_token': {'token_id': 'status-token-id'}}]}
+        importer = {'decision': 'non_identity',
+                    'include': [{'service_token': {'token_id': 'import-token-id'}}]}
+        self.assertEqual(check_access(app, [owner, status, importer], ['owner@example.com'],
+                                      'status-token-id', 'import-token-id'), 'A'*32)
+        for policies, status_id, import_id in (
+                ([owner, status], 'status-token-id', 'import-token-id'),
+                ([owner, status, importer], 'status-token-id', 'status-token-id'),
+                ([owner, status, {**importer, 'include': [{'any_valid_service_token': {}}]}],
+                 'status-token-id', 'import-token-id'),
+                ([owner, status, {**importer, 'include': [{'service_token': {'token_id': 'other'}}]}],
+                 'status-token-id', 'import-token-id')):
+            with self.subTest(policies=policies), self.assertRaises(ValueError):
+                check_access(app, policies, ['owner@example.com'], status_id, import_id)
+
+    def test_import_configuration_requires_separate_token_and_client(self):
+        base = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+                "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+                "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+                f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n"
+                "OWNER_EVIDENCE_STATUS_FILE=/var/lib/freediving-owner-evidence/status/presentation-status.json\n"
+                "OWNER_EVIDENCE_STATUS_TOKEN=abcdefghijklmnopqrstuvwxyz123456\n"
+                "OWNER_EVIDENCE_STATUS_CLIENT_ID=status123.access\n")
+        importer = ("OWNER_EVIDENCE_IMPORT_TOKEN=independent-import-token-123456\n"
+                    "OWNER_EVIDENCE_IMPORT_CLIENT_ID=import123.access\n")
+        self.assertEqual(parse_origin_env(base + importer)[0]['OWNER_EVIDENCE_IMPORT_CLIENT_ID'],
+                         'import123.access')
+        for invalid in (importer.splitlines()[0] + '\n',
+                        importer.replace('import123.access', 'status123.access'),
+                        importer.replace('independent-import-token-123456', 'abcdefghijklmnopqrstuvwxyz123456'),
+                        importer.replace('independent-import-token-123456', 'short')):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_origin_env(base + invalid)
+
     def test_status_client_id_resolves_to_one_enabled_cloudflare_token(self):
         token_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         match = {'id': token_id, 'client_id': 'status123.access', 'enabled': True}
@@ -171,6 +209,31 @@ class PrivateActivationChecks(unittest.TestCase):
              patch('owner_evidence_cloudflare.check_worker_bindings', return_value={'GATEWAY_SECRET'}):
             result = preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
         self.assertEqual(result[-1]['OWNER_EVIDENCE_STATUS_CLIENT_ID'], 'status123.access')
+
+    def test_preflight_binds_import_client_after_verifying_service_policy(self):
+        app_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        import_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        app = {'type': 'self_hosted', 'domain': DOMAIN, 'aud': 'A'*32}
+        policies = [{'decision': 'allow', 'include': [{'email': {'email': 'owner@example.com'}}]},
+                    {'decision': 'non_identity',
+                     'include': [{'service_token': {'token_id': import_id}}]}]
+        env = ("OWNER_EVIDENCE_GATEWAY_SECRET=1234567890123456\n"
+               "OWNER_EVIDENCE_ORIGIN_HOST=owner-origin.alphacompose.com\n"
+               "OWNER_EVIDENCE_EMAILS=owner@example.com\n"
+               f"OWNER_EVIDENCE_SNAPSHOT_SHA256={'a'*64}\n"
+               "OWNER_EVIDENCE_IMPORT_TOKEN=independent-import-token-123456\n"
+               "OWNER_EVIDENCE_IMPORT_CLIENT_ID=import123.access\n")
+        token = {'id': import_id, 'client_id': 'import123.access', 'enabled': True}
+        with patch('owner_evidence_cloudflare.token_from_profile', return_value='oauth'), \
+             patch('owner_evidence_cloudflare.api', side_effect=[app, policies, [token],
+                   [{'name': 'freediving-results-poc', 'id': 'tunnel-id'}],
+                   {'config': {'ingress': [PUBLIC_INGRESS, FALLBACK]}}, []]), \
+             patch('owner_evidence_cloudflare.subprocess.check_output', side_effect=[env, 'dns-token']), \
+             patch('owner_evidence_cloudflare.subprocess.run'), \
+             patch('owner_evidence_cloudflare.check_origin'), \
+             patch('owner_evidence_cloudflare.check_worker_bindings', return_value={'GATEWAY_SECRET'}):
+            result = preflight(app_id, 'https://team.cloudflareaccess.com', 'access-read-only')
+        self.assertEqual(result[-1]['OWNER_EVIDENCE_IMPORT_CLIENT_ID'], 'import123.access')
 
     def test_worker_requires_public_secret_and_no_partial_private_bindings(self):
         def check(names):

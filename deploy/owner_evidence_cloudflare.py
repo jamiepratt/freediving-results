@@ -16,7 +16,7 @@ WORKER_SECRETS = ('ACCESS_ISSUER', 'ACCESS_AUDIENCE', 'OWNER_EVIDENCE_EMAILS',
 DOMAIN = 'poc.alphacompose.com/owner-evidence*'
 
 
-def check_access(app, policies, emails, status_token_id=None):
+def check_access(app, policies, emails, status_token_id=None, import_token_id=None):
     if app.get('type') != 'self_hosted' or app.get('domain') != DOMAIN:
         raise ValueError('Access app must protect the exact owner evidence path')
     destinations = app.get('destinations') or []
@@ -30,8 +30,9 @@ def check_access(app, policies, emails, status_token_id=None):
     aud = app.get('aud')
     if not isinstance(aud, str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', aud):
         raise ValueError('Access audience missing or malformed')
-    if len(policies) != (2 if status_token_id else 1):
-        raise ValueError('Require one owner-only Allow policy')
+    service_ids = [token_id for token_id in (status_token_id, import_token_id) if token_id]
+    if len(set(service_ids)) != len(service_ids) or len(policies) != 1 + len(service_ids):
+        raise ValueError('Require one owner Allow policy and exact service policies')
     owners = [policy for policy in policies if policy.get('decision') == 'allow']
     if len(owners) != 1:
         raise ValueError('Require one owner-only Allow policy')
@@ -48,12 +49,13 @@ def check_access(app, policies, emails, status_token_id=None):
         allowed.append(selector['email'])
     if sorted(allowed) != sorted(emails) or len(allowed) != len(set(allowed)):
         raise ValueError('Access policy and origin owner allowlists differ')
-    if status_token_id:
-        service = [item for item in policies if item is not policy][0]
-        if (service.get('decision') != 'non_identity' or service.get('require') or
-                service.get('exclude') or service.get('include') != [
-                    {'service_token': {'token_id': status_token_id}}]):
-            raise ValueError('Status writer requires exact Service Auth policy')
+    services = [item for item in policies if item is not policy]
+    for token_id in service_ids:
+        matches = [item for item in services if item.get('decision') == 'non_identity' and
+                   not item.get('require') and not item.get('exclude') and
+                   item.get('include') == [{'service_token': {'token_id': token_id}}]]
+        if len(matches) != 1:
+            raise ValueError('Machine client requires exact Service Auth policy')
     return aud
 
 
@@ -64,7 +66,8 @@ def parse_origin_env(content):
     status_keys = {'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                    'OWNER_EVIDENCE_STATUS_CLIENT_ID'}
     queue_keys = {'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE', 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'}
-    allowed = required | status_keys | queue_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED'}
+    import_keys = {'OWNER_EVIDENCE_IMPORT_TOKEN', 'OWNER_EVIDENCE_IMPORT_CLIENT_ID'}
+    allowed = required | status_keys | queue_keys | import_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED'}
     if (not required <= values.keys() or set(values) - allowed or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             values['OWNER_EVIDENCE_ORIGIN_HOST'] != PRIVATE_HOST):
@@ -75,6 +78,16 @@ def parse_origin_env(content):
                 not 24 <= len(values['OWNER_EVIDENCE_STATUS_TOKEN']) <= 256 or
                 not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access', values['OWNER_EVIDENCE_STATUS_CLIENT_ID'])):
             raise ValueError('Private status configuration incomplete or malformed')
+    if import_keys & values.keys():
+        if (not import_keys <= values.keys() or
+                not 24 <= len(values['OWNER_EVIDENCE_IMPORT_TOKEN']) <= 256 or
+                not values['OWNER_EVIDENCE_IMPORT_TOKEN'].isascii() or
+                any(char.isspace() for char in values['OWNER_EVIDENCE_IMPORT_TOKEN']) or
+                not re.fullmatch(r'[A-Za-z0-9_-]{8,128}\.access',
+                                 values['OWNER_EVIDENCE_IMPORT_CLIENT_ID']) or
+                values['OWNER_EVIDENCE_IMPORT_TOKEN'] == values.get('OWNER_EVIDENCE_STATUS_TOKEN') or
+                values['OWNER_EVIDENCE_IMPORT_CLIENT_ID'] == values.get('OWNER_EVIDENCE_STATUS_CLIENT_ID')):
+            raise ValueError('Private import configuration incomplete or malformed')
     if queue_keys & values.keys():
         if (not queue_keys <= values.keys() or
                 values['OWNER_EVIDENCE_ISSUE172_QUEUE_FILE'] != '/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json' or
@@ -159,8 +172,12 @@ def preflight(app_id, issuer, access_read_token=None):
     status_client_id = values.get('OWNER_EVIDENCE_STATUS_CLIENT_ID')
     if 'OWNER_EVIDENCE_STATUS_CLIENT_ID' in names and status_client_id is None:
         raise ValueError('Status writer Worker and origin configuration differ')
+    import_client_id = values.get('OWNER_EVIDENCE_IMPORT_CLIENT_ID')
+    if 'OWNER_EVIDENCE_IMPORT_CLIENT_ID' in names and import_client_id is None:
+        raise ValueError('Import Worker and origin configuration differ')
     status_token_id = resolve_service_token_id(status_client_id, read_auth) if status_client_id else None
-    audience = check_access(app, policies, emails, status_token_id)
+    import_token_id = resolve_service_token_id(import_client_id, read_auth) if import_client_id else None
+    audience = check_access(app, policies, emails, status_token_id, import_token_id)
     subprocess.run(['ssh', 'bridge-vps', 'sudo -n systemctl is-active --quiet freediving-owner-evidence.service'], check=True)
     check_origin(values)
     base = f'accounts/{ACCOUNT}/cfd_tunnel'
@@ -188,6 +205,8 @@ def preflight(app_id, issuer, access_read_token=None):
                 'OWNER_EVIDENCE_GATEWAY_SECRET': values['OWNER_EVIDENCE_GATEWAY_SECRET']}
     if status_client_id:
         bindings['OWNER_EVIDENCE_STATUS_CLIENT_ID'] = status_client_id
+    if import_client_id:
+        bindings['OWNER_EVIDENCE_IMPORT_CLIENT_ID'] = import_client_id
     return auth, dns_token, path, ingress, desired, dns_path, records, tunnel, bindings
 
 
