@@ -5,14 +5,14 @@ import os
 from pathlib import Path
 import re
 import time
-from sporting_authority import digest
+from sporting_authority import digest, ConflictError
 from private_attempt_inspector import _Runtime, _remaining, READ_BUDGET_SECONDS
 
 SCHEMA = 'private-sporting-proofs/v1'
 SOURCES = ('private_sporting_proofs', 'publication', 'event_selections', 'revisions',
            'canonical_attempt_store', 'source_relationships', 'source_scope', 'html_evidence',
            'aida_html', 'archive', 'vestico_2025', 'reconciliation_flow', 'reconciliation_budget',
-           'reconciliation_jev', 'reconciliation_policy')
+           'reconciliation_jev', 'reconciliation_policy', 'source_accuracy_review', 'reviews', 'candidates')
 JARS = ('clojure-1.12.0.jar', 'data.json-2.5.1.jar', 'postgresql-42.7.8.jar',
         'core.specs.alpha-0.4.74.jar', 'spec.alpha-0.5.238.jar', 'jsoup-1.21.2.jar')
 RUNTIME_FILES = frozenset(['src/freediving/' + name + '.clj' for name in SOURCES]
@@ -21,8 +21,11 @@ SERVE = '''(require '[clojure.data.json :as json]
                     '[freediving.private-sporting-proofs :as proofs])
 (doseq [line (line-seq (java.io.BufferedReader. *in*))]
   (println (json/write-str
-             (try (proofs/read-proofs (json/read-str line :key-fn keyword))
-                  (catch Exception _ {:error "Private exact proof read unavailable"}))))
+             (try (proofs/command (json/read-str line :key-fn keyword))
+                  (catch Exception e {:schema "private-sporting-proofs/v1"
+                                      :error "Source accuracy review unavailable"
+                                      :status (let [s (:status (ex-data e))]
+                                                (if (#{400 409 503} s) s 503))}))))
   (flush))'''
 
 
@@ -88,7 +91,7 @@ def create_reader(env):
                     or not isinstance(result['rows'], list) or len(result['rows']) != len(rows)):
                 raise ValueError('private sporting proof binding changed')
             for expected, returned in zip(rows, result['rows']):
-                if (not isinstance(returned, dict) or set(returned) - {'reference', 'coordinates', 'upstream', 'diagnostics', 'public_reference'}
+                if (not isinstance(returned, dict) or set(returned) - {'reference', 'coordinates', 'upstream', 'diagnostics', 'public_reference', 'source_review'}
                         or any(returned.get(k) != expected[k] for k in ('reference', 'coordinates'))
                         or not isinstance(returned.get('upstream'), dict) or not isinstance(returned.get('diagnostics'), dict)):
                     raise ValueError('private sporting proof exact row changed')
@@ -107,6 +110,48 @@ def create_reader(env):
             raise ValueError('private sporting proof pins changed during read')
         _remaining(deadline)
         return {**result, 'config_sha256': config_sha}
+    def review(request, config_path, *, deadline=None, replay_only=False):
+        deadline = min(deadline if deadline is not None else float('inf'), time.monotonic() + READ_BUDGET_SECONDS)
+        _remaining(deadline)
+        data, root, _ = verified()
+        review_path = Path(config_path)
+        info = review_path.lstat()
+        if (review_path.is_symlink() or not review_path.is_file() or info.st_uid not in (0, os.geteuid())
+                or info.st_mode & 0o027 or info.st_size > 65536):
+            raise ValueError('private source review configuration permissions invalid')
+        config = json.loads(review_path.read_bytes())
+        if (not isinstance(config, dict) or set(config) != {'jdbc_url', 'database', 'runtime_path', 'runtime_manifest_sha256'}
+                or not isinstance(config['jdbc_url'], str)
+                or not config['jdbc_url'].startswith('jdbc:postgresql://127.0.0.1:')
+                or config['database'] != data['database']):
+            raise ValueError('invalid private source review configuration')
+        if any(config[key] != data[key] for key in ('runtime_path', 'runtime_manifest_sha256')):
+            raise ValueError('private source review runtime differs from proof runtime')
+        command = ['/usr/bin/java', '-Xmx192m', '-XX:ActiveProcessorCount=1', '-XX:+UseSerialGC', '-cp',
+                   str(root / 'src') + os.pathsep + os.pathsep.join(str(root / 'lib' / jar) for jar in JARS),
+                   'clojure.main', '-e', SERVE]
+        operation = {'op': 'source-review', 'jdbc_url': config['jdbc_url'],
+                     'database': config['database'], 'request': request}
+        if replay_only:
+            operation['replay_only'] = True
+        result = engine.exchange(command, operation, deadline,
+                                data['runtime_manifest_sha256'])
+        if result.get('schema') != SCHEMA:
+            raise ValueError('private source review response schema changed')
+        if 'error' in result:
+            if set(result) != {'schema', 'error', 'status'} or result['status'] not in (400, 409, 503):
+                raise ValueError('invalid private source review error')
+            error = {409: ConflictError, 400: ValueError, 503: OSError}[result['status']]
+            raise error('Source accuracy review unavailable')
+        if (set(result) != {'schema', 'database', 'binding_sha256', 'receipt', 'replayed'}
+                or result['database'] != config['database'] or not isinstance(result['binding_sha256'], str)
+                or not re.fullmatch('[a-f0-9]{64}', result['binding_sha256'])
+                or not isinstance(result['receipt'], dict) or not isinstance(result['replayed'], bool)
+                or (replay_only and not result['replayed'])):
+            raise ValueError('private source review binding changed')
+        _remaining(deadline)
+        return result
+    read.review = review
     read.close = engine.close
     read.verify = lambda: bool(verified())
     read.deadline_supported = True

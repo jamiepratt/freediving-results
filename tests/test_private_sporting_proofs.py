@@ -73,3 +73,56 @@ def test_reader_rejects_wrong_row_and_permission_exposure(tmp_path, monkeypatch)
     config.chmod(0o644)
     with pytest.raises(ValueError, match='permissions'):
         create_reader({'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': str(config)})
+
+
+def review_config(tmp_path, data):
+    path = tmp_path / 'review-config.json'
+    path.write_bytes(canonical({key: data[key] for key in ('jdbc_url', 'database', 'runtime_path', 'runtime_manifest_sha256')}))
+    path.chmod(0o600)
+    return path
+
+
+def test_source_review_uses_same_engine_and_exact_pinned_runtime(tmp_path, monkeypatch):
+    config, data = pinned(tmp_path); reviewer = review_config(tmp_path, data)
+    engines, requests = [], []
+    def exchange(self, command, request, deadline, generation):
+        engines.append(self); requests.append(request)
+        if request.get('op') == 'source-review':
+            return {'schema': 'private-sporting-proofs/v1', 'database': data['database'],
+                    'binding_sha256': 'a' * 64, 'receipt': {'revision': 1}, 'replayed': bool(request.get('replay_only'))}
+        return {'schema': 'private-sporting-proofs/v1', 'database': request['database'],
+                'binding_sha256': 'b' * 64, 'rows': []}
+    monkeypatch.setattr('private_sporting_proofs._Runtime.exchange', exchange)
+    reader = create_reader({'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': str(config)})
+    try:
+        reader([])
+        result = reader.review({'id': 'isolated-review'}, reviewer)
+        assert result['receipt']['revision'] == 1
+        assert len({id(engine) for engine in engines}) == 1
+        assert requests[-1] == {'op': 'source-review', 'jdbc_url': data['jdbc_url'], 'database': data['database'], 'request': {'id': 'isolated-review'}}
+        reader.review({'id': 'isolated-review'}, reviewer, replay_only=True)
+        assert requests[-1]['replay_only'] is True
+        assert len({id(engine) for engine in engines}) == 1
+        reviewer.chmod(0o644)
+        with pytest.raises(ValueError, match='permissions'):
+            reader.review({}, reviewer)
+        reviewer.chmod(0o600)
+        changed = json.loads(reviewer.read_bytes()); changed['runtime_manifest_sha256'] = 'e' * 64
+        reviewer.write_bytes(canonical(changed))
+        with pytest.raises(ValueError, match='runtime'):
+            reader.review({}, reviewer)
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize('status,exception', [(409, 'ConflictError'), (400, 'ValueError'), (503, 'OSError')])
+def test_source_review_maps_safe_domain_errors(tmp_path, monkeypatch, status, exception):
+    from sporting_authority import ConflictError
+    config, data = pinned(tmp_path); reviewer = review_config(tmp_path, data)
+    monkeypatch.setattr('private_sporting_proofs._Runtime.exchange', lambda *args: {'schema': 'private-sporting-proofs/v1', 'error': 'Source accuracy review unavailable', 'status': status})
+    reader = create_reader({'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': str(config)})
+    try:
+        with pytest.raises({'ConflictError': ConflictError, 'ValueError': ValueError, 'OSError': OSError}[exception]):
+            reader.review({'id': 'isolated-review'}, reviewer)
+    finally:
+        reader.close()

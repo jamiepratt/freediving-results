@@ -209,6 +209,7 @@ def configure(origin, snapshot_dir, env):
     origin.sporting = None
     origin.sporting_request_key = None
     origin.sporting_proof_reader = None
+    origin.source_accuracy_review = None
     origin.relationship_reviews = None
     origin.sporting_deadlines = threading.local()
     if not name:
@@ -226,6 +227,12 @@ def configure(origin, snapshot_dir, env):
         raise ValueError('invalid sporting request key')
     from private_sporting_proofs import create_reader
     origin.sporting_proof_reader = create_reader(env)
+    review_config = env.get('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG')
+    if review_config and origin.sporting_proof_reader:
+        def source_accuracy_review(request, *, deadline=None, replay_only=False):
+            return origin.sporting_proof_reader.review(request, review_config,
+                                                      deadline=deadline, replay_only=replay_only)
+        origin.source_accuracy_review = source_accuracy_review
     if origin.sporting_proof_reader is not None:
         # JVM initialization happens before the HTTP socket is bound. Discard
         # authority results; every request still reads and rechecks current pins.
@@ -347,7 +354,7 @@ def get(handler, parsed):
 
 
 def post(handler, parsed):
-    if parsed.path not in (CURRENT, PREFIX + '/stage', PREFIX + '/actions', PREFIX + '/relationships') or parsed.query:
+    if parsed.path not in (CURRENT, PREFIX + '/stage', PREFIX + '/actions', PREFIX + '/relationships', PREFIX + '/source-accuracy') or parsed.query:
         return False
     if handler.server.sporting is None:
         handler._reply(503)
@@ -370,7 +377,25 @@ def post(handler, parsed):
             body = _body(handler, MAX_STAGE)
             if not hmac.compare_digest(body.get('csrf_token', ''), handler._csrf()):
                 handler._reply(403); return True
-            if parsed.path.endswith('/relationships'):
+            if parsed.path.endswith('/source-accuracy'):
+                fields = {'id', 'action', 'reference', 'coordinates', 'expected_source_binding_sha256',
+                          'base_revision', 'event_id', 'reason', 'source_visual_accuracy', 'csrf_token',
+                          'expected_context_pins_sha256'}
+                if not isinstance(body, dict) or set(body) != fields:
+                    raise ValueError('invalid exact source accuracy action fields')
+                writer = getattr(handler.server, 'source_accuracy_review', None)
+                if writer is None:
+                    handler._reply(503); return True
+                context = handler.server.sporting_proof_context()
+                replay_only = not hmac.compare_digest(body['expected_context_pins_sha256'], digest(context['pins']))
+                target = [row for row in context['rows'] if
+                          row['reference'] == body['reference'] and row['coordinates'] == body['coordinates']]
+                if len(target) != 1 or target[0].get('source_review', {}).get('enabled') is not True:
+                    raise ConflictError('exact retained source version is unavailable for visual accuracy review')
+                request = {k: v for k, v in body.items() if k not in ('csrf_token', 'expected_context_pins_sha256')}
+                request['actor'] = handler._one('X-Freediving-Owner-Email')
+                result = writer(request, deadline=handler.server.sporting_deadlines.deadline, replay_only=replay_only)
+            elif parsed.path.endswith('/relationships'):
                 if set(body) != {'assertion', 'action', 'expected_revision', 'idempotency_key', 'csrf_token'}:
                     raise ValueError('invalid relationship action fields')
                 ledger = handler.server.relationship_reviews

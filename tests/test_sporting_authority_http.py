@@ -558,3 +558,117 @@ class SportingAuthorityConcurrencyHTTPTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ExactSourceAccuracyOwnerHTTPTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = Fixture(); self.addCleanup(self.fixture.close)
+        self.calls = []
+        def writer(request, **kw):
+            self.calls.append((request, kw))
+            if kw.get('replay_only'):
+                from sporting_authority import ConflictError
+                raise ConflictError('No identical prior receipt')
+            return {'schema': 'private-sporting-proofs/v1', 'receipt': {'revision': 1}, 'replayed': False}
+        self.fixture.server.source_accuracy_review = writer
+        csrf = self.fixture.review()['csrf_token']
+        self.body = {'id': 'synthetic-review-one', 'action': 'accept',
+                'reference': {'job-id': 'a' * 64, 'ordinal': 1, 'candidate-id': 'synthetic',
+                              'source-sha256': 'b' * 64, 'artifact-sha256': 'c' * 64, 'parser-version': 'synthetic/1'},
+                'coordinates': {'page': 1, 'line': 2, 'column-start': 3, 'column-end': 4},
+                'expected_source_binding_sha256': 'd' * 64, 'base_revision': 0, 'event_id': None,
+                'reason': 'Compared one exact row against its original PDF page', 'source_visual_accuracy': True,
+                'csrf_token': csrf}
+        self.context = {'pins': {'packet_sha256': 'e' * 64, 'source_bundle_sha256': 'f' * 64,
+                        'canonical_scope_bindings': {'source': 'd' * 64}, 'owner_revision': 1},
+                        'rows': [{'reference': self.body['reference'], 'coordinates': self.body['coordinates'],
+                                  'source_review': {'enabled': True}}]}
+        self.fixture.server.sporting_proof_context = lambda: self.context
+        self.body['expected_context_pins_sha256'] = canonical_digest(self.context['pins'])
+        self.route = '/owner-evidence/api/sporting-authority/source-accuracy'
+
+    def test_exact_source_accuracy_route_derives_actor_and_requires_csrf(self):
+        f, body = self.fixture, self.body
+        self.assertEqual(f.request(self.route, {**body, 'csrf_token': 'bad'})[0], 403)
+        self.assertEqual(f.request(self.route, {**body, 'actor': 'forged'})[0], 400)
+        self.assertEqual(f.request(self.route, body)[0], 200)
+        request, options = self.calls[0]
+        self.assertEqual(request['actor'], OWNER)
+        self.assertNotIn('csrf_token', request)
+        self.assertNotIn('expected_context_pins_sha256', request)
+        self.assertEqual(request['reference'], body['reference'])
+        self.assertTrue(f.server.request_lock.acquire(blocking=False)); f.server.request_lock.release()
+
+    def test_stale_packet_refuses_writer_even_when_database_binding_unchanged(self):
+        self.context['pins']['packet_sha256'] = '9' * 64
+        self.assertEqual(self.fixture.request(self.route, self.body)[0], 409)
+        self.assertTrue(self.calls[0][1]['replay_only'])
+
+    def test_lost_response_retry_allows_only_identical_existing_receipt_after_pin_change(self):
+        from sporting_authority import ConflictError
+        receipts = {}
+        def writer(request, **options):
+            if request['id'] in receipts:
+                if receipts[request['id']] != request:
+                    raise ConflictError('Replay body changed')
+                return {'receipt': {'revision': 1}, 'replayed': True}
+            if options.get('replay_only'):
+                raise ConflictError('No identical prior receipt')
+            receipts[request['id']] = request
+            return {'receipt': {'revision': 1}, 'replayed': False}
+        self.fixture.server.source_accuracy_review = writer
+        self.assertEqual(self.fixture.request(self.route, self.body)[0], 200)
+        self.context['pins']['packet_sha256'] = '9' * 64
+        status, result = self.fixture.request(self.route, self.body)
+        self.assertEqual(status, 200); self.assertTrue(result['replayed'])
+        self.assertEqual(self.fixture.request(self.route, {**self.body, 'id': 'new-id'})[0], 409)
+        self.assertEqual(self.fixture.request(self.route, {**self.body, 'reason': 'Changed reason'})[0], 409)
+        self.assertEqual(len(receipts), 1)
+
+    def test_configuration_reuses_paired_reader_writer_callback(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from sporting_authority_http import configure
+        calls = []
+        class Reader:
+            def __call__(self, rows, **kw):
+                calls.append(('read', rows))
+            def review(self, request, config, **kw):
+                calls.append(('review', request, config, kw)); return {'replayed': True}
+            def close(self):
+                pass
+        origin = SimpleNamespace(comparison_reader=None)
+        env = {'OWNER_EVIDENCE_SPORTING_CONFIG': str(self.fixture.root / 'sporting.json'),
+               'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG': str(self.fixture.root / 'review.json')}
+        with patch('private_sporting_proofs.create_reader', return_value=Reader()):
+            configure(origin, self.fixture.root / 'snapshot', env)
+            self.addCleanup(origin.sporting.close)
+            self.assertTrue(origin.source_accuracy_review({'id': 'retry'}, replay_only=True)['replayed'])
+            self.assertEqual(calls[-1][2], env['OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG'])
+            self.assertTrue(calls[-1][3]['replay_only'])
+        other = SimpleNamespace(comparison_reader=None)
+        with patch('private_sporting_proofs.create_reader', return_value=None):
+            configure(other, self.fixture.root / 'snapshot', env)
+            self.addCleanup(other.sporting.close)
+            self.assertIsNone(other.source_accuracy_review)
+
+    def test_writer_unavailable_fails_closed(self):
+        self.fixture.server.source_accuracy_review = None
+        self.assertEqual(self.fixture.request(self.route, self.body)[0], 503)
+
+    def test_unimported_or_disabled_exact_target_refuses_writer(self):
+        for state in ({'enabled': False, 'reason': 'Exact canonical import missing'}, {}):
+            self.context['rows'][0]['source_review'] = state
+            self.assertEqual(self.fixture.request(self.route, self.body)[0], 409)
+        self.assertEqual(self.calls, [])
+
+    def test_exact_parser_and_all_coordinates_must_match_current_retained_version(self):
+        changed = {**self.body['reference'], 'parser-version': 'synthetic/2'}
+        self.assertEqual(self.fixture.request(self.route, {**self.body, 'reference': changed})[0], 409)
+        coords = {**self.body['coordinates'], 'column-end': 5}
+        self.assertEqual(self.fixture.request(self.route, {**self.body, 'coordinates': coords})[0], 409)
+        self.assertEqual(self.calls, [])
+
+
+def canonical_digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
