@@ -570,3 +570,53 @@ class SourceReviewGuardTests(unittest.TestCase):
                 (runtime/'extra.clj').unlink()
                 proof['runtime']['candidate']='b'*40
                 with self.assertRaisesRegex(ValueError,'shared proof'):comparison_activate.capture_source_review_guard(layout)
+
+class AidaDiffActivationTests(unittest.TestCase):
+    sha = ComparisonActivationTests.sha
+
+    def setUp(self):
+        ComparisonActivationTests.setUp(self)
+        self.diff_report = self.root/'report.json'; self.diff_report.write_text('{"synthetic":true}'); self.diff_report.chmod(0o640)
+        parent = self.layout.state/'aida-diff'; parent.mkdir()
+        self.diff_config = parent/'config.json'
+        self.diff_config.write_text(json.dumps({'schema':'retained-aida-diff-service/v1',
+            'report':{'path':str(self.diff_report),'sha256':self.sha(self.diff_report)},
+            'source_sha256':'67933b6afa56c7c4cff1df14b9b415d2e32d33f49feb10f24be46d4b59fa3e93',
+            'artifact_sha256s':['a'*64,'b'*64], 'hashes_sha256':'c'*64,
+            'selected_positions':103,'source_positions':209})); self.diff_config.chmod(0o640)
+        self.pins = self.guard()
+
+    def test_optional_diff_attachment_guard_and_derived_rollback(self):
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw,
+            aida_diff_config=self.diff_config,aida_diff_probe=lambda *args:None)
+        self.assertIn(('OWNER_EVIDENCE_AIDA_DIFF_CONFIG='+str(self.diff_config)).encode(), self.layout.config.read_bytes())
+        rollback_comparison(self.layout,command=self.command)
+        self.assertNotIn(b'OWNER_EVIDENCE_AIDA_DIFF_CONFIG=',self.layout.config.read_bytes())
+        self.assertTrue(self.diff_config.exists()); self.assertTrue(self.diff_report.exists())
+
+    def test_changed_diff_report_refuses_activation_and_rollback(self):
+        original = self.diff_report.read_bytes()
+        self.diff_report.write_text('changed')
+        with self.assertRaisesRegex(ValueError,'diff.*pin'):
+            activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw,
+                aida_diff_config=self.diff_config,aida_diff_probe=lambda *args:None)
+        self.diff_report.write_bytes(original)
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw,
+            aida_diff_config=self.diff_config,aida_diff_probe=lambda *args:None)
+        active = (self.layout.app/'current').resolve()
+        self.diff_report.write_text('changed')
+        with self.assertRaisesRegex(ValueError,'diff.*pin'):
+            rollback_comparison(self.layout,command=self.command)
+        self.assertEqual(active,(self.layout.app/'current').resolve())
+        self.assertEqual('changed',self.diff_report.read_text())
+
+    def test_diff_attachment_refuses_unregistered_path_and_failed_service_read(self):
+        with self.assertRaisesRegex(ValueError,'configuration path'):
+            activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw,
+                aida_diff_config=self.root/'foreign.json',aida_diff_probe=lambda *args:None)
+        def refused(*args): raise ValueError('service denied')
+        with self.assertRaisesRegex(ValueError,'service denied'):
+            activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw,
+                aida_diff_config=self.diff_config,aida_diff_probe=refused)
+        self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())
+        self.assertNotIn(b'OWNER_EVIDENCE_AIDA_DIFF_CONFIG=',self.layout.config.read_bytes())

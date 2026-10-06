@@ -166,6 +166,42 @@ def _proof_probe(app, config, uid, gid):
 
 
 
+def capture_aida_diff_guard(layout):
+    """Pin separately registered private derivative; never copy/restore its bytes."""
+    path=layout.state/'aida-diff/config.json'
+    if not path.exists() and not path.is_symlink():return None
+    def entry(file):
+        if any(part.is_symlink() for part in (file,*file.parents)):raise ValueError('linked retained AIDA diff input')
+        _regular(file);info=file.stat()
+        if info.st_uid!=os.geteuid() or info.st_mode&0o027:raise ValueError('unsafe retained AIDA diff input')
+        return {'path':str(file),'sha256':_sha(file),'uid':info.st_uid,'gid':info.st_gid,'mode':info.st_mode&0o777}
+    config=entry(path);value=json.loads(path.read_text())
+    if (set(value)!={'schema','report','source_sha256','artifact_sha256s','hashes_sha256','selected_positions','source_positions'}
+            or value['schema']!='retained-aida-diff-service/v1'
+            or value['source_sha256']!='67933b6afa56c7c4cff1df14b9b415d2e32d33f49feb10f24be46d4b59fa3e93'
+            or value['selected_positions']!=103 or value['source_positions']!=209
+            or not isinstance(value['artifact_sha256s'],list) or len(value['artifact_sha256s'])!=2
+            or len(set(value['artifact_sha256s']))!=2
+            or not all(isinstance(x,str) and re.fullmatch('[0-9a-f]{64}',x) for x in value['artifact_sha256s']+[value['hashes_sha256']])
+            or set(value['report'])!={'path','sha256'}):
+        raise ValueError('invalid retained AIDA diff configuration')
+    report=Path(value['report']['path'])
+    if not report.is_absolute():raise ValueError('invalid retained AIDA diff report path')
+    report=entry(report)
+    if report['sha256']!=value['report']['sha256']:raise ValueError('retained AIDA diff report pin changed')
+    return {'config':config,'report':report}
+
+
+def _aida_diff_probe(app, config, uid, gid):
+    """Read/render the complete pinned derivative as the actual service identity."""
+    code=('import sys;sys.path.insert(0,sys.argv[1]);from retained_aida_diff import read_service;'
+          'body=read_service(sys.argv[2]);assert body.startswith(b"<!doctype html>");print("verified")')
+    identity={} if (uid,gid)==(os.geteuid(),os.getegid()) else {'user':uid,'group':gid,'extra_groups':[]}
+    result=subprocess.run(['/usr/bin/python3','-I','-B','-c',code,str(app/'scripts'),str(config)],
+        env={'PATH':'/usr/bin:/bin'},capture_output=True,timeout=15,**identity)
+    if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('retained AIDA diff service read refused')
+
+
 def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/current'),
                   public_configs=(Path('/etc/freediving/public.env'),Path('/etc/freediving/migration.env')),
                   table_reader=None):
@@ -193,6 +229,7 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
                        'comparison':_sha(comparison_path) if comparison_path.exists() else None},
             'protected':{'files':{str(path):_sha(path) for path in protected_paths},'canonical_runtime':{'path':str(runtime),'files':_tree(runtime)},
                          'sporting_proof':capture_proof_guard(layout),'source_review':capture_source_review_guard(layout),
+                         **({'aida_diff':capture_aida_diff_guard(layout)} if (layout.state/'aida-diff/config.json').exists() or (layout.state/'aida-diff/config.json').is_symlink() else {}),
                          'public_app':{'path':str(public_current),'files':_tree(public_current)},'public_configs':{str(path):_sha(path) for path in public_configs}},
             'sporting':capture_sporting_guard(layout),
             'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database),
@@ -403,7 +440,7 @@ def _comparison_health(values):
     else:inspector()
 
 
-def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof_probe=None, authority_reader=None):
+def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof_probe=None, authority_reader=None, aida_diff_probe=None):
     """Restore derived app/config only, irrespective of newer genuine human events."""
     command=command or _system_command
     checkpoint=_checkpoint(layout);_regular(checkpoint/'record.json')
@@ -416,6 +453,8 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
     if ('source_authority_guard' in record and
             capture_source_authority_guard(layout,table_reader=authority_reader)!=record['source_authority_guard']):
         raise ValueError('source authority changed; rollback refused')
+    if 'aida_diff_guard' in record and capture_aida_diff_guard(layout)!=record['aida_diff_guard']:
+        raise ValueError('retained AIDA diff capability changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
@@ -435,6 +474,9 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
     proof=record.get('proof_guard')
     if proof is not None:
         (proof_probe or _proof_probe)(Path(record['before']['app']),Path(proof['config']['path']),owner_uid,owner_gid)
+    previous_values=_read_values((checkpoint/'before-config').read_bytes())
+    if previous_values.get('OWNER_EVIDENCE_AIDA_DIFF_CONFIG'):
+        (aida_diff_probe or _aida_diff_probe)(Path(record['before']['app']),Path(previous_values['OWNER_EVIDENCE_AIDA_DIFF_CONFIG']),owner_uid,owner_gid)
     _atomic_link(layout.app/'current',Path(record['before']['app']))
     for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed)]:
         if record['before'][name] is None:path.unlink(missing_ok=True)
@@ -450,13 +492,15 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
 
 def activate_comparison(bundle, config, layout, expected_guard, *, guard,
                         command=None, health=None, owner_uid=0, owner_gid=0,
-                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None, source_review_config=None):
+                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None, source_review_config=None, aida_diff_config=None, aida_diff_probe=None):
     command=command or _system_command
     bundle,config=Path(bundle),Path(config)
     if proof_config is not None and Path(proof_config)!=layout.state/'sporting-proof-reader/config.json':
         raise ValueError('invalid sporting proof configuration path')
     if source_review_config is not None and Path(source_review_config)!=layout.state/'source-review/config.json':
         raise ValueError('invalid source review configuration path')
+    if aida_diff_config is not None and Path(aida_diff_config)!=layout.state/'aida-diff/config.json':
+        raise ValueError('invalid retained AIDA diff configuration path')
     manifest_path=bundle/'private-owner-manifest.json';_regular(manifest_path)
     if bundle_manifest_sha256 and _sha(manifest_path)!=bundle_manifest_sha256:raise ValueError('staged app manifest changed')
     if config_sha256 and _sha(config)!=config_sha256:raise ValueError('staged comparison config changed')
@@ -489,6 +533,11 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
             raise ValueError('source review shared runtime differs from private code candidate')
         review_pin=('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='+str(source_review_config)+'\n').encode()
         contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='))+review_pin for name,body in contents.items()}
+    if aida_diff_config is not None:
+        diff_guard=expected_guard['protected'].get('aida_diff')
+        if diff_guard is None or diff_guard!=capture_aida_diff_guard(layout):raise ValueError('retained AIDA diff capability not guarded')
+        diff_pin=('OWNER_EVIDENCE_AIDA_DIFF_CONFIG='+str(aida_diff_config)+'\n').encode()
+        contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_AIDA_DIFF_CONFIG='))+diff_pin for name,body in contents.items()}
     checkpoint=_checkpoint(layout)
     if checkpoint.is_symlink():raise ValueError('linked comparison checkpoint')
     if (checkpoint/'record.json').exists() and json.loads((checkpoint/'record.json').read_text())['status']=='pending':raise ValueError('pending comparison activation requires reviewed recovery')
@@ -507,9 +556,11 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         from owner_evidence_activate import _source_review_inputs
         _source_review_inputs(bundle,{'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG':str(source_review_config),
                                     'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG':str(proof_config)},owner_uid,owner_gid)
+    if aida_diff_config is not None:(aida_diff_probe or _aida_diff_probe)(app,Path(aida_diff_config),owner_uid,owner_gid)
     # Runtime and packet are revalidated after the service-user read/execute probe.
     _comparison_config(config)
     record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'proof_guard':expected_guard['protected'].get('sporting_proof'),'source_review_guard':expected_guard['protected'].get('source_review'),'source_authority_guard':expected_guard['authority'].get('source_review_tables'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
+    if 'aida_diff' in expected_guard['protected']:record['aida_diff_guard']=expected_guard['protected']['aida_diff']
     # Last full authority/CAS read occurs after staging and immediately before swaps.
     if guard()!=expected_guard:raise ValueError('live guard changed before activation')
     _atomic_write(checkpoint/'record.json',json.dumps(record,sort_keys=True).encode(),0o600)
@@ -535,7 +586,7 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
             any(current['derived'][key]!=after[key] for key in ('config','env','comparison'))):
             raise ValueError('live authority changed during activation')
     except BaseException:
-        rollback_comparison(layout,command=command,owner_uid=owner_uid,owner_gid=owner_gid,proof_probe=proof_probe)
+        rollback_comparison(layout,command=command,owner_uid=owner_uid,owner_gid=owner_gid,proof_probe=proof_probe,aida_diff_probe=aida_diff_probe)
         raise
     _atomic_write(checkpoint/'record.json',json.dumps({**record,'status':'active'},sort_keys=True).encode(),0o600)
     return 'activated'
@@ -548,6 +599,7 @@ def main():
     parser.add_argument('--guard',type=Path)
     parser.add_argument('--proof-config',type=Path)
     parser.add_argument('--source-review-config',type=Path)
+    parser.add_argument('--aida-diff-config',type=Path)
     parser.add_argument('--bundle',type=Path);parser.add_argument('--config',type=Path)
     parser.add_argument('--bundle-manifest-sha256');parser.add_argument('--config-sha256')
     args=parser.parse_args()
@@ -565,7 +617,7 @@ def main():
         if args.action=='rollback':rollback_comparison(layout,owner_uid=account.pw_uid,owner_gid=account.pw_gid)
         else:
             if not all((args.guard,args.bundle,args.config,args.bundle_manifest_sha256,args.config_sha256)):raise ValueError('activation requires exact stage and live guard pins')
-            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config,source_review_config=args.source_review_config)
+            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config,source_review_config=args.source_review_config,aida_diff_config=args.aida_diff_config)
         print(json.dumps({'result':'PASS','action':args.action,'data_writes':0}))
         return 0
     except Exception:

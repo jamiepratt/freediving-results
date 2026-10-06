@@ -39,3 +39,13 @@ Commands create output files exclusively with mode 0600. Every consumed
 checkpoint/manifest/file requires its byte SHA-256 through the CLI. The helper
 never executes ingestion, creates authorities, or rolls back database rows.
 Apply through the normal source-only importer between preflight and verification.
+
+The private report is registered separately at
+`<owner-state>/aida-diff/config.json`. `comparison_activate.py capture` guards its
+config, full report hash and permissions when present. Activation accepts only
+that registered path through `--aida-diff-config`, renders the pinned report as
+the service identity, and attaches `OWNER_EVIDENCE_AIDA_DIFF_CONFIG` to derived
+env files. A failed read prevents activation. The checkpoint pins the report
+without backing it up. Compatible rollback restores derived app/env files only;
+changed report pins refuse rollback rather than restoring stale evidence. With
+no registered diff config, existing deployment guards/checkpoints stay compatible.
