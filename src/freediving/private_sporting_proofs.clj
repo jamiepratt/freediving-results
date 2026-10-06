@@ -102,20 +102,25 @@
    :source-sha256 (:source_sha256 extraction) :artifact-sha256 (:artifact_sha256 extraction)
    :parser-version (:parser_version extraction)})
 (def ^:dynamic *decoded-artifacts* nil)
+(defn- artifact-binding [extraction]
+  (let [artifact (edn/read-string (String. ^bytes (:artifact_bytes extraction) "UTF-8"))
+        identity-keys (if (= 4 (:schema-version artifact)) html/identity-keys
+                          [:source-sha256 :acquisitions :evidence-sha256 :actor :config
+                           :parser-version :schema-version :pdfinfo-version :tool])]
+    {:artifact artifact :artifact-sha256 (sha (:artifact_bytes extraction))
+     :job-id (html/digest (select-keys artifact identity-keys))}))
 (defn- exact-target [state {:keys [reference coordinates]}]
   (when-let [row (some #(when (= ((juxt :job-id :ordinal) reference) ((juxt :job_id :ordinal) %)) %) (:observations state))]
     (let [extraction (some #(when (= (:job-id reference) (:job_id %)) %) (:extractions state))
-          artifact (or (when *decoded-artifacts* (get @*decoded-artifacts* (:job-id reference)))
-                       (let [a (edn/read-string (String. ^bytes (:artifact_bytes extraction) "UTF-8"))]
-                         (when *decoded-artifacts* (swap! *decoded-artifacts* assoc (:job-id reference) a)) a))
+          binding (or (when *decoded-artifacts* (get @*decoded-artifacts* (:job-id reference)))
+                      (let [value (artifact-binding extraction)]
+                        (when *decoded-artifacts* (swap! *decoded-artifacts* assoc (:job-id reference) value)) value))
+          artifact (:artifact binding)
           payload (edn/read-string (:payload_edn row))
-          actual (base-reference row extraction)
-          identity-keys (if (= 4 (:schema-version artifact)) html/identity-keys
-                            [:source-sha256 :acquisitions :evidence-sha256 :actor :config
-                             :parser-version :schema-version :pdfinfo-version :tool])]
+          actual (base-reference row extraction)]
       (need! (and (= actual reference)
-                  (= (:artifact-sha256 reference) (sha (:artifact_bytes extraction)))
-                  (= (:job-id reference) (html/digest (select-keys artifact identity-keys)))
+                  (= (:artifact-sha256 reference) (:artifact-sha256 binding))
+                  (= (:job-id reference) (:job-id binding))
                   (= payload (get (:candidates artifact) (:ordinal reference)))
                   (= "result-row" (:kind row))
                   (= (:candidate-id reference)

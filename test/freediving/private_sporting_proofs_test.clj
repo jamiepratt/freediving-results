@@ -134,6 +134,29 @@
     (reviews/accept-pdf-extraction! publication-fixture/reviewer request)
     ref))
 
+(deftest shared-row-artifact-integrity-is-checked-once-and-rechecked-next-request
+  (let [{:keys [config target artifact stored] :as sample} (sample)
+        _ (accept-pdf sample)
+        _ (publication/decide! publication-fixture/reviewer (publication-fixture/request target "memo-publication"))
+        other-target (assoc target :ordinal 1)
+        other-reference (assoc (revisions/reference fixture/app other-target) :parser-version (:parser-version artifact))
+        config (update config :rows conj {:reference other-reference :coordinates (get-in artifact [:candidates 1 :coordinates])})
+        sha-var (ns-resolve 'freediving.private-sporting-proofs 'sha)
+        original @sha-var artifact-checks (atom 0)]
+    (with-redefs-fn {sha-var (fn [bytes]
+                               (when (java.util.Arrays/equals ^bytes (:artifact-bytes stored) ^bytes bytes)
+                                 (swap! artifact-checks inc))
+                               (original bytes))}
+      #(let [proof (read-proof config)]
+         (is (= ["mapped" "mapped"] (mapv (fn [row] (get-in row [:diagnostics :mapping :state])) (:rows proof))))
+         (is (= "approved" (get-in proof [:rows 0 :upstream :publication :value])))))
+    (is (= 1 @artifact-checks))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER immutable_extractions")
+    (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_bytes=artifact_bytes || convert_to(' ','UTF8')")
+    (let [changed (read-proof config)]
+      (is (= ["scope-mismatch" "scope-mismatch"] (mapv #(get-in % [:diagnostics :mapping :state]) (:rows changed))))
+      (is (every? #(empty? (:upstream %)) (:rows changed))))))
+
 (deftest exact-extraction-receipts-currentness-and-history-stay-separate
   (let [{:keys [config target] :as sample} (sample)
         ref (accept-pdf sample)

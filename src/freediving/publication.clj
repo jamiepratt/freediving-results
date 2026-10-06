@@ -58,9 +58,39 @@
                  (execute! c (str "GRANT SELECT ON freediving.publication_policy_events TO " reviewer-role))
                  {:schema-version 3})))
 (defn- nonblank? [x] (and (string? x) (not (str/blank? x))))
+(def ^:dynamic *artifacts* nil)
+(def ^:dynamic ^:private *source-snapshot-cache* nil)
+(defn- read-only-snapshot! [^Connection c]
+  (when-not (and (.isReadOnly c) (not (.getAutoCommit c))
+                 (#{Connection/TRANSACTION_REPEATABLE_READ Connection/TRANSACTION_SERIALIZABLE}
+                  (.getTransactionIsolation c)))
+    (fail! "Source cache requires a read-only snapshot")))
+(defn with-source-snapshot-cache
+  "Reuse extraction bytes and target rows only on this read-only snapshot connection."
+  [^Connection c f]
+  (read-only-snapshot! c)
+  (binding [*source-snapshot-cache* {:connection c :extractions (atom {}) :targets (atom {})}
+            *artifacts* (atom {})]
+    (f)))
+(defn- source-cache [c]
+  (when (identical? c (:connection *source-snapshot-cache*))
+    (read-only-snapshot! c)
+    *source-snapshot-cache*))
+(defn- cached-extraction [c job]
+  (let [cache (:extractions (source-cache c))]
+    (or (get @cache job)
+        (let [row (or (first (query c "SELECT job_id,artifact_bytes,artifact_sha256,source_sha256 FROM freediving.extractions WHERE job_id=?" job))
+                      (fail! "Unknown observation version"))]
+          (swap! cache assoc job row) row))))
 (defn- target [c {:keys [job-id ordinal]}]
-  (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
-      (fail! "Unknown observation version")))
+  (if-let [cache (:targets (source-cache c))]
+    (or (get @cache [job-id ordinal])
+        (let [row (or (first (query c "SELECT * FROM freediving.observations WHERE job_id=? AND ordinal=?" job-id ordinal))
+                      (fail! "Unknown observation version"))
+              row (merge row (cached-extraction c job-id))]
+          (swap! cache assoc [job-id ordinal] row) row))
+    (or (first (query c "SELECT o.*,e.artifact_bytes,e.artifact_sha256,e.source_sha256 FROM freediving.observations o JOIN freediving.extractions e USING(job_id) WHERE job_id=? AND ordinal=?" job-id ordinal))
+        (fail! "Unknown observation version"))))
 (defn- provenance [o]
   {:job-id (:job_id o) :ordinal (:ordinal o) :candidate-id (:candidate_id o)
    :source-sha256 (:source_sha256 o) :artifact-sha256 (:artifact_sha256 o)})
@@ -68,11 +98,13 @@
   (query c (str "SELECT * FROM freediving." table " WHERE job_id=? AND ordinal=? ORDER BY revision") (:job-id t) (:ordinal t)))
 (defn- body [r]
   (assoc (edn/read-string (:body_edn r)) :db-role (:db_role r) :recorded-at (str (:recorded_at r))))
-(def ^:dynamic *artifacts* nil)
 (defn- artifact [c job]
-  (or (when *artifacts* (get @*artifacts* job))
-      (let [a (edn/read-string (String. ^bytes (:artifact_bytes (first (query c "SELECT artifact_bytes FROM freediving.extractions WHERE job_id=?" job))) "UTF-8"))]
-        (when *artifacts* (swap! *artifacts* assoc job a)) a)))
+  (let [cache (when (or (nil? *source-snapshot-cache*) (source-cache c)) *artifacts*)]
+    (or (when cache (get @cache job))
+        (let [row (if (source-cache c) (cached-extraction c job)
+                      (first (query c "SELECT artifact_bytes FROM freediving.extractions WHERE job_id=?" job)))
+              a (edn/read-string (String. ^bytes (:artifact_bytes row) "UTF-8"))]
+          (when cache (swap! cache assoc job a)) a))))
 (defn- state [c t]
   (let [o (target c t) payload (edn/read-string (:payload_edn o))
         artifact (artifact c (:job-id t))
@@ -160,16 +192,22 @@
                                                                                                                (= "revoke" (:action last-decision)) [:validation-revoked]
                                                                                                                (not= policy (:policy_version last-decision)) [:policy-version-changed]
                                                                                                                (not= (:review-revision s) (:review_revision last-decision)) [:review-revision-changed])))}))
-(defn- read-snapshot [url f]
-  (with-open [c (connect url)]
-    (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
-    (let [r (f c)] (.commit c) r)))
+(defn- read-snapshot
+  ([url f] (read-snapshot url f false))
+  ([url f readonly?]
+   (with-open [c (connect url)]
+     (when readonly? (.setReadOnly c true))
+     (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
+     (let [r (f c)] (.commit c) r))))
 (defn diagnose [url t] (read-snapshot url #(diagnosis % t)))
 (defn diagnose-many
   "Private read-only diagnostics in one snapshot; artifact decoding cached per job."
   [url targets]
-  (binding [*artifacts* (atom {})]
-    (read-snapshot url (fn [c] (mapv #(merge (select-keys % [:job-id :ordinal]) (diagnosis c %)) targets)))))
+  (read-snapshot url
+                 (fn [c]
+                   (with-source-snapshot-cache c
+                     #(mapv (fn [t] (merge (select-keys t [:job-id :ordinal]) (diagnosis c t))) targets)))
+                 true))
 (defn history [url t] (read-snapshot url (fn [c] (target c t) (mapv body (rows c "publication_decisions" t)))))
 (def request-keys #{:id :job-id :ordinal :base-revision :review-revision :policy-version :observation :action :actor :reason :evidence :attestations})
 (defn decide! [url r]

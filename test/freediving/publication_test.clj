@@ -30,6 +30,47 @@
   (merge t (select-keys (publication/diagnose reviewer t) [:review-revision :policy-version :observation])
          {:id id :base-revision 0 :action :validate :actor "validator" :reason "Checked synthetic source"
           :evidence [{:page 1 :line 1}] :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}}))
+(deftest batch-diagnostics-fetch-source-bytes-once-per-read-snapshot
+  (let [t (sample) targets [t (assoc t :ordinal 1) t]
+        expected (mapv #(merge (select-keys % [:job-id :ordinal]) (publication/diagnose reviewer %)) targets)
+        query-var (ns-resolve 'freediving.publication 'query)
+        original @query-var
+        fetches (atom {:extractions 0 :observations 0})]
+    (with-redefs-fn {query-var
+                     (fn [c sql & args]
+                       (when (and (.contains ^String sql "artifact_bytes") (.contains ^String sql "freediving.extractions"))
+                         (swap! fetches update :extractions inc))
+                       (when (.contains ^String sql "FROM freediving.observations")
+                         (swap! fetches update :observations inc))
+                       (apply original c sql args))}
+      #(is (= expected (publication/diagnose-many reviewer targets))))
+    (is (= {:extractions 1 :observations 2} @fetches))
+    (publication/decide! reviewer (request t "snapshot-validation"))
+    (is (:eligible? (first (publication/diagnose-many reviewer [t]))))
+    (publication/activate-policy! fixture/admin "extraction-publication/unknown" "Current policy changed")
+    (is (false? (:eligible? (first (publication/diagnose-many reviewer [t])))))
+    (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+      (is (thrown-with-msg? Exception #"read-only snapshot"
+                            ((ns-resolve 'freediving.publication 'with-source-snapshot-cache) c (constantly :unsafe)))))))
+(deftest source-snapshot-cache-cannot-supply-artifacts-to-another-connection
+  (let [t (sample)
+        artifact (:artifact (observations/inspect fixture/app (:job-id t)))
+        revised (assoc-in artifact [:publication :reasons] [:synthetic-source-error])
+        bytes (.getBytes (pr-str revised) "UTF-8")]
+    (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+      (.setReadOnly c true)
+      (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+      (.setAutoCommit c false)
+      (publication/with-source-snapshot-cache
+        c (fn []
+            (is (:ready? ((ns-resolve 'freediving.publication 'diagnosis) c t)))
+            (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER immutable_extractions")
+            (with-open [admin (java.sql.DriverManager/getConnection fixture/admin)
+                        s (.prepareStatement admin "UPDATE freediving.extractions SET artifact_bytes=? WHERE job_id=?")]
+              (.setBytes s 1 bytes) (.setString s 2 (:job-id t)) (.executeUpdate s))
+            (is (false? (:ready? (publication/diagnose reviewer t))))
+            (is (:ready? ((ns-resolve 'freediving.publication 'diagnosis) c t))))))
+    (is (false? (:ready? (first (publication/diagnose-many reviewer [t])))))))
 (deftest explicit-validation-is-separate-from-identity-and-raw-flags
   (let [t (sample) original (observations/inspect fixture/app (:job-id t))]
     (is (:ready? (publication/diagnose reviewer t)))
