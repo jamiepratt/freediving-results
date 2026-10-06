@@ -1,0 +1,207 @@
+(ns freediving.private-sporting-proofs-test
+  (:require [clojure.string]
+            [clojure.data.json :as json]
+            [clojure.test :refer [deftest is use-fixtures run-tests]]
+            [freediving.observations :as observations]
+            [freediving.observations-test :as fixture]
+            [freediving.reviews :as reviews]
+            [freediving.revisions :as revisions]
+            [freediving.event-selections :as selections]
+            [freediving.publication :as publication]
+            [freediving.public-results :as public]
+            [freediving.publication-test :as publication-fixture]))
+
+(def proof-url (clojure.string/replace fixture/app "user=observations_app" "user=proof_source"))
+(def relationship-url (clojure.string/replace fixture/app "user=observations_app" "user=proof_relationships"))
+(def source-tables ["extractions" "observations" "extraction_reviews" "pdf_extraction_reviews" "review_proposals" "review_decisions" "publication_decisions" "publication_policy_events" "revision_proposals" "revision_decisions" "event_selections"])
+(defn role! [role tables]
+  (fixture/sql! fixture/admin (str "DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='" role "') THEN CREATE ROLE " role " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT; END IF; END $$"))
+  (fixture/sql! fixture/admin (str "ALTER ROLE " role " SET default_transaction_read_only=on"))
+  (fixture/sql! fixture/admin (str "GRANT USAGE ON SCHEMA freediving TO " role))
+  (fixture/sql! fixture/admin (str "GRANT SELECT ON " (clojure.string/join "," (map #(str "freediving." %) tables)) " TO " role)))
+
+(defn with-database [f]
+  (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
+  (observations/migrate! fixture/admin "observations_app")
+  (reviews/migrate! fixture/admin "observations_app" "reviews_owner")
+  (publication/migrate! fixture/admin "reviews_owner")
+  (revisions/migrate! fixture/admin "observations_app" "reviews_owner")
+  (public/migrate! fixture/admin "reviews_owner" "reviews_public")
+  (selections/migrate! fixture/admin "reviews_owner")
+  (role! "proof_source" source-tables)
+  (role! "proof_relationships" ["extractions" "observations" "canonical_attempt_evidence" "canonical_attempt_events" "canonical_attempt_state"])
+  (f))
+(use-fixtures :each with-database)
+(defn read-proof [config]
+  ((requiring-resolve 'freediving.private-sporting-proofs/read-proofs) config))
+(defn sample []
+  (let [t (publication-fixture/sample)
+        stored (observations/inspect fixture/app (:job-id t))
+        artifact (:artifact stored)
+        reference (assoc (revisions/reference fixture/app t) :parser-version (:parser-version artifact))]
+    {:config {:jdbc_url proof-url :database "observations_test" :mode "source"
+              :rows [{:reference reference :coordinates {:page 1 :line 1}}]}
+     :target t :artifact artifact :stored stored}))
+
+(deftest exact-unimported-row-is-an-observable-gap-not-zero-attempts
+  (let [sha (apply str (repeat 64 "a"))
+        reference {:job-id sha :ordinal 0 :candidate-id sha :source-sha256 sha
+                   :artifact-sha256 sha :parser-version "synthetic/1"}
+        result (read-proof {:jdbc_url proof-url :database "observations_test" :mode "source"
+                            :rows [{:reference reference :coordinates {:table 0 :row 0}}]})]
+    (is (= "private-sporting-proofs/v1" (:schema result)))
+    (is (= reference (get-in result [:rows 0 :reference])))
+    (is (= "not-imported" (get-in result [:rows 0 :diagnostics :mapping :state])))
+    (is (empty? (get-in result [:rows 0 :upstream])))))
+
+(deftest imported-exact-row-exposes-current-publication-and-rejects-other-scope
+  (let [{:keys [config target]} (sample)
+        initial (read-proof config)]
+    (is (= "mapped" (get-in initial [:rows 0 :diagnostics :mapping :state])))
+    (is (empty? (get-in initial [:rows 0 :upstream])))
+    (publication/decide! publication-fixture/reviewer (publication-fixture/request target "validation"))
+    (let [validated (read-proof config)]
+      (is (= "approved" (get-in validated [:rows 0 :upstream :publication :value])))
+      (is (= #{:result-id :observation-id :ordinal :source-sha256 :artifact-sha256}
+             (set (keys (get-in validated [:rows 0 :public_reference])))))
+      (is (nil? (get-in validated [:rows 0 :upstream :same-attempt])))
+      (is (nil? (get-in validated [:rows 0 :upstream :source-conflict])))
+      (is (not= (:binding_sha256 initial) (:binding_sha256 validated)))
+      (doseq [[path value] [[[:reference :parser-version] "different/1"]
+                            [[:reference :source-sha256] (apply str (repeat 64 "a"))]
+                            [[:coordinates :line] 2]]]
+        (let [wrong (read-proof (assoc-in config (into [:rows 0] path) value))]
+          (is (= "scope-mismatch" (get-in wrong [:rows 0 :diagnostics :mapping :state])))
+          (is (empty? (get-in wrong [:rows 0 :upstream]))))))))
+
+(defn accept-pdf [{:keys [target artifact config]}]
+  (let [ref (merge (get-in config [:rows 0 :reference])
+                   {:source-kind :pdf :schema-version (:schema-version artifact)
+                    :acquisition-id (get-in artifact [:acquisitions 0 :acquisition-id])
+                    :observation-id (str "local-observation:" (:job-id target) ":0") :page 1 :line 1})
+        request (merge target {:id "accept" :base-revision 0 :evidence ref
+                               :owner-receipt-sha256 (apply str (repeat 64 "b"))
+                               :owner-response {:task-id "test-task" :user-message-id "test-message"
+                                                :response-annotation-index 1 :selected-text "Accept extraction 0-1"}
+                               :actor "PRIVATE-OWNER" :reason "PRIVATE-REASON"})]
+    (reviews/accept-pdf-extraction! publication-fixture/reviewer request)
+    ref))
+
+(deftest exact-extraction-receipts-currentness-and-history-stay-separate
+  (let [{:keys [config target] :as sample} (sample)
+        ref (accept-pdf sample)
+        accepted (read-proof config)]
+    (is (= "verified" (get-in accepted [:rows 0 :upstream :review :value])))
+    (is (= "accepted" (get-in accepted [:rows 0 :diagnostics :review :state])))
+    (is (nil? (get-in accepted [:rows 0 :upstream :publication])))
+    (reviews/revoke-pdf-extraction! publication-fixture/reviewer
+                                    (merge target {:id "revoke" :base-revision 1 :event-id "accept"
+                                                   :evidence ref :actor "owner" :reason "Changed extraction"}))
+    (let [revoked (read-proof config)]
+      (is (= "revoked" (get-in revoked [:rows 0 :diagnostics :review :state])))
+      (is (nil? (get-in revoked [:rows 0 :upstream :review])))
+      (is (= 2 (count (get-in revoked [:rows 0 :diagnostics :review :history_sha256]))))
+      (is (not= (:binding_sha256 accepted) (:binding_sha256 revoked))))))
+
+(deftest active-policy-review-revision-and-revocation-withdraw-public-proof
+  (let [{:keys [config target]} (sample)
+        validate (publication-fixture/request target "v")]
+    (publication/decide! publication-fixture/reviewer validate)
+    (let [before (read-proof config)]
+      (publication/decide! publication-fixture/reviewer (assoc validate :id "r" :action :revoke :base-revision 1 :attestations {}))
+      (let [after (read-proof config)]
+        (is (nil? (get-in after [:rows 0 :upstream :publication])))
+        (is (nil? (get-in after [:rows 0 :public_reference])))
+        (is (not= (:binding_sha256 before) (:binding_sha256 after)))))
+    (publication/decide! publication-fixture/reviewer (assoc validate :id "v2" :base-revision 2))
+    (publication/activate-policy! fixture/admin "extraction-publication/99" "Synthetic policy change")
+    (let [changed (read-proof config)]
+      (is (nil? (get-in changed [:rows 0 :upstream :publication])))
+      (is (some #{:policy-inactive} (get-in changed [:rows 0 :diagnostics :publication :reasons]))))))
+
+(deftest source-and-relationship-capabilities-are-independent-and-never-leak-private-data
+  (let [{:keys [config]} (sample)
+        url (clojure.string/replace fixture/app "user=observations_app" "user=proof_extra")]
+    (fixture/sql! fixture/admin "CREATE ROLE proof_extra LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT")
+    (fixture/sql! fixture/admin "ALTER ROLE proof_extra SET default_transaction_read_only=on")
+    (fixture/sql! fixture/admin "GRANT USAGE ON SCHEMA freediving TO proof_extra")
+    (fixture/sql! fixture/admin "GRANT SELECT ON freediving.extractions,freediving.observations,freediving.extraction_reviews,freediving.pdf_extraction_reviews,freediving.review_proposals,freediving.review_decisions,freediving.publication_decisions,freediving.publication_policy_events,freediving.revision_proposals,freediving.revision_decisions,freediving.event_selections TO proof_extra")
+    (let [result (read-proof (assoc config :jdbc_url url))]
+      (is (= "mapped" (get-in result [:rows 0 :diagnostics :mapping :state])))
+      (is (not-any? #(clojure.string/includes? (pr-str result) %) ["PRIVATE-OWNER" "PRIVATE-REASON" ":artifact_bytes" ":payload_edn" ":body_edn" "Éxample"]))
+      (is (= (:binding_sha256 result) (:binding_sha256 (read-proof (assoc config :jdbc_url url :rows []))))))
+    (is (thrown? Exception (read-proof (assoc config :jdbc_url url :mode "relationships"))))
+    (is (thrown? Exception (read-proof (assoc config :jdbc_url (System/getenv "FREEDIVING_TEST_PUBLIC_URL")))))
+    (is (thrown? Exception (fixture/sql! url "INSERT INTO freediving.pdf_extraction_reviews(id,job_id,ordinal,revision,action,body_edn) VALUES('forged','missing',0,1,'accept','{}')")))))
+
+(deftest authority-mutation-between-owned-reads-denies-old-context
+  (let [{:keys [config target]} (sample)
+        original publication/diagnose-many
+        entered (promise) continue (promise)]
+    (with-redefs [publication/diagnose-many (fn [url targets]
+                                              (deliver entered true)
+                                              @continue
+                                              (original url targets))]
+      (let [reading (future (try (read-proof config) (catch Exception e (.getMessage e))))]
+        @entered
+        (publication/decide! publication-fixture/reviewer (publication-fixture/request target "concurrent"))
+        (deliver continue true)
+        (is (= "Canonical sporting authority changed during read" @reading))))))
+
+(deftest capability-widening-after-startup-is-observable-denial
+  (let [{:keys [config]} (sample)]
+    (is (= "mapped" (get-in (read-proof config) [:rows 0 :diagnostics :mapping :state])))
+    (fixture/sql! fixture/admin "GRANT SELECT ON freediving.canonical_attempt_events TO proof_source")
+    (is (thrown-with-msg? Exception #"capability" (read-proof config)))
+    (fixture/sql! fixture/admin "REVOKE SELECT ON freediving.canonical_attempt_events FROM proof_source")
+    (fixture/sql! fixture/admin "GRANT UPDATE(body_edn) ON freediving.pdf_extraction_reviews TO proof_source")
+    (is (thrown-with-msg? Exception #"capability" (read-proof config)))
+    (fixture/sql! fixture/admin "REVOKE UPDATE(body_edn) ON freediving.pdf_extraction_reviews FROM proof_source")
+    (fixture/sql! fixture/admin "GRANT CREATE ON SCHEMA freediving TO proof_source")
+    (is (thrown-with-msg? Exception #"capability" (read-proof config)))
+    (fixture/sql! fixture/admin "REVOKE CREATE ON SCHEMA freediving FROM proof_source")))
+
+(deftest tampered-extraction-acquisition-cannot-authenticate-current-review
+  (let [{:keys [config] :as sample} (sample)]
+    (accept-pdf sample)
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.pdf_extraction_reviews DISABLE TRIGGER immutable_pdf_extraction_reviews")
+    (fixture/sql! fixture/admin "UPDATE freediving.pdf_extraction_reviews SET body_edn=replace(body_edn,':source-kind :pdf',':source-kind :html')")
+    (is (empty? (get-in (read-proof config) [:rows 0 :upstream])))))
+
+(deftest html-review-is-only-the-current-explicit-source-visual-validation
+  (let [target (publication-fixture/html-sample)
+        stored (observations/inspect fixture/app (:job-id target))
+        reference (assoc (revisions/reference fixture/app target) :parser-version (get-in stored [:artifact :parser-version]))
+        config {:jdbc_url proof-url :database "observations_test" :mode "source"
+                :rows [{:reference reference :coordinates {:table 1 :row 2}}]}]
+    (publication/activate-policy! fixture/admin publication/html-policy "Explicit synthetic HTML policy")
+    (is (nil? (get-in (read-proof config) [:rows 0 :upstream :review])))
+    (let [request (publication-fixture/html-request target "html-current")]
+      (is (thrown? Exception (publication/decide! publication-fixture/reviewer
+                                                  (assoc-in request [:attestations :source-visual-accuracy] false))))
+      (publication/decide! publication-fixture/reviewer request)
+      (let [current (read-proof config)]
+        (is (= "verified" (get-in current [:rows 0 :upstream :review :value])))
+        (is (= "verified-by-current-html-source-validation" (get-in current [:rows 0 :diagnostics :review :state]))))
+      (publication/decide! publication-fixture/reviewer (assoc request :id "html-revoked" :base-revision 1 :action :revoke :attestations {}))
+      (is (nil? (get-in (read-proof config) [:rows 0 :upstream :review]))))))
+
+(defn connector-fixture!
+  "Only isolated disposable PostgreSQL. Emit exact real APIs/readers for HTTP tests."
+  [path]
+  (with-database
+    (fn []
+      (let [{:keys [config target] :as sample} (sample)]
+        (accept-pdf sample)
+        (publication/decide! publication-fixture/reviewer (publication-fixture/request target "connector-validation"))
+        (public/refresh! publication-fixture/reviewer)
+        (spit path (json/write-str {:source_config config
+                                    :relationship_config (assoc config :jdbc_url relationship-url :mode "relationships")
+                                    :rows (:rows config) :source_result (read-proof config)
+                                    :relationship_result (read-proof (assoc config :jdbc_url relationship-url :mode "relationships"))}))))))
+
+(defn -main [& [command path]]
+  (if (= command "fixture-output") (connector-fixture! path)
+      (let [r (run-tests 'freediving.private-sporting-proofs-test)]
+        (shutdown-agents)
+        (when (pos? (+ (:fail r) (:error r))) (System/exit 1)))))
