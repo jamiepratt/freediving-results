@@ -14,8 +14,42 @@
             [freediving.public-sporting :as sporting]
             [freediving.deployment :as deployment]
             [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.data.json :as json]
+            [freediving.sporting-authority :as authority]
             [clojure.string :as str])
   (:import [java.sql DriverManager]))
+(def ^:dynamic *private-authority* nil)
+(defn private-command! [command]
+  (let [{:keys [writer reader]} *private-authority*]
+    (.write writer (str (authority/canonical-json command) "\n"))
+    (.flush writer)
+    (let [reply (json/read-str (.readLine reader) :key-fn keyword :bigdec true)]
+      (when (or (:error reply) (not= 200 (:status reply))) (throw (ex-info "Synthetic private fixture rejected command" reply))) reply)))
+(defn with-private-authority! [f]
+  (let [root (or (System/getenv "FREEDIVING_PRIVATE_TEST_ROOT") (System/getProperty "user.dir"))
+        process (.start (ProcessBuilder. ^java.util.List ["python3" (str root "/tests/sporting_authority_fixture.py")]))
+        reader (io/reader (.getInputStream process)) writer (io/writer (.getOutputStream process))
+        cfg (if-let [line (.readLine reader)]
+              (json/read-str line :key-fn keyword)
+              (throw (ex-info "Synthetic owner fixture failed to start; inspect fixture separately" {})))
+        hook (Thread. #(.destroy process))]
+    (.addShutdownHook (Runtime/getRuntime) hook)
+    (try
+      (binding [*private-authority* {:process process :reader reader :writer writer :config cfg}]
+        (with-redefs [authority/config (constantly cfg)] (f)))
+      (finally
+        (.removeShutdownHook (Runtime/getRuntime) hook)
+        (try
+          (.write writer "{\"op\":\"stop\"}\n") (.flush writer) (.readLine reader)
+          (catch Exception _ nil))
+        (when-not (.waitFor process 3 java.util.concurrent.TimeUnit/SECONDS) (.destroy process))
+        (.waitFor process)
+        (.close reader) (.close writer)))))
+(defn publish-authorized! [payload]
+  (private-command! {:op "stage" :publication payload})
+  (private-command! {:op "approve"})
+  (sporting/deliver-current! fixture/admin))
 (defn setup! []
   (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")
   (observations/migrate! fixture/admin "observations_app")
@@ -25,7 +59,7 @@
   (revisions/migrate! fixture/admin "observations_app" "reviews_owner")
   (selections/migrate! fixture/admin "reviews_owner")
   (sporting/migrate! fixture/admin "reviews_public"))
-(use-fixtures :each (fn [f] (setup!) (f)))
+(use-fixtures :each (fn [f] (setup!) (with-private-authority! f)))
 (deftest published-source-records-do-not-create-sporting-authority
   (sample/validate! (sample/sample) "synthetic-public")
   (public/refresh! sample/reviewer)
@@ -114,7 +148,7 @@
          payload {:schema "public-sporting/v1" :rows rows :cutoff "2026-06-12T00:00:00Z"
                   :cohort {:binding ref :value (vec (sort (map :result-id rows)))
                            :citation {:url "https://example.org/results.pdf" :page 1}}}
-         event (sporting/publish-derived! fixture/admin payload)]
+         event (publish-authorized! payload)]
      {:cohort-id cohort-id :event event :payload payload :targets targets :input-roots @input-roots})))
 
 (deftest cited-current-cmas-and-aida-cohort-ranks-through-restricted-http
@@ -144,7 +178,7 @@
       (fn [url]
         (let [row (first (get-in (http/request url "/api/comparison") [:body :rows]))
               old-detail (:detail-api-url row) old-peer (get-in row [:ranks 2 :api-url])]
-          (sporting/publish-derived! fixture/admin payload)
+          (publish-authorized! payload)
           (is (= 404 (:status (http/request url old-detail))))
           (is (= 404 (:status (http/request url old-peer))))
           (let [new (first (get-in (http/request url "/api/comparison") [:body :rows]))]
@@ -163,10 +197,10 @@
 
 (deftest the-first-public-cohort-requires-eligible-peers-from-both-federations
   (let [{:keys [payload]} (synthetic-cohort!)]
-    (sporting/publish-derived! fixture/admin
-                               (update payload :rows #(mapv (fn [row]
-                                                              (if (= "AIDA" (get-in row [:source :federation]))
-                                                                (assoc-in row [:facts :finality :value] :unknown) row)) %)))
+    (publish-authorized!
+     (update payload :rows #(mapv (fn [row]
+                                    (if (= "AIDA" (get-in row [:source :federation]))
+                                      (assoc-in row [:facts :finality :value] :unknown) row)) %)))
     (http/with-server
       (fn [url]
         (let [r (:body (http/request url "/api/comparison"))]
@@ -217,7 +251,7 @@
           (is (= 404 (:status (http/request url (:detail-api-url row)))))
           (is (= 404 (:status (http/request url (get-in row [:ranks 2 :api-url])))))
           (is (= 4 (get-in (http/request url "/api/results") [:body :total]))))
-        (sporting/publish-derived! fixture/admin payload)
+        (publish-authorized! payload)
         (let [row (first (get-in (http/request url "/api/comparison") [:body :rows]))]
           (sample/validate! (first targets) "changed-source-validation")
           (public/refresh! sample/reviewer)
@@ -253,7 +287,7 @@
                                                (if (= (:result-id row) (:result-id r))
                                                  (-> r (assoc-in [:facts :source-conflict :value] :selected-provisional)
                                                      (assoc-in [:facts :source-selection] (assoc (get-in row [:facts :source-conflict]) :value selection))) r)) %))]
-    (sporting/publish-derived! fixture/admin changed)
+    (publish-authorized! changed)
     (http/with-server
       (fn [url]
         (let [rows (get-in (http/request url "/api/comparison") [:body :rows])
@@ -278,7 +312,7 @@
           (is (= 404 (:status (http/request url (:detail-api-url row)))))
           (sample/validate! target "revalidate-after-approval")
           (public/refresh! sample/reviewer)
-          (sporting/publish-derived! fixture/admin payload)
+          (publish-authorized! payload)
           (let [approved-row (first (get-in (http/request url "/api/comparison") [:body :rows]))]
             (is (= 3 (get-in (http/request url "/api/comparison") [:body :coverage :eligible-comparison-peers])))
             (sample/decide! "synthetic-identity-reversal" :reverse "synthetic-identity-approval" 1)
@@ -288,14 +322,15 @@
 
 (defn -main [& _]
   (if (= "1" (System/getenv "FREEDIVING_TEST_SERVE"))
-    (do
-      (setup!)
-      (synthetic-cohort!)
-      (let [app ((requiring-resolve 'freediving.public-server/start!) {:database-url sample/reader-url :port 0 :demo? true})]
-        (.addShutdownHook (Runtime/getRuntime) (Thread. #((requiring-resolve 'freediving.public-server/stop!) app)))
-        (println (str "Synthetic sporting comparison: " (:url app) "/comparison"))
-        (flush)
-        @(promise)))
+    (with-private-authority!
+      (fn []
+        (setup!)
+        (synthetic-cohort!)
+        (let [app ((requiring-resolve 'freediving.public-server/start!) {:database-url sample/reader-url :port 0 :demo? true})]
+          (.addShutdownHook (Runtime/getRuntime) (Thread. #((requiring-resolve 'freediving.public-server/stop!) app)))
+          (println (str "Synthetic sporting comparison: " (:url app) "/comparison"))
+          (flush)
+          @(promise))))
     (let [r (run-tests 'freediving.public-sporting-test)]
       (shutdown-agents)
       (when (pos? (+ (:fail r) (:error r))) (System/exit 1)))))
@@ -335,7 +370,7 @@
           updated (update payload :rows conj cloned)
           updated (-> updated (assoc-in [:cohort :value] (vec (sort (map :result-id (:rows updated)))))
                       (assoc-in [:cohort :binding :source-versions] (vec (sort (set (map #(get-in % [:reference :artifact-sha256]) (:rows updated)))))))]
-      (sporting/publish-derived! fixture/admin updated)
+      (is (thrown? clojure.lang.ExceptionInfo (publish-authorized! updated)))
       (http/with-server
         (fn [url]
           (let [body (:body (http/request url "/api/comparison"))]
@@ -355,22 +390,22 @@
 
 (deftest an-aida-total-view-is-not-invented-into-a-sporting-attempt
   (let [{:keys [payload]} (synthetic-cohort!)]
-    (sporting/publish-derived! fixture/admin
-                               (update payload :rows #(mapv (fn [row]
-                                                              (if (= "AIDA" (get-in row [:source :federation]))
-                                                                (assoc-in row [:facts :source-view :value :kind] :totals) row)) %)))
+    (publish-authorized!
+     (update payload :rows #(mapv (fn [row]
+                                    (if (= "AIDA" (get-in row [:source :federation]))
+                                      (assoc-in row [:facts :source-view :value :kind] :totals) row)) %)))
     (http/with-server
       (fn [url]
         (is (= "withheld" (get-in (http/request url "/api/comparison") [:body :status])))
         (is (= 0 (get-in (http/request url "/api/comparison") [:body :coverage :eligible-comparison-peers])))))))
 
-(deftest normal-deployment-installs-all-twenty-two-migrations-and-preserves-source-and-sporting-data
+(deftest normal-deployment-installs-all-twenty-three-migrations-and-preserves-source-and-sporting-data
   (synthetic-cohort!)
   (let [counts #(query! "SELECT (SELECT count(*) FROM freediving.observations) AS observations,(SELECT count(*) FROM freediving.publication_decisions) AS publications,(SELECT count(*) FROM freediving.public_results) AS public,(SELECT count(*) FROM freediving.public_sporting_authority_events) AS authority,(SELECT count(*) FROM freediving.public_sporting_members) AS members")
         before (counts)]
-    (dotimes [_ 2] (is (= {:schema-version 22} (deployment/migrate! fixture/admin))))
+    (dotimes [_ 2] (is (= {:schema-version 23} (deployment/migrate! fixture/admin))))
     (is (= before (counts)))
-    (is (= (vec (range 1 23)) (mapv :version (query! "SELECT version FROM freediving.schema_migrations ORDER BY version"))))
+    (is (= (vec (range 1 24)) (mapv :version (query! "SELECT version FROM freediving.schema_migrations ORDER BY version"))))
     (http/with-server
       (fn [url]
         (is (= 3 (get-in (http/request url "/api/comparison") [:body :coverage :eligible-comparison-peers])))

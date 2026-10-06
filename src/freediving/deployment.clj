@@ -23,7 +23,7 @@
   (selections/migrate! url "reviews_owner")
   (batch-evidence/migrate! url "observations_app")
   (sporting/migrate! url "reviews_public")
-  {:schema-version 22})
+  {:schema-version 23})
 (defn -main [& _]
   (migrate! (System/getenv "FREEDIVING_MIGRATION_URL"))
-  (println "Applied migrations 1-22; no records published."))
+  (println "Applied migrations 1-23; no records published."))

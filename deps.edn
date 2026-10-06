@@ -27,6 +27,9 @@
            :test-correction-http {:extra-paths ["test"] :main-opts ["-m" "freediving.correction-http-test"]}
            :public {:main-opts ["-m" "freediving.public-server"]}
            :public-demo {:main-opts ["-m" "freediving.public-demo"]}
+           :sporting-delivery {:main-opts ["-m" "freediving.public-sporting"]}
+           :test-sporting-authority-client {:extra-paths ["test"] :main-opts ["-m" "freediving.sporting-authority-client-test"]}
+           :test-sporting-authority {:extra-paths ["test"] :main-opts ["-m" "freediving.sporting-authority-test"]}
            :test-public-sporting {:extra-paths ["test"] :main-opts ["-m" "freediving.public-sporting-test"]}
            :test-public-server {:extra-paths ["test"] :main-opts ["-m" "freediving.public-server-test"]}
            :test-public-ui {:extra-paths ["test"] :main-opts ["-m" "freediving.public-ui-test"]}

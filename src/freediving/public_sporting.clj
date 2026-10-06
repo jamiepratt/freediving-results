@@ -6,7 +6,8 @@
             [clojure.string :as str]
             [freediving.attempt-comparison :as attempts]
             [freediving.comparison-score :as scores]
-            [freediving.peer-scope :as peers])
+            [freediving.peer-scope :as peers]
+            [freediving.sporting-authority :as authority])
   (:import [java.sql DriverManager Connection]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -33,16 +34,17 @@
     (.setAutoCommit c false)
     (try
       (query c "SELECT pg_advisory_xact_lock(781246914)")
-      (let [sql (slurp (io/resource "migrations/022-public-sporting-comparison.sql"))
-            digest (sha sql)
-            prior (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=22"))]
-        (if prior
-          (when-not (= digest (:sha256 prior)) (fail! 503))
-          (do (with-open [s (.createStatement c)] (.execute s sql))
-              (with-open [s (.prepareStatement c "INSERT INTO freediving.schema_migrations VALUES(22,?)")]
-                (.setString s 1 digest) (.executeUpdate s))))
-        (with-open [s (.createStatement c)]
-          (.execute s (str "GRANT SELECT ON freediving.public_sporting_comparison TO " public-role))))
+      (doseq [[version resource] [[22 "migrations/022-public-sporting-comparison.sql"]
+                                  [23 "migrations/023-sporting-authority-bridge.sql"]]]
+        (let [sql (slurp (io/resource resource)) digest (sha sql)
+              prior (first (query c "SELECT sha256 FROM freediving.schema_migrations WHERE version=?" version))]
+          (if prior
+            (when-not (= digest (:sha256 prior)) (fail! 503))
+            (do (with-open [s (.createStatement c)] (.execute s sql))
+                (with-open [s (.prepareStatement c "INSERT INTO freediving.schema_migrations VALUES(?,?)")]
+                  (.setInt s 1 version) (.setString s 2 digest) (.executeUpdate s))))))
+      (with-open [s (.createStatement c)]
+        (.execute s (str "GRANT SELECT ON freediving.public_sporting_comparison TO " public-role)))
       (.commit c)
       (catch Exception e (.rollback c) (throw e)))))
 (defn- filters! [params]
@@ -157,44 +159,88 @@
 (defn- execute! [c sql & args]
   (with-open [s (.prepareStatement c sql)]
     (doseq [[i value] (map-indexed vector args)] (.setObject s (inc i) value)) (.executeUpdate s)))
+(defn- local-state [c payload]
+  {:policy (first (query c "SELECT freediving.public_sporting_local_snapshot() AS snapshot,(SELECT max(revision) FROM freediving.publication_policy_events) AS publication_policy,(SELECT max(revision) FROM freediving.public_sporting_policy_events) AS sporting_policy"))
+   :sources (mapv (fn [row] (first (query c "SELECT p.body_edn,d.source_sha256,d.artifact_sha256,d.ordinal,encode(sha256(convert_to(row(d.job_id,d.ordinal,d.candidate_id,d.artifact_sha256)::text,'UTF8')),'hex') AS observation_id FROM freediving.public_results p JOIN freediving.public_projection_cache c USING(result_id) JOIN freediving.publication_decisions d ON d.id=c.validation_id WHERE p.result_id=?" (:result-id row)))) (:rows payload))})
 (defn publish-derived!
   "Trusted database-owner preparation boundary for safe cited facts. No CLI or HTTP writer.
    This checks exact local public/source bindings, not the truth of owner sporting decisions.
-   Production use still requires genuine current source/owner authority and its withdrawal bridge."
-  [url payload]
-  (payload! payload)
-  (with-open [c (DriverManager/getConnection url)]
-    (.setAutoCommit c false)
-    (.setTransactionIsolation c Connection/TRANSACTION_SERIALIZABLE)
-    (try
-      (when-not (:allowed (first (query c "SELECT pg_has_role(current_user,relowner,'MEMBER') AS allowed FROM pg_class WHERE oid='freediving.public_sporting_authority_events'::regclass"))) (fail! 403))
-      (query c "SELECT pg_advisory_xact_lock(781246916)")
-      (let [cohort-urls (atom #{})]
-        (doseq [row (:rows payload)]
-          (let [source (first (query c "SELECT p.body_edn,d.source_sha256,d.artifact_sha256,d.ordinal,encode(sha256(convert_to(row(d.job_id,d.ordinal,d.candidate_id,d.artifact_sha256)::text,'UTF8')),'hex') AS observation_id FROM freediving.public_results p JOIN freediving.public_projection_cache c USING(result_id) JOIN freediving.publication_decisions d ON d.id=c.validation_id WHERE p.result_id=?" (:result-id row)))
-                reference {:result-id (:result-id row) :source-sha256 (:source_sha256 source) :artifact-sha256 (:artifact_sha256 source)
-                           :ordinal (:ordinal source) :observation-id (:observation_id source)}
-                public (some-> (:body_edn source) edn/read-string)
-                urls (set (mapcat (juxt :final-url :discovery-url :mirror-of) (:citations public)))]
-            (let [position (select-keys (:source-position public) [:page :line :table :row])]
-              (when-not (seq position) (fail! 400))
-              (doseq [k [:review :final :official-event-placing :source-gender :represented-country :outcome]]
-                (when-not (= position (select-keys (get-in row [:facts k :citation]) [:page :line :table :row])) (fail! 400))))
-            (swap! cohort-urls into urls)
-            (when-not (= reference (:reference row)) (fail! 409))
-            (doseq [fact (cond-> (vec (vals (:facts row))) (:hypothetical row) (conj (:hypothetical row)))]
-              (when-not (contains? urls (get-in fact [:citation :url])) (fail! 400)))))
-        (when-not (contains? @cohort-urls (get-in payload [:cohort :citation :url])) (fail! 400))
-        (doseq [row (:rows payload) k [:authority-citation :selection-citation]
-                :let [citation (get-in row [:facts :source-selection :value k])] :when citation]
-          (when-not (contains? @cohort-urls (:url citation)) (fail! 400))))
-      (let [event (first (query c "INSERT INTO freediving.public_sporting_authority_events(cohort_id,action,policy_version,expected_members,body_edn) VALUES(?,'publish',?,?,?) RETURNING revision"
-                                (get-in payload [:cohort :binding :cohort-id]) (name scores/policy)
-                                (count (:rows payload)) (pr-str payload)))]
-        (doseq [row (:rows payload)]
-          (execute! c "INSERT INTO freediving.public_sporting_members(event_revision,result_id) VALUES(?,?)" (:revision event) (:result-id row)))
-        (.commit c) event)
-      (catch Exception e (.rollback c) (throw e)))))
+   Unbridged preparation is withheld. Live signed owner receipts and fresh per-read authority are required."
+  ([url payload] (publish-derived! url payload nil))
+  ([url payload receipt]
+   (payload! payload)
+   (with-open [c (DriverManager/getConnection url)]
+     (.setAutoCommit c false)
+     (.setTransactionIsolation c Connection/TRANSACTION_READ_COMMITTED)
+     (try
+       (when-not (:allowed (first (query c "SELECT pg_has_role(current_user,relowner,'MEMBER') AS allowed FROM pg_class WHERE oid='freediving.public_sporting_authority_events'::regclass"))) (fail! 403))
+       (query c "SELECT pg_advisory_xact_lock(781246916)")
+       (let [state-before (local-state c payload)]
+         (when receipt
+           (let [latest (first (query c "SELECT * FROM freediving.public_sporting_bridge_receipts ORDER BY revision DESC LIMIT 1"))]
+             (when-not (and (= (:revision receipt) (:revision latest)) (= (:head_sha256 receipt) (:head_sha256 latest))
+                            (= "approve" (:action latest))
+                            (= (:publication_sha256 latest) (authority/sha (authority/canonical-json payload)))) (fail! 409))))
+         (let [cohort-urls (atom #{})]
+           (doseq [row (:rows payload)]
+             (let [source (first (query c "SELECT p.body_edn,d.source_sha256,d.artifact_sha256,d.ordinal,encode(sha256(convert_to(row(d.job_id,d.ordinal,d.candidate_id,d.artifact_sha256)::text,'UTF8')),'hex') AS observation_id FROM freediving.public_results p JOIN freediving.public_projection_cache c USING(result_id) JOIN freediving.publication_decisions d ON d.id=c.validation_id WHERE p.result_id=?" (:result-id row)))
+                   reference {:result-id (:result-id row) :source-sha256 (:source_sha256 source) :artifact-sha256 (:artifact_sha256 source)
+                              :ordinal (:ordinal source) :observation-id (:observation_id source)}
+                   public (some-> (:body_edn source) edn/read-string)
+                   urls (set (mapcat (juxt :final-url :discovery-url :mirror-of) (:citations public)))]
+               (let [position (select-keys (:source-position public) [:page :line :table :row])]
+                 (when-not (seq position) (fail! 400))
+                 (doseq [k [:review :final :official-event-placing :source-gender :represented-country :outcome]]
+                   (when-not (= position (select-keys (get-in row [:facts k :citation]) [:page :line :table :row])) (fail! 400))))
+               (swap! cohort-urls into urls)
+               (when-not (= reference (:reference row)) (fail! 409))
+               (doseq [fact (cond-> (vec (vals (:facts row))) (:hypothetical row) (conj (:hypothetical row)))]
+                 (when-not (contains? urls (get-in fact [:citation :url])) (fail! 400)))))
+           (when-not (contains? @cohort-urls (get-in payload [:cohort :citation :url])) (fail! 400))
+           (doseq [row (:rows payload) k [:authority-citation :selection-citation]
+                   :let [citation (get-in row [:facts :source-selection :value k])] :when citation]
+             (when-not (contains? @cohort-urls (:url citation)) (fail! 400))))
+         (let [prior (when receipt (first (query c "SELECT revision,cohort_id,body_edn FROM freediving.public_sporting_authority_events WHERE receipt_revision=?" (:revision receipt))))]
+           (when (and prior (not= [(get-in payload [:cohort :binding :cohort-id]) (authority/sha (authority/canonical-json payload))]
+                                  [(:cohort_id prior) (authority/sha (authority/canonical-json (edn/read-string (:body_edn prior))))])) (fail! 409))
+           (if prior
+             (do (when-not (= state-before (local-state c payload)) (fail! 409))
+                 (.commit c) (select-keys prior [:revision]))
+             (let [event (first (query c "INSERT INTO freediving.public_sporting_authority_events(cohort_id,action,policy_version,expected_members,body_edn,receipt_revision) VALUES(?,'publish',?,?,?,?) RETURNING revision"
+                                       (get-in payload [:cohort :binding :cohort-id]) (name scores/policy)
+                                       (count (:rows payload)) (pr-str payload) (:revision receipt)))]
+               (doseq [row (:rows payload)]
+                 (execute! c "INSERT INTO freediving.public_sporting_members(event_revision,result_id) VALUES(?,?)" (:revision event) (:result-id row)))
+               (when-not (= state-before (local-state c payload)) (fail! 409))
+               (.commit c) event))))
+       (catch Exception e (.rollback c) (throw e))))))
+(defn deliver-current!
+  "Database-owner delivery from the authenticated live private interface, never from an unverified payload.
+   Ordered receipts are committed before preparation; interruptions leave public reads withheld."
+  [url]
+  (let [current (authority/fetch-current!) events (:events current) key-id (:key_id current)]
+    (with-open [c (DriverManager/getConnection url)]
+      (.setAutoCommit c false)
+      (try
+        (when-not (:allowed (first (query c "SELECT pg_has_role(current_user,relowner,'MEMBER') AS allowed FROM pg_class WHERE oid='freediving.public_sporting_bridge_receipts'::regclass"))) (fail! 403))
+        (query c "SELECT pg_advisory_xact_lock(781246916)")
+        (let [existing (query c "SELECT revision,previous_sha256,head_sha256,action,publication_sha256,binding_sha256,decision_sha256,policy,key_id FROM freediving.public_sporting_bridge_receipts ORDER BY revision")]
+          (when (> (count existing) (count events)) (fail! 409))
+          (doseq [[old event] (map vector existing events)]
+            (when-not (= old (assoc event :key_id key-id)) (fail! 409)))
+          (doseq [event (drop (count existing) events)]
+            (execute! c "INSERT INTO freediving.public_sporting_bridge_receipts(revision,previous_sha256,head_sha256,action,publication_sha256,binding_sha256,decision_sha256,policy,key_id) VALUES(?,?,?,?,?,?,?,?,?)"
+                      (:revision event) (:previous_sha256 event) (:head_sha256 event) (:action event)
+                      (:publication_sha256 event) (:binding_sha256 event) (:decision_sha256 event) (:policy event) key-id)))
+        (.commit c)
+        (catch Exception e (.rollback c) (throw e))))
+    (if (and (= "current" (:status current)) (:publication current))
+      (let [payload (authority/decode-publication (:publication current))
+            already (with-open [c (DriverManager/getConnection url)]
+                      (first (query c "SELECT revision FROM freediving.public_sporting_comparison WHERE bridge_revision=?" (:revision current))))]
+        (or already (publish-derived! url payload (peek events))))
+      {:status :withheld :authority-revision (:revision current)})))
+
 (defn- internal-reference [reference]
   {:job-id (:observation-id reference) :candidate-id (:result-id reference) :ordinal (:ordinal reference)
    :artifact-sha256 (:artifact-sha256 reference) :source-sha256 (:source-sha256 reference)})
@@ -355,11 +401,12 @@
     (when (and (get params "authority") (not (str/starts-with? path "/api/comparison/attempts/"))) (fail! 400))
     (with-open [c (DriverManager/getConnection url)]
       (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ)
+      (.setReadOnly c true)
       (.setAutoCommit c false)
       (let [installed? (:installed (first (query c "SELECT to_regclass('freediving.public_sporting_comparison') IS NOT NULL AS installed")))
             events (when installed? (query c "SELECT * FROM freediving.public_sporting_comparison ORDER BY revision DESC LIMIT 2"))
             ;; Multiple independently selected cohorts need an explicit authority choice.
-            data (when (= 1 (count events))
+            data (when (and (= 1 (count events)) (authority/current-for? (first events)))
                    (try (projection (classify (first events)) filters) (catch Exception _ nil)))
             response (or (:response data) (empty-response filters))
             [_ kind id] (re-matches #"/api/comparison/(attempts|peers)/([0-9a-f]{64})" path)
@@ -370,3 +417,9 @@
                                  (assoc response :rows (mapv (:by-id data) (:ids link)) :descriptor (:descriptor link)) (fail! 404))
                        (if (= path "/api/comparison") response (fail! 404)))]
         (.commit c) response))))
+
+(defn -main [& _]
+  (let [url (System/getenv "FREEDIVING_SPORTING_DELIVERY_URL")]
+    (when-not url (throw (ex-info "Dedicated owner delivery URL required" {})))
+    (let [result (deliver-current! url)]
+      (println (if (:revision result) "Current signed sporting authority delivered." "Sporting authority withheld.")))))
