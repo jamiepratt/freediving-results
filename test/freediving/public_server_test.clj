@@ -147,3 +147,54 @@
                  (let [app ((requiring-resolve 'freediving.public-server/start!)
                             (merge {:database-url sample/reader-url :port 0} config))]
                    ((requiring-resolve 'freediving.public-server/stop!) app))))))
+
+(deftest comparison-gap-is-derived-only-from-current-public-projections
+  (let [target (sample/sample)]
+    (sample/validate! target "comparison-v1") (public/refresh! sample/reviewer)
+    (with-server
+      (fn [url]
+        (let [body (:body (request url "/api/results?comparison=2026-pool-dnf-women"))
+              gap (:comparison body)]
+          (is (not (contains? (:body (request url "/api/results")) :comparison)))
+          (is (= 1 (:published-source-records gap)))
+          (is (= "2026-pool-dnf-women" (:target gap)))
+          (is (= 0 (:target-source-records gap)))
+          (is (nil? (:distinct-sporting-attempts gap)))
+          (is (= ["national" "continental" "international"] (mapv :scope (:lists gap))))
+          (is (every? #(and (= "withheld" (:status %)) (nil? (:rank %))
+                            (nil? (:eligible-peer-denominator %))
+                            (= "/?comparison=2026-pool-dnf-women" (:source-records-url %))) (:lists gap)))
+          (is (= 0 (get-in (request url "/api/results?comparison=2026-pool-dnf-women") [:body :total])))
+          (is (= 400 (:status (request url "/api/results?comparison=other"))))
+          (is (= 404 (:status (request url "/owner-evidence/api/attempt-inspector"))))
+          (is (not (re-find #"PRIVATE|job-id|packet|receipt" (pr-str gap)))))
+        (sample/validate! target "comparison-revoke" :revoke)
+        (is (= 0 (get-in (request url "/api/results?comparison=2026-pool-dnf-women") [:body :comparison :published-source-records])))
+        (is (= 0 (get-in (request url "/api/results?comparison=2026-pool-dnf-women") [:body :total])))))))
+
+(deftest comparison-source-scope-does-not-invent-category-equivalence-or-ranks
+  (doseq [[i fields] (map-indexed vector
+                                  [{:federation "CMAS" :discipline "DNF" :event-date "2026-06-11" :category "SENIORS - WOMEN"}
+                                   {:federation "CMAS" :discipline "DNF" :event-date "2026-06-11" :category "JUNIORS - WOMEN"}
+                                   {:federation "AIDA" :discipline "DNF" :event-date "2026-06-03" :category nil :gender "Women"}
+                                   {:federation "CMAS" :discipline "DNF" :event-date "2026-99-99" :category "SENIORS - WOMEN"}])]
+    (let [{:keys [root artifact]} (fixture/synthetic 1 (str "public-comparison-synthetic/" i))
+          artifact (update artifact :candidates #(mapv (fn [row] (update row :parsed merge fields)) %))]
+      (fixture/publish! {:root root :artifact artifact})
+      (observations/import! fixture/app root (:job-id artifact))
+      (sample/validate! {:job-id (:job-id artifact) :ordinal 0} (str "scope-v" i))))
+  (public/refresh! sample/reviewer)
+  (with-server
+    (fn [url]
+      (let [body (:body (request url "/api/results?comparison=2026-pool-dnf-women"))]
+        (is (= 1 (:total body)))
+        (is (= "CMAS" (get-in body [:results 0 :effective :federation])))
+        (is (= "SENIORS - WOMEN" (get-in body [:results 0 :effective :category])))
+        (is (= 4 (get-in body [:comparison :published-source-records])))
+        (is (= 1 (get-in body [:comparison :target-source-records])))
+        (is (= 0 (get-in body [:comparison :eligible-comparison-peers])))
+        (is (every? #(and (nil? (:rank %)) (nil? (:eligible-peer-denominator %)))
+                    (get-in body [:comparison :lists])))
+        (is (nil? (get-in body [:results 0 :effective :gender])))
+        (is (= 0 (get-in (request url "/api/results?comparison=2026-pool-dnf-women&federation=AIDA") [:body :total])))
+        (is (= 400 (:status (request url "/api/results?comparison=2026-pool-dnf-women&comparison=2026-pool-dnf-women"))))))))

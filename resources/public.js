@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const keys = ['q', 'federation', 'discipline', 'category', 'date', 'page'];
+  const keys = ['q', 'federation', 'discipline', 'category', 'date', 'page', 'comparison'];
   function searchURL(values) {
     const p = new URLSearchParams();
     keys.forEach(k => { if (values[k]) p.set(k, values[k]); });
@@ -63,6 +63,7 @@
     const wrap = el('div', null, 'search-box'); const l = el('label', 'Source name'); l.htmlFor = 'q';
     const input = el('input'); input.id = 'q'; input.name = 'q'; input.type = 'search'; input.maxLength = 200; input.value = v.q || ''; input.placeholder = 'Search a name as printed in the source';
     wrap.append(l, input); form.append(wrap);
+    if (v.comparison) { const target = el('input'); target.type = 'hidden'; target.name = 'comparison'; target.value = v.comparison; form.append(target); }
     const grid = el('div', null, 'filters');
     ['federation', 'discipline', 'category', 'date'].forEach(k => {
       const w = el('div'); const lab = el('label', k === 'date' ? 'Event date' : label(k)); lab.htmlFor = k;
@@ -95,6 +96,31 @@
       entry.append(el('p', ['federation', 'date', 'venue', 'discipline', 'category', 'round', 'session'].map(k => label(k) + ': ' + display(event[k])).join(' · '), 'muted'));
       entry.append(eventContext({coverage})); panel.append(entry);
     });
+    return panel;
+  }
+  function comparisonGap(gap) {
+    const title = '2026 pool DNF women - comparison';
+    if (!gap || gap.target !== '2026-pool-dnf-women') {
+      const panel = section(title, 'Both-federation comparison is awaiting verified public scope and peer authority.');
+      panel.append(link('View comparison coverage and scoped published records', '/?comparison=2026-pool-dnf-women'));
+      return panel;
+    }
+    const panel = section(title, 'CMAS and AIDA source coverage is separate from sporting comparison eligibility.');
+    panel.append(el('p', display(gap['published-source-records']) + ' published source records across the pilot; ' + display(gap['target-source-records']) + ' target source records; ' + display(gap['eligible-comparison-peers']) + ' eligible comparison peers.'));
+    panel.append(el('p', 'Distinct sporting attempts: unknown. Unpublished or unverified records do not mean missing competitions or zero dives.', 'muted'));
+    const window = gap['year-window'] || {};
+    panel.append(el('p', 'Year window: ' + display(window.from) + ' to ' + display(window.through) + '. Public projection readback time: ' + display(gap['projection-read-at']) + '. Publisher evidence coverage cutoff: unknown.', 'muted'));
+    panel.append(el('p', 'Counts describe the fixed target across the current public projection. Search filters narrow displayed source records; they do not define a sporting peer denominator.', 'muted'));
+    const gaps = el('ul'); (gap['scope-gaps'] || []).forEach(reason => gaps.append(el('li', display(reason)))); panel.append(gaps);
+    const table = el('table'), head = el('thead'), header = el('tr');
+    ['Comparison list', 'Rank and denominator', 'Published target source records'].forEach(title => { const th = el('th', title); th.scope = 'col'; header.append(th); }); head.append(header); table.append(head);
+    const body = el('tbody');
+    (gap.lists || []).filter(list => ['national', 'continental', 'international'].includes(list.scope)).forEach(list => {
+      const row = el('tr'), title = el('th', label(list.scope)); title.scope = 'row'; row.append(title);
+      const withheld = el('td'); withheld.append(el('strong', 'Rank withheld'), el('p', 'Peer denominator: unknown.'), el('p', display(list.reason), 'muted')); row.append(withheld);
+      const peers = el('td'); peers.append(link('View published target source records', '/?comparison=2026-pool-dnf-women'), el('p', 'Source records are not a ranked peer list.', 'muted')); row.append(peers); body.append(row);
+    }); table.append(body);
+    const scroll = el('div', null, 'table-scroll'); scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', 'Comparison availability'); scroll.append(table); panel.append(scroll);
     return panel;
   }
   function resultCards(rows) {
@@ -142,7 +168,8 @@
   }
   function detail(r) {
     const f = r.effective || {}; main.append(link('← Search results', '/', 'back-link'), el('p', 'RESULT / SOURCE RECORD', 'eyebrow'), el('h1', display(f['source-name'])), el('p', 'Event: ' + display(f['event-name']) + ' · Date: ' + display(f['event-date']), 'lead'));
-    const summary = el('div', null, 'summary'); [['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
+    const summary = el('div', null, 'summary'); [['Publisher placing (source)', (r.original || {}).rank], ['Federation', f.federation], ['Discipline', f.discipline], [performance(f).label, performance(f).value], ['Unit', f.unit], ['Category', f.category], ['Status', f.status], ['Event representation', f.representation]].forEach(([k, v]) => { const d = el('div'); d.append(el('span', k), el('strong', display(v))); summary.append(d); }); main.append(summary);
+    main.append(el('p', 'Publisher placing is the published source field. Sporting finality is not inferred.', 'muted'));
     main.append(eventContext(r));
     const identity = section('Athlete connection');
     if (r.identity && r.identity.status === 'approved' && internalLink('athletes', r.identity.id)) identity.append(el('p', 'This record has an active approved identity link.'), link('View approved athlete history →', internalLink('athletes', r.identity.id)));
@@ -169,6 +196,7 @@
       banner.hidden = !data.demo;
       if (search) {
         main.append(el('p', 'FREEDIVING / RESULTS ARCHIVE', 'eyebrow'), el('h1', 'Every result has a source.'), el('p', 'Explore validated source records. Follow the evidence, see approved corrections, and discover connected results.', 'lead'));
+        main.append(comparisonGap(data.comparison));
         main.append(searchForm(values(), data.filters || {})); if (data.coverage) main.append(el('p', 'Partial pilot coverage, with unpublished and unreviewed gaps · ' + display(data.coverage.results) + ' public records · ' + display(data.coverage.approved_identities) + (data.coverage.approved_identities === 1 ? ' approved athlete history' : ' approved athlete histories'), 'muted'));
         if (((data.coverage || {}).events || []).length) main.append(eventCoverage(data.coverage.events));
         const heading = el('div', null, 'results-heading'); heading.append(el('h2', 'Public results'), el('p', data.total + ' matching ' + (data.total === 1 ? 'record' : 'records'), 'muted')); main.append(heading);

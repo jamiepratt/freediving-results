@@ -50,7 +50,7 @@
             (let [[k v] (str/split part #"=" 2)
                   decode #(try (URLDecoder/decode (or % "") "UTF-8") (catch Exception _ (fail! 400)))
                   k (decode k) v (decode v)]
-              (when (or (contains? m k) (not (contains? #{"q" "federation" "discipline" "category" "date" "page" "limit"} k))
+              (when (or (contains? m k) (not (contains? #{"q" "federation" "discipline" "category" "date" "page" "limit" "comparison"} k))
                         (> (count v) 200) (re-find #"[\p{Cc}\p{Cs}\uFFFD]" v)) (fail! 400))
               (assoc m k v))) {} (if (seq raw) (str/split raw #"&" -1) [])))
 (defn- positive [value default maximum]
@@ -59,20 +59,48 @@
         (let [n (Long/parseLong value)] (if (<= n maximum) n (fail! 400)))
         (fail! 400))))
 (def filter-fields {"federation" :federation "discipline" :discipline "category" :category "date" :event-date})
+(def comparison-target "2026-pool-dnf-women")
+(defn- target-source-record? [row]
+  (let [f (:effective row)]
+    (and (= "CMAS" (:federation f)) (= "DNF" (:discipline f))
+         (string? (:event-date f))
+         (try (= 2026 (.getYear (LocalDate/parse (:event-date f)))) (catch Exception _ false))
+         (string? (:category f)) (re-matches #"SENIORS [\u2013\u2014-] WOMEN" (:category f)))))
+(defn- comparison-gap [rows]
+  ;; Public eligibility is not evidence of sporting comparison eligibility. The
+  ;; restricted projection has no current sporting authority or cohort proof.
+  {:target comparison-target :environment :pool :discipline "DNF" :gender :women :comparable-category :unknown
+   :year-window {:from "2026-01-01" :through "2026-12-31"}
+   :projection-read-at (str (java.time.Instant/now)) :evidence-coverage-cutoff nil
+   :published-source-records (count rows) :target-source-records (count (filter target-source-record? rows))
+   :distinct-sporting-attempts nil :eligible-comparison-peers 0
+   :federations ["CMAS" "AIDA"]
+   :scope-gaps ["AIDA gender and comparable category evidence are unavailable in the public projection."
+                "CMAS source category is preserved; equivalence to AIDA categories is unverified."
+                "Current finality, sanction, scoring and peer-cohort authority are unavailable for public comparison."]
+   :lists (mapv (fn [scope]
+                  {:scope scope :status :withheld :rank nil :eligible-peer-denominator nil
+                   :reason "Verified comparison authority and an exact eligible peer cohort are unavailable."
+                   :source-records-url (str "/?comparison=" comparison-target)})
+                [:national :continental :international])})
 (defn- listing [rows p demo?]
-  (let [page (positive (get p "page") 1 100000) limit (positive (get p "limit") 10 50)
+  (let [target (get p "comparison")
+        _ (when (and target (not= target comparison-target)) (fail! 400))
+        scoped-rows (if target (filterv target-source-record? rows) rows)
+        page (positive (get p "page") 1 100000) limit (positive (get p "limit") 10 50)
         date (get p "date")
         _ (when (seq date) (try (LocalDate/parse date) (catch Exception _ (fail! 400))))
         q (str/lower-case (get p "q" ""))
         found (filterv (fn [r]
                          (and (some #(str/includes? (str/lower-case (str (get-in r [% :source-name]))) q) [:original :effective])
-                              (every? (fn [[param field]] (or (str/blank? (get p param)) (= (get p param) (str (get-in r [:effective field]))))) filter-fields))) rows)]
-    {:results (vec (take limit (drop (* (dec page) limit) found)))
-     :page page :limit limit :total (count found) :pages (long (Math/ceil (/ (count found) (double limit))))
-     :filters (into {} (map (fn [[param field]] [(keyword param) (vec (sort (set (keep #(some-> (get-in % [:effective field]) str) rows))))]) filter-fields))
-     :coverage {:scope :pilot :completeness :partial :results (count rows)
-                :approved_identities (count (set (keep #(get-in % [:identity :id]) rows)))}
-     :demo (boolean demo?)}))
+                              (every? (fn [[param field]] (or (str/blank? (get p param)) (= (get p param) (str (get-in r [:effective field]))))) filter-fields))) scoped-rows)]
+    (cond-> {:results (vec (take limit (drop (* (dec page) limit) found)))
+             :page page :limit limit :total (count found) :pages (long (Math/ceil (/ (count found) (double limit))))
+             :filters (into {} (map (fn [[param field]] [(keyword param) (vec (sort (set (keep #(some-> (get-in % [:effective field]) str) rows))))]) filter-fields))
+             :coverage {:scope :pilot :completeness :partial :results (count rows)
+                        :approved_identities (count (set (keep #(get-in % [:identity :id]) rows)))}
+             :demo (boolean demo?)}
+      target (assoc :comparison (comparison-gap rows)))))
 (defn- correction-body! [^HttpExchange e]
   (let [h (.getRequestHeaders e)]
     (when-not (= ["1"] (vec (.get h "X-Correction-Request"))) (fail! 403))

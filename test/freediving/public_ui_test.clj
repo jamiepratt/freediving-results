@@ -113,6 +113,45 @@ function texts(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')
  console.log('reviewed event coverage and history rendering passed');
 })().catch(e=>{console.error(e);process.exitCode=1});")]
     (is (zero? (:exit r)) (str (:out r) (:err r)))))
+(deftest public-comparison-gap-navigation-and-source-placing-render
+  (let [r (shell/sh "node" "-e"
+                    "const a=require('node:assert/strict');
+class Element {
+ constructor(tag){this.tag=tag;this.children=[];this.events={};this.attributes={};}
+ append(...items){this.children.push(...items)} replaceChildren(...items){this.children=items}
+ setAttribute(k,v){this.attributes[k]=v} removeAttribute(k){delete this.attributes[k]}
+ addEventListener(k,v){this.events[k]=v}
+}
+const nodes=Object.fromEntries(['content','status','demo'].map(k=>[k,new Element('div')]));
+global.document={getElementById:k=>nodes[k],createElement:t=>new Element(t),addEventListener:()=>{}};
+const events={};global.window={addEventListener:(k,v)=>events[k]=v};
+global.location={pathname:'/',search:'?comparison=2026-pool-dnf-women',origin:'http://localhost'};
+const gap={target:'2026-pool-dnf-women','published-source-records':81,'target-source-records':0,'eligible-comparison-peers':0,'distinct-sporting-attempts':null,'projection-read-at':'2026-10-06T13:00:00Z','year-window':{from:'2026-01-01',through:'2026-12-31'},'scope-gaps':['AIDA gender and comparable category evidence unavailable'],lists:['national','continental','international'].map(scope=>({scope,status:'withheld',rank:null,'eligible-peer-denominator':null,reason:'Verified comparison authority unavailable','source-records-url':'/?comparison=2026-pool-dnf-women'}))};
+let data={results:[],total:0,page:1,pages:0,filters:{},coverage:{results:81,approved_identities:0},comparison:gap};let request;
+global.fetch=async url=>(request=url,{ok:true,json:async()=>data});
+require('./resources/public.js');
+function all(n){return [n,...n.children.flatMap(all)]}
+function text(){return all(nodes.content).map(n=>n.textContent||'').join(' | ')}
+(async()=>{
+ await events.pageshow();
+ a.match(request,/comparison=2026-pool-dnf-women/);
+ a.match(text(),/2026 pool DNF women/);a.match(text(),/81 published source records/);
+ a.match(text(),/0 target source records/);a.match(text(),/0 eligible comparison peers/);
+ a.match(text(),/Distinct sporting attempts: unknown/);a.match(text(),/National/);a.match(text(),/Continental/);a.match(text(),/International/);
+ a.match(text(),/Peer denominator: unknown/);a.match(text(),/Rank withheld/);
+ a.ok(all(nodes.content).filter(n=>n.href==='/?comparison=2026-pool-dnf-women').length>=3);
+ a.match(text(),/missing competitions or zero dives/);
+ global.location.search='';delete data.comparison;await events.pageshow();
+ a.ok(all(nodes.content).some(n=>n.href==='/?comparison=2026-pool-dnf-women'));
+ global.location.pathname='/results/'+ 'a'.repeat(64);
+ data={result:{'result-id':'a'.repeat(64),original:{rank:3},effective:{rank:2,'source-name':'Synthetic','final-distance':100}}};
+ await events.pageshow();a.ok(text().includes('Publisher placing (source)'));a.match(text(),/Sporting finality is not inferred/);
+ const labels=all(nodes.content).filter(n=>n.tag==='span').map(n=>n.textContent);
+ a.ok(labels.indexOf('Publisher placing (source)')<labels.indexOf('Federation'));
+ a.equal(all(nodes.content).find(n=>n.className==='summary').children[0].children[1].textContent,'3');
+ console.log('public comparison gap and source placing passed');
+})().catch(e=>{console.error(e);process.exitCode=1});")]
+    (is (zero? (:exit r)) (str (:out r) (:err r)))))
 (defn -main [& _]
   (let [r (run-tests 'freediving.public-ui-test)]
     (shutdown-agents)
