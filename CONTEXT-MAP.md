@@ -44,6 +44,7 @@ Older references to an issue being open are historical, not current status.
 | --- | --- |
 | [2025 onward inventory](docs/2025-onward-source-inventory-20260926.md) | September batch history, with later additions. Consult exact pass/date before claiming coverage. |
 | [5 October source refresh](docs/issue55-refresh-20261005.md) | Two bounded passes across 15 retained route records; private receipts and explicit child, calendar and access gaps. |
+| [6 October retained reconciliation audit](docs/retained-corpus-reconciliation-audit-20261006.md) | Frozen source/year/family denominators, stratified structural audit, isolated reversal/cache controls and bounded genuine private review. Read before claiming reconciliation accuracy or #73 acceptance. |
 | [October Microplus census](docs/cmas-microplus-census-20261001.md) | Later timing acquisition and Nordic PDF accounting; supersedes specific September access gaps. |
 | [Championship inventory](docs/championship-inventory-20260925.md), [source gaps](docs/championship-source-gaps-20260925.md), [corpus](docs/championship-corpus-20260925.md) | Historical #8 baseline. Read before reusing its sources or counts. |
 | [AIDA scope audit](docs/aida-scope-audit-20260925.md) | Historical selected-date coverage and missing scope. |
