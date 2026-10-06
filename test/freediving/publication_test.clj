@@ -1,6 +1,7 @@
 (ns freediving.publication-test
   (:require [clojure.test :refer [deftest is use-fixtures run-tests]]
             [freediving.aida-html :as html]
+            [freediving.html-evidence :as evidence]
             [freediving.archive :as archive]
             [freediving.aida-html-test :as html-fixture]
             [freediving.archive-test :as archive-fixture]
@@ -321,3 +322,30 @@
       (publication/decide! reviewer (assoc (row-request t "synthetic-distance-revocation")
                                            :action :revoke :base-revision 1 :attestations {}))
       (is (false? (:eligible? (publication/diagnose reviewer t)))))))
+
+(deftest html-batch-verifies-retained-bytes-once-without-transferring-snapshot-trust
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (let [t (html-sample) original evidence/sha256 checks (atom 0)]
+    (with-redefs [evidence/sha256 (fn [bytes] (swap! checks inc) (original bytes))]
+      (is (every? :ready? (evidence/with-verified-replay-cache #(publication/diagnose-many reviewer [t t]))))
+      ;; One retained-source replay and one immutable envelope hash for this version.
+      (is (= 2 @checks)))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+    (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_bytes=artifact_bytes || convert_to(' ', 'UTF8')")
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+    (is (every? false? (map :ready? (publication/diagnose-many reviewer [t t]))))))
+
+(deftest batch-diagnostics-reuse-current-ledgers-without-reusing-later-policy
+  (let [t (sample) targets [t (assoc t :ordinal 1) t]
+        expected (mapv #(merge (select-keys % [:job-id :ordinal]) (publication/diagnose reviewer %)) targets)
+        query-var (ns-resolve 'freediving.publication 'query) original @query-var
+        tables ["review_decisions" "review_proposals" "publication_decisions" "publication_policy_events"]
+        reads (atom (zipmap tables (repeat 0)))]
+    (with-redefs-fn {query-var (fn [c sql & args]
+                                 (doseq [table tables :when (.contains ^String sql (str "FROM freediving." table))]
+                                   (swap! reads update table inc))
+                                 (apply original c sql args))}
+      #(is (= expected (publication/diagnose-many reviewer targets))))
+    (is (= (zipmap tables (repeat 1)) @reads))
+    (publication/activate-policy! fixture/admin "unknown-fresh-policy" "Changed after batch")
+    (is (every? #(some #{:policy-inactive} (:reasons %)) (publication/diagnose-many reviewer targets)))))

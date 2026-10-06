@@ -69,7 +69,8 @@
   "Reuse extraction bytes and target rows only on this read-only snapshot connection."
   [^Connection c f]
   (read-only-snapshot! c)
-  (binding [*source-snapshot-cache* {:connection c :extractions (atom {}) :targets (atom {})}
+  (binding [*source-snapshot-cache* {:connection c :extractions (atom {}) :targets (atom {})
+                                     :envelopes (java.util.IdentityHashMap.)}
             *artifacts* (atom {})]
     (f)))
 (defn- source-cache [c]
@@ -95,7 +96,9 @@
   {:job-id (:job_id o) :ordinal (:ordinal o) :candidate-id (:candidate_id o)
    :source-sha256 (:source_sha256 o) :artifact-sha256 (:artifact_sha256 o)})
 (defn- rows [c table t]
-  (query c (str "SELECT * FROM freediving." table " WHERE job_id=? AND ordinal=? ORDER BY revision") (:job-id t) (:ordinal t)))
+  (if-let [tables (:diagnostic-tables (source-cache c))]
+    (get-in tables [table [(:job-id t) (:ordinal t)]] [])
+    (query c (str "SELECT * FROM freediving." table " WHERE job_id=? AND ordinal=? ORDER BY revision") (:job-id t) (:ordinal t))))
 (defn- body [r]
   (assoc (edn/read-string (:body_edn r)) :db-role (:db_role r) :recorded-at (str (:recorded_at r))))
 (defn- artifact [c job]
@@ -110,7 +113,9 @@
         artifact (artifact c (:job-id t))
         ds (rows c "review_decisions" t)
         ps (into {} (map (fn [r] [(:id r) (edn/read-string (:body_edn r))])
-                         (query c "SELECT * FROM freediving.review_proposals WHERE job_id=? AND ordinal=?" (:job-id t) (:ordinal t))))
+                         (if-let [tables (:diagnostic-tables (source-cache c))]
+                           (get-in tables ["review_proposals" [(:job-id t) (:ordinal t)]] [])
+                           (query c "SELECT * FROM freediving.review_proposals WHERE job_id=? AND ordinal=?" (:job-id t) (:ordinal t)))))
         fields (reduce (fn [fields r]
                          (let [d (edn/read-string (:body_edn r))
                                approved (when (= "reverse" (:action r)) (first (filter #(= (:event_id r) (:id %)) ds)))
@@ -118,7 +123,7 @@
                            (if (or (= :identity (:field p)) (= "reject" (:action r))) fields
                                (assoc fields (:field p) (if (= :reverse (:action d)) (:before p) (:after p))))))
                        (:parsed payload) ds)]
-    {:observation o :payload payload :artifact artifact :fields fields
+    {:connection c :observation o :payload payload :artifact artifact :fields fields
      :review-revision (or (:revision (last ds)) 0)}))
 (defn- http-url? [x]
   (try (let [u (java.net.URI. x)] (and (#{"https" "http"} (.getScheme u)) (nonblank? (.getHost u)))) (catch Exception _ false)))
@@ -134,12 +139,22 @@
            (and (= :decimal (:notation x)) (= 1 (count (:components x)))))
        (or (nil? (:fraction x)) (and (string? (:fraction x)) (re-matches #"[0-9]+" (:fraction x))))
        (= (count (:fraction x)) (:fraction-digits x))))
-(defn- html-context! [{:keys [observation payload artifact]}]
-  (let [context (html-evidence/bound-context! artifact payload (:ordinal observation) (:source_sha256 observation))]
-    (when-not (and (= (:artifact_sha256 observation) (html-evidence/sha256 (:artifact_bytes observation)))
-                   (= (:job_id observation) (:job-id artifact) (html/digest (select-keys artifact html/identity-keys)))
+(defn- html-envelope [c observation artifact]
+  (let [cache (:envelopes (source-cache c))
+        bytes (:artifact_bytes observation)
+        prior (when cache (.get ^java.util.IdentityHashMap cache artifact))]
+    (if (and prior (identical? bytes (:bytes prior))) prior
+        (let [verified {:bytes bytes :artifact-sha256 (html-evidence/sha256 bytes)
+                        :job-id (html/digest (select-keys artifact html/identity-keys))}]
+          (when cache (.put ^java.util.IdentityHashMap cache artifact verified)) verified))))
+(defn- html-context! [{:keys [connection observation payload artifact]}]
+  (let [context (html-evidence/bound-context! artifact payload (:ordinal observation) (:source_sha256 observation))
+        envelope (html-envelope connection observation artifact)]
+    (when-not (and (= (:artifact_sha256 observation) (:artifact-sha256 envelope))
+                   (= (:job_id observation) (:job-id artifact) (:job-id envelope))
                    (= (:candidate_id observation) (html/digest [(:source_sha256 observation) [(:coordinates context)]])))
       (fail! "HTML observation envelope mismatch")) context))
+
 (defn- blockers [{:keys [observation payload artifact fields] :as s} policy]
   (let [html? (html-evidence/html? artifact)
         context (when html? (try (html-context! s) (catch Exception _ nil)))
@@ -171,7 +186,9 @@
                                    (and html? (= html-policy policy)) (into #{:html-review-not-supported :coverage-not-established})) uncertainties))
                     (map (fn [x] [:invalid-field x]) invalid-fields))))))
 (defn- active-policy [c]
-  (:policy_version (first (query c "SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1"))))
+  (if-let [policy (:diagnostic-policy (source-cache c))]
+    (first policy)
+    (:policy_version (first (query c "SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1")))))
 (defn activate-policy! [admin-url version reason]
   (when-not (and (nonblank? version) (nonblank? reason)) (fail! "Policy version and reason required"))
   (transaction admin-url
@@ -206,7 +223,13 @@
   (read-snapshot url
                  (fn [c]
                    (with-source-snapshot-cache c
-                     #(mapv (fn [t] (merge (select-keys t [:job-id :ordinal]) (diagnosis c t))) targets)))
+                     #(let [tables (into {} (for [table ["review_decisions" "review_proposals" "publication_decisions"]]
+                                              [table (group-by (juxt :job_id :ordinal)
+                                                               (query c (str "SELECT * FROM freediving." table (if (= table "review_proposals") " ORDER BY id" " ORDER BY revision"))))]))
+                            policy (active-policy c)]
+                        (binding [*source-snapshot-cache* (assoc *source-snapshot-cache*
+                                                                 :diagnostic-tables tables :diagnostic-policy [policy])]
+                          (mapv (fn [t] (merge (select-keys t [:job-id :ordinal]) (diagnosis c t))) targets)))))
                  true))
 (defn history [url t] (read-snapshot url (fn [c] (target c t) (mapv body (rows c "publication_decisions" t)))))
 (def request-keys #{:id :job-id :ordinal :base-revision :review-revision :policy-version :observation :action :actor :reason :evidence :attestations})

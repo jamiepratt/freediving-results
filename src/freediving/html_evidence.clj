@@ -44,12 +44,12 @@
            :acquisition-context acquisitions :context-errors errors)))
 (def ^:dynamic *verified-replays* nil)
 (defn with-verified-replay-cache
-  "Reuse exact immutable artifact replay/context inside one synchronous request only."
+  "Reuse checked immutable artifact objects inside one synchronous request only. New decoded objects replay independently."
   [f]
-  (binding [*verified-replays* (atom {})] (f)))
+  (binding [*verified-replays* (java.util.IdentityHashMap.)] (f)))
 
 (defn- verified-replay [artifact]
-  (or (when *verified-replays* (get @*verified-replays* artifact))
+  (or (when *verified-replays* (.get ^java.util.IdentityHashMap *verified-replays* artifact))
       (let [source (:raw-html artifact)
             _ (when-not (= (:source-sha256 artifact) (sha256 (.getBytes ^String source "UTF-8")))
                 (throw (ex-info "HTML source provenance mismatch" {})))
@@ -57,7 +57,7 @@
         (when-not (= replayed (select-keys artifact (keys replayed)))
           (throw (ex-info "HTML retained source replay or observation mismatch" {})))
         (let [verified {:replayed replayed :context (context artifact)}]
-          (when *verified-replays* (swap! *verified-replays* assoc artifact verified))
+          (when *verified-replays* (.put ^java.util.IdentityHashMap *verified-replays* artifact verified))
           verified))))
 
 (defn bound-context!

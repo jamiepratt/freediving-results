@@ -317,15 +317,22 @@
         rows (into (conj (:rows config) {:reference second-reference :coordinates (get-in artifact [:candidates 1 :coordinates])}) absent)
         config (assoc config :rows rows)
         original selections/projection-plan calls (atom 0)
-        read-current (fn [] (reset! calls 0)
-                       (with-redefs [selections/projection-plan (fn [c validations]
-                                                                  (swap! calls inc)
-                                                                  (original c validations))]
-                         (read-proof config)))
+        digest-var (ns-resolve 'freediving.private-sporting-proofs 'digest)
+        original-digest @digest-var metadata (atom nil) digest-calls (atom 0)
+        read-current (fn [] (reset! calls 0) (reset! digest-calls 0)
+                       (with-redefs-fn {#'selections/projection-plan
+                                        (fn [c validations]
+                                          (swap! calls inc)
+                                          (let [plan (original c validations)] (reset! metadata (:metadata plan)) plan))
+                                        digest-var (fn [value]
+                                                     (when (= value @metadata) (swap! digest-calls inc))
+                                                     (original-digest value))}
+                         #(read-proof config)))
         validation (publication-fixture/request target "current-batched-validation")]
     (publication/decide! publication-fixture/reviewer validation)
     (let [first-read (read-current)]
       (is (= 1 @calls))
+      (is (= 1 @digest-calls))
       (is (= 276 (count (:rows first-read))))
       (is (= "approved" (get-in first-read [:rows 0 :upstream :publication :value])))
       (is (nil? (get-in first-read [:rows 1 :upstream :publication])))
@@ -334,6 +341,7 @@
                            (assoc validation :id "current-batched-revocation" :base-revision 1 :action :revoke :attestations {}))
       (let [second-read (read-current)]
         (is (= 1 @calls))
+        (is (= 1 @digest-calls))
         (is (not= (:binding_sha256 first-read) (:binding_sha256 second-read)))
         (is (nil? (get-in second-read [:rows 0 :upstream :publication])))
         (is (nil? (get-in second-read [:rows 0 :public_reference])))))))
@@ -357,3 +365,11 @@
       (let [r (run-tests 'freediving.private-sporting-proofs-test)]
         (shutdown-agents)
         (when (pos? (+ (:fail r) (:error r))) (System/exit 1)))))
+
+(deftest duplicate-exact-observation-keys-refuse-the-entire-proof-snapshot
+  (let [{:keys [config target]} (sample)]
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.observations DROP CONSTRAINT observations_pkey CASCADE")
+    (fixture/sql! fixture/admin
+                  (str "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) SELECT job_id,ordinal,repeat('0',64),kind,classification_reason,payload_edn FROM freediving.observations WHERE job_id='"
+                       (:job-id target) "' AND ordinal=" (:ordinal target)))
+    (is (thrown-with-msg? Exception #"Ambiguous exact source" (read-proof config)))))

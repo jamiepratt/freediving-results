@@ -1,5 +1,6 @@
 (ns freediving.html-evidence-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is]]
             [freediving.aida-html :as html]
             [freediving.aida-html-test :as fixture]
             [freediving.html-evidence :as evidence]))
@@ -57,3 +58,17 @@
         (is (thrown? Exception (evidence/bound-context! a (assoc-in payload [:parsed :points] "forged") 0 (:source-sha256 a))))))
     ;; A later request receives its own scope and repeats provenance validation.
     (is (thrown? Exception (scoped #(read-row (assoc a :source-sha256 "changed binding")))))))
+
+(deftest newly-decoded-artifacts-require-their-own-source-replay
+  (let [a (artifact (fixture/document fixture/cells))
+        decoded (edn/read-string (pr-str a))
+        payload (first (:candidates a))
+        read-row #(evidence/bound-context! % payload 0 (:source-sha256 a))]
+    (is (= a decoded))
+    (is (not (identical? a decoded)))
+    (evidence/with-verified-replay-cache
+      #(let [verified (read-row a)]
+        ;; Simulate a refused replay. Prior trust belongs only to the checked immutable object.
+         (with-redefs [html/parse-html (fn [_] (throw (ex-info "Replay refused" {})))]
+           (is (= verified (read-row a)))
+           (is (thrown-with-msg? Exception #"Replay refused" (read-row decoded))))))))

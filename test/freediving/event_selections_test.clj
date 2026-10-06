@@ -536,3 +536,23 @@
       (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
       (is (thrown-with-msg? Exception #"provenance integrity"
                             (selections/select! reviewer (dnf-pdf-request "tampered" members [])))))))
+
+(deftest read-only-global-projection-reuses-eligibility-and-observes-fresh-revocations
+  (let [a (sample "cache-a/1" revision-fixture/scope)
+        b (sample "cache-b/1" (assoc revision-fixture/scope :bib "8"))
+        query-var (ns-resolve 'freediving.event-selections 'query) original @query-var reads (atom 0)
+        read-plan (fn []
+                    (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+                      (.setReadOnly c true)
+                      (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+                      (.setAutoCommit c false)
+                      (revisions/with-verified-snapshot-cache c #(selections/projection-plan c []))))]
+    (validate! a "cache-va") (validate! b "cache-vb")
+    (selections/select! reviewer (request "cached-selection" [a b] [(selected a "cache-va") (selected b "cache-vb")]))
+    (with-redefs-fn {query-var (fn [c sql & args]
+                                 (when (.startsWith ^String sql "SELECT p.* FROM freediving.publication_decisions") (swap! reads inc))
+                                 (apply original c sql args))}
+      #(is (= 2 (count (:metadata (read-plan))))))
+    (is (= 1 @reads))
+    (validate! b "cache-revoke-b" :revoke)
+    (is (= 1 (count (:metadata (read-plan)))))))

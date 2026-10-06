@@ -68,8 +68,19 @@
 (defn history [url scope] (transaction url #(filterv (fn [r] (= scope (:event-scope r))) (records %))))
 (defn- latest [rs] (vals (reduce #(assoc %1 (event-key (:event-scope %2)) %2) {} rs)))
 (defn- ref-key [ref] [(:job-id ref) (:ordinal ref)])
-(defn- eligible [c]
+(defn- eligible-query [c]
   (query c "SELECT p.* FROM freediving.publication_decisions p WHERE p.action='validate' AND p.policy_version IN ('extraction-publication/1','extraction-publication/2') AND p.policy_version=(SELECT policy_version FROM freediving.publication_policy_events ORDER BY revision DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM freediving.publication_decisions n WHERE n.job_id=p.job_id AND n.ordinal=p.ordinal AND n.revision>p.revision) AND p.review_revision=COALESCE((SELECT max(r.revision) FROM freediving.review_decisions r WHERE r.job_id=p.job_id AND r.ordinal=p.ordinal),0)"))
+(def ^:dynamic ^:private *projection-snapshot* nil)
+(defn- read-only-snapshot? [^Connection c]
+  (and (.isReadOnly c) (not (.getAutoCommit c))
+       (#{Connection/TRANSACTION_REPEATABLE_READ Connection/TRANSACTION_SERIALIZABLE}
+        (.getTransactionIsolation c))))
+(defn- eligible [c]
+  (if (identical? c (:connection *projection-snapshot*))
+    (do (when-not (read-only-snapshot? c) (fail! "Projection cache requires a read-only snapshot"))
+        (let [cache (:eligible *projection-snapshot*)]
+          (or @cache (reset! cache (eligible-query c)))))
+    (eligible-query c)))
 (defn- validation! [c {:keys [reference validation-id]}]
   (when-not (some #(and (= validation-id (:id %)) (= (ref-key reference) [(:job_id %) (:ordinal %)])) (eligible c))
     (fail! "Selected observation requires its exact current extraction validation")))
@@ -212,7 +223,7 @@
           (when (= scope (revisions/event-scope (retained-scope! c descriptor scope))) (fail! "Same event cannot be retained outside inventory"))
           (validation! c {:reference (:reference descriptor) :validation-id validation-id}))))
     (when (and (seq rs) (contains? r :retained)) (fail! "Retained baseline is fixed at initial cutover"))))
-(defn projection-plan [c validations]
+(defn- projection-plan-in-scope [c validations]
   (if-not (installed? c) {:validations validations :metadata {}}
           (let [rs (records c)]
             (if (empty? rs) {:validations validations :metadata {}}
@@ -236,6 +247,13 @@
                   {:validations (filterv #(= (:id %) (:validation-id (allowed [(:job_id %) (:ordinal %)]))) validations)
                    :metadata allowed
                    :expected (into {} (map (fn [r] [(sha (:id r)) (count (:selected r))]) active))})))))
+(defn projection-plan
+  "Verify the global selection plan; eligibility reuse is limited to this read-only invocation."
+  [c validations]
+  (if (read-only-snapshot? c)
+    (binding [*projection-snapshot* {:connection c :eligible (atom nil)}]
+      (projection-plan-in-scope c validations))
+    (projection-plan-in-scope c validations)))
 (defn refresh-coverage! [c]
   (when (installed? c)
     (let [snapshot (snapshot-on c) rels (relationships c)]
