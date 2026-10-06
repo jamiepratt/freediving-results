@@ -93,7 +93,7 @@ class RuleBindingAuthorityTest(unittest.TestCase):
         self.assertEqual(self.authority.review()['revision'], 4)
 
     def test_edition_citation_policy_and_source_coordinate_mismatch_refuse_exact_stage(self):
-        for change in ('edition', 'section', 'claim', 'policy', 'coordinates', 'date', 'scope', 'applicability'):
+        for change in ('edition', 'section', 'claim', 'policy', 'coordinates', 'date', 'view', 'scope', 'applicability'):
             with self.subTest(change=change):
                 proposal = self.pinned_context()
                 catalog = json.loads(self.catalog_path.read_bytes())
@@ -105,6 +105,8 @@ class RuleBindingAuthorityTest(unittest.TestCase):
                     catalog['bindings'][0]['coordinates']['row'] = 99
                 elif change == 'date':
                     catalog['documents'][0]['effective_from'] = '2026-07-01'
+                elif change == 'view':
+                    catalog['bindings'][0]['source_view']['view-id'] = 'different-retained-view'
                 elif change == 'scope':
                     catalog['documents'][0]['scope']['discipline'] = 'cwt'
                 else:
