@@ -112,6 +112,26 @@ def test_microplus_metrics_reports_verified_local_checkpoint_without_authority(t
     assert report['confirmed_distinct_attempts'] is None
     assert report['accepted_athletes'] is None
     assert report['remote_status'] == 'pending'
+    assert report['coverage'] == {
+        'decision_denominator': 1, 'deterministic_approved': 1,
+        'automatic_approved': 1, 'unknown': 0, 'error': 0,
+        'pending_review': 1, 'invalidated': 0, 'projection_pending': 0}
+    assert report['reversals'] == 0
+    assert report['sampled_error']['denominator'] is None
+    assert report['sampled_error']['independent_label_count'] == 0
+    assert report['sampled_error']['numerator'] is None
+    assert report['sampled_error']['rate'] is None
+    assert report['sampled_error']['selection_bias'] == 'No independently labelled sample retained for this cohort'
+    assert report['provider']['reported_usage'] is None
+    assert report['provider']['cache_hits_recorded'] == 0
+    assert report['provider']['cache_hits_this_execution'] is None
+    assert report['provider']['actual_monetary_cost'] is None
+    assert report['latency_ms'] is None
+    assert report['binding']['history_versions']['rule'] == ['cmas-microplus-attempt-evidence/1']
+    assert report['binding']['history_versions']['config'] == ['microplus-local/1']
+    assert report['counts']['affiliate_name_gaps'] == 1
+    assert report['counts']['checked_name_assertions'] == 0
+    assert report['binding']['owner_store_revision_current'] == state['reconciliation']['owner_store_revision']
     with (target / 'reconciliation/flow.edn').open('ab') as output:
         output.write(b'\n')
     changed = subprocess.run(command, capture_output=True, text=True)
@@ -159,6 +179,60 @@ def test_microplus_run_resumes_after_interrupted_export_and_preserves_correction
         store.close()
     assert sha(flow_path) == flow_hash
     assert sha(export_path) == export_hash
+
+
+def test_microplus_metrics_reads_current_scoped_owner_reversals_across_rerun(tmp_path):
+    sys.path.insert(0, str(SCRIPT.parent))
+    from owner_decision_store import DecisionStore
+
+    plan, record_id = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    assert run(plan, target).returncode == 0
+    state = json.loads((target / 'state.json').read_text())
+    checkpoint_revision = state['reconciliation']['owner_store_revision']
+    store = DecisionStore(target / 'reconciliation/owner.sqlite')
+    try:
+        identifier = 'microplus-attempt-' + record_id
+        store.act(identifier, action='approve', expected_revision=store.revision,
+                  idempotency_key='synthetic-approve')
+        store.act(identifier, action='reverse', expected_revision=store.revision,
+                  idempotency_key='synthetic-reverse')
+        owner_revision = store.revision
+    finally:
+        store.close()
+    paths = [target / 'reconciliation' / name for name in
+             ('flow.edn', 'owner.sqlite', 'pending-export.json')]
+    hashes = [sha(path) for path in paths]
+    command = [sys.executable, str(SCRIPT), 'metrics', '--run-dir', str(target)]
+    measured = subprocess.run(command, capture_output=True, text=True)
+    assert measured.returncode == 0, measured.stderr
+    report = json.loads(measured.stdout)
+    assert report['binding']['owner_store_revision_at_checkpoint'] == checkpoint_revision
+    assert report['binding']['owner_store_revision_current'] == owner_revision
+    assert report['coverage']['automatic_approved'] == 0
+    assert report['coverage']['deterministic_approved'] == 1
+    assert report['coverage']['projection_pending'] == 1
+    assert report['counts']['pending_proposals'] == 0
+    assert report['owner_review_statuses'] == {'reversed': 1}
+    assert report['reversals'] == 1 and report['flow_reversals'] == 0
+    assert [sha(path) for path in paths] == hashes
+    assert run(plan, target).returncode == 0
+    measured = subprocess.run(command, capture_output=True, text=True)
+    assert measured.returncode == 0, measured.stderr
+    after = json.loads(measured.stdout)
+    assert after['binding']['owner_store_revision_current'] == owner_revision
+    assert after['reversals'] == 1
+    assert after['owner_review_statuses'] == {'reversed': 1}
+    assert [sha(path) for path in paths] == hashes
+    store = DecisionStore(target / 'reconciliation/owner.sqlite')
+    try:
+        store.bind_snapshot('0' * 64, [], expected_revision=store.revision,
+                            idempotency_key='synthetic-stale-owner-snapshot')
+    finally:
+        store.close()
+    stale = subprocess.run(command, capture_output=True, text=True)
+    assert stale.returncode != 0
+    assert 'Microplus metrics owner snapshot changed' in stale.stderr
 
 
 def test_microplus_run_rejects_tampered_evidence_and_unsupported_scope(tmp_path):

@@ -86,6 +86,12 @@ def _reconciliation_summary(state, run_dir):
         return None
     if run.get('status') != 'complete':
         raise ValueError('reconciliation is not complete')
+    if run.get('mode') == 'microplus_attempt':
+        from local_evidence_run import microplus_metrics
+        microplus_metrics(Path(run_dir), state)
+        # This owner store belongs to the local run. Its revision cannot stand
+        # in for the authenticated remote revision required by status v2/v3.
+        return None
     receipt = run.get('metrics') or {}
     binding = receipt.get('binding') or {}
     ledger = Path(run_dir) / 'reconciliation' / 'flow.edn'
@@ -187,6 +193,10 @@ def sync_status(run_dir, client_id, client_secret, token, *, url=STATUS_URL, ope
     candidate = {'schema': 'private-presentation-status/v1', 'run_id': run_id,
                  'local': local, 'remote': remote}
     reconciliation = _reconciliation_summary(state, run_dir)
+    if (state.get('reconciliation', {}).get('mode') == 'microplus_attempt'
+            and current.get('schema') in ('private-presentation-status/v2',
+                                         'private-presentation-status/v3')):
+        raise RuntimeError('normal local staging cannot replace authoritative reconciliation status')
     if reconciliation is not None:
         candidate['schema'] = 'private-presentation-status/v2'
         candidate['reconciliation'] = reconciliation

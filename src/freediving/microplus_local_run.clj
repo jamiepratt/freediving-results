@@ -19,6 +19,37 @@
                                                    bindings))))))
                   versions))))
 
+(defn- inspect-local [{:keys [decision_ids flow_path]}]
+  (let [ledger (flow/load-ledger! flow_path)
+        ids (set decision_ids)
+        events (filterv #(ids (:decision-id %)) (:events ledger))
+        current (into {} (map (fn [[id history]]
+                                [id (or (last (filter #(= :human (:origin %)) history))
+                                        (last history))])
+                              (group-by :decision-id events)))
+        versions (fn [field] (vec (sort (set (keep field events)))))]
+    (when-not (and (vector? decision_ids) (seq decision_ids)
+                   (= (count decision_ids) (count ids))
+                   (= ids (set (keys current))))
+      (throw (ex-info "Microplus metrics decision history incomplete" {})))
+    {:decision_denominator (count ids)
+     :statuses (frequencies (map :status (vals current)))
+     :automatic_decision_ids (mapv :decision-id
+                                   (filter #(and (= :approved (:status %))
+                                                 (not= :human (:origin %)))
+                                           (vals current)))
+     :deterministic_approved (count (set (map :decision-id
+                                              (filter #(and (= :approved (:status %))
+                                                            (= :deterministic (:origin %)))
+                                                      events))))
+     :human_reversals (count (filter #(and (= :human (:origin %))
+                                           (= :reversed (:status %))) events))
+     :cache_hits_recorded (count (filter #(= :cached-jev (:origin %)) events))
+     :history_versions {:ledger (:version ledger) :config (versions :config-version)
+                        :policy (versions :policy-version) :rule (versions :rule-version)
+                        :template (versions :template-version)
+                        :model (versions :model-version)}}))
+
 (defn- run-local! [{:keys [evidence decision_ids flow_path]}]
   (let [attempt (relationships/empty-attempt-ledger (keywordize-evidence evidence))
         grouped (sort-by first (group-by :snapshot-record-id
@@ -61,7 +92,10 @@
 
 (defn -main [& _]
   (try
-    (println (json/write-str (run-local! (json/read-str (slurp *in*) :key-fn keyword))))
+    (let [input (json/read-str (slurp *in*) :key-fn keyword)]
+      (println (json/write-str (if (= "inspect" (:operation input))
+                                 (inspect-local input)
+                                 (run-local! input)))))
     (catch Exception error
       (binding [*out* *err*] (println (.getMessage error)))
       (System/exit 1))))

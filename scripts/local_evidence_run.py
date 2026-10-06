@@ -833,6 +833,122 @@ def verify_staging(run_dir, state):
         raise ValueError('completed staging manifest changed')
 
 
+def microplus_metrics(run_dir, state):
+    """Read the pinned flow and current local owner projection without writes."""
+    from contextlib import closing
+    import sqlite3
+    from owner_decision_store import DecisionStore
+    from private_evidence_transfer import verified_input
+
+    receipt = state['reconciliation']
+    directory = run_dir / 'reconciliation'
+    flow_path = directory / 'flow.edn'
+    export_path = directory / 'pending-export.json'
+    if (state.get('schema') != 'local-evidence-run/v1'
+            or state.get('local', {}).get('status') != 'complete'
+            or receipt.get('status') != 'complete'
+            or receipt.get('snapshot_sha256') != state['local'].get('snapshot_sha256')
+            or receipt.get('flow_sha256') != digest(flow_path)
+            or receipt.get('export_sha256') != digest(export_path)):
+        raise ValueError('Microplus metrics checkpoint binding changed')
+    verified_input(run_dir)
+    envelope = json.loads(export_path.read_text())
+    proposals = envelope['proposals']
+    ids = [proposal['id'] for proposal in proposals]
+    if not ids or len(ids) != len(set(ids)) or len(ids) != receipt['snapshot_positions']:
+        raise ValueError('Microplus metrics cohort binding changed')
+    inspected = subprocess.run(
+        ['clojure', '-M', '-m', 'freediving.microplus-local-run'],
+        input=json.dumps({'operation': 'inspect', 'decision_ids': ids,
+                          'flow_path': str(flow_path)}),
+        text=True, capture_output=True, check=True, cwd=ROOT.parent)
+    flow = json.loads(inspected.stdout)
+    owner_path = directory / 'owner.sqlite'
+    if owner_path.is_symlink() or not owner_path.is_file():
+        raise ValueError('Microplus metrics owner store missing')
+    # Reuse the store's public projection on a read-only connection. Its normal
+    # constructor performs schema setup, which a metrics command must not do.
+    with closing(sqlite3.connect(owner_path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('BEGIN')
+        store = DecisionStore.__new__(DecisionStore)
+        store.db = db
+        if store.active_snapshot_sha256 != receipt['snapshot_sha256']:
+            raise ValueError('Microplus metrics owner snapshot changed')
+        for proposal in proposals:
+            row = db.execute('SELECT payload_json FROM proposals WHERE id=?', (proposal['id'],)).fetchone()
+            if row is None or json.loads(row['payload_json']) != proposal:
+                raise ValueError('Microplus metrics owner proposal changed')
+        decisions = [store.inspect(identifier) for identifier in ids]
+        revision = store.revision
+        reversals = sum(event['action'] == 'reverse'
+                        for decision in decisions for event in decision['history'])
+    name = receipt['name_evidence']
+    if name['status'] == 'checked':
+        from affiliate_name_query import AffiliateNameQuery
+        from unified_evidence_query import SnapshotQuery
+        with SnapshotQuery(run_dir / 'snapshot') as snapshot:
+            names = AffiliateNameQuery(name['path'], name['sha256'],
+                                       run_dir / 'snapshot', snapshot).listing()
+        name_gaps, assertions = len(names['gaps']), len(names['assertions'])
+    else:
+        name_gaps, assertions = 1, 0
+    if digest(flow_path) != receipt['flow_sha256'] or digest(export_path) != receipt['export_sha256']:
+        raise ValueError('Microplus metrics checkpoint binding changed')
+    statuses = flow['statuses']
+    automatic_ids = set(flow['automatic_decision_ids'])
+    coverage = {
+        'decision_denominator': flow['decision_denominator'],
+        'deterministic_approved': flow['deterministic_approved'],
+        'automatic_approved': sum(decision['id'] in automatic_ids
+                                  and not any(event['action'] in ('approve', 'reject', 'correct', 'reverse')
+                                              for event in decision['history'])
+                                  and decision['effective_status'] != 'invalidated'
+                                  for decision in decisions),
+        'unknown': sum(statuses.get(status, 0) for status in
+                       ('unresolved', 'unknown-external-outcome', 'timeout')),
+        'error': sum(statuses.get(status, 0) for status in
+                     ('provider-error', 'invalid-response', 'interrupted')),
+        'pending_review': sum(decision['effective_status'] == 'pending' for decision in decisions),
+        'invalidated': sum(decision['effective_status'] == 'invalidated' for decision in decisions),
+        'projection_pending': sum(decision['effective_status'] == 'projection_pending' for decision in decisions)}
+    owner_statuses = {}
+    for decision in decisions:
+        status = decision['status']
+        owner_statuses[status] = owner_statuses.get(status, 0) + 1
+    return {
+        'schema': 'microplus-attempt-local-metrics/v1',
+        'binding': {'run_id': state['run_id'], 'snapshot_sha256': receipt['snapshot_sha256'],
+                    'flow_sha256': receipt['flow_sha256'], 'export_sha256': receipt['export_sha256'],
+                    'run_revision': receipt['run_revision'],
+                    'owner_store_revision_at_checkpoint': receipt['owner_store_revision'],
+                    'owner_store_revision_current': revision,
+                    'history_versions': flow['history_versions']},
+        'counts': {'snapshot_positions': receipt['snapshot_positions'],
+                   'cited_view_observations': receipt['cited_view_observations'],
+                   'source_objects': receipt['source_objects'],
+                   'pending_proposals': coverage['pending_review'],
+                   'source_gaps': len(state['coverage']['gaps']),
+                   'affiliate_name_gaps': name_gaps, 'checked_name_assertions': assertions},
+        'coverage': coverage, 'owner_review_statuses': owner_statuses,
+        'reversals': reversals, 'flow_reversals': flow['human_reversals'],
+        'sampled_error': {'sampling_frame': 'selected Microplus same-attempt decisions',
+                          'numerator': None, 'denominator': None, 'rate': None,
+                          'independent_label_count': 0,
+                          'selection': None,
+                          'selection_bias': 'No independently labelled sample retained for this cohort'},
+        'provider_calls': receipt['provider_calls'],
+        'provider': {'calls_recorded': receipt['provider_calls'],
+                     'cache_hits_recorded': flow['cache_hits_recorded'],
+                     'cache_hits_this_execution': None,
+                     'reported_usage': None, 'actual_monetary_cost': None},
+        'latency_ms': None,
+        'confirmed_distinct_attempts': state['coverage']['confirmed_distinct_attempts'],
+        'accepted_athletes': receipt['accepted_athletes'],
+        'remote_status': state['remote']['status'],
+        'authority': 'verified_local_checkpoint_only'}
+
+
 def reconcile_microplus_attempt(config, run_dir, state):
     from cmas_microplus_snapshot_observations import load_attempt_evidence
     from owner_decision_export_adapter import (build_verified_microplus_attempt_export,
@@ -1065,34 +1181,7 @@ def main():
                 return 0
             microplus = state.get('reconciliation', {})
             if microplus.get('mode') == 'microplus_attempt':
-                if (state.get('schema') != 'local-evidence-run/v1'
-                        or state.get('local', {}).get('status') != 'complete'
-                        or microplus.get('status') != 'complete'
-                        or microplus.get('snapshot_sha256') != state['local'].get('snapshot_sha256')
-                        or microplus.get('flow_sha256') != digest(args.run_dir / 'reconciliation' / 'flow.edn')
-                        or microplus.get('export_sha256') != digest(args.run_dir / 'reconciliation' / 'pending-export.json')):
-                    raise ValueError('Microplus metrics checkpoint binding changed')
-                from private_evidence_transfer import verified_input
-                verified_input(args.run_dir)
-                print(json.dumps({
-                    'schema': 'microplus-attempt-local-metrics/v1',
-                    'binding': {'run_id': state['run_id'],
-                                'snapshot_sha256': microplus['snapshot_sha256'],
-                                'flow_sha256': microplus['flow_sha256'],
-                                'export_sha256': microplus['export_sha256'],
-                                'run_revision': microplus['run_revision'],
-                                'owner_store_revision_at_checkpoint': microplus['owner_store_revision']},
-                    'counts': {'snapshot_positions': microplus['snapshot_positions'],
-                               'cited_view_observations': microplus['cited_view_observations'],
-                               'source_objects': microplus['source_objects'],
-                               'pending_proposals': microplus['pending_proposals'],
-                               'source_gaps': len(state['coverage']['gaps'])},
-                    'provider_calls': microplus['provider_calls'],
-                    'confirmed_distinct_attempts': state['coverage']['confirmed_distinct_attempts'],
-                    'accepted_athletes': microplus['accepted_athletes'],
-                    'remote_status': state['remote']['status'],
-                    'authority': 'verified_local_checkpoint_only',
-                }, sort_keys=True))
+                print(json.dumps(microplus_metrics(args.run_dir, state), sort_keys=True))
                 return 0
             receipt = state['reconciliation']['metrics']
             if (state['reconciliation']['status'] != 'complete'

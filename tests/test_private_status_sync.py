@@ -13,6 +13,77 @@ from private_status_sync import pin_active_status, sync_application_from_pin, as
 from test_unified_evidence_query import snapshot
 
 
+def test_normal_microplus_sync_publishes_verified_staging_without_remote_review_authority(tmp_path):
+    from tests.test_local_evidence_run import microplus_normal_fixture, run
+    from private_status_sync import sync_status
+
+    plan, _ = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    prepared = run(plan, target)
+    assert prepared.returncode == 0, prepared.stderr
+    status = PrivatePresentationStatus(tmp_path / 'status.json')
+    state = json.loads((target / 'state.json').read_text())
+    active = {'snapshot_sha256': state['local']['snapshot_sha256'],
+              'bundle_manifest_sha256': state['local']['bundle_manifest_sha256']}
+
+    class Response:
+        status = 200
+
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self, _):
+            return json.dumps(self.value).encode()
+
+    class LocalStatusTransport:
+        def __init__(self):
+            self.posts = []
+
+        def open(self, request, timeout):
+            if request.method == 'GET':
+                return Response(status.read(active))
+            payload = json.loads(request.data)
+            self.posts.append(payload)
+            return Response(status.update(payload, active))
+
+    transport = LocalStatusTransport()
+    synced = sync_status(target, 'test-id', 'test-secret', 'test-token', opener=transport)
+    assert synced['schema'] == 'private-presentation-status/v1'
+    assert 'reconciliation' not in synced and 'application' not in synced
+    assert synced['remote']['status'] == 'pending'
+    assert synced['remote']['active'] == active
+    assert sync_status(target, 'test-id', 'test-secret', 'test-token', opener=transport) == synced
+    assert len(transport.posts) == 1
+    with (target / 'reconciliation/flow.edn').open('ab') as stream:
+        stream.write(b'\n')
+    with __import__('pytest').raises(ValueError, match='metrics checkpoint binding changed'):
+        sync_status(target, 'test-id', 'test-secret', 'test-token', opener=transport)
+    assert len(transport.posts) == 1
+
+
+def test_normal_microplus_sync_preserves_existing_authoritative_status(tmp_path):
+    from tests.test_local_evidence_run import microplus_normal_fixture, run
+    from private_status_sync import sync_status
+
+    plan, _ = microplus_normal_fixture(tmp_path)
+    target = tmp_path / 'run'
+    prepared = run(plan, target)
+    assert prepared.returncode == 0, prepared.stderr
+    for schema in ('private-presentation-status/v2', 'private-presentation-status/v3'):
+        current = {'schema': schema, 'run_id': 'prior-authoritative-run', 'revision': 7,
+                   'remote': {'active': None}, 'local': {'cutoff': '2026-10-04T00:00:00Z'}}
+        with patch('private_status_sync._request', return_value=current) as request:
+            with __import__('pytest').raises(RuntimeError, match='cannot replace authoritative'):
+                sync_status(target, 'test-id', 'test-secret', 'test-token')
+        assert [call.args[1] for call in request.call_args_list] == ['GET']
+
+
 def test_authenticated_active_status_can_supply_application_provenance():
     snap = 'a' * 64
     active = {'snapshot_sha256': snap, 'bundle_manifest_sha256': 'b' * 64}
