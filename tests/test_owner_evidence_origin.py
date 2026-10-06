@@ -223,6 +223,30 @@ class PrivateOriginTest(unittest.TestCase):
         retained['source']['federation'] = 'AIDA'
         self.assertEqual(self.request(path + '1')[0], 404)
 
+    def test_retained_source_context_survives_current_authority_loss_without_returning_ranks(self):
+        from private_presentation_status import StatusConflict
+        retained = {'reference': {'source-sha256': 'a' * 64, 'artifact-sha256': 'b' * 64, 'ordinal': 0},
+                    'candidate': {'coordinates': {'page': 5, 'row': 1},
+                                  'raw': {'fields': {'card': 'isolated synthetic WHITE'}}, 'parsed': {}},
+                    'source': {'federation': 'AIDA'}}
+        def reader(filters, current):
+            return {'schema': 'private-attempt-inspector/v1', 'pagination': {'offset': 0, 'total': 1},
+                    'rows': [{**retained, 'rank': 1 if current is not None else None}]}
+        self.server.comparison_reader = reader
+        self.server.status_authority = lambda: {'synthetic_revision': 1}
+        page = json.loads(self.request('/owner-evidence/api/attempt-inspector')[2])
+        row_id = page['rows'][0]['source_access']['retained_row_id']
+        def unavailable():
+            raise StatusConflict('isolated external authority unavailable')
+        self.server.status_authority = unavailable
+        status, _, body = self.request('/owner-evidence/api/attempt-inspector/source/' + row_id)
+        self.assertEqual(status, 200)
+        source = json.loads(body)
+        self.assertEqual(source['source_value'], retained['candidate']['raw'])
+        self.assertNotIn('rank', source)
+        self.assertNotIn('authority', source)
+        self.assertEqual(self.request('/owner-evidence/api/attempt-inspector')[0], 409)
+
     def test_overview_reports_verified_source_bundle_binding(self):
         self.server.source_bundle_sha256 = 'd' * 64
         status, _, body = self.request('/owner-evidence/api/overview')

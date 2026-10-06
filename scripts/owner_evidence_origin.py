@@ -346,9 +346,9 @@ class PrivateOrigin(ThreadingHTTPServer):
         if filters is None or self.comparison_reader is None:
             raise SourceViewError(404)
         try:
-            result = self.comparison_reader(filters, self.status_authority())
-        except StatusConflict:
-            raise
+            # Source context verifies immutable pins and exact row coordinates.
+            # Sporting authority is collected only by the ranking endpoint.
+            result = self.comparison_reader(filters, None)
         except Exception as exc:
             raise SourceViewError(503) from exc
         rows = result.get('rows', [])
