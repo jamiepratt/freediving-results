@@ -98,9 +98,12 @@ validation fails. Fetching and remote transfer are separate phases because VPN
 routing can interfere with the VPS connection. Automatic NordVPN switching for
 deployment is authorized, with restoration afterward and resumable failure.
 See [ADR 0002](docs/adr/0002-local-ingestion-remote-presentation.md).
-The opt-in local command now coordinates verified snapshot and bundle staging,
-guarded activation and owner readback. The private host setup, unattended VPN
-control and live validation remain in
+The opt-in local command coordinates verified snapshot and bundle staging,
+guarded activation and authenticated owner readback. The supported private
+reconciliation path is integrated and validated in
+[issue #73](https://github.com/jamiepratt/freediving-results/issues/73).
+Live VPN transition and exact restoration certification remain an explicit
+operational dependency in
 [issue #64](https://github.com/jamiepratt/freediving-results/issues/64).
 
 Python scripts handle bounded discovery, paced acquisition, browser capture,
@@ -162,6 +165,17 @@ review attestations or public publication authority.
 
 See [ADR 0003](docs/adr/0003-automatic-evidence-reconciliation.md) for the accepted
 policy and [issue #67](https://github.com/jamiepratt/freediving-results/issues/67)
-for implementation. Compact Jev request building, score storage and automatic
-spelling decisions exist; general automatic reconciliation and remote review
-writes are not yet implemented.
+for parent acceptance and dependencies. The supported private path implements
+append-only deterministic decisions, bounded code-generated Jev batches and
+retained-answer reuse, versioned approval gates, reversible canonical application,
+and authenticated owner inspection and reversal. The
+[normal local run](docs/local-evidence-run.md) binds evidence and decision revisions,
+syncs signed human history and preserves corrections on unchanged reruns and
+guarded snapshot replacement; [#73](https://github.com/jamiepratt/freediving-results/issues/73)
+records its completed integration acceptance.
+
+The [retained audit for #76](docs/retained-corpus-reconciliation-audit-20261006.md)
+is explicitly partial. The 6 October private readback verifies five accepted
+same-attempt links; current canonical identity status remains unknown. Historical
+identity events do not establish current accepted global athletes. Corpus-wide
+coverage, identity accuracy and actual provider billing remain unmeasured.

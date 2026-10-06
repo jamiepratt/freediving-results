@@ -10,14 +10,14 @@ Older references to an issue being open are historical, not current status.
 | --- | --- | --- |
 | Understanding purpose, vocabulary and boundaries | [CONTEXT.md](CONTEXT.md) | Active brief |
 | Evaluating the LLM/deterministic ingestion boundary | [ADR 0001](docs/adr/0001-staged-evidence-ingestion.md) | Accepted direction; not a claim of implementation |
-| Running ingestion locally and presenting it remotely | [ADR 0002](docs/adr/0002-local-ingestion-remote-presentation.md) | Accepted policy; opt-in command wiring implemented, live handoff unverified |
+| Running ingestion locally and presenting it remotely | [ADR 0002](docs/adr/0002-local-ingestion-remote-presentation.md), [local evidence run](docs/local-evidence-run.md), [issue #64](https://github.com/jamiepratt/freediving-results/issues/64) | Supported private handoff implemented and validated under #73; live VPN transition/restoration certification remains open in #64 |
 | Learning from prior collection passes | [2025-2026 ingestion lessons](docs/reference/ingestion-lessons-2025-2026.md) | Historical synthesis, reviewed 2026-10-02 |
 | Installing or running local tools | [README](README.md) | Setup and detailed command contracts |
 | Fetching or reusing sources | [Source acquisition](docs/source-acquisition.md) | Runbook plus dated batch history; read relevant sections only |
 | Capturing AIDA selected-day results | [AIDA HTML ingestion](docs/aida-html-ingestion.md) | Implemented format contract |
 | Building/querying private evidence | [Census contract](docs/census-evidence-contract.md), [snapshot](docs/unified-evidence-snapshot.md), [private bundle](docs/private-source-bundle.md) | Implemented contracts plus dated snapshots |
 | Changing owner evidence display | [Owner workspace](docs/owner-evidence-workspace.md) | Implemented UI and access contract |
-| Applying automatic reconciliation policy | [ADR 0003](docs/adr/0003-automatic-evidence-reconciliation.md), [issue #67](https://github.com/jamiepratt/freediving-results/issues/67) | Accepted policy; general reconciliation and remote review writes remain implementation work |
+| Applying automatic reconciliation policy | [ADR 0003](docs/adr/0003-automatic-evidence-reconciliation.md), [issue #67](https://github.com/jamiepratt/freediving-results/issues/67), [completed integration #73](https://github.com/jamiepratt/freediving-results/issues/73) | Supported private deterministic/Jev path, authenticated review/reversal and incremental binding implemented; parent acceptance and #64 operational dependency remain separate |
 | Checking existing review/publication contracts | [Revision relationships](docs/revision-relationships.md), [review rubric](docs/review-rubric.md), [event selections](docs/event-selections.md), [publication policy](docs/publication-policy.md) | Implemented boundaries; distinguish them from ADR 0003 direction |
 | Deploying an approved change | [Deployment](docs/deployment.md) | Operational runbook |
 | Reviewing bounded ingestion design and acceptance | [Issue #62](https://github.com/jamiepratt/freediving-results/issues/62) | Historical decisions and validated implementation evidence |
@@ -36,6 +36,7 @@ Older references to an issue being open are historical, not current status.
 | Recent timing evidence | `scripts/cmas_microplus_ingest.py`, `tests/test_cmas_microplus_ingest.py` | API repeats, rankings and Nordic PDF correspondences |
 | Import orchestration | `src/freediving/pipeline.clj`, `src/freediving/observations.clj`, `deps.edn` | Checking stage receipts, immutable imports and test aliases |
 | Private query projection | `scripts/census_contract.py`, `scripts/unified_evidence_snapshot.py`, `scripts/unified_evidence_query.py` | Distinguishing source evidence from observation imports |
+| Private reconciliation and review delivery | `src/freediving/reconciliation_flow.clj`, `src/freediving/reconciliation_jev.clj`, `src/freediving/reconciliation_application.clj`, `scripts/owner_evidence_origin.py`; [local evidence run](docs/local-evidence-run.md), [owner workspace](docs/owner-evidence-workspace.md) | Checking versioned decisions, deterministic/cache reuse, reversible application, authenticated review and current versus historical authority |
 | Product copy | `resources/evidence_workspace.html`, `resources/evidence_workspace.js`, `resources/owner.html`, `resources/owner.js`, `resources/public.html`, `resources/public.js` | Reviewing copy when visible behavior changes |
 
 ## Cold context: dated evidence

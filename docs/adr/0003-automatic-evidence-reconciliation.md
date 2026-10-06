@@ -1,8 +1,11 @@
 # ADR 0003: Automatic evidence reconciliation with later review
 
 Date: 2026-10-02. Status: accepted owner direction.
-Implementation status: partial building blocks only. General automatic
-reconciliation and remote review writes are not implemented by this document.
+Implementation status, updated 2026-10-06: the supported private reconciliation
+and authenticated review path is implemented. Its bounded integration acceptance
+is recorded in [closed #73](https://github.com/jamiepratt/freediving-results/issues/73);
+live VPN transition/restoration certification remains open in
+[#64](https://github.com/jamiepratt/freediving-results/issues/64).
 Implementation scope and dependencies: [issue #67](https://github.com/jamiepratt/freediving-results/issues/67).
 
 ## Decision
@@ -125,8 +128,10 @@ The owner reviews through https://poc.alphacompose.com/owner-evidence. Persisten
 decision authority is separate from immutable evidence snapshots: snapshot
 replacement and subsequent local runs must preserve remote human corrections.
 Bind each projection to its evidence snapshot and decision revision. Stale
-exports cannot overwrite newer decisions. The concrete synchronization contract
-and migration work belong in #67's implementation issues.
+exports cannot overwrite newer decisions. The implemented synchronization and
+incremental binding contract is documented in the
+[local evidence run](../local-evidence-run.md), with acceptance in
+[#73](https://github.com/jamiepratt/freediving-results/issues/73).
 
 Pending scored decisions sort from low to high Jev confidence with stable ties.
 Scoreless failures and gaps stay visible separately. All automatic approvals
@@ -134,7 +139,10 @@ remain searchable and reversible. Show alternatives, evidence, actor, versions,
 audit history and the downstream impact of a reversal. Scores across question
 types are not calibrated accuracy rankings.
 
-## Existing implementation and alternatives
+## Implementation at the decision date and alternatives
+
+The following describes the building blocks on 2 October 2026, before the
+private reconciliation and review implementation below shipped:
 
 - `jev_candidates.clj` builds source-bound candidate requests in code.
 - `evaluation_protocol.clj` and durable evaluation runs already provide compact
@@ -142,11 +150,31 @@ types are not calibrated accuracy rankings.
 - `spelling_normalization.clj` has reversible spelling selection with a fixed
   0.95 probability/confidence gate and 0.20 margin. These are existing thresholds,
   not evidence for general reconciliation accuracy.
-- `reviews.clj` records explicit proposals/decisions; the current general identity
+- `reviews.clj` records explicit proposals/decisions; the then-existing general identity
   path still requires reviewer authority. `revisions.clj` has an exclusive-endpoint
   contract that cannot silently become a general multi-source attempt graph.
-- The deployed owner evidence viewer reads immutable SQLite and exposes no review
-  writes. This ADR is accepted direction, not a claim that those writes now exist.
+- The then-deployed owner evidence viewer read immutable SQLite and exposed no
+  review writes. Accepting this ADR alone did not implement those writes.
+
+The supported private implementation now includes
+[`reconciliation_flow.clj`](../../src/freediving/reconciliation_flow.clj),
+[`reconciliation_jev.clj`](../../src/freediving/reconciliation_jev.clj) and
+[`reconciliation_application.clj`](../../src/freediving/reconciliation_application.clj):
+append-only deterministic decisions, bounded versioned Jev requests and cache
+reuse, approval gates, dependency invalidation and reversible canonical routing.
+[`owner_evidence_origin.py`](../../scripts/owner_evidence_origin.py) provides
+authenticated inspection, preview and review actions, with signed human-event
+delivery and separately acknowledged flow/canonical destinations. Normal local
+runs preserve those corrections and immutable proposal bindings across reruns
+and guarded presentation updates.
+
+The [retained #76 audit](../retained-corpus-reconciliation-audit-20261006.md) is
+historical and explicitly partial; later [#73 acceptance](https://github.com/jamiepratt/freediving-results/issues/73)
+verifies the supported private integration. The 6 October private readback has
+five accepted same-attempt links and unknown current canonical identity status.
+Historical identity totals are not current accepted global athletes; independent
+identity accuracy, complete corpus coverage and actual provider billing remain
+unknown. These limits do not change this ADR's accepted policy.
 
 Rejected defaults: an LLM preparing every query; Jev for deterministic cases;
 mandatory manual review before all approvals; blind approval from confidence
@@ -155,11 +183,12 @@ dives; treating automatic approval as human review or public publication.
 
 ## User-facing copy impact
 
-When implementation ships, update `resources/evidence_workspace.html` and `.js`
-and the owner review UI to show decision states, confidence sorting, automatic
-approval, evidence and rollback impact. Replace blanket read-only/always-unknown
-claims only as the relevant behavior ships. Public reviewed-coverage copy remains
-governed by publication policy. External CMS/email surfaces are unverified.
+The private owner UI now distinguishes automatic approval, human review,
+unresolved, superseded and reversed states, sorts scored pending decisions by
+confidence, and shows cited evidence, audit history and reversal impact. Current
+canonical readback keeps identity status unknown separately from verified
+same-attempt acceptance. Public reviewed-coverage copy remains governed by
+publication policy. External CMS/email surfaces are unverified.
 
 ## References
 
