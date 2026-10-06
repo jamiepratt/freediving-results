@@ -219,6 +219,40 @@ class HistoricalAidaStageTests(unittest.TestCase):
         self.assertIn('stage object', result.stderr)
         self.assertEqual(self.output.read_text(), '[]')
 
+    def test_cli_refuses_2023_without_creating_or_changing_private_stage(self):
+        older = self.source('2023-06-24', 'day_4')
+        rejected = self.run_stage(*older)
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertIn('2024 selected date', rejected.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.parent.exists())
+        current = self.source()
+        self.assertEqual(self.run_stage(*current).returncode, 0)
+        before = self.output.read_bytes()
+        before_stat = self.output.stat()
+        rejected = self.run_stage(*older)
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertEqual(self.output.read_bytes(), before)
+        self.assertEqual(self.output.stat().st_mtime_ns, before_stat.st_mtime_ns)
+
+    def test_python_refuses_2023_without_creating_or_changing_private_stage(self):
+        spec = importlib.util.spec_from_file_location('historical_aida_stage', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source, receipt, sha = self.source('2023-06-24', 'day_4')
+        with self.assertRaisesRegex(ValueError, '2024 selected date'):
+            module.stage(source, receipt, self.output, sha)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.parent.exists())
+        current = self.source()
+        module.stage(current[0], current[1], self.output, current[2])
+        before = self.output.read_bytes()
+        before_stat = self.output.stat()
+        with self.assertRaisesRegex(ValueError, '2024 selected date'):
+            module.stage(source, receipt, self.output, sha)
+        self.assertEqual(self.output.read_bytes(), before)
+        self.assertEqual(self.output.stat().st_mtime_ns, before_stat.st_mtime_ns)
+
 
 if __name__ == '__main__':
     unittest.main()

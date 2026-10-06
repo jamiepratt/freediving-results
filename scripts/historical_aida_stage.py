@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Stage bounded selected-date AIDA evidence privately, without import or approval."""
+"""Stage bounded 2024 selected-date AIDA evidence privately, without import or approval."""
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
@@ -26,6 +27,8 @@ def digest(value):
 
 def make_view(source, receipt, expected_source_sha256):
     packet = selected.build(source, receipt)
+    selected.require(date.fromisoformat(packet['source']['selected_date']).year == 2024,
+                     'bounded historical AIDA stage requires 2024 selected date')
     selected.require(packet['source']['sha256'] == expected_source_sha256,
                      'expected source sha256 mismatch')
     packet['parser_version'] = PARSER_VERSION
@@ -82,7 +85,7 @@ def read_stage(output):
 
 
 def stage(source, receipt, output, expected_source_sha256):
-    """Stage one checked view; serialize calls for a given output.
+    """Stage one checked 2024 view; serialize calls for a given output.
 
     Receipt/path bindings are immutable: reacquisition needs a separate stage.
     Returned versions are private evidence, never authority or database imports.
