@@ -24,6 +24,8 @@
             [freediving.reconciliation-policy-test]
             [freediving.reconciliation-transport-test]
             [freediving.reconciliation-flow-test]
+            [freediving.reconciliation-flow-proof-test]
+            [freediving.microplus-local-run-test]
             [freediving.reconciliation-application-test]
             [freediving.parser-routing-test]
             [freediving.parser-adapters-test]
@@ -32,7 +34,7 @@
             [freediving.parser-batch-import-test]))
 
 (defn -main [& _]
-  (let [result (t/run-tests 'freediving.archive-test 'freediving.aida-html-test 'freediving.html-evidence-test 'freediving.legacy-test 'freediving.extraction-test 'freediving.croatia-open-test 'freediving.athens-geometry-test 'freediving.depth-test 'freediving.depth-2026-test 'freediving.indoor-2026-test 'freediving.indoor-time-2026-test 'freediving.world-games-2025-test 'freediving.world-games-series-2025-test 'freediving.candidates-test 'freediving.athlete-identity-test 'freediving.packets-test 'freediving.source-pages-test 'freediving.source-relationships-test 'freediving.source-relationship-ledger-test 'freediving.source-relationships-jev-test 'freediving.reconciliation-jev-test 'freediving.reconciliation-policy-test 'freediving.reconciliation-transport-test 'freediving.reconciliation-flow-test 'freediving.reconciliation-application-test 'freediving.parser-routing-test 'freediving.parser-adapters-test 'freediving.retained-workbook-test 'freediving.parser-batch-test 'freediving.parser-batch-import-test)]
+  (let [result (t/run-tests 'freediving.archive-test 'freediving.aida-html-test 'freediving.html-evidence-test 'freediving.legacy-test 'freediving.extraction-test 'freediving.croatia-open-test 'freediving.athens-geometry-test 'freediving.depth-test 'freediving.depth-2026-test 'freediving.indoor-2026-test 'freediving.indoor-time-2026-test 'freediving.world-games-2025-test 'freediving.world-games-series-2025-test 'freediving.candidates-test 'freediving.athlete-identity-test 'freediving.packets-test 'freediving.source-pages-test 'freediving.source-relationships-test 'freediving.source-relationship-ledger-test 'freediving.source-relationships-jev-test 'freediving.reconciliation-jev-test 'freediving.reconciliation-policy-test 'freediving.reconciliation-transport-test 'freediving.reconciliation-flow-test 'freediving.reconciliation-flow-proof-test 'freediving.microplus-local-run-test 'freediving.reconciliation-application-test 'freediving.parser-routing-test 'freediving.parser-adapters-test 'freediving.retained-workbook-test 'freediving.parser-batch-test 'freediving.parser-batch-import-test)]
     (shutdown-agents)
     (when (pos? (+ (:fail result) (:error result)))
       (System/exit 1))))

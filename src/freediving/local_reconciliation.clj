@@ -7,7 +7,8 @@
             [freediving.reconciliation-flow :as flow]
             [freediving.reconciliation-jev :as jev]
             [freediving.reconciliation-policy :as policy])
-  (:import [java.nio.file Files Path]))
+  (:import [java.nio.file Files Path LinkOption]
+           [java.nio.file.attribute PosixFilePermissions]))
 
 (defn- remote-revision [ledger]
   (reduce max 0 (keep :remote-store-revision (:events ledger))))
@@ -33,7 +34,23 @@
                             (map (fn [[family members]] [(name family) (summary members)])
                                  (group-by :family decisions))))))
 
-(defn- sync-owner! [flow-path decisions config owner-options]
+(defn owner-sync-options!
+  "Read an owner-only EDN config and require the active snapshot and local flow."
+  [config-path flow-path snapshot-sha256]
+  (let [path (Path/of config-path (make-array String 0))]
+    (when-not (and (.isAbsolute path)
+                   (Files/isRegularFile path (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                   (= (PosixFilePermissions/fromString "rw-------")
+                      (Files/getPosixFilePermissions path (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))))
+      (throw (ex-info "Owner synchronization config must be an owner-only regular file" {})))
+    (let [options (edn/read-string (Files/readString path))]
+      (when-not (and (map? options)
+                     (= snapshot-sha256 (:active-snapshot-sha256 options))
+                     (or (nil? (:flow-path options)) (= flow-path (:flow-path options))))
+        (throw (ex-info "Owner synchronization snapshot differs from local run or flow" {})))
+      options)))
+
+(defn sync-owner! [flow-path decisions config owner-options]
   (let [opts (assoc owner-options :config config :policy policy/default-policy
                     :flow-path flow-path)]
     ;; The private ledger cursor advances only after both remote ACK responses.

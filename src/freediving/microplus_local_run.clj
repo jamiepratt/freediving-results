@@ -1,7 +1,9 @@
 (ns freediving.microplus-local-run
   "Persist verified two-view Microplus decisions without provider dispatch."
+  (:refer-clojure :exclude [run!])
   (:require [clojure.data.json :as json]
             [freediving.reconciliation-flow :as flow]
+            [freediving.local-reconciliation :as local]
             [freediving.reconciliation-policy :as policy]
             [freediving.source-relationships :as relationships]))
 
@@ -50,7 +52,7 @@
                         :template (versions :template-version)
                         :model (versions :model-version)}}))
 
-(defn- run-local! [{:keys [evidence decision_ids flow_path]}]
+(defn run! [{:keys [evidence decision_ids flow_path owner_sync_config snapshot_sha256]}]
   (let [attempt (relationships/empty-attempt-ledger (keywordize-evidence evidence))
         grouped (sort-by first (group-by :snapshot-record-id
                                          (get evidence :observation-versions)))
@@ -65,8 +67,13 @@
                         decision_ids grouped)
         _ (when-not (every? :evidence-adequate? decisions)
             (throw (ex-info "Microplus source-bound attempt evidence inadequate" {})))
+        config {:provider :jev :model "none" :version "microplus-local/1"}
+        owner-options (when owner_sync_config
+                        (local/owner-sync-options! owner_sync_config flow_path snapshot_sha256))
+        owner-revision (when owner-options
+                         (local/sync-owner! flow_path decisions config owner-options))
         ledger (flow/run! (flow/load-ledger! flow_path) decisions
-                          {:config {:provider :jev :model "none" :version "microplus-local/1"}
+                          {:config config
                            :policy policy/default-policy
                            :execute! (fn [_] (throw (ex-info "Provider call forbidden" {})))
                            :deterministic-results
@@ -87,6 +94,10 @@
             (throw (ex-info "Microplus deterministic flow event not approved" {})))]
     (flow/save-ledger! flow_path ledger)
     {:run_revision (count (:events ledger))
+     :proposal_run_revision (inc (last (keep-indexed (fn [index event]
+                                                       (when (not= :human (:origin event)) index))
+                                                     (:events ledger))))
+     :owner_store_revision_synchronized owner-revision
      :events (into {} (map (fn [[id event]] [id (:id event)]) current))
      :provider_calls 0}))
 
@@ -95,7 +106,7 @@
     (let [input (json/read-str (slurp *in*) :key-fn keyword)]
       (println (json/write-str (if (= "inspect" (:operation input))
                                  (inspect-local input)
-                                 (run-local! input)))))
+                                 (run! input)))))
     (catch Exception error
       (binding [*out* *err*] (println (.getMessage error)))
       (System/exit 1))))
