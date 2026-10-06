@@ -20,6 +20,50 @@ exact event; decisions without a verified route show projection unavailable.
 Local overlay counts do not attest that PostgreSQL has caught up. Automatic decisions shown here are never
 human review attestations or public publication approval.
 
+## Private attempt comparison
+
+The authenticated `api/attempt-inspector` caller reads an independently pinned
+retained packet and JVM runtime. Each request binds exact references and row
+coordinates to current sporting authority, packet digest and expiry. Missing,
+withdrawn or stale authority clears ranks. The current retained scope is 2026
+pool DNF source-labelled women; unsupported depth or discipline filters return
+no eligible projection. Source positions, retained versions and unknown distinct
+sporting attempts keep separate denominators.
+
+A row detail puts cited official event placing before National, Continental and
+International lists. Each list states its eligible-peer denominator, versioned
+common-score policy and exact ordered peer IDs. Sport, source category,
+representation and review/publication filters narrow the peer population before
+ranking. Listing provenance and sanction filters are independent; verified
+CMAS/AIDA international sanction remains the default. Represented country comes
+from the source row. Unmapped geography has no national or continental rank.
+AIDA's source age category remains unknown; the optional `age_class` filter
+requires cited verified equivalence and never derives age from gender. Para
+classes remain outside the supported broad women cohort.
+
+Exact peer links reuse this endpoint with `peer_anchor`, `geography`, `peer_token`
+and all selected filters. The digest binds current authority, sporting values,
+cutoff, comparison policy and exact membership. Reopening a changed or tampered
+link returns a stale peer view, no rows and zero visible ranks. Pagination retains
+the exact link scope; applying new filters exits the peer view. Refresh withdraws
+old rows while checking current evidence.
+
+Conflicting source claims can rank provisionally only with a cited exact source
+choice. Source authority has priority. Equal-authority administrative choice
+supports `exact-reference-lexical-v1`, ordering source hash, source-position ordinal and candidate ID,
+then job and artifact hash as administrative fallbacks; competing supplied references remain withheld. This
+ordering selects evidence and never breaks a sporting-value tie. Affected peer
+lists disclose provisional status and show the selection basis.
+
+Disqualified rows remain outside main ranks and denominators. A separate cited
+hypothetical requires exact source-supported achieved performance, precision and
+conversion. Its position is computed against eligible valid peers only, under
+the same category, sanction, listing and geography gates. It has no position when
+no eligible peers exist. It neither asserts a valid post-penalty result nor alters
+main ranks. The retained real rows receive no hypothetical without genuine exact
+current evidence. Public eligibility and the full first-peer acceptance remain
+tracked in [issue #194](https://github.com/jamiepratt/freediving-results/issues/194).
+
 Current human review filters include decisions awaiting canonical delivery;
 Human approved and Human corrected exclude approvals invalidated by stale evidence
 or inactive prerequisites. Canonical delivery pending remains a separate filter.

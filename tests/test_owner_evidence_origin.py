@@ -157,6 +157,23 @@ class PrivateOriginTest(unittest.TestCase):
         for query in ('federation=AIDA&federation=CMAS', 'unknown=1', 'limit=101', 'offset=-1'):
             self.assertEqual(self.request('/owner-evidence/api/attempt-inspector?' + query)[0], 400)
 
+    def test_exact_private_peer_link_preserves_scope_and_requires_gateway_authentication(self):
+        self.server.comparison_reader = lambda filters, current: {
+            'schema': 'private-attempt-inspector/v1', 'filters': filters, 'rows': []}
+        path = ('/owner-evidence/api/attempt-inspector?peer_anchor=synthetic&geography=national'
+                '&peer_token=' + 'a' * 64 + '&sanction_scope=broad&listing_filter=international'
+                '&federation=CMAS&environment=pool&discipline=DNF&year=2026&gender=women'
+                '&category=seniors&representation=POL&review=verified&publication=approved&limit=25&offset=0')
+        status, headers, body = self.request(path)
+        self.assertEqual(status, 200)
+        filters = json.loads(body)['filters']
+        self.assertEqual(filters['peer_anchor'], 'synthetic')
+        self.assertEqual(filters['sanction_scope'], 'broad')
+        self.assertEqual(filters['federation'], 'CMAS')
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.request(path, headers=[('Host', HOST)])[0], 403)
+        self.assertEqual(self.request(path + '&federation=AIDA')[0], 400)
+
     def test_private_inspector_accepts_bounded_full_version_page_without_raising_other_route_caps(self):
         padding = 'synthetic' * (3 * 1024 * 1024 // 9)
         self.server.comparison_reader = lambda filters, current: {

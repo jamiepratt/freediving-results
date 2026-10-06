@@ -106,7 +106,8 @@
           ranks (competition-ranks peers)
           peer-list (->> peers (sort-by (juxt (comp - :comparison-score) (comp str :id)))
                          (mapv :id))
-          descriptor (assoc base-descriptor :denominator (count peers) :peer-ids peer-list)
+          descriptor (assoc base-descriptor :denominator (count peers) :peer-ids peer-list
+                            :provisional (boolean (some :selected-source-conflict? peers)))
           broader-list (->> geography-matched (sort-by (juxt (comp - :comparison-score) (comp str :id)))
                             (mapv :id))
           broader-descriptor (assoc base-descriptor :sanction-scope :broad

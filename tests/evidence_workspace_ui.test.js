@@ -625,3 +625,22 @@ test('cited JPEG displays original image and bounded row citation', async () => 
   assert.equal(images.length, 1);
   assert.equal(images[0].src, '/api/source-view/' + id + '/image');
 });
+
+
+test('mapped private detail shows official placing before geographic lists and follows an exact fresh peer link', async () => {
+  const href='/api/attempt-inspector?peer_anchor=synthetic&geography=international&peer_token='+ 'a'.repeat(64)+'&federation=CMAS';
+  const {context,node,requests}=workspace({[href+'&limit=25&offset=0']:{peer_view:{status:'stale',reason:'Peer authority changed'},rows:[],pagination:{total:0,limit:25,offset:0}}});
+  context.result={rows:[{reference:{'candidate-id':'synthetic'},candidate:{raw:{},parsed:{}},official_placing:{value:7,citation:{synthetic:'placing'}},
+    common_score:{value:50,policy:'aida-baseline-v1'},comparison_lists:[{geography:'national',rank:1,denominator:2,provisional:true,href},
+      {geography:'continental',rank:1,denominator:3,href},{geography:'international',rank:1,denominator:4,href}],
+    hypothetical:{value:100,status:'disqualified'},hypothetical_lists:[{geography:'international',rank:2,denominator:4}]}]};
+  vm.runInContext('renderAttemptInspector(result);showInspectorRow(0)',context);
+  const detail=node('inspector-detail').visibleText;
+  assert.ok(detail.indexOf('Official event placing') < detail.indexOf('National'));
+  for(const value of ['National','Continental','International','1 / 2','1 / 3','1 / 4','provisional','aida-baseline-v1','DQ hypothetical'])assert.ok(detail.includes(value),value);
+  await vm.runInContext('loadAttemptInspector(result.rows[0].comparison_lists[2].href)',context);
+  assert.equal(requests[0].path,href+'&limit=25&offset=0');
+  assert.equal(node('inspector-detail').visibleText,'');
+  assert.match(node('inspector-summary').visibleText,/Peer authority changed/);
+  assert.equal(node('inspector-results').visibleText.includes('1 / 4'),false);
+});

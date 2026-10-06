@@ -4,6 +4,7 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [freediving.attempt-view-adapter :as adapter]
             [freediving.attempt-comparison :as attempts]
             [freediving.comparison-score :as scores]
@@ -23,7 +24,7 @@
           claim (first matches)]
       (when (and (seq (get-in row [:candidate :coordinates]))
                  (= 1 (count matches))
-                 (every? #(seq (get-in claim [:citations %])) citation-gates))
+                 (every? #(and (map? (get-in claim [:citations %])) (seq (get-in claim [:citations %]))) citation-gates))
         claim))))
 
 (defn- bind-row [row authority]
@@ -42,6 +43,7 @@
   (let [claim (:sporting-claim row)
         final (get-in row [:evidence :final])]
     {:id (get-in row [:reference :candidate-id]) :discipline :dynamic
+     :selected-source-conflict? (= :selected-provisional (get-in row [:evidence :source-conflict]))
      :review (if (= :ranked (:comparison-status row)) :verified :unknown)
      :attempt-relationship (get-in row [:evidence :attempt-relationship])
      :status (get-in row [:evidence :outcome])
@@ -58,12 +60,15 @@
   (let [parsed (get-in row [:candidate :parsed])
         ref (:reference row)]
     (cond-> (-> row
-                (dissoc :sporting-claim :rank)
+                (dissoc :sporting-claim :rank :hypothetical)
                 (assoc :source_id (:source-sha256 ref) :version_id (:artifact-sha256 ref)
                        :row_coordinate (get-in row [:candidate :coordinates])
                        :raw_fields (get-in row [:candidate :raw]) :parsed_fields parsed
                        :federation (get-in row [:source :federation]) :environment "pool"
-                       :discipline (:discipline parsed) :gender "women" :category "seniors"
+                       :discipline (:discipline parsed) :gender "women" :category (or (:category parsed) "unknown")
+                       :age_class (if (and (= :verified (get-in row [:sporting-claim :comparable-category :age-equivalence]))
+                                           (seq (get-in row [:sporting-claim :comparable-category :age-citation])))
+                                    (name (get-in row [:sporting-claim :comparable-category :age-class] :unknown)) "unknown")
                        :year (subs (:event-date parsed) 0 4) :representation (:representation parsed)
                        :finality (name (get-in row [:source :finality]))
                        :review (name (get-in row [:evidence :review]))
@@ -73,44 +78,150 @@
       (:rank peer) (assoc :rank (:rank peer) :rank_descriptor (:rank-descriptor peer)))))
 
 (def ^:private filter-keys
-  #{:federation :environment :discipline :year :gender :category :representation :review :publication})
+  #{:federation :environment :discipline :year :gender :category :age_class :representation :review :publication})
+
+(def ^:private peer-filter-keys #{:peer_anchor :geography :peer_token :sanction_scope :listing_filter})
+
+(defn- peer-request [filters geography country]
+  (cond-> {:geography geography
+           :sanction-scope (keyword (or (:sanction_scope filters) "default"))
+           :listing-filter (keyword (or (:listing_filter filters) "all"))}
+    (not= :international geography) (assoc :anchor-represented-country country)))
+
+(defn- row-matches? [row filters]
+  (every? (fn [[k v]] (or (nil? v) (= "" v) (= "all" v) (= (str v) (str (get row k)))))
+          (select-keys filters filter-keys)))
+
+(defn- peer-link [id descriptor token filters]
+  (str "/api/attempt-inspector?"
+       (str/join "&" (for [[k v] (concat [[:peer_anchor id] [:geography (name (:geography descriptor))]
+                                          [:peer_token token] [:sanction_scope (or (:sanction_scope filters) "default")]
+                                          [:listing_filter (or (:listing_filter filters) "all")]]
+                                         (sort-by key (select-keys filters filter-keys)))]
+                       (str (name k) "=" (java.net.URLEncoder/encode (str v) "UTF-8"))))))
 
 (defn inspect
   "Recompute every contract from retained rows and fresh exact authority, then filter.
-   Missing or withdrawn claims clear source semantics and every cached rank."
+   Peer links carry a digest of the current authority and exact ordered descriptor.
+   Missing, changed or withdrawn authority clears every cached rank and peer link."
   [packet filters authority]
   (when-not (= "private-retained-attempts/v1" (:schema packet))
     (throw (ex-info "Unsupported retained packet" {})))
-  (when (seq (remove (conj filter-keys :limit :offset) (keys filters)))
+  (when (seq (remove (into (conj filter-keys :limit :offset) peer-filter-keys) (keys filters)))
     (throw (ex-info "Unsupported comparison filter" {})))
+  (when (and (some #(contains? filters %) [:peer_anchor :geography :peer_token])
+             (not (and (string? (:peer_anchor filters)) (seq (:peer_anchor filters))
+                       (#{"national" "continental" "international"} (:geography filters))
+                       (re-matches #"[a-f0-9]{64}" (or (:peer_token filters) "")))))
+    (throw (ex-info "Incomplete exact peer link" {})))
   (let [bound (mapv #(bind-row % authority) (:observations packet))
         comparison (attempts/compare-attempts (:request packet) bound)
-        sporting (mapv sporting-row (:rows comparison))
+        scoped-rows (filterv #(row-matches? (displayed-row % nil) filters) (:rows comparison))
+        sporting (mapv sporting-row scoped-rows)
         score (scores/compare-verified sporting)
-        peer (peers/compare-peers {} sporting)
+        scored-by-id (into {} (map (juxt :id identity) (:rows score)))
+        peer (peers/compare-peers (peer-request filters :international nil) sporting)
         by-id (into {} (map (juxt :id identity) (:rows peer)))
-        rows (mapv #(displayed-row % (get by-id (get-in % [:reference :candidate-id]))) (:rows comparison))
-        selected (filterv (fn [row] (every? (fn [[k v]] (or (nil? v) (= "" v) (= "all" v)
-                                                            (= (str v) (str (get row k)))))
-                                            (select-keys filters filter-keys))) rows)
+        scopes (memoize (fn [geography country]
+                          (if (and (not= :international geography) (not (and (string? country) (seq country))))
+                            (assoc peer :rows [] :coverage {:provided (count sporting) :denominator 0}
+                                   :descriptor (assoc (:descriptor peer) :geography geography
+                                                      :anchor-represented-country nil :anchor-sports-continent nil
+                                                      :denominator 0 :peer-ids [] :provisional false))
+                            (peers/compare-peers (peer-request filters geography country) sporting))))
+        token-for (memoize (fn [descriptor] (sha256 (.getBytes (pr-str (walk/postwalk #(if (map? %) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b)))) %) %)
+                                                                                      [(:cutoff packet) authority descriptor sporting (select-keys filters filter-keys)])) "UTF-8"))))
+        list-for (fn [id country geography]
+                   (let [result (scopes geography (when-not (= :international geography) country))
+                         row (first (filter #(= id (:id %)) (:rows result)))
+                         descriptor (:descriptor result)
+                         token (token-for descriptor)]
+                     (cond-> (assoc descriptor :rank (:rank row) :status (:peer-status row)
+                                    :provisional (:provisional descriptor))
+                       (pos? (:denominator descriptor)) (assoc :href (peer-link id descriptor token filters)))))
+        rows (mapv (fn [row]
+                     (let [id (get-in row [:reference :candidate-id])
+                           scored (get scored-by-id id)
+                           claim (:sporting-claim row)
+                           placing (:official-placing claim)]
+                       (cond-> (assoc (displayed-row row (get by-id id))
+                                      :official_placing (when (and (seq (:citation placing))
+                                                                   (some? (:value placing))) placing)
+                                      :official_final (:official-final scored)
+                                      :source_category {:gender (get-in row [:candidate :parsed :gender])
+                                                        :category (get-in row [:candidate :parsed :category])
+                                                        :para_class (get-in claim [:comparable-category :para-class])}
+                                      :category_equivalence (:comparable-category claim)
+                                      :source_choice (:source-selection (:evidence row))
+                                      :common_score (when (:comparison-score scored)
+                                                      {:policy scores/policy :value (:comparison-score scored)})
+                                      :comparison_lists (mapv #(list-for id (:represented-country scored) %)
+                                                              [:national :continental :international]))
+                         (and (:hypothetical row) (= :approved (:publication claim)))
+                         (assoc :hypothetical (dissoc (:hypothetical row) :rank :eligible-peer-denominator)
+                                :hypothetical_lists
+                                (let [hrow (assoc scored :review :verified :status :finally-valid
+                                                  :official-final (-> (get-in row [:evidence :hypothetical :final])
+                                                                      (assoc :unit :m :basis :verified-publisher-post-penalty)))
+                                      hscore (get-in (scores/compare-verified [hrow]) [:rows 0 :comparison-score])]
+                                  (when hscore
+                                    (mapv (fn [geography]
+                                            (let [list (list-for id (:represented-country scored) geography)
+                                                  hypothetic-peers (when (or (= :international geography)
+                                                                             (seq (:represented-country scored)))
+                                                                     (peers/compare-peers
+                                                                      (peer-request filters geography (:represented-country scored))
+                                                                      (mapv #(if (= id (:id %)) hrow %) sporting)))
+                                                  eligible? (and (pos? (:denominator list))
+                                                                 (some #(and (= id (:id %)) (:rank %)) (:rows hypothetic-peers)))
+                                                  ids (:peer-ids list)]
+                                              (cond-> (assoc (dissoc list :rank :href) :hypothetical true
+                                                             :status (if eligible? :hypothetical :withheld)
+                                                             :value hscore :policy scores/policy)
+                                                eligible? (assoc :rank (inc (count (filter #(> (:comparison-score (get scored-by-id %)) hscore) ids)))
+                                                                 :href (:href list)))))
+                                          [:national :continental :international]))))
+                         (:discipline-rank scored) (assoc :discipline_rank (:discipline-rank scored)))))
+                   scoped-rows)
+        anchor (first (filter #(= (:peer_anchor filters) (get-in % [:reference :candidate-id])) rows))
+        selected-list (when anchor (first (filter #(= (:geography %) (keyword (:geography filters)))
+                                                  (:comparison_lists anchor))))
+        replay? (contains? filters :peer_anchor)
+        fresh? (and selected-list (:href selected-list)
+                    (= (:peer_token filters) (token-for (dissoc selected-list :rank :status :href))))
+        peer-ids (when fresh? (:peer-ids selected-list))
+        replay-ranks (when fresh? (into {} (map (juxt :id :rank)
+                                                (:rows (scopes (keyword (:geography filters))
+                                                               (when-not (= "international" (:geography filters))
+                                                                 (:representation anchor)))))))
+        selected (if replay?
+                   (if fresh? (mapv (fn [id] (assoc (first (filter #(= id (get-in % [:reference :candidate-id])) rows))
+                                                    :rank (get replay-ranks id)
+                                                    :rank_descriptor (dissoc selected-list :rank :status :href))) peer-ids) [])
+                   rows)
         limit (or (:limit filters) 50) offset (or (:offset filters) 0)]
     (when-not (and (integer? limit) (<= 1 limit 200) (integer? offset) (<= 0 offset 100000))
       (throw (ex-info "Invalid comparison page" {})))
     {:schema "private-attempt-inspector/v1" :ready true :cutoff (:cutoff packet)
      :authority {:status (name (or (:status authority) :absent))
                  :reason (or (:reason authority) "No current exact-row sporting authority")}
+     :peer_view (when replay? {:status (if fresh? :current :stale) :descriptor (when fresh? selected-list)
+                               :reason (when-not fresh? "Peer authority or exact membership changed; reload the comparison")})
      :counts {:source_positions (get-in packet [:census :source-positions])
               :retained_observation_versions (get-in packet [:census :versioned-selected-rows])
               :distinct_sporting_attempts nil
               :eligible_peer_cohorts (if (and (pos? (get-in peer [:coverage :denominator]))
                                               (= #{"CMAS" "AIDA"}
                                                  (set (map :federation (filter :rank rows))))) 1 0)}
-     :readiness (:census packet) :coverage (:coverage comparison)
-     :score_coverage (:coverage score) :peer_coverage (:coverage peer)
+     :readiness (:census packet) :coverage (assoc (:coverage comparison) :in-scope (count selected)
+                                                  :ranked (count (filter :rank selected))
+                                                  :withheld (count (remove :rank selected)))
+     :score_coverage (:coverage score) :peer_coverage (if replay? {:provided (count selected) :denominator (if fresh? (:denominator selected-list) 0)} (:coverage peer))
      :gaps ["Distinct sporting attempts unknown; retained versions are not dives"
+            "Supported private scope: 2026 pool DNF women; other depth, disciplines and categories have no eligible projection"
             "Final AIDA publication/revision and post-penalty semantics require genuine exact-row review"
             "Complete 103-row AIDA difference review and both federations eligible required for public peers"]
-     :filter_options (into {} (for [k filter-keys] [k (vec (sort (set (map k rows))))]))
+     :filter_options (into {} (for [k filter-keys] [k (vec (sort (set (map #(k (displayed-row % nil)) (:rows comparison)))))]))
      :pagination {:offset offset :limit limit :total (count selected)}
      :rows (vec (take limit (drop offset selected)))}))
 

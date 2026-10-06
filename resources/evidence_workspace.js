@@ -4,13 +4,14 @@ let offset = 0, total = 0, active = 'browse', queueOffset = 0, comparisonOffset 
 let routeOffset = 0;
 let issue172Offset = 0;
 const routeAuthorities = new Map();
-let inspectorOffset=0, inspectorRows=[], inspectorPageSize=25;
-const inspectorFilterNames=['federation','environment','discipline','year','gender','category','representation','review','publication'];
+let inspectorOffset=0, inspectorRows=[], inspectorPageSize=25, inspectorPeerPath=null;
+const inspectorFilterNames=['federation','environment','discipline','year','gender','category','age_class','representation','review','publication'];
 function inspectorValue(value){return value==null?'unknown':typeof value==='object'?JSON.stringify(value):String(value);}
 function renderAttemptInspector(result){
   const coverage=result.counts || result.coverage || {},readiness=result.readiness || {},paging=result.pagination || {};
   const summary=$('inspector-summary');summary.replaceChildren();
   summary.append(cell(`${coverage.source_positions ?? 'unknown'} source positions; ${coverage.retained_observation_versions ?? 'unknown'} retained observation versions. Distinct sporting attempts: ${coverage.distinct_sporting_attempts ?? 'unknown'}. ${result.coverage?.ranked ?? readiness.ranked_positions ?? 0} ranked positions. Cutoff: ${result.cutoff || 'unknown'}. Eligible peer cohorts: ${coverage.eligible_peer_cohorts ?? 'unknown'}. Current authority: ${inspectorValue(result.authority)}.`, 'p'));
+  if(result.peer_view){summary.append(cell(`Exact peer list: ${result.peer_view.status}. ${result.peer_view.reason || ''}`,'p'));}
   for(const gap of result.gaps || [])summary.append(cell(inspectorValue(gap),'p'));
   const options=result.filter_options || {};
   for(const name of inspectorFilterNames){
@@ -36,7 +37,25 @@ function renderAttemptInspector(result){
 }
 function showInspectorRow(index){
   const row=inspectorRows[index];if(!row)return;
-  const area=$('inspector-detail');area.replaceChildren(heading('Exact retained source row'));
+  const area=$('inspector-detail');area.replaceChildren(heading('Official event placing'));
+  entries(area,row.official_placing || {value:'unknown',reason:'No current cited official event placing'});
+  area.append(heading('National, Continental and International comparison'));
+  const lists=document.createElement('table');lists.append(makeRow(['Scope','Rank / eligible peers','Status','Exact peer list'],'th'));
+  for(const list of row.comparison_lists || []){
+    const label=({national:'National',continental:'Continental',international:'International'})[list.geography] || list.geography;
+    const tr=makeRow([label,`${list.rank ?? 'withheld'} / ${list.denominator ?? 0}`,`${list.status || 'unknown'}${list.provisional ? ' - provisional' : ''}`]);
+    const td=document.createElement('td');
+    if(list.href && /^\/api\/attempt-inspector\?peer_anchor=/.test(list.href)){
+      const link=cell('Open exact '+label+' peers','a');link.href=list.href;
+      link.addEventListener('click',event=>{event.preventDefault();inspectorOffset=0;run(()=>loadAttemptInspector(list.href),'inspector-summary');});td.append(link);
+    }else td.append(cell('No eligible peer link','span'));
+    tr.append(td);lists.append(tr);
+  }
+  area.append(lists,heading('Verified publisher final and common score'));
+  entries(area,{official_final:row.official_final,common_score:row.common_score,discipline_rank:row.discipline_rank,source_category:row.source_category,category_equivalence:row.category_equivalence});
+  if(row.source_choice){area.append(heading('Provisional source choice'),jsonBlock(row.source_choice));}
+  if(row.hypothetical){area.append(heading('DQ hypothetical positions'),cell('Disqualified; excluded from eligible peer denominators. Source-supported achieved performance only. Hypothetical positions do not alter main ranks.','p'),jsonBlock(row.hypothetical),jsonBlock(row.hypothetical_lists || []));}
+  area.append(heading('Exact retained source row'));
   entries(area,{reference:row.reference,source:row.source,coordinates:row.candidate?.coordinates,
     finality:row.finality,review:row.review,publication:row.publication,
     comparison_status:row['comparison-status'] || row.comparison_status,rank:row.rank ?? 'withheld',reasons:row.reasons,peer_status:row.peer_status,peer_reasons:row.peer_reasons});
@@ -65,11 +84,12 @@ async function showInspectorSource(rowId,area){
   entries(area,{source_sha256:info.source_sha256,derivative_sha256:info.derivative_sha256,citation:info.citation,reference:info.reference,original_replay:info.original_replay});
   area.append(heading('Cited source value'),jsonBlock(info.source_value),heading('Parsed fields'),jsonBlock(info.parsed_fields));
 }
-async function loadAttemptInspector(){
+async function loadAttemptInspector(peerHref){
+  if(peerHref)inspectorPeerPath=peerHref;
   // Withdraw visible rows before every refresh, including denied or failed requests.
   inspectorRows=[];$('inspector-results').replaceChildren();$('inspector-detail').replaceChildren();
   $('inspector-summary').textContent='Checking fresh current authority; ranks withheld while loading.';
-  const params=new URLSearchParams(new FormData($('inspector-filters')));for(const [key,value] of [...params])if(!value)params.delete(key);
+  const params=inspectorPeerPath ? new URLSearchParams(inspectorPeerPath.split('?')[1]) : new URLSearchParams(new FormData($('inspector-filters')));for(const [key,value] of [...params])if(!value)params.delete(key);
   if(!params.has('limit'))params.set('limit','25');params.set('offset',inspectorOffset);
   try{renderAttemptInspector(await fetchJson('/api/attempt-inspector?'+params));}
   catch(error){$('inspector-summary').textContent='Private comparison unavailable; current authority unverified and ranks withheld. '+error.message;throw error;}
@@ -543,7 +563,7 @@ document.addEventListener('DOMContentLoaded',()=>{run(loadRoatan,'roatan-detail'
 document.addEventListener('DOMContentLoaded',()=>{run(loadIssue172Queue,'issue172-summary');$('issue172-previous').addEventListener('click',()=>{issue172Offset=Math.max(0,issue172Offset-25);run(loadIssue172Queue,'issue172-summary');});$('issue172-next').addEventListener('click',()=>{issue172Offset+=25;run(loadIssue172Queue,'issue172-summary');});});
 document.addEventListener('DOMContentLoaded',()=>{
   const refresh=()=>{loadAttemptInspector().catch(()=>{});};refresh();
-  $('inspector-filters').addEventListener('submit',event=>{event.preventDefault();inspectorOffset=0;refresh();});
+  $('inspector-filters').addEventListener('submit',event=>{event.preventDefault();inspectorOffset=0;inspectorPeerPath=null;refresh();});
   $('inspector-refresh').addEventListener('click',refresh);
   $('inspector-previous').addEventListener('click',()=>{inspectorOffset=Math.max(0,inspectorOffset-inspectorPageSize);refresh();});
   $('inspector-next').addEventListener('click',()=>{inspectorOffset+=inspectorPageSize;refresh();});

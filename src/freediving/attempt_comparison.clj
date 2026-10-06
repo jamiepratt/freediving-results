@@ -23,8 +23,30 @@
            (.setScale (bigdec value) places java.math.RoundingMode/UNNECESSARY)
            true
            (catch ArithmeticException _ false)))))
+(defn- exact-reference? [ref]
+  (and (map? ref) (every? #(contains? ref %) [:job-id :ordinal :candidate-id :source-sha256 :artifact-sha256])
+       (every? #(and (string? %) (not (str/blank? %))) ((juxt :job-id :candidate-id) ref))
+       (nat-int? (:ordinal ref)) (sha? (:source-sha256 ref)) (sha? (:artifact-sha256 ref))))
+
+(defn- selected-conflict? [row]
+  (let [selection (get-in row [:evidence :source-selection])]
+    (and (= :selected-provisional (get-in row [:evidence :source-conflict]))
+         (= (:reference row) (:selected-reference selection))
+         (seq (:conflicting-references selection))
+         (every? #(and (exact-reference? %) (not= (:reference row) %)) (:conflicting-references selection))
+         (map? (:authority-citation selection)) (seq (:authority-citation selection))
+         (map? (:selection-citation selection)) (seq (:selection-citation selection))
+         (or (= :source-authority (:basis selection))
+             (and (= :administrative-tie-break (:basis selection))
+                  (= true (:equal-authority selection))
+                  (= :exact-reference-lexical-v1 (:tie-break-rule selection))
+                  (= (:reference row)
+                     (first (sort-by (juxt :source-sha256 :ordinal :candidate-id :job-id :artifact-sha256)
+                                     (cons (:reference row) (:conflicting-references selection))))))))))
+
 (defn- source-conflict? [row]
-  (or (= :unresolved (get-in row [:evidence :source-conflict]))
+  (or (not (or (= :resolved (get-in row [:evidence :source-conflict]))
+               (selected-conflict? row)))
       (and (= "CMAS" (get-in row [:source :federation]))
            (not= (get-in row [:candidate :parsed :final-distance]) (result-value row)))
       (and (= "AIDA" (get-in row [:source :federation]))
@@ -62,7 +84,7 @@
       (not= :verified-final (:finality source)) (conj :unverified-source-finality)
       (not= :eligible (:sanction source)) (conj :unverified-sanction)
       (not= :verified (:review evidence)) (conj :unverified-review)
-      (not= :finally-valid (:outcome evidence)) (conj :unverified-outcome)
+      (not (#{:finally-valid :finally-valid-penalized} (:outcome evidence))) (conj :unverified-outcome)
       (not= :distinct (:attempt-relationship evidence)) (conj :unresolved-attempt-relationship)
       (not (and (positive-decimal? (:value final)) (= "m" (:unit final))
                 (= :verified-post-penalty (:basis final)))) (conj :unverified-final-distance)
@@ -91,10 +113,13 @@
     (throw (ex-info "Expected exact 2026 women DNF pool comparison scope" {})))
   (let [observations (vec observations)
         duplicates (->> observations (group-by observation-key) (filter (fn [[_ xs]] (> (count xs) 1))) (map key) set)
+        unselected (set (mapcat #(get-in % [:evidence :source-selection :conflicting-references])
+                                (filter selected-conflict? observations)))
         classified (mapv (fn [input]
-                           (let [row (dissoc input :rank :comparison-status :reasons)
+                           (let [row (dissoc input :rank :comparison-status :reasons :hypothetical :provisional-rank?)
                                  why (cond-> (reasons request row)
-                                       (contains? duplicates (observation-key row)) (conj :duplicate-reference))]
+                                       (contains? duplicates (observation-key row)) (conj :duplicate-reference)
+                                       (contains? unselected (:reference row)) (conj :non-selected-source-claim))]
                              (assoc row :reasons why
                                     :comparison-status (cond
                                                          (some filters why) :excluded
@@ -110,13 +135,31 @@
                          (recur (rest rows) (inc index) value rank
                                 (conj out (assoc row :rank rank))))
                        out))
+        provisional? (boolean (some selected-conflict? ranked))
+        hypothetical (fn [row]
+                       (let [evidence (get-in row [:evidence :hypothetical])
+                             final (:final evidence)
+                             checked (assoc-in row [:evidence :final] (assoc final :basis :verified-post-penalty))
+                             why (remove #{:unverified-outcome :source-status-conflict :source-conflict}
+                                         (reasons request checked))]
+                         (when (and (= :verified-source-achieved (:basis final))
+                                    (= (:value final) (get-in row [:candidate :parsed (if (= "CMAS" (get-in row [:source :federation])) :realized-distance :performance)]))
+                                    (= :disqualified (get-in row [:evidence :outcome]))
+                                    (= :resolved (get-in row [:evidence :source-conflict]))
+                                    (map? (:citation evidence)) (seq (:citation evidence)) (empty? why)
+                                    (not (contains? duplicates (observation-key row)))
+                                    (not (contains? unselected (:reference row))))
+                           {:rank (inc (count (filter #(> (result-value %) (:value final)) ranked)))
+                            :eligible-peer-denominator (count ranked) :value (:value final) :unit (:unit final)
+                            :status :disqualified :basis :verified-source-achieved :citation (:citation evidence)})))
         others (sort-by (juxt (comp str :comparison-status) (comp :candidate-id :reference)
                               (comp :job-id :reference) (comp :ordinal :reference))
                         (remove #(= :ranked (:comparison-status %)) classified))]
-    {:scope request :rows (vec (concat with-ranks others))
+    {:scope request :rows (vec (concat (map #(assoc % :provisional-rank? provisional?) with-ranks)
+                                       (map (fn [row] (if-let [h (hypothetical row)] (assoc row :hypothetical h) row)) others)))
      :coverage {:provided (count observations)
                 :in-scope (count (remove #(= :excluded (:comparison-status %)) classified))
                 :ranked (count ranked)
                 :withheld (count (filter #(= :withheld (:comparison-status %)) classified))
                 :excluded (count (filter #(= :excluded (:comparison-status %)) classified))}
-     :provisional? (boolean (some #(= :withheld (:comparison-status %)) classified))}))
+     :provisional? (or provisional? (boolean (some #(= :withheld (:comparison-status %)) classified)))}))

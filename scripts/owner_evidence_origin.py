@@ -33,7 +33,8 @@ MAX_ACTION = 16 * 1024
 MAX_EVENT_ACK = 8 * 1024 * 1024
 MAX_ISSUE172_QUEUE = 32 * 1024 * 1024
 INSPECTOR_FILTERS = {'federation', 'environment', 'discipline', 'year', 'gender',
-                     'category', 'representation', 'review', 'publication', 'limit', 'offset'}
+                     'category', 'representation', 'review', 'publication', 'limit', 'offset',
+                     'age_class', 'peer_anchor', 'geography', 'peer_token', 'sanction_scope', 'listing_filter'}
 STATUS_PATH = '/owner-evidence/api/presentation-status'
 DECISION_ACK_PATH = '/owner-evidence/api/decision-events/ack'
 DECISION_PATH = re.compile(r'^/owner-evidence/api/decisions/([A-Za-z0-9_-]{1,128})$')
@@ -519,7 +520,7 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                     'application/json; charset=utf-8', max_response=max_response)
 
     def _inspector_filters(self, query):
-        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=11)
+        args = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=17)
         if set(args) - INSPECTOR_FILTERS or any(len(values) != 1 for values in args.values()):
             raise ValueError('invalid comparison filters')
         result = {key: values[0] for key, values in args.items() if values[0]}

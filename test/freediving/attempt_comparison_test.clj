@@ -93,6 +93,55 @@
     (is (= :withheld (:comparison-status output)))
     (is (not (contains? output :rank)))))
 
+(deftest cited-selected-source-conflict-is-disclosed-with-provisional-peer-ranks
+  (let [selected (-> (row "selected" "CMAS" 100M)
+                     (assoc-in [:evidence :source-conflict] :selected-provisional)
+                     (assoc-in [:evidence :source-selection]
+                               {:selected-reference (:reference (row "selected" "CMAS" 100M))
+                                :conflicting-references [(:reference (row "alternative" "AIDA" 90M))]
+                                :basis :source-authority :authority-citation {:synthetic "official authority"}
+                                :selection-citation {:synthetic "exact selected revision"}}))
+        result (comparison/compare-attempts request [selected (row "peer" "AIDA" 90M)])]
+    (is (= 2 (get-in result [:coverage :ranked])))
+    (is (every? :provisional-rank? (:rows result)))
+    (is (= :source-authority (get-in result [:rows 0 :evidence :source-selection :basis])))
+    (is (= 1 (get-in (comparison/compare-attempts request [(update-in selected [:evidence :source-selection] dissoc :authority-citation)])
+                     [:coverage :withheld])))))
+
+(deftest disqualified-hypothetical-never-enters-main-peer-denominator
+  (let [dq (-> (row "dq" "AIDA" 110M)
+               (assoc-in [:candidate :parsed :card] "RED")
+               (assoc-in [:evidence :outcome] :disqualified)
+               (assoc-in [:evidence :hypothetical]
+                         {:final {:value 110M :unit "m" :basis :verified-source-achieved
+                                  :decimal-places 0 :conversion :verified}
+                          :citation {:synthetic "explicit reviewed hypothetical"}}))
+        result (comparison/compare-attempts request [dq (row "valid" "CMAS" 100M)])
+        withheld (first (filter #(= "dq" (get-in % [:reference :candidate-id])) (:rows result)))]
+    (is (= 1 (get-in result [:coverage :ranked])))
+    (is (nil? (:rank withheld)))
+    (is (= {:rank 1 :eligible-peer-denominator 1 :value 110M :unit "m" :status :disqualified :basis :verified-source-achieved
+            :citation {:synthetic "explicit reviewed hypothetical"}} (:hypothetical withheld)))
+    (is (nil? (:hypothetical (first (:rows (comparison/compare-attempts request [(update dq :evidence dissoc :hypothetical)]))))))))
+
+(deftest equal-authority-administrative-choice-validates-the-supported-stable-rule
+  (let [selected (row "selected" "CMAS" 100M)
+        alternative (row "alternative" "AIDA" 90M)
+        choice (-> selected
+                   (assoc-in [:evidence :source-conflict] :selected-provisional)
+                   (assoc-in [:evidence :source-selection]
+                             {:selected-reference (:reference selected) :conflicting-references [(:reference alternative)]
+                              :basis :administrative-tie-break :equal-authority true
+                              :tie-break-rule :exact-reference-lexical-v1
+                              :authority-citation {:synthetic "equal authorities"}
+                              :selection-citation {:synthetic "stable selected source"}}))
+        good (comparison/compare-attempts request [choice alternative])
+        wrong-rule (comparison/compare-attempts request [(assoc-in choice [:evidence :source-selection :tie-break-rule] :invented)])]
+    (is (= 1 (get-in good [:coverage :ranked])))
+    (is (= 1 (get-in good [:coverage :withheld])))
+    (is (= :non-selected-source-claim (last (:reasons (last (:rows good))))))
+    (is (= 0 (get-in wrong-rule [:coverage :ranked])))))
+
 (defn -main [& _]
   (let [result (run-tests 'freediving.attempt-comparison-test)]
     (shutdown-agents)
