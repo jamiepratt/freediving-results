@@ -1,6 +1,8 @@
 """A release packages only clean committed source and reports immutable byte pins."""
 import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +13,31 @@ import sporting_proof_runtime
 
 
 class SportingProofRuntimeTests(unittest.TestCase):
+    def test_real_reader_cli_packages_without_pythonpath_or_import_artifacts(self):
+        source=Path(os.environ.get('SPORTING_PROOF_TEST_SOURCE',str(Path(__file__).resolve().parents[1])))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();repo=root/'repo';repo.mkdir()
+            shutil.copytree(source/'src',repo/'src')
+            shutil.copytree(source/'scripts',repo/'scripts',ignore=shutil.ignore_patterns('__pycache__'))
+            shutil.copyfile(source/'deps.edn',repo/'deps.edn')
+            for args in (('init','-q'),('config','user.name','Test'),('config','user.email','test@example.invalid'),
+                         ('add','.'),('commit','-qm','real proof module package fixture')):
+                subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
+            candidate=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+            output=root/'runtime'
+            env={k:v for k,v in os.environ.items() if k!='PYTHONPATH'}
+            env['PYTHONDONTWRITEBYTECODE']='1'
+            result=subprocess.run([sys.executable,'-I',str(Path(sporting_proof_runtime.__file__)),
+                '--repo',str(repo),'--candidate',candidate,'--output',str(output)],
+                cwd=root,env=env,text=True,capture_output=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            manifest=json.loads((output/'manifest.json').read_text())
+            self.assertEqual(len(manifest['files']),21)
+            self.assertIn('src/freediving/private_sporting_proofs.clj',manifest['files'])
+            self.assertIn('lib/jsoup-1.21.2.jar',manifest['files'])
+            self.assertEqual(subprocess.check_output(['git','-C',str(repo),'status','--porcelain']).strip(),b'')
+            self.assertEqual(list(repo.rglob('__pycache__')),[])
+
     def test_host_stage_verifies_hashes_and_is_idempotent_without_live_config_changes(self):
         import os
         with tempfile.TemporaryDirectory() as directory:

@@ -19,11 +19,14 @@ def prepare(repo, output, candidate):
     spec = importlib.util.spec_from_file_location('sporting_proof_reader', repo / 'scripts/private_sporting_proofs.py')
     reader = importlib.util.module_from_spec(spec)
     previous = sys.dont_write_bytecode
+    previous_path = list(sys.path)
     try:
         sys.dont_write_bytecode = True
+        sys.path.insert(0, str((repo / 'scripts').resolve()))
         spec.loader.exec_module(reader)
     finally:
         sys.dont_write_bytecode = previous
+        sys.path[:] = previous_path
     return build_runtime(repo, output, candidate, reader, git)
 
 
