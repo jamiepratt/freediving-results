@@ -113,7 +113,8 @@
   (let [target (verified-target c (:reference d))
         html-values (when (= 4 (:schema-version (:artifact target)))
                       (source-scope/html-values! (:artifact target) (:ordinal (:reference d))))
-        pdf-view? (= :cmas-pdf-results-view/v1 (:scope-contract d))]
+        pdf-view? (= :cmas-pdf-results-view/v1 (:scope-contract d))
+        pdf-contract (when pdf-view? (source-scope/pdf-results-contract (:ordinal (:reference d))))]
     (when-not (= (:reference d) (:reference target)) (fail! "Descriptor provenance mismatch"))
     (when-not (and (= (if (:scope-contract d) #{:reference :scope :scope-contract} #{:reference :scope}) (set (keys d)))
                    (or (not (contains? d :scope-contract))
@@ -130,15 +131,16 @@
                      (= (:job-id (:reference d)) source-scope/pdf-results-job-id)
                      (= (:source-sha256 (:reference d)) source-scope/pdf-results-source-sha256)
                      (empty? (:scope d))
-                     (some #{(:ordinal (:reference d))} source-scope/pdf-results-ordinals))
+                     pdf-contract)
         (fail! "Unsupported PDF results-view descriptor"))
-      (source-scope/pdf-results-view! (:artifact target)))
+      (source-scope/pdf-results-view! (:artifact target) (:ordinal (:reference d))))
     (into (if pdf-view?
             {:scope-contract :cmas-pdf-results-view/v1
              :source-sha256 source-scope/pdf-results-source-sha256
              :artifact-sha256 source-scope/pdf-results-artifact-sha256
-             :page 10 :date "2026-06-12" :discipline "DYN-BF" :category "JUNIORS \u2014 MEN"
-             :row-position (str "10:" (get-in (:artifact target) [:candidates (:ordinal (:reference d)) :coordinates :line]) ":" (:ordinal (:reference d)))
+             :page (:page pdf-contract) :date (:date pdf-contract)
+             :discipline (:discipline pdf-contract) :category (:category pdf-contract)
+             :row-position (str (:page pdf-contract) ":" (get-in (:artifact target) [:candidates (:ordinal (:reference d)) :coordinates :line]) ":" (:ordinal (:reference d)))
              :source-name (get-in (:artifact target) [:candidates (:ordinal (:reference d)) :raw :fields :source-name])}
             (if (:scope-contract d) {:scope-contract (:scope-contract d)} {}))
           (for [[k b] (:scope d)]

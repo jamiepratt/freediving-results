@@ -11,7 +11,8 @@
             [freediving.public-results :as public]
             [freediving.public-results-test :as public-fixture]
             [freediving.public-server-test :as http]
-            [freediving.event-selections :as selections]))
+            [freediving.event-selections :as selections]
+            [freediving.source-scope :as source-scope]))
 (def reviewer (System/getenv "FREEDIVING_TEST_REVIEW_URL"))
 (def reader-url (System/getenv "FREEDIVING_TEST_PUBLIC_URL"))
 (use-fixtures :each
@@ -429,3 +430,109 @@
                                         :selection-id "pdf-first" :base (selections/snapshot reviewer)})
         (is (= before (set (map :result-id (public/results reader-url)))))
         (is (= 3 (count (selections/history reviewer (:event-scope first-request)))))))))
+
+(defn synthetic-pdf-descriptors! [artifact]
+  ;; Synthetic bytes get an isolated exact artifact pin; no real athlete evidence.
+  (let [bytes (.getBytes (pr-str artifact) "UTF-8")
+        digest (.formatHex (java.util.HexFormat/of)
+                           (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+        ordinals (vec (range 56 91))]
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin)
+                e (.prepareStatement c "INSERT INTO freediving.extractions(job_id,artifact_sha256,source_sha256,parser_version,schema_version,artifact_bytes) VALUES (?,?,?,?,?,?)")]
+      (doseq [[i value] (map-indexed vector [(:job-id artifact) digest (:source-sha256 artifact)
+                                             (:parser-version artifact) (:schema-version artifact) bytes])]
+        (.setObject e (inc i) value))
+      (.executeUpdate e)
+      (with-open [o (.prepareStatement c "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) VALUES (?,?,?,?,?,?)")]
+        (doseq [ordinal ordinals
+                :let [candidate (get (:candidates artifact) ordinal)
+                      position (mapv #(select-keys % [:page :line]) (:source-lines candidate))]]
+          (doseq [[i value] (map-indexed vector [(:job-id artifact) ordinal
+                                                 (fixture/hash-value [(:source-sha256 artifact) position])
+                                                 "result-row" "parsed-or-explicit-result-fields" (pr-str candidate)])]
+            (.setObject o (inc i) value))
+          (.executeUpdate o))))
+    {:digest digest
+     :members (mapv (fn [ordinal]
+                      {:reference (revisions/reference fixture/app {:job-id (:job-id artifact) :ordinal ordinal})
+                       :scope-contract :cmas-pdf-results-view/v1 :scope {}}) ordinals)}))
+(defn dnf-pdf-request [id members selected]
+  (assoc (request id members selected)
+         :event-scope {:scope-contract :cmas-pdf-results-view/v1
+                       :source-sha256 source-scope/pdf-results-source-sha256
+                       :artifact-sha256 source-scope/pdf-results-artifact-sha256
+                       :page 5 :date "2026-06-11" :discipline "DNF" :category "SENIORS \u2014 WOMEN"}
+         :coverage {:completeness :partial :gaps [selections/pdf-view-gap]}))
+(deftest dnf-pdf-empty-selection-keeps-complete-inventory-and-explicit-public-gap
+  (let [{:keys [members digest]} (synthetic-pdf-descriptors! (revision-fixture/synthetic-dnf-pdf))]
+    (with-redefs [source-scope/pdf-results-artifact-sha256 digest]
+      (let [r (dnf-pdf-request "synthetic-dnf-empty" members [])]
+        (selections/select! reviewer r)
+        (is (= 35 (count (:members (first (selections/history reviewer (:event-scope r)))))))
+        (is (empty? (public/results reader-url)))
+        (is (= [selections/pdf-view-gap] (get-in (public/coverage reader-url) [:events 0 :gaps])))
+        (is (thrown-with-msg? Exception #"census"
+                              (selections/select! reviewer (dnf-pdf-request "synthetic-dnf-omitted" (pop members) []))))))))
+
+(deftest dnf-pdf-selection-requires-current-validation-and-preserves-other-public-scope
+  (let [baseline (sample "synthetic-baseline/1" revision-fixture/scope)
+        _ (validate! baseline "synthetic-baseline-validation")
+        _ (public/refresh! reviewer)
+        baseline-id (:result-id (first (public/results reader-url)))
+        {:keys [members digest]} (synthetic-pdf-descriptors! (revision-fixture/synthetic-dnf-pdf))]
+    (with-redefs [source-scope/pdf-results-artifact-sha256 digest]
+      (let [initial (assoc (dnf-pdf-request "synthetic-dnf-initial" members [])
+                           :retained [{:descriptor baseline :validation-id "synthetic-baseline-validation"}])
+            row (first members)
+            target (select-keys (:reference row) [:job-id :ordinal])]
+        (selections/select! reviewer initial)
+        (is (= [baseline-id] (mapv :result-id (public/results reader-url))))
+        (is (thrown-with-msg? Exception #"current extraction validation"
+                              (selections/select! reviewer (dnf-pdf-request "synthetic-dnf-unvalidated" members [(selected row "missing")]))))
+        (let [diagnosis (publication/diagnose reviewer target)]
+          (publication/decide! reviewer
+                               (merge target {:id "synthetic-dnf-validation" :action :validate
+                                              :base-revision (:revision diagnosis) :review-revision (:review-revision diagnosis)
+                                              :policy-version publication/current-policy :observation (:observation diagnosis)
+                                              :evidence [{:page 5 :line 9}] :actor "SYNTHETIC"
+                                              :attestations {:source-visual-accuracy true :no-unresolved-substantive-errors true}
+                                              :reason "Synthetic validation only"})))
+        (selections/select! reviewer (dnf-pdf-request "synthetic-dnf-selected" members [(selected row "synthetic-dnf-validation")]))
+        (is (= 2 (count (public/results reader-url))))
+        (is (some #{baseline-id} (map :result-id (public/results reader-url))))
+        (let [diagnosis (publication/diagnose reviewer target)]
+          (publication/decide! reviewer
+                               (merge target {:id "synthetic-dnf-revoke" :action :revoke
+                                              :base-revision (:revision diagnosis) :review-revision (:review-revision diagnosis)
+                                              :policy-version publication/current-policy :observation (:observation diagnosis)
+                                              :evidence [{:page 5 :line 9}] :attestations {} :actor "SYNTHETIC" :reason "Synthetic revocation only"})))
+        (public/refresh! reviewer)
+        (is (= [baseline-id] (mapv :result-id (public/results reader-url))))
+        (is (empty? (:events (public/coverage reader-url))))
+        (is (thrown-with-msg? Exception #"current extraction validation"
+                              (selections/rollback! reviewer {:id "synthetic-stale-rollback" :actor "SYNTHETIC"
+                                                              :reason "Synthetic refused rollback" :selection-id "synthetic-dnf-selected"
+                                                              :base (selections/snapshot reviewer)})))))))
+(deftest dnf-pdf-selection-rejects-wrong-envelope-scope-and-mixed-table
+  (let [{:keys [members digest]} (synthetic-pdf-descriptors! (revision-fixture/synthetic-dnf-pdf))]
+    (with-redefs [source-scope/pdf-results-artifact-sha256 digest]
+      (doseq [[field value] [[:page 10] [:date "2026-06-12"] [:discipline "DYN-BF"]
+                             [:category "SENIORS \u2014 MEN"] [:source-sha256 "wrong-source"]
+                             [:artifact-sha256 "wrong-artifact"]]]
+        (is (thrown? Exception (selections/select! reviewer
+                                                   (assoc-in (dnf-pdf-request (name field) members []) [:event-scope field] value)))))
+      (doseq [[field value] [[:source-sha256 "wrong-source"] [:artifact-sha256 "wrong-artifact"]
+                             [:job-id "wrong-job"] [:ordinal 126] [:candidate-id "wrong-candidate"]]]
+        (is (thrown? Exception (selections/select! reviewer
+                                                   (dnf-pdf-request (str "reference-" (name field))
+                                                                    (assoc-in members [0 :reference field] value) [])))))
+      (is (thrown? Exception (selections/select! reviewer (dnf-pdf-request "duplicated" (assoc members 1 (first members)) []))))
+      (is (thrown? Exception (selections/select! reviewer (assoc (dnf-pdf-request "complete" members []) :coverage {:completeness :complete :gaps []}))))
+      (is (thrown? Exception (selections/select! reviewer (assoc (dnf-pdf-request "gap-omitted" members []) :coverage {:completeness :partial :gaps ["Other gap"]}))))
+      (is (empty? (selections/history reviewer (:event-scope (dnf-pdf-request "none" members [])))))
+      ;; Isolated admin corruption probe only; immutable triggers remain active in production.
+      (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER USER")
+      (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_bytes=artifact_bytes || decode('20','hex')")
+      (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions ENABLE TRIGGER USER")
+      (is (thrown-with-msg? Exception #"provenance integrity"
+                            (selections/select! reviewer (dnf-pdf-request "tampered" members [])))))))

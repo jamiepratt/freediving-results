@@ -114,42 +114,58 @@
 (def pdf-results-ordinals [126 127 128 129])
 (def pdf-results-lines [9 10 11 12])
 (def pdf-results-names ["Ediz DUMAN" "Yusuf ERKAN" "Timur KURU" "Walter STRUMBICHLER"])
+(defn pdf-results-contract
+  "Supported exact table containing ordinal, without granting row authority."
+  [ordinal]
+  (cond
+    (some #{ordinal} pdf-results-ordinals)
+    {:ordinals pdf-results-ordinals :lines pdf-results-lines :names pdf-results-names
+     :page 10 :discipline "DYN-BF" :category "JUNIORS \u2014 MEN" :date "2026-06-12"}
+    (and (integer? ordinal) (<= 56 ordinal 90))
+    {:ordinals (vec (range 56 91)) :lines (vec (range 9 44))
+     :page 5 :discipline "DNF" :category "SENIORS \u2014 WOMEN" :date "2026-06-11"}))
 (defn pdf-results-view!
   "Exact retained CMAS PDF table census. Positions identify published claims only."
-  [artifact]
-  (let [page (get (:pages artifact) 9)
-        candidates (:candidates artifact)
-        table (mapv #(get candidates %) pdf-results-ordinals)
-        page-lines (into {} (map (juxt :line :text) (:lines page)))
-        scoped (keep-indexed (fn [i c]
-                               (when (and (= "DYN-BF" (get-in c [:parsed :discipline]))
-                                          (= "JUNIORS \u2014 MEN" (get-in c [:parsed :category]))
-                                          (= "2026-06-12" (get-in c [:parsed :event-date]))) i)) candidates)]
-    (when-not (and (= pdf-results-source-sha256 (:source-sha256 artifact))
-                   (= pdf-results-job-id (:job-id artifact))
-                   (= "cmas-2026-indoor-time/2" (:parser-version artifact))
-                   (= 2 (:schema-version artifact))
-                   (= 32 (count (:pages artifact)))
-                   (= 10 (:page page))
-                   (= (str/join "\n" (map :text (:lines page))) (:text page))
-                   (= [126 127 128 129] (vec scoped))
-                   (= 4 (count table))
-                   (every? true?
-                           (map-indexed
-                            (fn [i c]
-                              (let [line (get page-lines (nth pdf-results-lines i))]
-                                (and (= :parsed (:parse-status c))
-                                     (= {:page 10 :line (nth pdf-results-lines i)}
-                                        (select-keys (:coordinates c) [:page :line]))
-                                     (= [{:page 10 :line (nth pdf-results-lines i) :text line}] (:source-lines c))
-                                     (= line (get-in c [:raw :line]))
-                                     (= (nth pdf-results-names i) (get-in c [:raw :fields :source-name]))
-                                     (= (nth pdf-results-names i) (get-in c [:parsed :source-name]))
-                                     (= "CMAS" (get-in c [:parsed :federation]))
-                                     (= "DYN-BF" (get-in c [:parsed :discipline]))
-                                     (= "JUNIORS \u2014 MEN" (get-in c [:parsed :category]))
-                                     (= "2026-06-12" (get-in c [:parsed :event-date]))))) table)))
-      (throw (ex-info "Unsupported or incomplete PDF results-view census" {})))
-    {:ordinals pdf-results-ordinals :page 10 :source-sha256 pdf-results-source-sha256
-     :artifact-sha256 pdf-results-artifact-sha256 :discipline "DYN-BF"
-     :category "JUNIORS \u2014 MEN" :date "2026-06-12"}))
+  ([artifact] (pdf-results-view! artifact (first pdf-results-ordinals)))
+  ([artifact ordinal]
+   (let [{:keys [page ordinals lines names discipline category date] :as contract}
+         (pdf-results-contract ordinal)
+         source-page (when page (get (:pages artifact) (dec page)))
+         candidates (:candidates artifact)
+         table (mapv #(get candidates %) ordinals)
+         page-lines (into {} (map (juxt :line :text) (:lines source-page)))
+         scoped (keep-indexed (fn [i c]
+                                (when (= [discipline category date]
+                                         ((juxt :discipline :category :event-date) (:parsed c))) i)) candidates)]
+     (when-not (and contract
+                    (= pdf-results-source-sha256 (:source-sha256 artifact))
+                    (= pdf-results-job-id (:job-id artifact))
+                    (= "cmas-2026-indoor-time/2" (:parser-version artifact))
+                    (= 2 (:schema-version artifact))
+                    (= 32 (count (:pages artifact)))
+                    (= page (:page source-page))
+                    (= (str/join "\n" (map :text (:lines source-page))) (:text source-page))
+                    (= (count page-lines) (count (:lines source-page)))
+                    (= ordinals (vec scoped))
+                    (= (count ordinals) (count table))
+                    (= (count table) (count (set (map #(get-in % [:parsed :source-name]) table))))
+                    (every? true?
+                            (map-indexed
+                             (fn [i c]
+                               (let [line (get page-lines (nth lines i))
+                                     name (get-in c [:parsed :source-name])]
+                                 (and (string? line) (not (str/blank? line))
+                                      (string? name) (not (str/blank? name))
+                                      (= :parsed (:parse-status c))
+                                      (= {:page page :line (nth lines i)}
+                                         (select-keys (:coordinates c) [:page :line]))
+                                      (= [{:page page :line (nth lines i) :text line}] (:source-lines c))
+                                      (= line (get-in c [:raw :line]))
+                                      (= name (get-in c [:raw :fields :source-name]))
+                                      (or (nil? names) (= (nth names i) name))
+                                      (= "CMAS" (get-in c [:parsed :federation]))
+                                      (= [discipline category date]
+                                         ((juxt :discipline :category :event-date) (:parsed c)))))) table)))
+       (throw (ex-info "Unsupported or incomplete PDF results-view census" {})))
+     (assoc (dissoc contract :lines :names)
+            :source-sha256 pdf-results-source-sha256 :artifact-sha256 pdf-results-artifact-sha256))))

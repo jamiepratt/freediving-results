@@ -32,6 +32,60 @@
                                                         ["Ediz DUMAN" "Yusuf ERKAN" "Timur KURU" "Walter STRUMBICHLER"])))}]
     (is (= [126 127 128 129] (:ordinals (source-scope/pdf-results-view! artifact))))
     (is (thrown? Exception (source-scope/pdf-results-view! (update artifact :candidates pop))))))
+(defn synthetic-dnf-pdf []
+  (let [names (mapv #(str "Synthetic diver " %) (range 35))
+        lines (mapv (fn [i name] {:page 5 :line (+ 9 i) :text name}) (range 35) names)]
+    {:source-sha256 source-scope/pdf-results-source-sha256
+     :job-id source-scope/pdf-results-job-id :schema-version 2
+     :parser-version "cmas-2026-indoor-time/2"
+     :acquisitions [{:manifest {:final-url "https://example.org/synthetic-cmas.pdf"
+                                :publisher "Synthetic publisher"
+                                :sha256 source-scope/pdf-results-source-sha256}}]
+     :pages (assoc (vec (repeat 32 {:text ""})) 4
+                   {:page 5 :text (str/join "\n" names) :lines lines})
+     :candidates (vec (concat (repeat 56 {:coordinates {:page 1 :line 1}})
+                              (map-indexed (fn [i name]
+                                             {:coordinates {:page 5 :line (+ 9 i)}
+                                              :source-lines [(nth lines i)] :parse-status :parsed
+                                              :parsed {:federation "CMAS" :event-date "2026-06-11"
+                                                       :discipline "DNF" :category "SENIORS \u2014 WOMEN"
+                                                       :source-name name :final-distance 100 :unit "m"}
+                                              :raw {:line name :fields {:source-name name}}}) names)))}))
+(deftest exact-dnf-women-pdf-view-inventories-all-35-printed-positions
+  (let [artifact (synthetic-dnf-pdf)
+        view (source-scope/pdf-results-view! artifact 56)]
+    (is (= (vec (range 56 91)) (:ordinals view)))
+    (is (= {:page 5 :date "2026-06-11" :discipline "DNF" :category "SENIORS \u2014 WOMEN"}
+           (select-keys view [:page :date :discipline :category])))))
+(deftest dnf-pdf-census-rejects-altered-source-layout-and-scope
+  (let [artifact (synthetic-dnf-pdf)
+        failures {:source (assoc artifact :source-sha256 "wrong-source")
+                  :job (assoc artifact :job-id "wrong-job")
+                  :parser (assoc artifact :parser-version "cmas-2026-indoor-time/1")
+                  :schema (assoc artifact :schema-version 3)
+                  :pages (update artifact :pages pop)
+                  :page (assoc-in artifact [:pages 4 :page] 6)
+                  :page-text (assoc-in artifact [:pages 4 :text] "changed")
+                  :missing-row (update artifact :candidates pop)
+                  :extra-row (update artifact :candidates conj (get-in artifact [:candidates 56]))
+                  :coordinate-page (assoc-in artifact [:candidates 90 :coordinates :page] 6)
+                  :coordinate-line (assoc-in artifact [:candidates 90 :coordinates :line] 42)
+                  :source-line (assoc-in artifact [:candidates 90 :source-lines 0 :line] 42)
+                  :raw-line (assoc-in artifact [:candidates 90 :raw :line] "changed")
+                  :raw-name (assoc-in artifact [:candidates 90 :raw :fields :source-name] "changed")
+                  :empty-name (-> artifact (assoc-in [:candidates 90 :raw :fields :source-name] "")
+                                  (assoc-in [:candidates 90 :parsed :source-name] ""))
+                  :unparsed (assoc-in artifact [:candidates 90 :parse-status] :unparsed)
+                  :federation (assoc-in artifact [:candidates 90 :parsed :federation] "AIDA")
+                  :discipline (assoc-in artifact [:candidates 90 :parsed :discipline] "DYN-BF")
+                  :category (assoc-in artifact [:candidates 90 :parsed :category] "SENIORS \u2014 MEN")
+                  :date (assoc-in artifact [:candidates 90 :parsed :event-date] "2026-06-12")}]
+    (doseq [[reason altered] failures]
+      (is (thrown? Exception (source-scope/pdf-results-view! altered 56)) (name reason)))
+    (is (thrown? Exception (source-scope/pdf-results-view! artifact 55)))
+    (is (thrown? Exception (source-scope/pdf-results-view! artifact 91)))
+    (is (= (:ordinals (source-scope/pdf-results-view! artifact 56))
+           (:ordinals (source-scope/pdf-results-view! artifact 90))))))
 (use-fixtures :each (fn [f]
                       (when-not fixture/admin (throw (ex-info "Isolated PostgreSQL required" {})))
                       (fixture/sql! fixture/admin "DROP SCHEMA IF EXISTS freediving CASCADE")

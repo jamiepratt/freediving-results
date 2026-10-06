@@ -140,17 +140,18 @@
                          (some #{daily-view-gap} (get-in r [:coverage :gaps])))))
       (fail! "Daily view requires partial coverage and the explicit missing-scope gap"))
     (when (= :cmas-pdf-results-view/v1 (:scope-contract scope))
-      (when-not (and (= :partial (get-in r [:coverage :completeness]))
-                     (some #{pdf-view-gap} (get-in r [:coverage :gaps]))
-                     (= (set source-scope/pdf-results-ordinals)
-                        (set (map (comp :ordinal :reference) members)))
-                     (= #{source-scope/pdf-results-job-id}
-                        (set (map (comp :job-id :reference) members)))
-                     (= (count members) (count source-scope/pdf-results-ordinals))
-                     (= (set (map :row-position values))
-                        (set (map (fn [line ordinal] (str "10:" line ":" ordinal))
-                                  source-scope/pdf-results-lines source-scope/pdf-results-ordinals))))
-        (fail! "Exact PDF results-view census and partial gap required")))
+      (let [{:keys [ordinals lines page] :as contract}
+            (source-scope/pdf-results-contract (get-in (first members) [:reference :ordinal]))]
+        (when-not (and contract
+                       (= :partial (get-in r [:coverage :completeness]))
+                       (some #{pdf-view-gap} (get-in r [:coverage :gaps]))
+                       (= (set ordinals) (set (map (comp :ordinal :reference) members)))
+                       (= #{source-scope/pdf-results-job-id}
+                          (set (map (comp :job-id :reference) members)))
+                       (= (count members) (count ordinals))
+                       (= (set (map :row-position values))
+                          (set (map (fn [line ordinal] (str page ":" line ":" ordinal)) lines ordinals))))
+          (fail! "Exact PDF results-view census and partial gap required"))))
     (when-not (and (#{:partial :complete} (get-in r [:coverage :completeness]))
                    (= #{:completeness :gaps} (set (keys (:coverage r))))
                    (vector? (get-in r [:coverage :gaps]))
