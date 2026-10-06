@@ -252,3 +252,44 @@ and current publication diagnostics on
 Keep all 67 guarded PostgreSQL tables and all 86 existing public responses identical
 to the pre-activation manifest. Health and inspection are reads only; do not submit
 accept/revoke, sporting Approve/Reverse or relationship decisions during activation.
+
+
+## Independently cited sporting meanings
+
+The owner sporting proof view reads a separately pinned private
+`OWNER_EVIDENCE_SPORTING_RULES_CONFIG`. Its catalog binds immutable rule bytes,
+issuer, edition, effective dates, section/page and named claim to each exact
+source/artifact/parser/reference, coordinates, view, event date, scope and scoring
+policy. Missing or changed pins withhold concrete interpretations. Current
+signed authority rechecks these inputs; old publication, detail and peer links
+cannot retain ranks after rule withdrawal. The catalog grants no human review,
+distinctness, publisher finality or public selection.
+
+The bounded June 2026 DNF evidence uses the issuer-linked
+[AIDA / World Apnea edition 17.8](https://drive.google.com/file/d/100SY8IWiAsTeYyljLLZO5YdvCVHB6Sih/view),
+SHA-256 `6dd75bf0b74a4f7434e2b7660780728c11dc8de6800892f1be94e50b81c5f4f8`.
+Section 2.5.2 states applicability from 25 May 2026. AP is announced performance;
+RP is achieved performance, subject to the discipline's measurement rules.
+Dynamic scoring is 0.5 point per metre with the prescribed rounding and penalty
+rules. RED denotes disqualification and zero points. Positive printed RP beside
+zero Points therefore remains achieved source evidence, never a valid final
+ranking distance. Immediate cards can change; the rulebook's review process does
+not establish that the retained result page is a later final publication.
+
+The private catalog accounts for 103 AIDA positions / 206 versions and 35 CMAS
+positions / 70 versions. Distinct attempts remain unknown. It preserves raw AP,
+RP, Points, card, final, rank, penalty and status text. Missing penalties remain
+unknown. The two AIDA extractions share one source hash and parser version; they
+are extraction versions, not publisher revisions. CMAS's
+[official pool rule download](https://www.cmas.org/document/freediving/freediving-regulations/pool-competitions/2026,-cmas-freediving-international-rules-pool-competitions-en.html)
+was inaccessible during this bounded pass. Its page title is not a retained rule
+edition. CMAS printed final/rank values and DQ markers remain source evidence;
+post-penalty meaning and event applicability need supported authority.
+
+Concrete sporting facts require exact applicable rule/source meanings. Positive
+publisher and event claims require independently bound source authority; a
+scoring formula cannot provide it. Source approval, cohort selection and
+publication remain separate authenticated actions. The private view shows
+citations, scope, supported interpretation, unknowns and conflicts alongside
+unchecked controls. Existing public results stay under their current authority.
+Unresolved acceptance remains [issue #194](https://github.com/jamiepratt/freediving-results/issues/194).
