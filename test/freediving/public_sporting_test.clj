@@ -20,6 +20,7 @@
             [clojure.string :as str])
   (:import [java.sql DriverManager]))
 (def ^:dynamic *private-authority* nil)
+(def ^:dynamic *prepare-canonical-context* nil)
 (defn private-command! [command]
   (let [{:keys [writer reader]} *private-authority*]
     (.write writer (str (authority/canonical-json command) "\n"))
@@ -148,7 +149,9 @@
          payload {:schema "public-sporting/v1" :rows rows :cutoff "2026-06-12T00:00:00Z"
                   :cohort {:binding ref :value (vec (sort (map :result-id rows)))
                            :citation {:url "https://example.org/results.pdf" :page 1}}}
-         event (publish-authorized! payload)]
+         event (do (when *prepare-canonical-context*
+                     (*prepare-canonical-context* {:payload payload :targets targets :input-roots @input-roots}))
+                   (publish-authorized! payload))]
      {:cohort-id cohort-id :event event :payload payload :targets targets :input-roots @input-roots})))
 
 (deftest cited-current-cmas-and-aida-cohort-ranks-through-restricted-http

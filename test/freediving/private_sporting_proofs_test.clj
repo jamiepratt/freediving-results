@@ -186,6 +186,13 @@
       (publication/decide! publication-fixture/reviewer (assoc request :id "html-revoked" :base-revision 1 :action :revoke :attestations {}))
       (is (nil? (get-in (read-proof config) [:rows 0 :upstream :review]))))))
 
+(deftest receipt-history-with-a-revision-gap-cannot-authenticate-current-facts
+  (let [{:keys [config] :as sample} (sample)]
+    (accept-pdf sample)
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.pdf_extraction_reviews DISABLE TRIGGER immutable_pdf_extraction_reviews")
+    (fixture/sql! fixture/admin "UPDATE freediving.pdf_extraction_reviews SET revision=3,body_edn=replace(body_edn,':revision 1',':revision 3')")
+    (is (empty? (get-in (read-proof config) [:rows 0 :upstream])))))
+
 (defn connector-fixture!
   "Only isolated disposable PostgreSQL. Emit exact real APIs/readers for HTTP tests."
   [path]

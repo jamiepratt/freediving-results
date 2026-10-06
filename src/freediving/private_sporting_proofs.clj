@@ -123,8 +123,13 @@
         rows (target-events state table reference)
         events (mapv #(edn/read-string (:body_edn %)) rows)
         last-row (last rows) event (last events)]
-    (doseq [[row receipt] (map vector rows events)]
-      (need! (and (= [(:id row) (:revision row) (:action row)]
+    (doseq [[index [row receipt]] (map-indexed vector (map vector rows events))]
+      (need! (and (= (inc index) (:revision row))
+                  (= index (:base-revision receipt))
+                  (#{:accept :revoke} (:action receipt))
+                  (= [(:job_id row) (:ordinal row)] ((juxt :job-id :ordinal) reference))
+                  (= (:event_id row) (:event-id receipt))
+                  (= [(:id row) (:revision row) (:action row)]
                      [(:id receipt) (:revision receipt) (name (:action receipt))])
                   (= (:request receipt) (dissoc receipt :request :action :revision))
                   (= reference (select-keys (:evidence receipt) reference-keys))
@@ -137,6 +142,11 @@
                               (= (:source-sha256 reference) (get-in % [:manifest :sha256]))
                               (= "application/pdf" (get-in % [:manifest :content-type]))) (:acquisitions artifact)))
              "Extraction receipt scope changed"))
+    (reduce (fn [active [row receipt]]
+              (case (:action receipt)
+                :accept (do (need! (and (nil? active) (nil? (:event-id receipt))) "Extraction acceptance predecessor changed") (:id receipt))
+                :revoke (do (need! (and active (= active (:event-id receipt) (:event_id row))) "Extraction revocation predecessor changed") nil)))
+            nil (map vector rows events))
     {:state (cond (nil? event) "unreviewed" (= :accept (:action event)) "accepted" :else "revoked")
      :revision (or (:revision event) 0)
      :event_sha256 (when event (digest last-row))
@@ -186,9 +196,13 @@
      :history_sha256 (mapv digest events)
      :reasons ["group-membership-does-not-prove-cohort-distinctness"]}))
 (defn- checked-validations! [validations reference coordinates]
-  (doseq [row validations]
+  (doseq [[index row] (map-indexed vector validations)]
     (let [record (edn/read-string (:body_edn row)) request (:request record)]
-      (need! (and (= [(:id row) (:revision row) (:review_revision row) (:policy_version row) (:action row)]
+      (need! (and (= (inc index) (:revision row))
+                  (= index (:base-revision record))
+                  (#{:validate :revoke} (:action record))
+                  (= [(:job_id row) (:ordinal row)] ((juxt :job-id :ordinal) reference))
+                  (= [(:id row) (:revision row) (:review_revision row) (:policy_version row) (:action row)]
                      [(:id record) (:revision record) (:review-revision record) (:policy-version record) (name (:action record))])
                   (= request (dissoc record :request :revision))
                   (= ((juxt :job-id :ordinal) reference) ((juxt :job-id :ordinal) record))
