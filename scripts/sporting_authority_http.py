@@ -32,11 +32,11 @@ table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid 
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}button{padding:10px 16px;margin:8px;border:1px solid #6c8880;border-radius:6px;background:white}
 label{display:block;margin-top:16px}textarea{width:90%;min-height:60px;font:inherit}a{color:#155f52}.notice{padding:16px;background:#e7eee9}'''
 SCRIPT = b'''"use strict";
-const root='/owner-evidence/api/sporting-authority';let current;
+const root='/owner-evidence/api/sporting-authority';let current,loadGeneration=0;
 const node=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
 function details(title,value){const d=node('details');d.append(node('summary',title),node('pre',JSON.stringify(value,null,2)));return d;}
-async function load(){try{const r=await fetch(root+'/review',{cache:'no-store'});if(!r.ok)throw Error('Private authority unavailable ('+r.status+')');
-current=await r.json();document.getElementById('status').textContent='Authority revision '+current.revision+' - '+current.proposals.length+' review proposals - current source authority '+current.currentness;
+async function load(){const generation=++loadGeneration;++proofGeneration;current=undefined;for(const id of ['proposals','proof-rows','proof-pages'])document.getElementById(id).replaceChildren();document.getElementById('status').textContent='Loading fresh current private reviews...';document.getElementById('proof-status').textContent='Current source authority pending fresh read.';try{const r=await fetch(root+'/review',{cache:'no-store'});if(!r.ok)throw Error('Private authority unavailable ('+r.status+')');
+const value=await r.json();if(generation!==loadGeneration)return;current=value;document.getElementById('status').textContent='Authority revision '+current.revision+' - '+current.proposals.length+' review proposals - current source authority '+current.currentness;
 const list=document.getElementById('proposals');list.replaceChildren();if(!current.proposals.length)list.append(node('p','No sporting decisions have been staged. Public sporting ranks remain withheld.'));
 for(const item of current.proposals){const p=item.proposal,card=node('article');card.append(node('h2',p.id),node('p','Stored review action: '+item.action+' - revision '+item.revision),
 node('p','Effective authority: '+item.authority_status+(item.authority_status==='stale'?' - Source or owner decisions changed, or evidence expired. Public ranks are withheld.':'')),
@@ -54,7 +54,7 @@ if(!reason.value.trim()){document.getElementById('status').textContent='Enter yo
 body:JSON.stringify({id:p.id,action,reason:reason.value,expected_revision:current.revision,idempotency_key:crypto.randomUUID(),csrf_token:current.csrf_token})});
 if(!r.ok)throw Error('Review refused ('+r.status+'). Refresh exact current authority and check independent upstream approvals.');await load();}
 catch(e){document.getElementById('status').textContent=e.message;b.disabled=false;}});card.append(b);}list.append(card);}await loadProofs(0);}
-catch(e){document.getElementById('status').textContent=e.message;}}
+catch(e){if(generation!==loadGeneration)return;current=undefined;for(const id of ['proposals','proof-rows','proof-pages'])document.getElementById(id).replaceChildren();document.getElementById('status').textContent=e.message;document.getElementById('proof-status').textContent='Exact source authority unavailable. Refresh current proof.';}}
 let proofGeneration=0;
 async function loadProofs(offset){const generation=++proofGeneration,container=document.getElementById('proof-rows');
 container.replaceChildren();document.getElementById('proof-pages').replaceChildren();document.getElementById('proof-status').textContent='Reading fresh exact upstream proofs...';
