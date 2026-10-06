@@ -57,6 +57,28 @@ function text() { return all(nodes.content).map(n => n.textContent || '').join('
   assert.ok(all(nodes.content).some(n => n.href === 'https://example.org/final.pdf'));
   assert.ok(all(nodes.content).some(n => n.href === '/results/' + row['result-id']));
   assert.match(text(), /Evidence coverage cutoff: unknown/);
+  const authority = 'e'.repeat(64), sourcePin = 'f'.repeat(64), artifactPin = '1'.repeat(64);
+  location.search = query + '&authority=' + authority;
+  data = {...metadata, authority: {'cohort-id': '2'.repeat(64), revision: 7, ledger: 'public-sporting-authority-v1'}, attempt: {...row,
+    'detail-url': '/comparison/attempts/' + id + location.search, listing: 'international', sanction: 'international',
+    provenance: {'result-id': row['result-id'], 'observation-id': '3'.repeat(64), ordinal: 56, 'source-sha256': sourcePin, 'artifact-sha256': artifactPin},
+    citations: {finality: {url: 'https://example.org/finality.pdf', page: 5, line: 9, 'source-sha256': sourcePin, 'artifact-sha256': artifactPin}, 'source-gender': {url: 'https://example.org/gender.pdf', table: 1, row: 56}}}};
+  await events.pageshow();
+  assert.equal(requests.at(-1).url, '/api/comparison/attempts/' + id + query + '&authority=' + authority);
+  assert.match(text(), /Finality/);
+  assert.match(text(), /Source gender/);
+  assert.match(text(), /Page: 5/);
+  assert.match(text(), /Line: 9/);
+  assert.match(text(), /Event listing: international/);
+  assert.match(text(), /Event sanction: international/);
+  assert.match(text(), /Current authority: cohort-id: .*revision: 7.*ledger: public-sporting-authority-v1/);
+  assert.match(text(), /Observation Id: /);
+  assert.match(text(), /Ordinal: 56/);
+  assert.ok(all(nodes.content).some(n => n.href === 'https://example.org/finality.pdf'));
+  assert.ok(all(nodes.content).some(n => n.href === 'https://example.org/gender.pdf'));
+  assert.ok(text().includes(sourcePin) && text().includes(artifactPin));
+  assert.equal(all(nodes.content).find(n => n.textContent === 'Current comparison list').href, '/comparison' + query);
+  location.search = query;
   location.pathname = '/comparison/peers/' + peer;
   data = {...metadata, rows: [row, {...row, id: 'd'.repeat(64), federation: 'AIDA'}], descriptor: {denominator: 3, 'peer-ids': [id, 'd'.repeat(64)], 'comparison-policy': 'aida-baseline-v1', 'represented-geography-policy': 'sports-geography-v1', 'sanction-scope': 'default', 'listing-filter': 'all', geography: 'international', provisional: false}};
   await events.pageshow();
@@ -92,11 +114,13 @@ function text() { return all(nodes.content).map(n => n.textContent || '').join('
   await events.pageshow();
   assert.doesNotMatch(text(), /Rank 1|Achieved comparison score/);
   assert.ok(!all(nodes.content).some(n => n.href === row.ranks[0].url));
-  data = {...metadata, 'evidence-coverage-cutoff': '2026-10-01T12:39:47Z', 'projection-read-at': '2026-10-06T15:00:00Z', rows: [{...row, status: 'withheld', hypothetical: {rank: 2, value: 99, unit: 'm', 'eligible-peer-denominator': 3, status: 'disqualified', basis: 'verified-source-achieved', citation: {publisher: 'Synthetic AIDA', url: 'https://example.org/dq.pdf'}}}]};
+  data = {...metadata, 'evidence-coverage-cutoff': '2026-10-01T12:39:47Z', 'projection-read-at': '2026-10-06T15:00:00Z', rows: [{...row, status: 'ineligible', hypothetical: {rank: 2, value: 99, unit: 'm', 'eligible-peer-denominator': 3, status: 'disqualified', basis: 'verified-source-achieved', score: {value: 49.5, policy: 'aida-baseline-v1'}, meaning: 'Hypothetical achieved-value score excluding disqualification; not a final valid result.', citation: {publisher: 'Synthetic AIDA', url: 'https://example.org/dq.pdf'}}}]};
   await events.pageshow();
   assert.match(text(), /Disqualified attempt - hypothetical only/);
   assert.match(text(), /Excluded from achieved ranks and peer denominators/);
   assert.match(text(), /Hypothetical rank: 2/);
+  assert.match(text(), /Hypothetical comparison score: 49.5/);
+  assert.match(text(), /Hypothetical achieved-value score excluding disqualification; not a final valid result/);
   assert.doesNotMatch(text(), /Achieved comparison score/);
   assert.doesNotMatch(text(), /Final post-penalty value/);
   assert.match(text(), /Evidence coverage cutoff: 2026-10-01T12:39:47Z/);

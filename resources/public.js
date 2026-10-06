@@ -3,6 +3,10 @@
   const keys = ['q', 'federation', 'discipline', 'category', 'date', 'page', 'comparison'];
   const comparisonKeys = ['comparison', 'federation', 'representation', 'sanction_scope', 'listing_filter'];
   function comparisonURL(path, search) { return '/api' + path + search; }
+  function comparisonListURL(search) {
+    const params = new URLSearchParams(search); params.delete('authority');
+    return '/comparison' + (params.size ? '?' + params : '');
+  }
   function sportingLink(value) {
     if (typeof value !== 'string' || !/^\/comparison\/(attempts|peers)\/[a-f0-9]{64}(\?|$)/.test(value)) return null;
     try { const url = new URL(value, 'https://comparison.invalid'); return url.origin === 'https://comparison.invalid' && !url.hash ? url.pathname + url.search : null; } catch (_) { return null; }
@@ -134,7 +138,7 @@
     const panel = section('Comparison scope and evidence', 'Ranks describe this current eligible peer cohort. Equal comparison scores share competition ranks; row order does not break ties.');
     const coverage = data.coverage || {};
     panel.append(el('p', display(coverage['eligible-comparison-peers']) + ' eligible comparison peers · ' + display(coverage.provided) + ' supplied attempts · ' + display(coverage.withheld) + ' withheld.'));
-    const facts = [['Scope', data.scope], ['Filters', data.filters], ['Scoring policy', data.policy], ['Evidence coverage cutoff', data['evidence-coverage-cutoff'] || 'unknown'], ['Projection readback time', data['projection-read-at'] || 'unknown'], ['Current authority', data['authority-revision'] || data['authority-digest'] || 'See exact peer provenance']];
+    const facts = [['Scope', data.scope], ['Filters', data.filters], ['Scoring policy', data.policy], ['Evidence coverage cutoff', data['evidence-coverage-cutoff'] || 'unknown'], ['Projection readback time', data['projection-read-at'] || 'unknown'], ['Current authority', data.authority || 'unknown']];
     facts.forEach(([title, value]) => panel.append(el('p', title + ': ' + display(value), 'muted')));
     (data['scope-gaps'] || []).forEach(gap => panel.append(el('p', display(gap), 'muted')));
     return panel;
@@ -157,14 +161,15 @@
   }
   function sportingCitations(citations) {
     const panel = section('Comparison source evidence');
-    (citations || []).forEach(citation => {
-      const entry = el('p', display(citation.publisher) + ' · ' + display(citation.relationship));
+    const facts = Array.isArray(citations) ? citations.map(citation => [null, citation]) : Object.entries(citations || {});
+    facts.forEach(([fact, citation]) => {
+      const entry = el('p', fact ? label(fact) : [citation.publisher, citation.relationship].filter(Boolean).map(display).join(' · ') || 'Source citation');
       const url = citationURL(citation['final-url'] || citation['discovery-url'] || citation.url);
       if (url) { const source = link('Open source citation', url); source.rel = 'noopener noreferrer'; entry.append(el('span', ' · '), source); }
       panel.append(entry);
-      ['page', 'line', 'table', 'row', 'source-sha256', 'revision', 'finality'].filter(key => citation[key] != null).forEach(key => panel.append(el('p', label(key) + ': ' + display(citation[key]), 'muted')));
+      ['page', 'line', 'table', 'row', 'source-sha256', 'artifact-sha256', 'revision', 'finality'].filter(key => citation[key] != null).forEach(key => panel.append(el('p', label(key) + ': ' + display(citation[key]), 'muted')));
     });
-    if (!(citations || []).length) panel.append(el('p', 'Public citation unavailable.'));
+    if (!facts.length) panel.append(el('p', 'Public citation unavailable.'));
     return panel;
   }
   function sportingAttempt(row, detailed, currentAuthority) {
@@ -190,12 +195,16 @@
       const hypothetical = row.hypothetical;
       card.append(el('h3', 'Disqualified attempt - hypothetical only'), el('p', 'Excluded from achieved ranks and peer denominators. Verified source-achieved value: ' + display(hypothetical.value) + ' ' + display(hypothetical.unit) + '. Hypothetical rank: ' + display(hypothetical.rank) + '. Eligible peer denominator: ' + display(hypothetical['eligible-peer-denominator']) + '.'), sportingCitations(hypothetical.citation ? [hypothetical.citation] : []));
       if (hypothetical.score) card.append(el('p', 'Hypothetical comparison score: ' + display(hypothetical.score.value) + ' · Policy: ' + display(hypothetical.score.policy)));
+      if (hypothetical.meaning) card.append(el('p', display(hypothetical.meaning), 'muted'));
     }
     const href = sportingLink(row['detail-url']);
     if (!detailed && href) card.append(link('View comparison attempt and evidence', href));
     if (detailed) {
-      [['Source category', row['source-category']], ['Source gender', row['source-gender']], ['Comparable category', row['comparable-category']], ['Age class', row['age-class']], ['Para class', row['para-class']], ['Represented country', row['represented-country']], ['Event listing', row['event-listing']], ['Event sanction', row['event-sanction']]].forEach(([title, value]) => card.append(el('p', title + ': ' + (value == null ? 'unknown' : display(value)), 'muted')));
+      [['Source category', row['source-category']], ['Source gender', row['source-gender']], ['Comparable category', row['comparable-category']], ['Age class', row['age-class']], ['Age equivalence', row['age-equivalence']], ['Para class', row['para-class']], ['Represented country', row['represented-country']], ['Event listing', row['event-listing'] || row.listing], ['Event sanction', row['event-sanction'] || row.sanction]].forEach(([title, value]) => card.append(el('p', title + ': ' + (value == null ? 'unknown' : display(value)), 'muted')));
       card.append(el('p', 'Source gender, age, para class and category equivalence are separate evidence. Represented country does not establish citizenship.', 'muted'), sportingCitations(row.citations));
+      const provenance = section('Attempt provenance');
+      ['result-id', 'observation-id', 'ordinal', 'source-sha256', 'artifact-sha256'].forEach(key => provenance.append(el('p', label(key) + ': ' + display((row.provenance || {})[key]), 'muted')));
+      card.append(provenance);
       const source = internalLink('results', row['result-id']); if (source) card.append(link('View published source record', source));
     }
     return card;
@@ -211,7 +220,7 @@
       const exact = el('details'); exact.append(el('summary', 'Complete peer descriptor and peer-ids'), el('pre', JSON.stringify(descriptor, null, 2), 'peer-descriptor')); panel.append(exact); main.append(panel);
     }
     if (!detail && !peers) main.append(comparisonFilters(data));
-    else main.append(link('Current comparison list', '/comparison' + location.search));
+    else main.append(link('Current comparison list', comparisonListURL(location.search)));
     const rows = detail ? (data.attempt ? [data.attempt] : []) : data.rows || [];
     rows.forEach(row => main.append(sportingAttempt(row, detail || peers, data.status === 'ranked')));
     if (!rows.length) main.append(el('div', 'Rank withheld. No currently eligible comparison peers. Unverified or unpublished evidence does not mean zero sporting attempts.', 'empty'));
