@@ -47,7 +47,7 @@ def create_reader(env, *, runtime=None):
             raise ValueError('private canonical configuration permissions invalid')
         return json.loads(path.read_text())
     config()
-    engine = _Runtime('private-canonical-status-readback/v1', 4096)
+    engine = _Runtime('private-canonical-status-readback/v1', 4096, max_waiters=2)
 
     def verified():
         data = config()

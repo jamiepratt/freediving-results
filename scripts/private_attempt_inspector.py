@@ -41,8 +41,11 @@ def _remaining(deadline):
 
 
 class _Runtime:
-    """One serial JVM, at most two waiters, no background pipe threads."""
-    def __init__(self, schema='private-attempt-inspector/v1', maximum=MAX_RESPONSE):
+    """One serial JVM and bounded waiters, no background pipe threads."""
+    def __init__(self, schema='private-attempt-inspector/v1', maximum=MAX_RESPONSE, max_waiters=3):
+        if not isinstance(max_waiters, int) or not 0 <= max_waiters <= 3:
+            raise ValueError('invalid private runtime admission bound')
+        self.max_waiters = max_waiters
         self.schema = schema
         self.maximum = maximum
         self.condition = threading.Condition()
@@ -110,7 +113,7 @@ class _Runtime:
             if self.closed:
                 raise ValueError('private comparison reader closed')
             if self.active:
-                if self.waiting >= 2:
+                if self.waiting >= self.max_waiters:
                     raise ComparisonBusy('private comparison busy; retry')
                 self.waiting += 1
                 try:

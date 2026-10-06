@@ -354,8 +354,10 @@ retain the archive/config hashes separately. Extract a pinned archive through
 `deploy/private_archive_extract.py` into a new root-private incoming directory.
 
 Comparison and canonical readers each reuse one JVM with a 256 MiB heap and
-one processor. Each reader admits one executing request and at most two waiting
-requests; overload returns a retriable busy error. The whole read, including queue
+one processor. Comparison admits one executing request and at most three waiting
+requests, covering the origin's four concurrent expensive reads. Canonical admits
+one executing request and at most two waiting requests. Overload returns a
+retriable busy error. The whole read, including queue
 wait, uses an absolute 12 second budget within the edge's 15 second deadline.
 Timeout and reader shutdown terminate and reap the JVM. There are no background
 pipe threads. Canonical reuse calls the existing pinned verifier for every input;

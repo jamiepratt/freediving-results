@@ -146,13 +146,13 @@ class PackagedComparisonTest(unittest.TestCase):
                 inspect({}, None)
             except (ValueError, OSError) as exc:
                 return str(exc)
-        with patch.object(reader.subprocess, 'Popen', side_effect=record), ThreadPoolExecutor(max_workers=8) as executor:
+        with patch.object(reader.subprocess, 'Popen', side_effect=record), ThreadPoolExecutor(max_workers=5) as executor:
             first = executor.submit(attempt)
             self.assertTrue(launched.wait(2))
-            contenders = [executor.submit(attempt) for _ in range(7)]
+            contenders = [executor.submit(attempt) for _ in range(4)]
             time.sleep(0.1)
             completed = [f.result() for f in contenders if f.done()]
-            self.assertGreaterEqual(sum('busy' in result for result in completed), 5)
+            self.assertEqual(sum('busy' in result for result in completed), 1)
             inspect.close()
             results = [f.result(timeout=2) for f in [first, *contenders]]
             self.assertTrue(all(results))
@@ -164,14 +164,14 @@ class PackagedComparisonTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'closed'):
             inspect({}, None)
 
-    def test_three_admitted_real_jvm_reads_share_startup_and_finish_within_deadline(self):
+    def test_four_admitted_real_jvm_reads_share_startup_and_finish_within_deadline(self):
         inspect = self.inspector()
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(inspect, {}, None, deadline=time.monotonic() + 3) for _ in range(3)]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(inspect, {}, None, deadline=time.monotonic() + 3) for _ in range(4)]
             results = [future.result(timeout=3) for future in futures]
         self.assertTrue(all(result['coverage']['withheld'] == 2 for result in results))
         timings = inspect.diagnostics()
-        self.assertEqual(len(timings), 3)
+        self.assertEqual(len(timings), 4)
         self.assertTrue(all(event['outcome'] == 'success' for event in timings))
         self.assertTrue(any(event['queue_ms'] > 100 for event in timings))
 
