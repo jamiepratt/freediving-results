@@ -21,6 +21,7 @@ from owner_source_view import OriginalSourceView, SourceViewError, _limit_render
 from route_roster_query import RouteRosterQuery
 from owner_decision_store import ConflictError
 from private_presentation_status import PrivatePresentationStatus, StatusConflict, status_digest, validate_authority
+import sporting_authority_http
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
@@ -85,6 +86,7 @@ def _assets():
     html = (root / 'evidence_workspace.html').read_text(encoding='utf-8')
     html = _replace_exact(html, 'href="/assets/app.css"', 'href="/owner-evidence/assets/app.css"')
     html = _replace_exact(html, 'src="/assets/app.js"', 'src="/owner-evidence/assets/app.js"')
+    html = _replace_exact(html, '<main>', '<main><nav><a href="/owner-evidence/sporting">Sporting source reviews</a></nav>')
     html = re.sub(r'<form action="/logout" method="post">.*?</form>', '', html, count=1)
     if '/logout' in html:
         raise ValueError('workspace logout asset contract changed')
@@ -219,6 +221,7 @@ class PrivateOrigin(ThreadingHTTPServer):
                     self.decisions.bind_verified_snapshot(snapshot_dir,
                         expected_revision=revision,
                         idempotency_key=f'snapshot-{expected_digest}-after-{revision}')
+            sporting_authority_http.configure(self, snapshot_dir, env)
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
             self.query.close()
@@ -229,6 +232,8 @@ class PrivateOrigin(ThreadingHTTPServer):
         self.query.close()
         if self.decisions is not None and hasattr(self.decisions, 'close'):
             self.decisions.close()
+        if getattr(self, 'sporting', None) is not None:
+            self.sporting.close()
 
     def status_authority(self):
         """Collect fresh origin authority; no local-run store grants this status."""
@@ -544,6 +549,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
         except ValueError:
             return self._reply(404)
         path = parsed.path
+        if sporting_authority_http.get(self, parsed):
+            return
         if path in STATIC and not parsed.query:
             key, content_type = STATIC[path]
             return self._reply(200, self.server.assets[key], content_type)
@@ -779,12 +786,14 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
 
     @_serialized_request
     def do_POST(self):
-        if not self._authorized(body=True):
+        if not self._authorized(body=True) and not sporting_authority_http.is_machine(self):
             return self._reply(403)
         try:
             parsed = self._path()
         except ValueError:
             return self._reply(404)
+        if sporting_authority_http.post(self, parsed):
+            return
         if parsed.path == DECISION_ACK_PATH and not parsed.query:
             if (self.server.decisions is None or self._one('Content-Type') != 'application/json'
                     or self.headers.get_all('Origin', [])):
