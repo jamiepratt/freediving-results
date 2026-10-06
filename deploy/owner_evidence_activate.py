@@ -23,7 +23,7 @@ import urllib.request
 
 SERVICE = 'freediving-owner-evidence.service'
 HEALTH_STARTUP_TIMEOUT = 30
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/private_attempt_inspector.py', 'scripts/owner_decision_store.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/private_attempt_inspector.py', 'scripts/owner_decision_store.py',
          'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
          'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
          'scripts/cmas_microplus_finalize.py',
@@ -36,7 +36,7 @@ REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGI
                           'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
 LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
                                    'scripts/private_attempt_inspector.py',
-                                   'scripts/private_canonical_status.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py',
+                                   'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py',
                                    'scripts/owner_decision_store.py',
                                    'scripts/aida_snapshot_observations.py',
                                    'scripts/issue55_aida_selected_html.py',
@@ -85,6 +85,7 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
                                           'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                                           'OWNER_EVIDENCE_STATUS_CLIENT_ID',
                                           'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG',
+                                          'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG',
                                           'OWNER_EVIDENCE_COMPARISON_CONFIG',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'} or
@@ -99,6 +100,9 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
     if ('OWNER_EVIDENCE_COMPARISON_CONFIG' in values and
             values['OWNER_EVIDENCE_COMPARISON_CONFIG'] != str(canonical_config_path.parent.parent / 'comparison' / 'config.json')):
         raise ValueError('invalid private comparison configuration path')
+    if ('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG' in values and
+            values['OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'] != str(canonical_config_path.parent.parent / 'sporting-proof-reader' / 'config.json')):
+        raise ValueError('invalid private sporting proof configuration path')
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
     if not (16 <= len(secret) <= 256 and secret.isascii() and
@@ -189,6 +193,22 @@ def _canonical_reader_inputs(bundle, values, owner_uid, owner_gid):
                             **identity)
     if result.returncode or result.stdout.strip() != b'verified':
         raise ValueError('canonical status read capability unavailable')
+
+
+def _sporting_proof_reader_inputs(bundle, values, owner_uid, owner_gid):
+    name = values.get('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG')
+    if not name:
+        return
+    _regular(Path(name))
+    config = json.loads(Path(name).read_text())
+    manifest = Path(config['runtime_path']) / 'manifest.json'
+    _regular(manifest)
+    if (_sha(manifest) != config['runtime_manifest_sha256'] or
+            json.loads(manifest.read_text())['candidate'] !=
+            json.loads((bundle / 'private-owner-manifest.json').read_text())['candidate']):
+        raise ValueError('sporting proof runtime differs from private code candidate')
+    from comparison_activate import _proof_probe
+    _proof_probe(bundle, Path(name), owner_uid, owner_gid)
 
 
 def _source_bundle_inputs(code, source, expected, snapshot_digest):
@@ -664,6 +684,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
             for line in candidate_config.splitlines(keepends=True))
     _inputs(bundle, source, expected)
     _canonical_reader_inputs(bundle, values, owner_uid, owner_gid)
+    _sporting_proof_reader_inputs(bundle, values, owner_uid, owner_gid)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
     if roster_source:

@@ -19,7 +19,7 @@ class ComparisonActivationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.layout = Layout(self.root/'app', self.root/'state', self.root/'units', self.root/'config')
         for p in (self.layout.app, self.layout.state, self.layout.units): p.mkdir()
         self.old = self.layout.app/'old'; self.old.mkdir(); (self.old/'app.py').write_text('old')
@@ -52,6 +52,56 @@ class ComparisonActivationTests(unittest.TestCase):
         self.kw={'guard':self.guard,'command':self.command,'health':lambda:None,'owner_uid':os.geteuid(),'owner_gid':os.getegid(),'service_probe':lambda *args:None}
 
     def sha(self,path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_relationship_ledger_schema_and_events_guard_activation_and_rollback(self):
+        bridge=self.layout.state/'sporting-bridge';bridge.mkdir()
+        for name in ('config.json','signing.pem','request.key','provision.json'):(bridge/name).write_text('synthetic '+name)
+        ledger=bridge/'ledger/relationships.sqlite';ledger.parent.mkdir()
+        with sqlite3.connect(ledger) as db:
+            db.execute('CREATE TABLE relationship_events (revision INTEGER, action TEXT)')
+        pins=self.guard()
+        self.assertEqual(pins['sporting']['relationships']['tables']['relationship_events']['count'],0)
+        activate_comparison(self.new,self.config,self.layout,pins,**self.kw)
+        with sqlite3.connect(ledger) as db:db.execute("INSERT INTO relationship_events VALUES (1,'distinct')")
+        before=(self.layout.app/'current').resolve()
+        with self.assertRaisesRegex(ValueError,'sporting authority changed'):
+            rollback_comparison(self.layout,command=self.command)
+        self.assertEqual((self.layout.app/'current').resolve(),before)
+        with sqlite3.connect(ledger) as db:self.assertEqual(db.execute('SELECT max(revision) FROM relationship_events').fetchone()[0],1)
+
+    def test_explicit_proof_reader_path_refuses_external_config_before_activation(self):
+        with self.assertRaisesRegex(ValueError, 'sporting proof configuration path'):
+            activate_comparison(self.new,self.config,self.layout,self.pins,
+                                proof_config=self.root/'external-proof.json',**self.kw)
+        self.assertEqual((self.layout.app/'current').resolve(), self.old.resolve())
+        self.assertEqual(self.commands, [])
+
+    def test_proof_capability_activation_and_rollback_pin_env_runtime_and_exact_grants(self):
+        import provision_sporting_proof_reader
+        directory=self.layout.state/'sporting-proof-reader';directory.mkdir()
+        proof=directory/'config.json'
+        runtime=self.root/'proof-runtime';runtime.mkdir()
+        (runtime/'manifest.json').write_text(json.dumps({'candidate':'a'*40,'files':{}}))
+        proof.write_text(json.dumps({'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_proof_read&password=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&connectTimeout=5&socketTimeout=10',
+            'database':'source','canonical_jdbc_url':'jdbc:postgresql://127.0.0.1:5432/canonical?user=sporting_proof_read&password=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&connectTimeout=5&socketTimeout=10',
+            'canonical_database':'canonical','runtime_path':str(runtime),
+            'runtime_manifest_sha256':self.sha(runtime/'manifest.json')}));proof.chmod(0o640)
+        with mock.patch.object(provision_sporting_proof_reader,'verify_grants',return_value={'exact':'verified'}) as grants:
+            pins=self.guard()
+            probes=[]
+            def probe(app,config,uid,gid):probes.append((config,uid,gid))
+            activate_comparison(self.new,self.config,self.layout,pins,proof_config=proof,proof_probe=probe,**self.kw)
+            self.assertEqual(probes,[(proof,os.geteuid(),os.getegid())])
+            self.assertIn(('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG='+str(proof)).encode(),self.layout.config.read_bytes())
+            self.assertEqual(self.guard()['authority'],pins['authority'])
+            with mock.patch.object(provision_sporting_proof_reader,'verify_grants',side_effect=ValueError('grants changed')):
+                before=(self.layout.app/'current').resolve()
+                with self.assertRaises(ValueError):rollback_comparison(self.layout,command=self.command)
+                self.assertEqual((self.layout.app/'current').resolve(),before)
+            rollback_comparison(self.layout,command=self.command)
+            self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+            self.assertNotIn(b'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG=',self.layout.config.read_bytes())
+            self.assertEqual(set(call.args[0] for call in grants.call_args_list),{'source','canonical'})
 
     def test_sporting_schema_rows_and_key_pins_guard_activation_and_rollback(self):
         bridge=self.layout.state/'sporting-bridge';bridge.mkdir()

@@ -27,7 +27,7 @@ class ActivationTests(unittest.TestCase):
         self.bundle = root / 'bundle'
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
-        for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'private_canonical_status.py', 'sporting_authority.py', 'sporting_authority_http.py', 'private_attempt_inspector.py', 'unified_evidence_query.py', 'route_roster_query.py',
+        for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'private_canonical_status.py', 'private_sporting_proofs.py', 'private_sporting_relationships.py', 'sporting_authority.py', 'sporting_authority_http.py', 'private_attempt_inspector.py', 'unified_evidence_query.py', 'route_roster_query.py',
                      'aida_snapshot_observations.py', 'cmas_microplus_snapshot_observations.py',
                      'issue55_aida_selected_html.py', 'cmas_microplus_ingest.py',
                      'cmas_microplus_finalize.py',
@@ -85,6 +85,15 @@ class ActivationTests(unittest.TestCase):
                                'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG=' + str(path) + '\n')
         self.assertEqual(_config(self.config, os.getuid(), self.digest,
                                 canonical_config_path=path)['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'], str(path))
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
+
+    def test_sporting_proof_config_is_scoped_to_selected_private_layout(self):
+        path = self.layout.state / 'sporting-proof-reader' / 'config.json'
+        self.config.write_text(self.config.read_text() +
+                               'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG=' + str(path) + '\n')
+        self.assertEqual(_config(self.config, os.getuid(), self.digest,
+                                canonical_config_path=self.layout.state/'canonical-reader/config.json')['OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'], str(path))
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 

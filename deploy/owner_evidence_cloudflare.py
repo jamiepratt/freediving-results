@@ -68,7 +68,9 @@ def parse_origin_env(content):
     queue_keys = {'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE', 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'}
     import_keys = {'OWNER_EVIDENCE_IMPORT_TOKEN', 'OWNER_EVIDENCE_IMPORT_CLIENT_ID'}
     allowed = required | status_keys | queue_keys | import_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED',
-                                                                'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'}
+                                                                'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG',
+                                                                'OWNER_EVIDENCE_COMPARISON_CONFIG',
+                                                                'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'}
     if (not required <= values.keys() or set(values) - allowed or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             values['OWNER_EVIDENCE_ORIGIN_HOST'] != PRIVATE_HOST):
@@ -94,6 +96,11 @@ def parse_origin_env(content):
                 values['OWNER_EVIDENCE_ISSUE172_QUEUE_FILE'] != '/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json' or
                 not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'])):
             raise ValueError('Private queue configuration incomplete or malformed')
+    for key, directory in (('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG','canonical-reader'),
+                           ('OWNER_EVIDENCE_COMPARISON_CONFIG','comparison'),
+                           ('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG','sporting-proof-reader')):
+        if key in values and values[key] != '/var/lib/freediving-owner-evidence/' + directory + '/config.json':
+            raise ValueError('Private reader configuration path malformed')
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
     if not emails or any(not re.fullmatch(r'[^\s,@]+@[^\s,@]+\.[^\s,@]+', e) or e != e.lower() for e in emails):
         raise ValueError('Owner allowlist malformed')

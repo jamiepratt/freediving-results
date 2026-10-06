@@ -36,6 +36,31 @@ class BridgeProvisionTests(unittest.TestCase):
             self.assertEqual(before,{str(p):p.read_bytes() for p in Path(tmp).resolve().rglob('*') if p.is_file()})
             self.assertEqual(bridge.verify(layout,os.getuid(),os.getgid(),os.getgid()),result)
 
+    def test_relationship_attachment_initializes_empty_schema_without_reviewing_or_restoring_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            layout=bridge.Layout(root/'private',root/'public',root/'units',root/'env')
+            for directory in (layout.private,layout.public,layout.env_dir):directory.mkdir()
+            bridge.provision(layout,os.getuid(),os.getgid(),os.getgid(),{})
+            authority=layout.private/'ledger/authority.sqlite';authority.write_bytes(b'current genuine authority history')
+            retained={str(p):p.read_bytes() for p in (layout.private/'signing.pem',layout.private/'request.key',authority)}
+            bundle=root/'bundle';scripts=bundle/'scripts';scripts.mkdir(parents=True)
+            module=scripts/'private_sporting_relationships.py'
+            module.write_text("import sqlite3\nclass RelationshipReviews:\n def __init__(self,path,reader):\n  self.db=sqlite3.connect(path);self.db.execute('CREATE TABLE IF NOT EXISTS relationship_events(revision INTEGER)');self.db.commit()\n def history(self):return self.db.execute('SELECT * FROM relationship_events').fetchall()\n def close(self):self.db.close()\n")
+            manifest=bundle/'private-owner-manifest.json';manifest.write_text(json.dumps({'candidate':'a'*40,'files':{'scripts/private_sporting_relationships.py':bridge.digest(module)}}))
+            guard={'schema':'synthetic exact authority guard'}
+            bridge.attach_relationships(layout,os.getuid(),os.getgid(),os.getgid(),bundle,
+                bridge.digest(manifest),bridge.digest(layout.private/'provision.json'),
+                bridge.digest(layout.private/'config.json'),guard,lambda:guard)
+            config=json.loads((layout.private/'config.json').read_text())
+            self.assertEqual(config['relationship_ledger_path'],str(layout.private/'ledger/relationships.sqlite'))
+            self.assertEqual(retained,{p:Path(p).read_bytes() for p in retained})
+            before={str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            bridge.attach_relationships(layout,os.getuid(),os.getgid(),os.getgid(),bundle,
+                bridge.digest(manifest),bridge.digest(layout.private/'provision.json'),
+                bridge.digest(layout.private/'config.json'),guard,lambda:guard)
+            self.assertEqual(before,{str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()})
+
     def test_relocation_preserves_locked_environment_and_existing_signer_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();root.chmod(0o755);env=root/'etc';env.mkdir(mode=0o700)

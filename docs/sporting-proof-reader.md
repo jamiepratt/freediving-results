@@ -1,0 +1,110 @@
+# Private exact sporting proof capability
+
+The owner sporting workspace reads current source authority and canonical relationship
+state through an independent `sporting_proof_read` PostgreSQL login. The source
+database is explicit, currently `freediving_release_20260924_11`; the relationship
+database is `freediving_canonical`. The reader binds both readbacks, retained source
+coordinates and runtime hashes. A missing import remains a missing mapping.
+
+The source grant is exactly SELECT on `extractions`, `observations`,
+`extraction_reviews`, `pdf_extraction_reviews`, `review_proposals`, `review_decisions`,
+`publication_decisions`, `publication_policy_events`, `revision_proposals`,
+`revision_decisions` and `event_selections`. Canonical grants are exactly SELECT on
+`extractions`, `observations`, `canonical_attempt_evidence`,
+`canonical_attempt_events` and `canonical_attempt_state`. Existing public and
+canonical status roles retain their existing grants. Role inheritance, elevated
+role attributes, object ownership, sequence privileges, schema creation, extra
+column/table privileges, future default grants and executable security-definer
+functions cause verification to fail. The role defaults to read-only transactions.
+
+The config lives at
+`/var/lib/freediving-owner-evidence/sporting-proof-reader/config.json`, root owned,
+0640 in a 0750 directory for the private service group. Its six fields are
+`jdbc_url`, `database`, `canonical_jdbc_url`, `canonical_database`, `runtime_path`
+and `runtime_manifest_sha256`. Resolved database credentials stay in this intended
+host config and process memory. Public service credentials and grants are unchanged.
+
+The proof transport uses one persistent 192 MiB JVM, one active request and two
+waiting requests. It shares the request's existing 12 second deadline. The service
+retains TasksMax 64 and MemoryMax 1G. A failed or changed proof produces denial;
+source diagnostics and typed relationship staging never submit sporting approvals.
+
+## Guarded host checkpoint
+
+Use an exact clean integrated commit for the code archive and proof runtime. The
+normal code archive includes both private proof modules and the host preparation
+helpers. Packaging makes no source acquisition or provider call:
+
+```sh
+python3 deploy/private_owner_preflight.py --candidate "$candidate" --prepare \
+  --confirm "$candidate" --output "$private_dir/owner-code.tar"
+python3 deploy/sporting_proof_runtime.py --candidate "$candidate" \
+  --output "$private_dir/proof-runtime"
+```
+
+Transfer the private archive and runtime through the existing verified SSH archive
+path. On the host, stage the independently pinned runtime before capturing a fresh
+comparison guard. `$runtime_sha` is the SHA-256 of its `manifest.json`:
+
+```sh
+python3 deploy/sporting_proof_runtime.py --stage --runtime "$uploaded_runtime" \
+  --runtime-manifest-sha256 "$runtime_sha"
+python3 deploy/comparison_activate.py capture --public-database freediving_release_20260924_11
+```
+
+Save the guard in a root-only file. Provision the new role once using the staged
+runtime path, exact code manifest and exact fresh guard. The command prints only
+non-secret effects. Existing matching capabilities are verified without rotation;
+a conflicting role, config, grant or pin refuses the checkpoint.
+
+```sh
+python3 deploy/provision_sporting_proof_reader.py --execute \
+  --database freediving_release_20260924_11 --canonical-database freediving_canonical \
+  --public-database freediving_release_20260924_11 \
+  --runtime "$staged_runtime" --runtime-manifest-sha256 "$runtime_sha" \
+  --app-manifest "$bundle/private-owner-manifest.json" --app-manifest-sha256 "$app_sha" \
+  --guard "$guard" --guard-sha256 "$guard_sha"
+```
+
+Capture a new guard after this capability exists. Attach the independent typed
+relationship ledger using the exact current signer provision/config pins and code
+archive. This initializes empty immutable schema at
+`/var/lib/freediving-owner-evidence/sporting-bridge/ledger/relationships.sqlite`.
+It uses the existing private writable ledger directory, submits no review, and
+preserves every sporting authority event and signer byte. An already attached
+ledger is verified without resetting history.
+
+```sh
+python3 deploy/provision_sporting_authority.py attach-relationships --execute \
+  --public-database freediving_release_20260924_11 \
+  --bundle "$bundle" --bundle-manifest-sha256 "$app_sha" \
+  --provision-sha256 "$signer_receipt_sha" --owner-config-sha256 "$sporting_config_sha" \
+  --guard "$guard" --guard-sha256 "$guard_sha"
+```
+
+Capture a fresh guard after ledger preparation. Activate the private code with the
+existing comparison config/packet/runtime, passing the separate proof capability
+explicitly:
+
+```sh
+python3 deploy/comparison_activate.py activate \
+  --public-database freediving_release_20260924_11 \
+  --bundle "$bundle" --bundle-manifest-sha256 "$app_sha" \
+  --config "$existing_comparison_config" --config-sha256 "$comparison_config_sha" \
+  --proof-config /var/lib/freediving-owner-evidence/sporting-proof-reader/config.json \
+  --guard "$guard"
+```
+
+Activation verifies the proof runtime matches the code candidate, runs the proof
+reader as the exact service UID/GID and rechecks current guards before publication.
+Rollback restores derived app/environment/comparison files only. New sporting or
+relationship history, changed signer/proof capability/runtime/grants, or another
+deployment causes rollback refusal. PostgreSQL, frozen SQLite and authority
+ledgers are never restored. Preserve partial capability setup on interruption and
+inspect fresh pins before continuation.
+
+Validate the owner surface at
+[the sporting workspace](https://poc.alphacompose.com/owner-evidence/sporting) and
+verify the current custom-domain public comparison remains unchanged while real
+authority is absent. Full source/public eligibility requirements remain tracked in
+[issue 194](https://github.com/jamiepratt/freediving-results/issues/194).

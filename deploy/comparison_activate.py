@@ -72,7 +72,12 @@ def capture_sporting_guard(layout):
         return None
     # Host capability preparation writes all four core files before its receipt.
     for path in paths[:4]:_regular(path)
-    ledger=bridge/'ledger/authority.sqlite'
+    return {'files':{str(p):{'sha256':_sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists()},
+            'ledger':_sqlite_guard(bridge/'ledger/authority.sqlite'),
+            'relationships':_sqlite_guard(bridge/'ledger/relationships.sqlite')}
+
+
+def _sqlite_guard(ledger):
     if ledger.parent.is_symlink() or ledger.is_symlink():raise ValueError('linked sporting ledger')
     state={'exists':ledger.exists(),'schema':None,'tables':{}}
     if ledger.exists():
@@ -85,7 +90,41 @@ def capture_sporting_guard(layout):
                 encoded=json.dumps(sorted(rows,key=repr),ensure_ascii=False,separators=(',',':'),default=lambda b:{'bytes':b.hex()})
                 state['tables'][name]={'count':len(rows),'sha256':hashlib.sha256(encoded.encode()).hexdigest()}
             db.rollback()
-    return {'files':{str(p):{'sha256':_sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists()},'ledger':state}
+    return state
+
+
+def capture_proof_guard(layout):
+    """Pin the independent proof runtime/config and exact effective grants in both DBs."""
+    path=layout.state/'sporting-proof-reader/config.json'
+    if not path.exists() and not path.is_symlink():return None
+    from provision_sporting_proof_reader import verify_grants, verify_config, TABLES, CANONICAL_TABLES, unlinked
+    unlinked(path,regular=True)
+    info=path.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o027:raise ValueError('unsafe sporting proof configuration')
+    value=verify_config(path)
+    if set(value)!={'jdbc_url','database','canonical_jdbc_url','canonical_database','runtime_path','runtime_manifest_sha256'}:
+        raise ValueError('invalid sporting proof configuration')
+    runtime=Path(value['runtime_path']);unlinked(runtime)
+    manifest=runtime/'manifest.json';unlinked(manifest,regular=True)
+    if _sha(manifest)!=value['runtime_manifest_sha256']:raise ValueError('sporting proof runtime pin changed')
+    record=json.loads(manifest.read_text());files=_tree(runtime)
+    if files!={**record['files'],'manifest.json':_sha(manifest)}:raise ValueError('sporting proof runtime files changed')
+    return {'config':{'path':str(path),'sha256':_sha(path),'uid':info.st_uid,'gid':info.st_gid,'mode':info.st_mode&0o777},
+            'runtime':{'path':str(runtime),'files':files,'candidate':record['candidate']},
+            'source_grants':verify_grants(value['database'],TABLES),
+            'canonical_grants':verify_grants(value['canonical_database'],CANONICAL_TABLES)}
+
+
+def _proof_probe(app, config, uid, gid):
+    """Test restricted DB read transport as the exact private service identity."""
+    code=('import sys;sys.path.insert(0,sys.argv[1]);from private_sporting_proofs import create_reader;'
+          'r=create_reader({"OWNER_EVIDENCE_SPORTING_PROOF_CONFIG":sys.argv[2]});'
+          'result=r([]);r.close();assert result["schema"]=="private-sporting-proofs/v1";print("verified")')
+    identity={} if (uid,gid)==(os.geteuid(),os.getegid()) else {'user':uid,'group':gid,'extra_groups':[]}
+    result=subprocess.run(['/usr/bin/python3','-I','-c',code,str(app/'scripts'),str(config)],
+                          env={'PATH':'/usr/bin:/bin'},capture_output=True,timeout=15,**identity)
+    if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('sporting proof read capability unavailable')
+
 
 
 def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/current'),
@@ -114,6 +153,7 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
             'derived':{**{name:_sha(path) for name,path in [('config',layout.config),('env',layout.state/'active.env'),('unit',layout.units/SERVICE)]},
                        'comparison':_sha(comparison_path) if comparison_path.exists() else None},
             'protected':{'files':{str(path):_sha(path) for path in protected_paths},'canonical_runtime':{'path':str(runtime),'files':_tree(runtime)},
+                         'sporting_proof':capture_proof_guard(layout),
                          'public_app':{'path':str(public_current),'files':_tree(public_current)},'public_configs':{str(path):_sha(path) for path in public_configs}},
             'sporting':capture_sporting_guard(layout),
             'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database)}}
@@ -275,6 +315,7 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
     record=json.loads((checkpoint/'record.json').read_text())
     if record['status'] not in ('active','pending'):raise ValueError('comparison checkpoint not rollbackable')
     if capture_sporting_guard(layout)!=record.get('sporting_guard'):raise ValueError('sporting authority changed; rollback refused')
+    if 'proof_guard' in record and capture_proof_guard(layout)!=record['proof_guard']:raise ValueError('sporting proof capability changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
@@ -305,9 +346,11 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
 
 def activate_comparison(bundle, config, layout, expected_guard, *, guard,
                         command=None, health=None, owner_uid=0, owner_gid=0,
-                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None):
+                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None):
     command=command or _system_command
     bundle,config=Path(bundle),Path(config)
+    if proof_config is not None and Path(proof_config)!=layout.state/'sporting-proof-reader/config.json':
+        raise ValueError('invalid sporting proof configuration path')
     manifest_path=bundle/'private-owner-manifest.json';_regular(manifest_path)
     if bundle_manifest_sha256 and _sha(manifest_path)!=bundle_manifest_sha256:raise ValueError('staged app manifest changed')
     if config_sha256 and _sha(config)!=config_sha256:raise ValueError('staged comparison config changed')
@@ -325,6 +368,12 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
     before={'app':str((layout.app/'current').resolve()),'app_files':expected_guard['app']['files'],'config':_sha(layout.config),'env':_sha(layout.state/'active.env'),'comparison':_sha(installed) if installed.exists() else None,'unit':expected_guard['derived']['unit']}
     pin=('OWNER_EVIDENCE_COMPARISON_CONFIG='+str(installed)+'\n').encode()
     contents={name:b''.join(line for line in path.read_bytes().splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_COMPARISON_CONFIG='))+pin for name,path in [('config',layout.config),('env',layout.state/'active.env')]}
+    if proof_config is not None:
+        proof_guard=expected_guard['protected'].get('sporting_proof')
+        if proof_guard is None:raise ValueError('sporting proof capability not guarded')
+        if proof_guard['runtime']['candidate']!=manifest['candidate']:raise ValueError('sporting proof runtime differs from private code candidate')
+        proof_pin=('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG='+str(proof_config)+'\n').encode()
+        contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG='))+proof_pin for name,body in contents.items()}
     checkpoint=_checkpoint(layout)
     if checkpoint.is_symlink():raise ValueError('linked comparison checkpoint')
     if (checkpoint/'record.json').exists() and json.loads((checkpoint/'record.json').read_text())['status']=='pending':raise ValueError('pending comparison activation requires reviewed recovery')
@@ -338,9 +387,10 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
     probe_config=_stage_directory(layout.state/'comparison-staged',_sha(config),[('config.json',config)],os.geteuid(),owner_gid,0o640)/'config.json'
     probe_config.parent.chmod(0o750)
     (service_probe or _service_probe)(app,probe_config,owner_uid,owner_gid)
+    if proof_config is not None:(proof_probe or _proof_probe)(app,Path(proof_config),owner_uid,owner_gid)
     # Runtime and packet are revalidated after the service-user read/execute probe.
     _comparison_config(config)
-    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
+    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'proof_guard':expected_guard['protected'].get('sporting_proof'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
     # Last full authority/CAS read occurs after staging and immediately before swaps.
     if guard()!=expected_guard:raise ValueError('live guard changed before activation')
     _atomic_write(checkpoint/'record.json',json.dumps(record,sort_keys=True).encode(),0o600)
@@ -377,6 +427,7 @@ def main():
     parser.add_argument('action',choices=('capture','stage','activate','rollback'))
     parser.add_argument('--public-database',required=True)
     parser.add_argument('--guard',type=Path)
+    parser.add_argument('--proof-config',type=Path)
     parser.add_argument('--bundle',type=Path);parser.add_argument('--config',type=Path)
     parser.add_argument('--bundle-manifest-sha256');parser.add_argument('--config-sha256')
     args=parser.parse_args()
@@ -394,7 +445,7 @@ def main():
         if args.action=='rollback':rollback_comparison(layout,owner_uid=0,owner_gid=account.pw_gid)
         else:
             if not all((args.guard,args.bundle,args.config,args.bundle_manifest_sha256,args.config_sha256)):raise ValueError('activation requires exact stage and live guard pins')
-            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256)
+            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config)
         print(json.dumps({'result':'PASS','action':args.action,'data_writes':0}))
         return 0
     except Exception:

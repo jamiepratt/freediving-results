@@ -20,7 +20,7 @@ import tempfile
 # Keep in sync with deploy/owner_evidence_activate.py FILES and SSH stage imports.
 OWNER_FILES = (
     'scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py',
-    'scripts/private_canonical_status.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py',
+    'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py',
     'scripts/private_attempt_inspector.py',
     'scripts/owner_decision_store.py', 'scripts/aida_snapshot_observations.py',
     'scripts/issue55_aida_selected_html.py',
@@ -34,7 +34,8 @@ OWNER_FILES = (
 )
 HOST_FILES = (
     'deploy/owner_evidence_activate.py', 'deploy/freediving-owner-evidence.service',
-    'deploy/canonical_status_runtime.py',
+    'deploy/canonical_status_runtime.py', 'deploy/sporting_proof_runtime.py',
+    'deploy/provision_sporting_proof_reader.py',
     'deploy/comparison_runtime.py', 'deploy/comparison_activate.py',
     'deploy/provision_canonical_status_reader.py', 'deploy/provision_sporting_authority.py', 'deploy/private_archive_extract.py',
     'scripts/private_evidence_transfer.py', 'scripts/private_evidence_ssh.py',

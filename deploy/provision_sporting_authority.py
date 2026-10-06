@@ -6,6 +6,7 @@ normal public/private activation. Nothing changes source decisions or database A
 """
 import argparse
 import base64
+import copy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -144,6 +145,9 @@ def verify(layout=Layout(),owner_uid=None,owner_gid=None,public_gid=None,*,publi
     if public['public_key_der']!=base64.b64encode(der).decode() or public['key_id']!=hashlib.sha256(der).hexdigest():
         raise ValueError('Signer differs from pinned verifier')
     if public['request_secret']!=(layout.private/'request.key').read_text().strip():raise ValueError('Request capability differs')
+    relationship=private.pop('relationship_ledger_path',None)
+    if relationship is not None and relationship!=str(layout.private/'ledger/relationships.sqlite'):
+        raise ValueError('Private relationship ledger binding differs')
     if private!={'schema':'sporting-authority-service/v1','ledger_path':str(layout.private/'ledger/authority.sqlite'),
                 'signing_key_path':str(layout.private/'signing.pem'),'request_key_path':str(layout.private/'request.key')}:
         raise ValueError('Private authority binding differs')
@@ -197,21 +201,78 @@ def provision(layout,owner_uid,owner_gid,public_gid,pins):
     return verify(layout,owner_uid,owner_gid,public_gid)
 
 
+def attach_relationships(layout,owner_uid,owner_gid,public_gid,bundle,manifest_sha,receipt_sha,
+                         config_sha,expected_guard,guard):
+    """Attach an independently empty immutable review ledger under exact live pins.
+
+    No sporting or source decision is submitted; existing history is never restored.
+    On interruption preserve capability files and obtain a fresh reviewed checkpoint.
+    """
+    for path,pin in ((layout.private/'provision.json',receipt_sha),
+                     (layout.private/'config.json',config_sha),
+                     (bundle/'private-owner-manifest.json',manifest_sha)):
+        if not isinstance(pin,str) or not re.fullmatch('[0-9a-f]{64}',pin) or digest(path)!=pin:
+            raise ValueError('Relationship attachment input pin changed')
+    verify(layout,owner_uid,owner_gid,public_gid)
+    record=json.loads((bundle/'private-owner-manifest.json').read_text())
+    if not re.fullmatch('[0-9a-f]{40}',record['candidate']):raise ValueError('Invalid relationship code candidate')
+    for relative,pin in record['files'].items():
+        if Path(relative).is_absolute() or '..' in Path(relative).parts or digest(bundle/relative)!=pin:
+            raise ValueError('Relationship code pin changed')
+    config=json.loads((layout.private/'config.json').read_text())
+    ledger=layout.private/'ledger/relationships.sqlite';unlinked(ledger)
+    if guard()!=expected_guard:raise ValueError('Live authority changed before relationship attachment')
+    if config.get('relationship_ledger_path')==str(ledger):
+        if not ledger.is_file():raise ValueError('Missing attached relationship ledger')
+        return {'result':'PASS','attached':True,'authority_seeded':False,'relationship_ledger':str(ledger)}
+    identity={} if (owner_uid,owner_gid)==(os.geteuid(),os.getegid()) else {'user':owner_uid,'group':owner_gid,'extra_groups':[]}
+    code=('import sys;sys.path.insert(0,sys.argv[1]);from private_sporting_relationships import RelationshipReviews;'
+          'r=RelationshipReviews(sys.argv[2],lambda:{});assert r.history()==[];r.close();print("verified")')
+    result=subprocess.run([sys.executable,'-I','-c',code,str(bundle/'scripts'),str(ledger)],
+                          capture_output=True,timeout=15,env={'PATH':'/usr/bin:/bin'},**identity)
+    if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('Empty relationship capability preparation refused')
+    current=copy.deepcopy(guard());expected=copy.deepcopy(expected_guard)
+    # This one schema initialization is the only authorized live guard difference.
+    if 'sporting' in current and current['sporting'] is not None:
+        current['sporting']['relationships']=expected['sporting']['relationships']
+    if current!=expected:raise ValueError('Live authority changed during relationship attachment')
+    config['relationship_ledger_path']=str(ledger)
+    atomic_write(layout.private/'config.json',(json.dumps(config,sort_keys=True)+'\n').encode(),0o640,owner_gid)
+    updated={'schema':'sporting-capability-provision/v1','files':{str(p):digest(p) for p in files(layout)}}
+    atomic_write(layout.private/'provision.json',(json.dumps(updated,sort_keys=True)+'\n').encode(),0o600,os.getegid())
+    verify(layout,owner_uid,owner_gid,public_gid)
+    return {'result':'PASS','attached':True,'authority_seeded':False,'relationship_events':0,'relationship_ledger':str(ledger)}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('prepare','verify','relocate-public'))
+    parser.add_argument('action',choices=('prepare','verify','relocate-public','attach-relationships'))
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--public-env-sha256')
     parser.add_argument('--owner-env-sha256')
     parser.add_argument('--provision-sha256')
     parser.add_argument('--public-config-sha256')
     parser.add_argument('--authority-env-sha256')
+    parser.add_argument('--owner-config-sha256')
+    parser.add_argument('--bundle',type=Path)
+    parser.add_argument('--bundle-manifest-sha256')
+    parser.add_argument('--guard',type=Path)
+    parser.add_argument('--guard-sha256')
+    parser.add_argument('--public-database')
     args=parser.parse_args()
     try:
         if os.geteuid()!=0:raise ValueError('Root host checkpoint required')
         owner=pwd.getpwnam('freediving-evidence');public=pwd.getpwnam('freediving')
         layout=Layout()
         if args.action=='verify':result=verify(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,public_uid=public.pw_uid)
+        elif args.action=='attach-relationships':
+            if not args.execute or not all((args.bundle,args.bundle_manifest_sha256,args.guard,args.guard_sha256,args.public_database)):
+                raise ValueError('Explicit pinned relationship attachment required')
+            if digest(args.guard)!=args.guard_sha256:raise ValueError('Relationship guard pin changed')
+            from comparison_activate import capture_guard
+            from owner_evidence_activate import Layout as OwnerLayout
+            owner_layout=OwnerLayout(Path('/opt/freediving/owner-evidence/app'),Path('/var/lib/freediving-owner-evidence'),layout.units,layout.env_dir/'owner-evidence.env')
+            result=attach_relationships(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,args.bundle,args.bundle_manifest_sha256,args.provision_sha256,args.owner_config_sha256,json.loads(args.guard.read_text()),lambda:capture_guard(owner_layout,args.public_database))
         elif args.action=='relocate-public':
             if not args.execute:raise ValueError('Explicit pinned relocation required')
             result=relocate_public(layout,owner.pw_uid,owner.pw_gid,public.pw_gid,args.provision_sha256,args.public_config_sha256,args.authority_env_sha256,public_uid=public.pw_uid)
