@@ -304,7 +304,8 @@
                                                               (when (:eligible? (get publication-state ((juxt :job-id :ordinal) reference)))
                                                                 (last (target-events state :publication_decisions reference))))) targets))
                                  plan (when (and (= mode "source") (seq targets))
-                                        (selections/projection-plan c (vec eligible-targets)))]
+                                        (revisions/with-verified-snapshot-cache
+                                          c #(selections/projection-plan c (vec eligible-targets))))]
                              {:schema "private-sporting-proofs/v1" :database database :binding_sha256 pin
                               :rows (binding [publication/*artifacts* (atom {}) *decoded-artifacts* (atom {})]
                                       (mapv #(mapped-proof c state mode relationship-state revision-state publication-state plan %) rows))})))]

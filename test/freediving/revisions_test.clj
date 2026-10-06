@@ -113,6 +113,26 @@
     (is (= :possible-revision (:match (first (revisions/candidates fixture/app b [a])))))
     (is (= :possible-revision (:match (first (revisions/candidates fixture/app a [b])))))
     (is (thrown-with-msg? Exception #"provenance" (revisions/candidates fixture/app (assoc-in b [:reference :source-sha256] "fake") [a])))))
+(deftest source-snapshot-cache-keeps-exact-provenance-and-ends-with-the-read
+  (let [d (sample "snapshot/1" scope)
+        cached-read (ns-resolve 'freediving.revisions 'with-verified-snapshot-cache)
+        read! (fn [f]
+                (with-open [c (java.sql.DriverManager/getConnection fixture/app)]
+                  (.setReadOnly c true)
+                  (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+                  (.setAutoCommit c false)
+                  (cached-read c #(f c))))]
+    (is (= scope (read! #(do (revisions/descriptor-values % d)
+                             (revisions/descriptor-values % d)))))
+    (is (thrown-with-msg? Exception #"provenance"
+                          (read! #(do (revisions/descriptor-values % d)
+                                      (revisions/descriptor-values % (assoc-in d [:reference :source-sha256] "wrong"))))))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER immutable_extractions")
+    (fixture/sql! fixture/admin (str "UPDATE freediving.extractions SET artifact_bytes=convert_to('{}','UTF8') WHERE job_id='"
+                                     (get-in d [:reference :job-id]) "'"))
+    (is (thrown-with-msg? Exception #"integrity" (read! #(revisions/descriptor-values % d))))
+    (with-open [c (java.sql.DriverManager/getConnection fixture/app)]
+      (is (thrown-with-msg? Exception #"read-only snapshot" (cached-read c (constantly :unsafe)))))))
 (defn -main [& _]
   (let [r (clojure.test/run-tests 'freediving.revisions-test)]
     (shutdown-agents) (when (pos? (+ (:fail r) (:error r))) (System/exit 1))))

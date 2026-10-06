@@ -73,16 +73,47 @@
 (defn- envelope [row]
   {:job-id (:job_id row) :ordinal (:ordinal row) :candidate-id (:candidate_id row)
    :source-sha256 (:source_sha256 row) :artifact-sha256 (:artifact_sha256 row)})
-(defn- verified-target [c ref]
-  (let [row (target c ref) artifact (edn/read-string (String. ^bytes (:artifact_bytes row) "UTF-8"))]
-    (when-not (and (= "result-row" (:kind row))
-                   (= (:artifact_sha256 row) (sha (:artifact_bytes row)))
+(def ^:dynamic ^:private *verified-snapshot-cache* nil)
+(defn- read-only-snapshot! [^Connection c]
+  (when-not (and (.isReadOnly c) (not (.getAutoCommit c))
+                 (#{Connection/TRANSACTION_REPEATABLE_READ Connection/TRANSACTION_SERIALIZABLE}
+                  (.getTransactionIsolation c)))
+    (fail! "Verified cache requires a read-only snapshot")))
+(defn with-verified-snapshot-cache
+  "Run f with provenance reuse limited to this read-only snapshot connection."
+  [^Connection c f]
+  (read-only-snapshot! c)
+  (binding [*verified-snapshot-cache* {:connection c :artifacts (atom {}) :targets (atom {})}]
+    (f)))
+(defn- verified-artifact [row]
+  (let [artifact (edn/read-string (String. ^bytes (:artifact_bytes row) "UTF-8"))]
+    (when-not (and (= (:artifact_sha256 row) (sha (:artifact_bytes row)))
                    (= (:job_id row) (:job-id artifact))
-                   (= (:candidate_id row) (candidate-id artifact (:ordinal row)))
-                   (= (:source_sha256 row) (:source-sha256 artifact))
-                   (= (edn/read-string (:payload_edn row)) (get (:candidates artifact) (:ordinal row))))
+                   (= (:source_sha256 row) (:source-sha256 artifact)))
       (fail! "Observation provenance integrity mismatch"))
-    {:reference (envelope row) :artifact artifact}))
+    artifact))
+(defn- verified-row [row artifact]
+  (when-not (and (= "result-row" (:kind row))
+                 (= (:candidate_id row) (candidate-id artifact (:ordinal row)))
+                 (= (edn/read-string (:payload_edn row)) (get (:candidates artifact) (:ordinal row))))
+    (fail! "Observation provenance integrity mismatch"))
+  {:reference (envelope row) :artifact artifact})
+(defn- verified-target [c {:keys [job-id ordinal] :as ref}]
+  (if (identical? c (:connection *verified-snapshot-cache*))
+    (let [{:keys [artifacts targets]} *verified-snapshot-cache*
+          key [job-id ordinal]]
+      (read-only-snapshot! c)
+      (or (get @targets key)
+          (let [row (or (first (query c "SELECT * FROM freediving.observations WHERE job_id=? AND ordinal=?" job-id ordinal))
+                        (fail! "Unknown observation version"))
+                source (or (get @artifacts job-id)
+                           (let [stored (or (first (query c "SELECT job_id,artifact_bytes,artifact_sha256,source_sha256 FROM freediving.extractions WHERE job_id=?" job-id))
+                                            (fail! "Unknown observation version"))
+                                 source {:metadata (dissoc stored :artifact_bytes) :artifact (verified-artifact stored)}]
+                             (swap! artifacts assoc job-id source) source))
+                result (verified-row (merge row (:metadata source)) (:artifact source))]
+            (swap! targets assoc key result) result)))
+    (let [row (target c ref)] (verified-row row (verified-artifact row)))))
 (defn reference "Exact immutable source/version reference; validates stored artifact and row." [url target]
   (transaction url #(-> (verified-target % target) :reference)))
 (defn- binding-value
