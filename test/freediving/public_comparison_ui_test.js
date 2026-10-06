@@ -136,5 +136,31 @@ function text() { return all(nodes.content).map(n => n.textContent || '').join('
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(location.pathname, '/comparison');
   assert.equal(location.search, '?comparison=2026-pool-dnf-women&federation=CMAS&representation=POL&sanction_scope=broad&listing_filter=national-local-only');
+  location.pathname = '/'; location.search = '?comparison=2026-pool-dnf-women';
+  const gap = {target: '2026-pool-dnf-women', 'published-source-records': 81, 'target-source-records': 4, 'eligible-comparison-peers': 3, 'distinct-sporting-attempts': 4,
+    'sporting-status': 'ranked', 'sporting-comparison-url': '/comparison?comparison=2026-pool-dnf-women&sanction_scope=default&listing_filter=all',
+    'year-window': {from: '2026-01-01', through: '2026-12-31'}, 'evidence-coverage-cutoff': '2026-10-01T12:39:47Z', 'projection-read-at': '2026-10-06T15:00:00Z',
+    'scope-gaps': [], lists: ['national', 'continental', 'international'].map(scope => ({scope, reason: 'Verified comparison authority unavailable'}))};
+  data = {results: [], total: 0, page: 1, pages: 0, filters: {}, coverage: {results: 81, approved_identities: 0}, comparison: gap};
+  await events.pageshow();
+  assert.match(text(), /Distinct sporting attempts: 4/);
+  assert.match(text(), /Publisher evidence coverage cutoff: 2026-10-01T12:39:47Z/);
+  assert.match(text(), /3 eligible comparison peers/);
+  assert.match(text(), /Current sporting ranks available/);
+  assert.match(text(), /Source record availability/);
+  assert.doesNotMatch(text(), /Verified comparison authority unavailable|Rank withheld|Peer denominator: unknown/);
+  assert.ok(all(nodes.content).some(n => n.href === gap['sporting-comparison-url']));
+  for (const unsafe of ['javascript:alert(1)', 'https://example.org/comparison?comparison=2026-pool-dnf-women', '/comparison?comparison=other', '/comparison?comparison=2026-pool-dnf-women&authority=bad', '/comparison?comparison=2026-pool-dnf-women&federation=CMAS&federation=AIDA', '/comparison?comparison=2026-pool-dnf-women#stale']) {
+    data = {...data, comparison: {...gap, 'sporting-comparison-url': unsafe}}; await events.pageshow();
+    assert.equal(all(nodes.content).find(n => n.textContent === 'Current sporting ranks available').href, '/comparison?comparison=2026-pool-dnf-women');
+  }
+  data = {...data, comparison: {...gap, 'sporting-status': 'withheld', 'distinct-sporting-attempts': null, 'evidence-coverage-cutoff': null, 'target-source-records': 0, 'eligible-comparison-peers': 0}};
+  await events.pageshow();
+  assert.match(text(), /Distinct sporting attempts: unknown/);
+  assert.match(text(), /Publisher evidence coverage cutoff: unknown/);
+  assert.match(text(), /0 eligible comparison peers/);
+  assert.match(text(), /Rank withheld/);
+  assert.match(text(), /Verified comparison authority unavailable/);
+  assert.doesNotMatch(text(), /Current sporting ranks available/);
   console.log('Rendered current detail, exact peers, refresh, revoked and empty comparison passed');
 })().catch(e => { console.error(e); process.exitCode = 1; });
