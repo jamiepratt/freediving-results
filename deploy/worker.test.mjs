@@ -291,3 +291,28 @@ test('status reader accepts a signed service assertion without nbf and rejects f
     assert.equal(forwarded,1);
   }finally{globalThis.fetch=original;}
 });
+
+test('public sporting list, detail and exact peers use only the authenticated uncached public upstream', async () => {
+  const original = globalThis.fetch;
+  const id = 'a'.repeat(64);
+  const paths = ['/comparison', '/api/comparison', `/comparison/attempts/${id}?authority=${id}`, `/api/comparison/attempts/${id}?authority=${id}`, `/comparison/peers/${id}?federation=CMAS`, `/api/comparison/peers/${id}?federation=CMAS`];
+  const seen = [];
+  globalThis.fetch = async (url, options) => {
+    seen.push(url);
+    assert.equal(options.headers.get('X-Freediving-Gateway'), 'test-secret');
+    assert.equal(options.headers.get('Cookie'), null);
+    return new Response('{}', {headers: {'Cache-Control': 'public'}});
+  };
+  try {
+    for (const path of paths) {
+      const response = await worker.fetch(req(path), env);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    }
+    assert.deepEqual(seen, paths.map(path => 'https://poc-origin.alphacompose.com' + path));
+    for (const path of ['/api/comparison/private', '/comparison/attempts/secret', `/api/comparison/peers/${id}/private`]) {
+      assert.equal((await worker.fetch(req(path), env)).status, 404);
+    }
+    assert.equal((await worker.fetch(req('/api/comparison', {method:'POST'}), env)).status, 405);
+  } finally {globalThis.fetch = original;}
+});

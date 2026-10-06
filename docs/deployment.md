@@ -624,3 +624,11 @@ The host helper retains prior app/snapshot versions for local service rollback.
 An incomplete activation is not evidence that owner access or archive durability
 has been verified; keep [issue #54](https://github.com/jamiepratt/freediving-results/issues/54)
 open until remote checks and the wider UI acceptance are complete.
+
+## Empty public sporting projection
+
+The normal deployment applies exact checksum-guarded migrations 1-22. Migration 22 creates a separate public sporting fact ledger and safe derived view without inserting sporting approvals, source selections or attempts. The public reader receives only `SELECT` on `public_results`, `public_event_coverage` and `public_sporting_comparison`; no sporting ledger, member, private canonical or function capability is granted. Startup and subsequent sporting requests reject widened database capabilities.
+
+The guarded migration checkpoint preserves all existing public/source counts and existing sporting counts. Its first migration expects one initial scoring-policy event and zero sporting authority/member rows. Schema-current retries rerun idempotent deployment configuration to restore the exact new-view grant after an application rollback. Changing that grant is separate from changing source or owner authority.
+
+A prior application that predates the new view rejects its reader grant. Application rollback must therefore revoke only the new derived-view reader grant before restarting the prior application, under the normal activation checkpoint. The additive schema stays installed. Do not restore a database dump over newer owner events or public records. The initial empty sporting projection and source-record preservation are code/runtime evidence, not proof of real current sporting eligibility; those gates remain [issue #194](https://github.com/jamiepratt/freediving-results/issues/194).

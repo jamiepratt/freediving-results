@@ -2,7 +2,8 @@
   "Loopback public website over the restricted public projection only."
   (:require [clojure.data.json :as json] [clojure.java.io :as io]
             [clojure.string :as str] [freediving.public-results :as public]
-            [freediving.corrections :as corrections])
+            [freediving.corrections :as corrections]
+            [freediving.public-sporting :as sporting])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
            [java.io PushbackReader StringReader]
@@ -29,9 +30,9 @@
                          "SELECT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user))"
                          "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=current_database() AND pg_has_role(current_user,datdba,'MEMBER'))"
                          "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' AND (pg_has_role(current_user,nspowner,'MEMBER') OR has_schema_privilege(current_user,oid,'CREATE')))"
-                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR (c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) OR has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))"
+                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND (pg_has_role(current_user,c.relowner,'MEMBER') OR (c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND c.oid IS DISTINCT FROM to_regclass('freediving.public_sporting_comparison') AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) OR has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))"
                          "SELECT has_database_privilege(current_user,current_database(),'CREATE')"
-                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND ((c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND has_any_column_privilege(current_user,c.oid,'SELECT')) OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES')))"
+                         "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p','f') AND ((c.oid <> 'freediving.public_results'::regclass AND c.oid IS DISTINCT FROM to_regclass('freediving.public_event_coverage') AND c.oid IS DISTINCT FROM to_regclass('freediving.public_sporting_comparison') AND has_any_column_privilege(current_user,c.oid,'SELECT')) OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES')))"
                          "SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE'))"
                          "SELECT NOT has_table_privilege(current_user,'freediving.public_results','SELECT')"]))
       (fail! 403))))
@@ -50,7 +51,7 @@
             (let [[k v] (str/split part #"=" 2)
                   decode #(try (URLDecoder/decode (or % "") "UTF-8") (catch Exception _ (fail! 400)))
                   k (decode k) v (decode v)]
-              (when (or (contains? m k) (not (contains? #{"q" "federation" "discipline" "category" "date" "page" "limit" "comparison"} k))
+              (when (or (contains? m k) (not (contains? #{"q" "federation" "discipline" "category" "date" "page" "limit" "comparison" "representation" "sanction_scope" "listing_filter" "authority"} k))
                         (> (count v) 200) (re-find #"[\p{Cc}\p{Cs}\uFFFD]" v)) (fail! 400))
               (assoc m k v))) {} (if (seq raw) (str/split raw #"&" -1) [])))
 (defn- positive [value default maximum]
@@ -84,6 +85,7 @@
                    :source-records-url (str "/?comparison=" comparison-target)})
                 [:national :continental :international])})
 (defn- listing [rows p demo?]
+  (when (seq (remove #{"q" "federation" "discipline" "category" "date" "page" "limit" "comparison"} (keys p))) (fail! 400))
   (let [target (get p "comparison")
         _ (when (and target (not= target comparison-target)) (fail! 400))
         scoped-rows (if target (filterv target-source-record? rows) rows)
@@ -175,8 +177,23 @@
       (do (when (some? raw) (fail! 400))
           (when-not (= [url] (vec origin)) (fail! 403))
           (let [r (correction-body! e)] (send (corrections/submit! submission-database-url r (client-key e gateway-secret)))))
-      (= path "/api/results") (let [p (params raw) snapshot (public/listing-snapshot database-url)]
-                                (send (assoc-in (listing (:results snapshot) p demo?) [:coverage :events] (:events snapshot))))
+      (or (= path "/api/comparison") (re-matches #"/api/comparison/(attempts|peers)/[0-9a-f]{64}" path))
+      (do (authority! database-url) (send (assoc (sporting/read-response database-url path (params raw)) :demo (boolean demo?))))
+      (= path "/api/results") (let [p (params raw) snapshot (public/listing-snapshot database-url)
+                                    result (assoc-in (listing (:results snapshot) p demo?) [:coverage :events] (:events snapshot))
+                                    sporting (when (get p "comparison") (authority! database-url) (sporting/read-response database-url "/api/comparison" (select-keys p ["comparison" "federation"])))]
+                                (send (if (= :ranked (:status sporting))
+                                        (update result :comparison merge
+                                                {:eligible-comparison-peers (get-in sporting [:coverage :eligible-comparison-peers])
+                                                 :distinct-sporting-attempts (get-in sporting [:coverage :distinct-sporting-attempts])
+                                                 :sporting-comparison-url "/comparison?comparison=2026-pool-dnf-women"
+                                                 :sporting-status :ranked :scope-gaps []
+                                                 :lists (mapv (fn [scope] {:scope scope :status :available :rank nil :eligible-peer-denominator nil
+                                                                           :reason "Current sporting ranks and exact peer lists are available in the sporting comparison."
+                                                                           :source-records-url "/comparison?comparison=2026-pool-dnf-women"})
+                                                              [:national :continental :international])
+                                                 :evidence-coverage-cutoff (:evidence-coverage-cutoff sporting)
+                                                 :projection-read-at (:projection-read-at sporting)}) result)))
       (re-matches #"/api/(results|athletes)/[0-9a-f]{64}" path)
       (do (when (seq raw) (fail! 400))
           (let [[_ kind id] (re-matches #"/api/(results|athletes)/([0-9a-f]{64})" path)
@@ -188,9 +205,9 @@
               (if-let [detail (corrections/public-detail database-url id)]
                 (send (assoc detail :demo (boolean demo?))) (fail! 404))
               (send {(if (= kind "results") :result :results) found :demo (boolean demo?)}))))
-      (or (= path "/") (re-matches #"/(results|athletes)/[0-9a-f]{64}" path) (contains? #{"/public.js" "/public.css"} path))
-      (do (when (and (seq raw) (not= path "/")) (fail! 400))
-          (when (= path "/") (params raw))
+      (or (= path "/") (= path "/comparison") (re-matches #"/comparison/(attempts|peers)/[0-9a-f]{64}" path) (re-matches #"/(results|athletes)/[0-9a-f]{64}" path) (contains? #{"/public.js" "/public.css"} path))
+      (do (when (and (seq raw) (not (or (= path "/") (= path "/comparison") (str/starts-with? path "/comparison/")))) (fail! 400))
+          (when (or (= path "/") (= path "/comparison") (str/starts-with? path "/comparison/")) (params raw))
           (let [[resource mime] (get {"/public.js" ["public.js" "text/javascript"] "/public.css" ["public.css" "text/css"]} path ["public.html" "text/html"])]
             (if-let [r (io/resource resource)] (respond! e 200 (slurp r) mime) (fail! 404))))
       :else (fail! 404))))

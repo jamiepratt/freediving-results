@@ -19,6 +19,7 @@ PUBLIC_TABLES = ('extractions', 'observations', 'review_decisions',
                  'publication_decisions', 'publication_policy_events',
                  'public_projection_cache', 'public_results')
 SOURCE_TABLES = ('source_identity_snapshot', 'source_identity_observations')
+SPORTING_TABLES = ('public_sporting_policy_events', 'public_sporting_authority_events', 'public_sporting_members')
 RELEASES_ROOT = Path('/opt/freediving/releases')
 ROLES = ('freediving_migrator', 'observations_app', 'reviews_owner',
          'reviews_public', 'corrections_submit')
@@ -64,8 +65,8 @@ def expected_migrations():
         if version == 6:
             data = json.dumps(data.decode('utf-8'), ensure_ascii=False).encode('utf-8')
         expected[version] = hashlib.sha256(data).hexdigest()
-    if set(expected) != set(range(1, 22)):
-        raise ValueError('Release must contain exact migrations 1-21')
+    if set(expected) != set(range(1, 23)):
+        raise ValueError('Release must contain exact migrations 1-22')
     return expected
 
 
@@ -166,14 +167,15 @@ def restore_drill(backup, database, port, versions):
             raise ValueError('Disposable restore public counts differ')
         if 20 in versions and counts(disposable, port, SOURCE_TABLES) != counts(database, port, SOURCE_TABLES):
             raise ValueError('Disposable restore source counts differ')
+        if 22 in versions and counts(disposable, port, SPORTING_TABLES) != counts(database, port, SPORTING_TABLES):
+            raise ValueError('Disposable restore sporting counts differ')
     finally:
         if created:
             postgres('dropdb', '-h', '/var/run/postgresql', '-p', port, disposable)
 
 
 def apply_if_needed(current, migration_url, release):
-    if current == 21:
-        return
+    # Even schema-current retries restore the exact derived-view grant after app rollback.
     env = {key: value for key, value in os.environ.items() if not key.startswith('PG')}
     env['FREEDIVING_MIGRATION_URL'] = migration_url
     run(['java', '-Xmx256m', '-cp', 'src:resources:lib/*', 'clojure.main',
@@ -202,10 +204,11 @@ def migrate(args):
     port, database, migration_url, public_origin = deployment_config(args.config_dir)
     verify_roles(database, port)
     before = version_state(database, port)
-    allowed = tuple(set(range(1, end)) for end in (8, 21, 22))
+    allowed = tuple(set(range(1, end)) for end in (8, 21, 22, 23))
     current = verify_versions(before, expected, allowed)
     source_before = counts(database, port, SOURCE_TABLES) if current >= 20 else None
     public_before = counts(database, port, PUBLIC_TABLES)
+    sporting_before = counts(database, port, SPORTING_TABLES) if current >= 22 else (1, 0, 0)
     deployment_before = deployment_state(args.public_current, args.owner_current,
                                          args.owner_status, public_origin)
     ensure_private_dir(args.backup_dir)
@@ -227,15 +230,17 @@ def migrate(args):
         raise
     print('Rollback checkpoint: ' + str(backup), flush=True)
     apply_if_needed(current, migration_url, release)
-    verify_versions(version_state(database, port), expected, (set(range(1, 22)),))
+    verify_versions(version_state(database, port), expected, (set(range(1, 23)),))
     if counts(database, port, SOURCE_TABLES) != (source_before if source_before is not None else (0, 0)):
         raise ValueError('Source identity table counts changed')
     if counts(database, port, PUBLIC_TABLES) != public_before:
         raise ValueError('Public table counts changed')
+    if counts(database, port, SPORTING_TABLES) != sporting_before:
+        raise ValueError('Sporting authority table counts changed')
     if deployment_state(args.public_current, args.owner_current,
                         args.owner_status, public_origin) != deployment_before:
         raise ValueError('Public or owner deployment state changed')
-    print('Migration-only verified versions 1-21; public and owner checkpoints unchanged')
+    print('Migration-only verified versions 1-22; public and owner checkpoints unchanged')
 
 
 def main():

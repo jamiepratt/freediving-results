@@ -56,3 +56,21 @@ PATH=/Applications/Postgres.app/Contents/Versions/17/bin:$PATH scripts/test-post
 ```
 
 The UI contract tests require Node.js. HTTP and demo tests use isolated disposable PostgreSQL clusters. Full database regression runs through `scripts/test-postgres.sh`; standalone archive/extraction regression remains `clojure -M:test`.
+
+## Public sporting comparison
+
+`/comparison` and `/api/comparison` expose the bounded 2026 pool DNF women comparison. They read the separate `public_sporting_comparison` projection through the restricted public database role. Installing migration 22 creates an empty sporting authority ledger and one scoring-policy event. It publishes no sporting attempts or owner decisions. The source-record API remains independent.
+
+Trusted database-owner preparation rejects unknown fields and binds each cited fact to the exact public result, source and extraction artifact digests, hashed observation version and ordinal. Selected source view and its attempt/result kind, finality, source authority, final post-penalty value, scoring policy, same-attempt relationship, comparable category, source gender, represented country, listing and sanction are separate facts. The public adapter uses hashed aliases for the internally exact source reference; original job and candidate identifiers are withheld. The first eligible cohort must contain both CMAS and AIDA before a user narrows federation or representation. Equal values receive competition ranks. Official event placing remains a separate publisher field; DQ achieved-value hypothetical scores never become achieved ranks.
+
+Source publication does not supply sporting authority. Genuine owner/source decisions and a current withdrawal bridge into the independent public fact ledger remain required for real publication under [issue #194](https://github.com/jamiepratt/freediving-results/issues/194). Snapshot checks on the public database's local canonical tables do not establish the current state of the separate private canonical database. Actual sporting authority is therefore initially unavailable, with zero eligible peers and no ranks.
+
+List filters are `comparison`, `federation`, `representation`, `sanction_scope` and `listing_filter`. They are independent of source-name, date and source-category search filters. Detail URLs carry an authority token; peer URLs carry a token binding the full filters, policy, authority revision and exact ordered peer descriptor. Current policy, publication/review corrections or reversals, selection/relationship drift, sporting withdrawal, changed source bodies or changed local derived state invalidate those URLs. Every HTTP response has `Cache-Control: no-store`. Coverage cutoff and projection read time are separate fields; source positions, extraction versions, explicitly distinct attempts and eligible peers have separate denominators.
+
+The isolated positive HTTP/browser fixture uses invented CMAS/AIDA sources and the actual restricted SQL view:
+
+```sh
+FREEDIVING_TEST_SERVE=1 scripts/test-postgres.sh test-public-sporting
+```
+
+The process prints its loopback comparison URL. Interrupt it to stop the HTTP server and remove only its disposable PostgreSQL cluster. This fixture is not a production authority import path.

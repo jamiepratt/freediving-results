@@ -1,6 +1,6 @@
 const ORIGIN = 'https://poc.alphacompose.com';
 const UPSTREAM = 'https://poc-origin.alphacompose.com';
-const allowed = /^(?:\/|\/public\.(?:js|css)|\/api\/results|\/(?:api\/)?(?:results|athletes)\/[a-f0-9]{64}|\/api\/corrections)$/;
+const allowed = /^(?:\/|\/public\.(?:js|css)|\/api\/results|\/(?:api\/)?comparison(?:\/(?:attempts|peers)\/[a-f0-9]{64})?|\/(?:api\/)?(?:results|athletes)\/[a-f0-9]{64}|\/api\/corrections)$/;
 const failure = (status) => new Response('Request unavailable', {status, headers: {'Cache-Control':'no-store', 'Content-Type':'text/plain; charset=utf-8'}});
 const privatePath = (path) => path === '/owner-evidence' || path.startsWith('/owner-evidence/');
 const safePrivatePath = /^\/owner-evidence(?:\/[A-Za-z0-9._~-]+)*\/?$/;
