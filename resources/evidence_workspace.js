@@ -26,6 +26,15 @@ function renderPresentationStatus(overview,sources,sync){
       const a=sync.application;
       area.append(cell(`Private application receipt for snapshot ${a.snapshot_sha256}. ${a.canonical_revision} canonical events in verified readback ${a.canonical_readback_sha256}; owner store revision ${a.owner_store_revision}. ${a.pending_proposals} pending owner proposals; ${a.unresolved_exclusions} unresolved exclusions; zero provider calls recorded. These proposals await owner review. Publication unverified; this receipt remains private.`, 'p'));
     }
+    if(sync.schema==='private-presentation-status/v4' && sync.authority){
+      const a=sync.authority;
+      const m=a.owner_metrics,count=name=>m[name] ?? 0,total=Object.values(m).reduce((sum,n)=>sum+n,0);
+      area.append(cell(`Current private owner authority: revision ${a.owner_store_revision}. ${total} owner decisions: ${count('pending')} pending review, ${count('automatic_approved')} automatic approvals, ${count('human_approved')} human approvals, ${count('human_corrected')} human corrections, ${count('rejected')} rejected, ${count('reversed')} reversed, ${count('invalidated')} invalidated, ${count('projection_pending')} awaiting canonical delivery.`, 'p'));
+      for(const [name,s] of Object.entries(a.canonical))area.append(cell(`${name==='identity' ? 'Athlete identity' : 'Same attempt'} canonical scope: ${s.status}; revision ${s.revision ?? 'unknown'}; owner event revision ${s.owner_event_revision ?? 'unknown'}. Accepted count within the verified cohort: ${s.status==='verified' ? s.accepted_count ?? 'unknown' : 'unknown'}.`, 'p'));
+      const h=sync.historical?.receipt,old=h?.application;
+      area.append(cell(old ? `Historical private identity application: canonical revision ${old.canonical_revision}; owner revision ${old.owner_store_revision}; receipt ${sync.historical.sha256}. This historical receipt does not establish current identity freshness.` : `Historical checkpoint receipt ${sync.historical?.sha256 ?? 'unknown'}.`, 'p'));
+      area.append(cell('Canonical scope revisions are independent. Local flow versions, cache reuse and provider usage remain in the verified local run metrics. Cost, measured accuracy and public publication authority are unknown.', 'p'));
+    }
   }else area.append(cell(`Local completed revision: unavailable. Pending transfer: unavailable. Failed activation and retry: unavailable. ${sync?.status==='stale' ? 'Reconciliation status is stale after an owner decision or active snapshot change.' : remote ? 'Private local checkpoint sync is unavailable; check the local run state before retrying.' : 'This demo reads a snapshot directly; check the local run state and remote owner page for presentation status.'}`, 'p'));
   const gaps=sources.filter(source=>source.status!=='included');
   area.append(cell(gaps.length ? 'Explicit source gaps:' : 'No source gaps listed by this snapshot; coverage may still be partial.', 'p'));

@@ -18,7 +18,7 @@ from unified_evidence_query import SnapshotQuery
 from owner_source_view import OriginalSourceView, SourceViewError
 from route_roster_query import RouteRosterQuery
 from owner_decision_store import ConflictError
-from private_presentation_status import PrivatePresentationStatus, StatusConflict
+from private_presentation_status import PrivatePresentationStatus, StatusConflict, status_digest, validate_authority
 
 
 PUBLIC_ORIGIN = 'https://poc.alphacompose.com'
@@ -145,6 +145,9 @@ class PrivateOrigin(ThreadingHTTPServer):
         self.request_lock = threading.Lock()
         self.secret, self.expected_host, self.owners, expected_digest = _config(env)
         self.canonical_reader = canonical_reader
+        if self.canonical_reader is None and env.get('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'):
+            from private_canonical_status import create_reader
+            self.canonical_reader = create_reader(env)
         self.assets = _assets()
         try:
             self.query = SnapshotQuery(snapshot_dir)
@@ -213,6 +216,59 @@ class PrivateOrigin(ThreadingHTTPServer):
         self.query.close()
         if self.decisions is not None and hasattr(self.decisions, 'close'):
             self.decisions.close()
+
+    def status_authority(self):
+        """Collect fresh origin authority; no local-run store grants this status."""
+        owner = self.decisions
+        if owner is None or self.import_token is None:
+            return None
+        revision, snapshot = owner.revision, owner.active_snapshot_sha256
+        events, cursor = [], 0
+        while True:
+            page = owner.human_events(after_revision=cursor)
+            if page['store_revision'] != revision:
+                raise StatusConflict('owner changed during status collection')
+            events.extend(page['events'])
+            if len(events) > 100000:
+                raise ValueError('owner status feed exceeds bound')
+            if len(page['events']) < 100:
+                break
+            cursor = page['next_revision']
+        feed = {'store_revision': revision, 'events': events}
+        payload = json.dumps(feed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        binding = owner._binding()
+        metrics = {}
+        for row in owner.db.execute('SELECT id FROM proposals'):
+            decision = owner._inspect(row['id'], binding)
+            status = decision['effective_status']
+            metrics[status] = metrics.get(status, 0) + 1
+        try:
+            readback = self.canonical_reader() if self.canonical_reader else None
+        except Exception:
+            readback = None
+        canonical = {}
+        fields = {'revision', 'owner_event_revision', 'export_sha256', 'accepted_count', 'evidence_sha256'}
+        for name in ('identity', 'same_attempt'):
+            scope = (readback.get('scopes', {}).get(name) if isinstance(readback, dict)
+                     and readback.get('schema') == 'private-canonical-status-readback/v1'
+                     and readback.get('snapshot_sha256') == snapshot else None)
+            latest = max((event['store_revision'] for event in events if
+                          ('identity' if event['proposal']['type'] in ('identity', 'athlete_identity')
+                           else event['proposal']['type']) == name), default=0)
+            if isinstance(scope, dict) and set(scope) == fields:
+                canonical[name] = {**scope, 'status': 'verified' if
+                                   scope['owner_event_revision'] == latest else 'stale'}
+            else:
+                canonical[name] = {**dict.fromkeys(fields), 'status': 'unknown'}
+        authority = {'owner_store_revision': revision, 'snapshot_sha256': snapshot,
+                     'signed_owner_feed_sha256': sha256(payload.encode('utf-8')).hexdigest(),
+                     'signed_owner_feed_hmac': hmac.new(self.import_token.encode('ascii'),
+                                payload.encode('utf-8'), sha256).hexdigest(),
+                     'owner_metrics': metrics, 'canonical': canonical}
+        validate_authority(authority)
+        if owner.revision != revision or owner.active_snapshot_sha256 != snapshot:
+            raise StatusConflict('owner changed during status collection')
+        return authority
 
     def get_request(self):
         sock, address = super().get_request()
@@ -404,11 +460,22 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
                           'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'], 'bundle_manifest_sha256': None}
                 owner = self.server.decisions
+                authority = self.server.status_authority()
+                if isinstance(self.server.presentation_status, PrivatePresentationStatus):
+                    self.server.presentation_status = PrivatePresentationStatus(self.server.presentation_status.path)
                 result = (self.server.presentation_status.read(
                     active, owner_revision=owner.revision if owner else None,
                     owner_snapshot=owner.active_snapshot_sha256 if owner else None,
-                    include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None) if self.server.presentation_status else
+                    include_stale_checkpoint=self._one('X-Freediving-Status-Token') is not None,
+                    **({'authority': authority} if authority is not None else {})) if self.server.presentation_status else
                           {'status': 'unavailable', 'remote': {'active': active}})
+                if (authority is not None and isinstance(self.server.presentation_status, PrivatePresentationStatus)
+                        and self.server.presentation_status.current
+                        and self._one('X-Freediving-Status-Token') is not None):
+                    result['refresh_pin'] = {'revision': self.server.presentation_status.current['revision'],
+                        'authority_sha256': status_digest(authority),
+                        'owner_store_revision': authority['owner_store_revision'],
+                        'export_sha256': authority['canonical']['same_attempt']['export_sha256']}
             elif path == '/owner-evidence/api/sources' and not parsed.query:
                 result = query.sources()
             elif path == '/owner-evidence/api/source':
@@ -549,6 +616,8 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 return self._reply(404)
         except SourceViewError as exc:
             return self._reply(exc.status)
+        except StatusConflict:
+            return self._reply(409)
         except KeyError:
             return self._reply(404)
         except ValueError:
@@ -610,9 +679,21 @@ class PrivateOriginHandler(BaseHTTPRequestHandler):
                 active = {'snapshot_sha256': self.server.query.manifest['snapshot_sha256'],
                           'bundle_manifest_sha256': self.server.source_bundle_sha256} if self.server.source_bundle_sha256 else None
                 owner = self.server.decisions
-                result = self.server.presentation_status.update(
-                    body, active, owner_revision=owner.revision if owner else None,
-                    owner_snapshot=owner.active_snapshot_sha256 if owner else None)
+                if isinstance(self.server.presentation_status, PrivatePresentationStatus):
+                    self.server.presentation_status = PrivatePresentationStatus(self.server.presentation_status.path)
+                if body.get('schema') == 'private-presentation-refresh/v1':
+                    authority = self.server.status_authority()
+                    if authority is None:
+                        raise StatusConflict('authoritative owner status unavailable')
+                    result = self.server.presentation_status.refresh(body, active, authority)
+                    # A correction racing the filesystem commit is never
+                    # returned as current authority. The next read also checks it.
+                    result = self.server.presentation_status.read(active,
+                        authority=self.server.status_authority(), include_stale_checkpoint=True)
+                else:
+                    result = self.server.presentation_status.update(
+                        body, active, owner_revision=owner.revision if owner else None,
+                        owner_snapshot=owner.active_snapshot_sha256 if owner else None)
             except StatusConflict:
                 return self._reply(409)
             except (ValueError, TypeError, KeyError):

@@ -913,7 +913,10 @@ def run(plan_path, run_dir, *, remote_config=None, owner_access_jwt=None,
     if len([value for value in (status_client_id, status_client_secret, status_token) if value]) not in (0, 3):
         raise ValueError('private status credentials incomplete')
     if status_client_id:
-        from private_status_sync import sync_status
+        from private_status_sync import sync_status as publish_status
+        def sync_status(directory, client_id, client_secret, token):
+            return publish_status(directory, client_id, client_secret, token,
+                authoritative_refresh=bool(plan.get('reconciliation', {}).get('owner_sync_config')))
         sync_status(run_dir, status_client_id, status_client_secret, status_token)
 
     if remote_config is not None:

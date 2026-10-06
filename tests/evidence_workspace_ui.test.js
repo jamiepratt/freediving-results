@@ -26,6 +26,24 @@ function workspace(responses = {}, statuses = {}, pathname = '/owner-evidence') 
   return {context, node: document.getElementById, requests};
 }
 
+test('current owner status separates canonical cohorts from historical identity receipt', () => {
+  const {context,node}=workspace();
+  context.receipt={schema:'private-presentation-status/v4',run_id:'normal-run',
+    local:{snapshot_sha256:'snapshot',cutoff:'2026-10-05T00:00:00Z',gap_count:9},
+    remote:{status:'failed',pending:'snapshot',failed:'snapshot',active:{snapshot_sha256:'snapshot',bundle_manifest_sha256:'bundle'}},
+    authority:{owner_store_revision:227,owner_metrics:{pending:207,human_approved:5},
+      canonical:{identity:{status:'unknown',revision:null,owner_event_revision:null,accepted_count:null},
+        same_attempt:{status:'verified',revision:7,owner_event_revision:227,accepted_count:5}}},
+    historical:{sha256:'historical-hash',receipt:{application:{canonical_revision:211,owner_store_revision:209}}}};
+  vm.runInContext('renderPresentationStatus({},[],receipt)',context);
+  const text=node('presentation-status').visibleText;
+  for(const phrase of ['Status receipt: failed','212 owner decisions','207 pending review',
+      'Athlete identity canonical scope: unknown','Same attempt canonical scope: verified; revision 7',
+      'Accepted count within the verified cohort: 5','Historical private identity application: canonical revision 211; owner revision 209',
+      'cache reuse and provider usage remain in the verified local run metrics'])assert.ok(text.includes(phrase),phrase);
+  assert.doesNotMatch(text,/same_attempt|"pending":207/);
+});
+
 test('consolidated PDF review shows cited versions while decision review remains available', async () => {
   const {context, node, requests} = workspace({'/api/issue172-queue?limit=25&offset=0': {
     schema:'issue172-owner-queue-v1', audit_sha256:'a'.repeat(64), queue_sha256:'b'.repeat(64),

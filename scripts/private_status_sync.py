@@ -28,7 +28,8 @@ def _active_provenance(current, snapshot, bundle):
         raise ValueError('authenticated local status provenance missing') from None
     if (current.get('schema') not in ('private-presentation-status/v1',
                                       'private-presentation-status/v2',
-                                      'private-presentation-status/v3')
+                                      'private-presentation-status/v3',
+                                      'private-presentation-status/v4')
             or type(current.get('revision')) is not int or current['revision'] < 1
             or not isinstance(current.get('run_id'), str)
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', current['run_id'])
@@ -162,13 +163,60 @@ def _request(opener, method, url, client_id, client_secret, token, payload=None)
         raise RuntimeError('private status sync unavailable') from error
 
 
-def sync_status(run_dir, client_id, client_secret, token, *, url=STATUS_URL, opener=None):
+def refresh_authoritative_status(run_dir, client_id, client_secret, token, *,
+                                 url=STATUS_URL, opener=None, pinned=None):
+    """Refresh verified remote authority while retaining scoped local provenance."""
+    _status_credentials(client_id, client_secret, token, url)
+    run_dir = Path(run_dir)
+    state = json.loads((run_dir / 'state.json').read_text(encoding='utf-8'))
+    if (state.get('local', {}).get('status') != 'complete' or
+            state.get('reconciliation', {}).get('mode') != 'microplus_attempt'):
+        raise ValueError('authoritative refresh requires a complete Microplus run')
+    from local_evidence_run import microplus_metrics
+    metrics = microplus_metrics(run_dir, state)
+    opener = opener or build_opener(_NoRedirect())
+    current = pinned or _request(opener, 'GET', url, client_id, client_secret, token)
+    pin = current.get('refresh_pin')
+    active = current.get('remote', {}).get('active')
+    if (not isinstance(pin, dict) or not isinstance(active, dict)
+            or pin.get('revision') != current.get('revision')
+            or active.get('snapshot_sha256') != state['local']['snapshot_sha256']
+            or pin.get('export_sha256') != metrics['binding']['export_sha256']):
+        raise RuntimeError('verified authoritative refresh pin unavailable or changed')
+    processing = {key: state['remote'].get(key) for key in ('status', 'pending', 'failed')}
+    for key in ('pending', 'failed'):
+        if isinstance(processing[key], dict):
+            processing[key] = processing[key]['snapshot_sha256']
+    command = {'schema': 'private-presentation-refresh/v1',
+               'expected_revision': pin['revision'],
+               'expected_authority_sha256': pin['authority_sha256'],
+               'snapshot_sha256': active['snapshot_sha256'],
+               'bundle_manifest_sha256': active['bundle_manifest_sha256'],
+               'export_sha256': metrics['binding']['export_sha256'],
+               'run_id': state.get('run_id') or state['plan_sha256'],
+               'local': {'snapshot_sha256': state['local']['snapshot_sha256'],
+                         'cutoff': state['coverage']['cutoff'],
+                         'gap_count': len(state['coverage']['gaps'])},
+               'remote': processing}
+    result = _request(opener, 'POST', url, client_id, client_secret, token, command)
+    if result.get('status') == 'stale' or result.get('schema') != 'private-presentation-status/v4':
+        raise RuntimeError('authoritative status refresh pending after concurrent correction')
+    return result
+
+
+def sync_status(run_dir, client_id, client_secret, token, *, url=STATUS_URL, opener=None,
+                authoritative_refresh=False):
     if url != STATUS_URL or not client_id or not client_secret or not token:
         raise ValueError('private status credentials or URL missing')
     state = json.loads((Path(run_dir) / 'state.json').read_text(encoding='utf-8'))
     if state['local']['status'] != 'complete':
         raise ValueError('local evidence is not complete')
     current = _request(opener or build_opener(_NoRedirect()), 'GET', url, client_id, client_secret, token)
+    if (authoritative_refresh and state.get('reconciliation', {}).get('mode') == 'microplus_attempt'
+            and current.get('schema') in ('private-presentation-status/v2',
+                                         'private-presentation-status/v3', 'private-presentation-status/v4')):
+        return refresh_authoritative_status(run_dir, client_id, client_secret, token,
+                                            url=url, opener=opener, pinned=current)
     if current.get('status') == 'stale':
         if (type(current.get('revision')) is not int or current['revision'] < 1
                 or not isinstance(current.get('run_id'), str)
@@ -195,7 +243,8 @@ def sync_status(run_dir, client_id, client_secret, token, *, url=STATUS_URL, ope
     reconciliation = _reconciliation_summary(state, run_dir)
     if (state.get('reconciliation', {}).get('mode') == 'microplus_attempt'
             and current.get('schema') in ('private-presentation-status/v2',
-                                         'private-presentation-status/v3')):
+                                         'private-presentation-status/v3',
+                                         'private-presentation-status/v4')):
         raise RuntimeError('normal local staging cannot replace authoritative reconciliation status')
     if reconciliation is not None:
         candidate['schema'] = 'private-presentation-status/v2'

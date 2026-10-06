@@ -1,5 +1,7 @@
 """Small, path-free local checkpoint mirror for the private owner origin."""
 import json
+import hashlib
+import fcntl
 import os
 import re
 import tempfile
@@ -33,6 +35,39 @@ def _hash(value):
     return value is None or isinstance(value, str) and HASH.fullmatch(value)
 
 
+def status_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False).encode('utf-8')).hexdigest()
+
+
+def validate_authority(value):
+    keys = {'owner_store_revision', 'snapshot_sha256', 'signed_owner_feed_sha256',
+            'signed_owner_feed_hmac', 'owner_metrics', 'canonical'}
+    if (not isinstance(value, dict) or set(value) != keys
+            or type(value['owner_store_revision']) is not int or not 0 <= value['owner_store_revision'] < 2**53
+            or any(not isinstance(value[key], str) or not HASH.fullmatch(value[key])
+                   for key in ('snapshot_sha256', 'signed_owner_feed_sha256', 'signed_owner_feed_hmac'))
+            or not isinstance(value['owner_metrics'], dict)
+            or set(value['owner_metrics']) - {'pending', 'human_approved', 'human_corrected',
+                'automatic_approved', 'rejected', 'reversed', 'invalidated', 'projection_pending'}
+            or any(type(count) is not int or not 0 <= count <= 1000000
+                   for count in value['owner_metrics'].values())
+            or not isinstance(value['canonical'], dict)
+            or set(value['canonical']) != {'identity', 'same_attempt'}):
+        raise ValueError('invalid authoritative status')
+    for scope in value['canonical'].values():
+        if (not isinstance(scope, dict) or set(scope) != {'status', 'revision',
+                'owner_event_revision', 'export_sha256', 'accepted_count', 'evidence_sha256'}
+                or scope['status'] not in ('verified', 'stale', 'unknown')
+                or any(scope[key] is not None and (type(scope[key]) is not int or
+                       not 0 <= scope[key] < 2**53) for key in
+                       ('revision', 'owner_event_revision', 'accepted_count'))
+                or any(not _hash(scope[key]) for key in ('export_sha256', 'evidence_sha256'))
+                or scope['status'] == 'verified' and any(scope[key] is None for key in
+                       ('revision', 'owner_event_revision', 'export_sha256', 'evidence_sha256'))):
+            raise ValueError('invalid canonical status scope')
+
+
 def _cutoff(value):
     if not isinstance(value, str) or not value.endswith('Z') or len(value) > 32:
         return False
@@ -51,11 +86,33 @@ class PrivatePresentationStatus:
         else:
             self.current = None
 
+    def _write(self, candidate):
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock = self.path.with_name(self.path.name + '.lock')
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            durable = json.loads(self.path.read_text(encoding='utf-8')) if self.path.is_file() else None
+            if durable != self.current:
+                raise StatusConflict('durable status revision changed')
+            _atomic_json(self.path, candidate)
+            self.current = candidate
+        finally:
+            os.close(fd)
+
     def read(self, active, *, owner_revision=None, owner_snapshot=None,
-             include_stale_checkpoint=False):
+             include_stale_checkpoint=False, authority=None):
         if self.current is None:
             return {'status': 'unavailable', 'remote': {'active': active}}
-        if self.current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
+        if self.current['schema'] == 'private-presentation-status/v4':
+            if authority != self.current['authority'] or active != self.current['remote']['active']:
+                stale = {'status': 'stale', 'remote': {'active': active},
+                         'reason': 'owner decision, canonical scope or active snapshot changed'}
+                if include_stale_checkpoint:
+                    stale.update(schema=self.current['schema'], revision=self.current['revision'],
+                                 run_id=self.current['run_id'], cutoff=self.current['local']['cutoff'])
+                return stale
+        elif self.current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
             binding = (self.current['reconciliation'] if self.current['schema'].endswith('/v2')
                        else self.current['application'])
             if (owner_revision != binding['owner_store_revision'] or
@@ -77,10 +134,23 @@ class PrivatePresentationStatus:
             keys.add('reconciliation')
         if isinstance(data, dict) and data.get('schema') == 'private-presentation-status/v3':
             keys.add('application')
+        if isinstance(data, dict) and data.get('schema') == 'private-presentation-status/v4':
+            keys.update(('authority', 'historical'))
         if not stored:
             keys.add('expected_revision')
-        if not isinstance(data, dict) or set(data) != keys or data['schema'] not in ('private-presentation-status/v1', 'private-presentation-status/v2', 'private-presentation-status/v3'):
+        if not isinstance(data, dict) or set(data) != keys or data['schema'] not in ('private-presentation-status/v1', 'private-presentation-status/v2', 'private-presentation-status/v3', 'private-presentation-status/v4'):
             raise ValueError('invalid status fields')
+        if data['schema'] == 'private-presentation-status/v4':
+            validate_authority(data['authority'])
+            history = data['historical']
+            if (not isinstance(history, dict) or set(history) != {'receipt', 'sha256'}
+                    or not isinstance(history['receipt'], dict)
+                    or history['receipt'].get('schema') not in ('private-presentation-status/v1',
+                        'private-presentation-status/v2', 'private-presentation-status/v3')
+                    or status_digest(history['receipt']) != history['sha256']
+                    or data['authority']['snapshot_sha256'] != data['local']['snapshot_sha256']):
+                raise ValueError('invalid status history')
+            self._validate(history['receipt'], stored=True)
         if data['schema'] == 'private-presentation-status/v2':
             self._validate_reconciliation(data['reconciliation'], data['local'])
         if data['schema'] == 'private-presentation-status/v3':
@@ -148,6 +218,9 @@ class PrivatePresentationStatus:
 
     def update(self, data, active, *, owner_revision=None, owner_snapshot=None):
         self._validate(data)
+        if data['schema'] == 'private-presentation-status/v4' or (
+                self.current and self.current['schema'] == 'private-presentation-status/v4'):
+            raise StatusConflict('authoritative status requires verified refresh')
         if data['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
             binding = (data['reconciliation'] if data['schema'].endswith('/v2')
                        else data['application'])
@@ -163,6 +236,8 @@ class PrivatePresentationStatus:
             raise StatusConflict('unverified active status')
         candidate = {key: value for key, value in data.items() if key != 'expected_revision'}
         current = self.current
+        if current and int(data['schema'].rsplit('v', 1)[1]) < int(current['schema'].rsplit('v', 1)[1]):
+            raise StatusConflict('authoritative status cannot downgrade')
         if current and current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3') and self.read(
                 active, owner_revision=owner_revision, owner_snapshot=owner_snapshot).get('status') == 'stale':
             applying_same_run = (
@@ -190,7 +265,74 @@ class PrivatePresentationStatus:
                     raise StatusConflict('run binding mismatch')
             elif data['local']['cutoff'] <= current['local']['cutoff']:
                 raise StatusConflict('stale run cutoff')
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _atomic_json(self.path, candidate)
-        self.current = candidate
+        self._write(candidate)
         return self.read(active, owner_revision=owner_revision, owner_snapshot=owner_snapshot)
+
+    def refresh(self, command, active, authority):
+        """Commit origin-collected authority. Clients submit pins, never receipts."""
+        keys = {'schema', 'expected_revision', 'expected_authority_sha256', 'run_id',
+                'local', 'snapshot_sha256', 'bundle_manifest_sha256', 'export_sha256', 'remote'}
+        if (not isinstance(command, dict) or set(command) != keys
+                or command['schema'] != 'private-presentation-refresh/v1'
+                or type(command['expected_revision']) is not int
+                or not 1 <= command['expected_revision'] < 2**53):
+            raise ValueError('invalid status refresh command')
+        validate_authority(authority)
+        current = self.current
+        if current is None:
+            raise StatusConflict('refresh requires retained status provenance')
+        if json.loads(self.path.read_text(encoding='utf-8')) != current:
+            raise StatusConflict('durable status revision changed')
+        if (command['expected_revision'] != current['revision'] or
+                command['expected_authority_sha256'] != status_digest(authority)):
+            raise StatusConflict('status or authority revision conflict')
+        if (active != {'snapshot_sha256': command['snapshot_sha256'],
+                       'bundle_manifest_sha256': command['bundle_manifest_sha256']}
+                or authority['snapshot_sha256'] != command['snapshot_sha256']):
+            raise StatusConflict('refresh active snapshot binding mismatch')
+        scope = authority['canonical']['same_attempt']
+        if scope['export_sha256'] != command['export_sha256'] or scope['status'] != 'verified':
+            raise StatusConflict('refresh export or canonical scope changed')
+        history = (current['historical'] if current['schema'] == 'private-presentation-status/v4'
+                   else {'receipt': current, 'sha256': status_digest(current)})
+        candidate = {'schema': 'private-presentation-status/v4', 'revision': current['revision'] + 1,
+                     'run_id': command['run_id'], 'local': command['local'],
+                     'remote': {**command['remote'], 'active': active},
+                     'authority': authority, 'historical': history}
+        self._validate(candidate, stored=True)
+        if (set(command['remote']) != {'status', 'pending', 'failed'} or
+                command['remote']['status'] == 'active' and
+                (command['remote']['pending'] is not None or command['remote']['failed'] is not None)):
+            raise ValueError('invalid refresh processing status')
+        if candidate['local']['snapshot_sha256'] != command['snapshot_sha256']:
+            raise StatusConflict('refresh local snapshot binding mismatch')
+        if current['schema'] == 'private-presentation-status/v4' and all(
+                current[key] == value for key, value in candidate.items() if key != 'revision'):
+            return self.read(active, authority=authority)
+        if (current['schema'] == 'private-presentation-status/v4'
+                and authority['owner_store_revision'] < current['authority']['owner_store_revision']):
+            raise StatusConflict('owner revision cannot regress')
+        if current['schema'] == 'private-presentation-status/v4':
+            for name, scope in authority['canonical'].items():
+                old = current['authority']['canonical'][name]
+                if (scope['status'] == old['status'] == 'verified'
+                        and authority['snapshot_sha256'] == current['authority']['snapshot_sha256']
+                        and scope['export_sha256'] == old['export_sha256']
+                        and (scope['revision'] < old['revision'] or
+                             scope['owner_event_revision'] < old['owner_event_revision'])):
+                    raise StatusConflict('canonical revision cannot regress')
+        elif current['schema'] in ('private-presentation-status/v2', 'private-presentation-status/v3'):
+            old = current.get('application') or current.get('reconciliation')
+            if (old['snapshot_sha256'] == authority['snapshot_sha256'] and
+                    authority['owner_store_revision'] < old['owner_store_revision']):
+                raise StatusConflict('owner revision cannot regress historical authority')
+        # Snapshot rollback can restore an older presentation binding, but it
+        # cannot lower owner authority or replace the original immutable receipt.
+        if candidate['local']['cutoff'] < current['local']['cutoff']:
+            raise StatusConflict('refresh local cutoff cannot regress')
+        # Machine GET also carries a bounded refresh pin. Reserve its envelope
+        # before committing, so a successful write stays readable by the client.
+        if len(json.dumps(candidate, ensure_ascii=False).encode('utf-8')) > 3584:
+            raise ValueError('authoritative status response too large')
+        self._write(candidate)
+        return self.read(active, authority=authority)
