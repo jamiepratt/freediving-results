@@ -97,6 +97,32 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 
+    def test_source_review_config_and_read_only_capability_preflight(self):
+        import owner_evidence_activate as helper
+        import provision_source_review as reviewer
+        import provision_sporting_proof_reader as reader
+        path=self.layout.state.resolve()/'source-review/config.json';path.parent.mkdir(parents=True);path.parent.chmod(0o750)
+        runtime=Path(self.temp.name).resolve()/'review-runtime';runtime.mkdir()
+        manifest=runtime/'manifest.json';manifest.write_text(json.dumps({'candidate':'a'*40,'files':{}}))
+        shared={'database':'source','runtime_path':str(runtime),'runtime_manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest()}
+        value={**shared,'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_source_review&password='+'a'*48+'&connectTimeout=5&socketTimeout=10'}
+        path.write_text(json.dumps(value));path.chmod(0o640)
+        (self.bundle/'private-owner-manifest.json').write_text(json.dumps({'candidate':'a'*40}))
+        proof=self.layout.state/'sporting-proof-reader/config.json'
+        values={'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG':str(path),'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG':str(proof)}
+        self.config.write_text(self.config.read_text()+'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='+str(path)+'\n')
+        self.assertEqual(_config(self.config,os.getuid(),self.digest,canonical_config_path=self.layout.state.resolve()/'canonical-reader/config.json')['OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG'],str(path))
+        with self.assertRaises(ValueError):_config(self.config,os.getuid(),self.digest)
+        with mock.patch.object(reader,'verify_config',return_value=shared),mock.patch.object(reviewer,'verify_grants',return_value={}) as grants:
+            helper._source_review_inputs(self.bundle,values,os.getuid(),os.getgid())
+            grants.assert_called_once_with('source')
+            with mock.patch.object(reader,'verify_config',return_value={**shared,'database':'other'}):
+                with self.assertRaisesRegex(ValueError,'shared proof'):helper._source_review_inputs(self.bundle,values,os.getuid(),os.getgid())
+            with mock.patch.object(reviewer,'verify_grants',side_effect=ValueError('grants changed')):
+                with self.assertRaisesRegex(ValueError,'grants changed'):helper._source_review_inputs(self.bundle,values,os.getuid(),os.getgid())
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):helper._source_review_inputs(self.bundle,values,os.getuid(),os.getgid())
+
     def test_reader_permission_failure_uses_service_identity_before_activation(self):
         reader_config = self.layout.state / 'canonical-reader' / 'config.json'
         reader_config.parent.mkdir(parents=True)

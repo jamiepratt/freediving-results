@@ -117,6 +117,43 @@ def capture_proof_guard(layout):
             'canonical_grants':verify_grants(value['canonical_database'],CANONICAL_TABLES)}
 
 
+def capture_source_authority_guard(layout, *, table_reader=None):
+    """Hash every authority table in both paired databases; never restore rows."""
+    path=layout.state/'sporting-proof-reader/config.json'
+    if not path.exists() and not path.is_symlink():return None
+    from provision_sporting_proof_reader import verify_config
+    config=verify_config(path)
+    read=table_reader or _pg_tables
+    return {database:read(database) for database in sorted({config['database'],config['canonical_database']})}
+
+
+def capture_source_review_guard(layout):
+    """Pin the independent receipt writer and its exact shared proof runtime."""
+    path=layout.state/'source-review/config.json'
+    if not path.exists() and not path.is_symlink():return None
+    from provision_source_review import verify_config, verify_grants, unlinked
+    from provision_sporting_proof_reader import verify_config as proof_config
+    unlinked(path,regular=True)
+    info=path.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o027:
+        raise ValueError('unsafe source review configuration')
+    value=verify_config(path)
+    runtime=Path(value['runtime_path']);unlinked(runtime)
+    manifest=runtime/'manifest.json';unlinked(manifest,regular=True)
+    record=json.loads(manifest.read_text());files=_tree(runtime)
+    if (not re.fullmatch('[0-9a-f]{40}',record['candidate'])
+            or files!={**record['files'],'manifest.json':value['runtime_manifest_sha256']}):
+        raise ValueError('source review runtime files changed')
+    proof=capture_proof_guard(layout)
+    if proof is None or proof['runtime']!={'path':str(runtime),'files':files,'candidate':record['candidate']}:
+        raise ValueError('source review requires exact current shared proof runtime')
+    if proof_config(layout.state/'sporting-proof-reader/config.json')['database']!=value['database']:
+        raise ValueError('source review database differs from shared proof reader')
+    return {'config':{'path':str(path),'sha256':_sha(path),'uid':info.st_uid,'gid':info.st_gid,'mode':info.st_mode&0o777},
+            'runtime':{'path':str(runtime),'files':files,'candidate':record['candidate']},
+            'source_grants':verify_grants(value['database'])}
+
+
 def _proof_probe(app, config, uid, gid):
     """Test restricted DB read transport as the exact private service identity."""
     code=('import sys;sys.path.insert(0,sys.argv[1]);from private_sporting_proofs import create_reader;'
@@ -155,10 +192,11 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
             'derived':{**{name:_sha(path) for name,path in [('config',layout.config),('env',layout.state/'active.env'),('unit',layout.units/SERVICE)]},
                        'comparison':_sha(comparison_path) if comparison_path.exists() else None},
             'protected':{'files':{str(path):_sha(path) for path in protected_paths},'canonical_runtime':{'path':str(runtime),'files':_tree(runtime)},
-                         'sporting_proof':capture_proof_guard(layout),
+                         'sporting_proof':capture_proof_guard(layout),'source_review':capture_source_review_guard(layout),
                          'public_app':{'path':str(public_current),'files':_tree(public_current)},'public_configs':{str(path):_sha(path) for path in public_configs}},
             'sporting':capture_sporting_guard(layout),
-            'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database)}}
+            'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database),
+                         'source_review_tables':capture_source_authority_guard(layout,table_reader=table_reader)}}
 
 
 def _comparison_config(source, value=None):
@@ -365,7 +403,7 @@ def _comparison_health(values):
     else:inspector()
 
 
-def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
+def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof_probe=None, authority_reader=None):
     """Restore derived app/config only, irrespective of newer genuine human events."""
     command=command or _system_command
     checkpoint=_checkpoint(layout);_regular(checkpoint/'record.json')
@@ -373,6 +411,11 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
     if record['status'] not in ('active','pending'):raise ValueError('comparison checkpoint not rollbackable')
     if capture_sporting_guard(layout)!=record.get('sporting_guard'):raise ValueError('sporting authority changed; rollback refused')
     if 'proof_guard' in record and capture_proof_guard(layout)!=record['proof_guard']:raise ValueError('sporting proof capability changed; rollback refused')
+    if 'source_review_guard' in record and capture_source_review_guard(layout)!=record['source_review_guard']:
+        raise ValueError('source review capability changed; rollback refused')
+    if ('source_authority_guard' in record and
+            capture_source_authority_guard(layout,table_reader=authority_reader)!=record['source_authority_guard']):
+        raise ValueError('source authority changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
@@ -388,6 +431,10 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
         if record['before'][name] is not None:
             backup=checkpoint/('before-'+name);_regular(backup)
             if _sha(backup)!=record['before'][name]:raise ValueError('rollback backup changed')
+    # Verify the prior app can read the retained current proof runtime before swaps.
+    proof=record.get('proof_guard')
+    if proof is not None:
+        (proof_probe or _proof_probe)(Path(record['before']['app']),Path(proof['config']['path']),owner_uid,owner_gid)
     _atomic_link(layout.app/'current',Path(record['before']['app']))
     for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed)]:
         if record['before'][name] is None:path.unlink(missing_ok=True)
@@ -403,11 +450,13 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
 
 def activate_comparison(bundle, config, layout, expected_guard, *, guard,
                         command=None, health=None, owner_uid=0, owner_gid=0,
-                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None):
+                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None, source_review_config=None):
     command=command or _system_command
     bundle,config=Path(bundle),Path(config)
     if proof_config is not None and Path(proof_config)!=layout.state/'sporting-proof-reader/config.json':
         raise ValueError('invalid sporting proof configuration path')
+    if source_review_config is not None and Path(source_review_config)!=layout.state/'source-review/config.json':
+        raise ValueError('invalid source review configuration path')
     manifest_path=bundle/'private-owner-manifest.json';_regular(manifest_path)
     if bundle_manifest_sha256 and _sha(manifest_path)!=bundle_manifest_sha256:raise ValueError('staged app manifest changed')
     if config_sha256 and _sha(config)!=config_sha256:raise ValueError('staged comparison config changed')
@@ -431,6 +480,15 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         if proof_guard['runtime']['candidate']!=manifest['candidate']:raise ValueError('sporting proof runtime differs from private code candidate')
         proof_pin=('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG='+str(proof_config)+'\n').encode()
         contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG='))+proof_pin for name,body in contents.items()}
+    if source_review_config is not None:
+        review_guard=expected_guard['protected'].get('source_review')
+        proof_guard=expected_guard['protected'].get('sporting_proof')
+        if (review_guard is None or proof_guard is None or proof_config is None
+                or review_guard['runtime']!=proof_guard['runtime']
+                or review_guard['runtime']['candidate']!=manifest['candidate']):
+            raise ValueError('source review shared runtime differs from private code candidate')
+        review_pin=('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='+str(source_review_config)+'\n').encode()
+        contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='))+review_pin for name,body in contents.items()}
     checkpoint=_checkpoint(layout)
     if checkpoint.is_symlink():raise ValueError('linked comparison checkpoint')
     if (checkpoint/'record.json').exists() and json.loads((checkpoint/'record.json').read_text())['status']=='pending':raise ValueError('pending comparison activation requires reviewed recovery')
@@ -445,9 +503,13 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
     probe_config.parent.chmod(0o750)
     (service_probe or _service_probe)(app,probe_config,owner_uid,owner_gid)
     if proof_config is not None:(proof_probe or _proof_probe)(app,Path(proof_config),owner_uid,owner_gid)
+    if source_review_config is not None:
+        from owner_evidence_activate import _source_review_inputs
+        _source_review_inputs(bundle,{'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG':str(source_review_config),
+                                    'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG':str(proof_config)},owner_uid,owner_gid)
     # Runtime and packet are revalidated after the service-user read/execute probe.
     _comparison_config(config)
-    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'proof_guard':expected_guard['protected'].get('sporting_proof'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
+    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'proof_guard':expected_guard['protected'].get('sporting_proof'),'source_review_guard':expected_guard['protected'].get('source_review'),'source_authority_guard':expected_guard['authority'].get('source_review_tables'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
     # Last full authority/CAS read occurs after staging and immediately before swaps.
     if guard()!=expected_guard:raise ValueError('live guard changed before activation')
     _atomic_write(checkpoint/'record.json',json.dumps(record,sort_keys=True).encode(),0o600)
@@ -473,7 +535,7 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
             any(current['derived'][key]!=after[key] for key in ('config','env','comparison'))):
             raise ValueError('live authority changed during activation')
     except BaseException:
-        rollback_comparison(layout,command=command,owner_uid=os.geteuid(),owner_gid=owner_gid)
+        rollback_comparison(layout,command=command,owner_uid=owner_uid,owner_gid=owner_gid,proof_probe=proof_probe)
         raise
     _atomic_write(checkpoint/'record.json',json.dumps({**record,'status':'active'},sort_keys=True).encode(),0o600)
     return 'activated'
@@ -485,6 +547,7 @@ def main():
     parser.add_argument('--public-database',required=True)
     parser.add_argument('--guard',type=Path)
     parser.add_argument('--proof-config',type=Path)
+    parser.add_argument('--source-review-config',type=Path)
     parser.add_argument('--bundle',type=Path);parser.add_argument('--config',type=Path)
     parser.add_argument('--bundle-manifest-sha256');parser.add_argument('--config-sha256')
     args=parser.parse_args()
@@ -499,10 +562,10 @@ def main():
             if not args.config or not args.config_sha256:raise ValueError('stage requires exact configuration pin')
             config=stage_payload(args.config,layout.state,0,account.pw_gid,args.config_sha256)
             print(json.dumps({'config':str(config),'config_sha256':_sha(config),'data_writes':0}));return 0
-        if args.action=='rollback':rollback_comparison(layout,owner_uid=0,owner_gid=account.pw_gid)
+        if args.action=='rollback':rollback_comparison(layout,owner_uid=account.pw_uid,owner_gid=account.pw_gid)
         else:
             if not all((args.guard,args.bundle,args.config,args.bundle_manifest_sha256,args.config_sha256)):raise ValueError('activation requires exact stage and live guard pins')
-            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config)
+            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config,source_review_config=args.source_review_config)
         print(json.dumps({'result':'PASS','action':args.action,'data_writes':0}))
         return 0
     except Exception:

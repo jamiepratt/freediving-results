@@ -86,6 +86,7 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
                                           'OWNER_EVIDENCE_STATUS_CLIENT_ID',
                                           'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG',
                                           'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG',
+                                          'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG',
                                           'OWNER_EVIDENCE_COMPARISON_CONFIG',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'} or
@@ -93,6 +94,9 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
             (expected is not None and values['OWNER_EVIDENCE_SNAPSHOT_SHA256'] != expected) or
             not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_SNAPSHOT_SHA256'])):
         raise ValueError('private environment does not match snapshot')
+    if ('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG' in values and
+            values['OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG'] != str(canonical_config_path.parent.parent/'source-review/config.json')):
+        raise ValueError('invalid source review environment')
     secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
     if ('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG' in values and
             values['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'] != str(canonical_config_path)):
@@ -209,6 +213,29 @@ def _sporting_proof_reader_inputs(bundle, values, owner_uid, owner_gid):
         raise ValueError('sporting proof runtime differs from private code candidate')
     from comparison_activate import _proof_probe
     _proof_probe(bundle, Path(name), owner_uid, owner_gid)
+
+
+def _source_review_inputs(bundle, values, owner_uid, owner_gid):
+    """Validate receipt capability by reads only, without starting another JVM."""
+    name=values.get('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG')
+    if not name:return
+    from provision_source_review import verify_config, verify_grants, unlinked
+    from provision_sporting_proof_reader import verify_config as proof_config
+    from comparison_activate import _tree
+    path=unlinked(Path(name),regular=True);info=path.stat();directory=path.parent.stat()
+    if (info.st_uid!=os.geteuid() or info.st_gid!=owner_gid or info.st_mode&0o777!=0o640
+            or directory.st_uid!=os.geteuid() or directory.st_gid!=owner_gid or directory.st_mode&0o777!=0o750):
+        raise ValueError('source review capability is not private and service readable')
+    value=verify_config(path)
+    proof_name=values.get('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG')
+    proof=proof_config(Path(proof_name)) if proof_name else None
+    if proof is None or any(proof[key]!=value[key] for key in ('database','runtime_path','runtime_manifest_sha256')):
+        raise ValueError('source review requires exact shared proof runtime and database')
+    runtime=Path(value['runtime_path']);record=json.loads((runtime/'manifest.json').read_text())
+    if (record['candidate']!=json.loads((bundle/'private-owner-manifest.json').read_text())['candidate']
+            or _tree(runtime)!={**record['files'],'manifest.json':value['runtime_manifest_sha256']}):
+        raise ValueError('source review runtime differs from private code candidate')
+    verify_grants(value['database'])
 
 
 def _source_bundle_inputs(code, source, expected, snapshot_digest):
@@ -685,6 +712,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     _inputs(bundle, source, expected)
     _canonical_reader_inputs(bundle, values, owner_uid, owner_gid)
     _sporting_proof_reader_inputs(bundle, values, owner_uid, owner_gid)
+    _source_review_inputs(bundle, values, owner_uid, owner_gid)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
     if roster_source:

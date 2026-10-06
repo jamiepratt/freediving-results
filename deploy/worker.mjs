@@ -63,7 +63,7 @@ async function verifiedOwner(token, config, machine=false) {
 }
 async function privateRequest(request, url, env) {
   if (!safePrivatePath.test(url.pathname) || url.pathname.length > 2048 || url.search.length > 2048) return failure(404);
-  const action = request.method === 'POST' && decisionActionPath.test(url.pathname) && !url.search;
+  const action = request.method === 'POST' && (decisionActionPath.test(url.pathname) || /^\/owner-evidence\/api\/sporting-authority\/(?:stage|actions|relationships|source-accuracy)$/.test(url.pathname)) && !url.search;
   const statusWrite = request.method === 'POST' && url.pathname === presentationStatusPath && !url.search;
   const ackWrite = request.method === 'POST' && url.pathname === decisionAckPath && !url.search;
   const machine = (url.pathname === decisionEventPath || url.pathname === decisionAckPath) ? 'import' : (statusWrite || url.pathname === presentationStatusPath && request.headers.has('X-Freediving-Status-Token')) ? 'status' : false;

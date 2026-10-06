@@ -100,10 +100,59 @@ class ComparisonActivationTests(unittest.TestCase):
                 before=(self.layout.app/'current').resolve()
                 with self.assertRaises(ValueError):rollback_comparison(self.layout,command=self.command)
                 self.assertEqual((self.layout.app/'current').resolve(),before)
-            rollback_comparison(self.layout,command=self.command)
+            active=(self.layout.app/'current').resolve()
+            with self.assertRaisesRegex(ValueError,'source authority changed'):
+                rollback_comparison(self.layout,command=self.command,proof_probe=probe,
+                                    authority_reader=lambda db:{'synthetic_table':{'count':2,'sha256':'2'*64}})
+            self.assertEqual((self.layout.app/'current').resolve(),active)
+            with self.assertRaisesRegex(ValueError,'incompatible old runtime'):
+                rollback_comparison(self.layout,command=self.command,authority_reader=self.pg,
+                                    proof_probe=mock.Mock(side_effect=ValueError('incompatible old runtime')))
+            self.assertEqual((self.layout.app/'current').resolve(),active)
+            compatibility=[]
+            def compatible(app,config,uid,gid):
+                self.assertEqual((self.layout.app/'current').resolve(),active)
+                compatibility.append((app,config))
+            rollback_comparison(self.layout,command=self.command,proof_probe=compatible,authority_reader=self.pg)
+            self.assertEqual(compatibility,[(self.old,proof)])
             self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
             self.assertNotIn(b'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG=',self.layout.config.read_bytes())
             self.assertEqual(set(call.args[0] for call in grants.call_args_list),{'source','canonical'})
+
+    def test_source_review_activation_env_pins_and_stale_guards_refuse(self):
+        import provision_source_review
+        import provision_sporting_proof_reader
+        runtime=self.root/'proof-runtime';runtime.mkdir()
+        (runtime/'manifest.json').write_text(json.dumps({'candidate':'a'*40,'files':{}}))
+        common={'database':'source','runtime_path':str(runtime),'runtime_manifest_sha256':self.sha(runtime/'manifest.json')}
+        proof=self.layout.state/'sporting-proof-reader/config.json';proof.parent.mkdir()
+        proof.write_text(json.dumps({**common,'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_proof_read&password='+'a'*48+'&connectTimeout=5&socketTimeout=10',
+            'canonical_database':'canonical','canonical_jdbc_url':'jdbc:postgresql://127.0.0.1:5432/canonical?user=sporting_proof_read&password='+'a'*48+'&connectTimeout=5&socketTimeout=10'}));proof.chmod(0o640)
+        review=self.layout.state/'source-review/config.json';review.parent.mkdir();review.parent.chmod(0o750)
+        review.write_text(json.dumps({**common,'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_source_review&password='+'b'*48+'&connectTimeout=5&socketTimeout=10'}));review.chmod(0o640)
+        with mock.patch.object(provision_source_review,'verify_grants',return_value={'receipt_append':2}),\
+             mock.patch.object(provision_sporting_proof_reader,'verify_grants',return_value={'exact':'verified'}):
+            pins=self.guard()
+            with self.assertRaisesRegex(ValueError,'source review configuration path'):
+                activate_comparison(self.new,self.config,self.layout,pins,source_review_config=self.root/'external.json',**self.kw)
+            changed={**common,'jdbc_url':json.loads(review.read_text())['jdbc_url']+'changed'}
+            review.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):
+                activate_comparison(self.new,self.config,self.layout,pins,source_review_config=review,**self.kw)
+            self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+            review.write_text(json.dumps({**common,'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_source_review&password='+'b'*48+'&connectTimeout=5&socketTimeout=10'}))
+            activate_comparison(self.new,self.config,self.layout,pins,proof_config=proof,proof_probe=lambda *args:None,
+                                source_review_config=review,**self.kw)
+            expected=('OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG='+str(review)).encode()
+            self.assertIn(expected,self.layout.config.read_bytes())
+            self.assertIn(expected,(self.layout.state/'active.env').read_bytes())
+            with mock.patch.object(provision_source_review,'verify_grants',side_effect=ValueError('review grants changed')):
+                with self.assertRaisesRegex(ValueError,'review grants changed'):
+                    rollback_comparison(self.layout,command=self.command)
+                self.assertNotEqual((self.layout.app/'current').resolve(),self.old.resolve())
+            rollback_comparison(self.layout,command=self.command,authority_reader=self.pg,proof_probe=lambda *args:None)
+            self.assertNotIn(expected,self.layout.config.read_bytes())
+            self.assertNotIn(expected,(self.layout.state/'active.env').read_bytes())
 
     def test_sporting_schema_rows_and_key_pins_guard_activation_and_rollback(self):
         bridge=self.layout.state/'sporting-bridge';bridge.mkdir()
@@ -479,3 +528,45 @@ class SportingComparisonHealthTests(unittest.TestCase):
                 self.assertEqual(requests[-1],'/owner-evidence/api/sporting-authority/review' if failure=='unavailable-review' else '/owner-evidence/api/sporting-authority/proofs?limit=1')
 
 if __name__=='__main__':unittest.main()
+
+class SourceReviewGuardTests(unittest.TestCase):
+    def test_absent_reviewer_has_no_capability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state=Path(directory)
+            layout=Layout(state/'app',state,state/'units',state/'env')
+            self.assertIsNone(comparison_activate.capture_source_review_guard(layout))
+
+    def test_exact_reviewer_pins_reject_runtime_database_permissions_and_grant_tampering(self):
+        import provision_source_review as helper
+        import provision_sporting_proof_reader as reader
+        with tempfile.TemporaryDirectory() as directory:
+            state=Path(directory).resolve()
+            layout=Layout(state/'app',state,state/'units',state/'env')
+            runtime=state/'runtime';runtime.mkdir()
+            manifest=runtime/'manifest.json'
+            manifest.write_text(json.dumps({'candidate':'a'*40,'files':{}}))
+            sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+            config=state/'source-review/config.json';config.parent.mkdir()
+            value={'database':'source','jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_source_review&password='+'a'*48+'&connectTimeout=5&socketTimeout=10',
+                   'runtime_path':str(runtime),'runtime_manifest_sha256':sha(manifest)}
+            config.write_text(json.dumps(value));config.chmod(0o640)
+            proof={'runtime':{'path':str(runtime),'files':{'manifest.json':sha(manifest)},'candidate':'a'*40}}
+            with mock.patch.object(comparison_activate,'capture_proof_guard',return_value=proof),\
+                 mock.patch.object(reader,'verify_config',return_value={'database':'source'}),\
+                 mock.patch.object(helper,'verify_grants',return_value={'exact':True}):
+                pins=comparison_activate.capture_source_review_guard(layout)
+                self.assertEqual(pins['config']['sha256'],sha(config))
+                self.assertEqual(pins['runtime'],proof['runtime'])
+                self.assertEqual(pins['source_grants'],{'exact':True})
+                config.chmod(0o644)
+                with self.assertRaisesRegex(ValueError,'unsafe source review'):comparison_activate.capture_source_review_guard(layout)
+                config.chmod(0o640)
+                with mock.patch.object(helper,'verify_grants',side_effect=ValueError('grants changed')):
+                    with self.assertRaisesRegex(ValueError,'grants changed'):comparison_activate.capture_source_review_guard(layout)
+                with mock.patch.object(reader,'verify_config',return_value={'database':'other'}):
+                    with self.assertRaisesRegex(ValueError,'shared proof'):comparison_activate.capture_source_review_guard(layout)
+                (runtime/'extra.clj').write_text('tampered')
+                with self.assertRaisesRegex(ValueError,'files changed'):comparison_activate.capture_source_review_guard(layout)
+                (runtime/'extra.clj').unlink()
+                proof['runtime']['candidate']='b'*40
+                with self.assertRaisesRegex(ValueError,'shared proof'):comparison_activate.capture_source_review_guard(layout)

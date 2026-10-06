@@ -140,3 +140,115 @@ Validate the owner surface at
 verify the current custom-domain public comparison remains unchanged while real
 authority is absent. Full source/public eligibility requirements remain tracked in
 [issue 194](https://github.com/jamiepratt/freediving-results/issues/194).
+
+## Exact source accuracy capability
+
+Source accuracy acceptance/revocation uses the existing append-only
+`extraction_reviews` and `pdf_extraction_reviews` receipts. Its separate
+`sporting_source_review` login has the same eleven source table SELECT grants and
+INSERT only on these two receipt tables. It has no canonical database grants,
+source observation/extraction writes, publication writes, memberships, owned
+objects, schema CREATE, sequence privileges or executable SECURITY DEFINER
+functions. Existing public, status and paired proof reader grants stay exact.
+
+The root-owned `source-review/config.json` contains only `jdbc_url`, `database`,
+`runtime_path` and `runtime_manifest_sha256`, mode 0640, service group
+`freediving-evidence` (983 on the current host), parent mode 0750. Provisioning
+requires explicit execution, an exact clean candidate, matching app/runtime pins
+and a fresh full authority guard. It creates no receipt. Matching existing
+capabilities are verified without password rotation; partial/conflicting setup
+refuses. The source review operation shares the persistent proof JVM and existing
+12 second request deadline, so it adds no JVM. Only the authenticated owner can
+submit an exact-version action through the CSRF-protected gateway; `current` and
+unknown sporting actions have no POST route.
+
+For the existing B34 installation, prepare/upload the committed code archive and
+proof runtime using the commands above. On the host, use the uploaded archive's
+helpers for this sequential checkpoint. `$bundle`, `$uploaded_runtime`, `$app_sha`
+and `$runtime_sha` are exact staged input paths/pins; `$existing_proof_config_sha`
+is the independently verified installed proof config SHA. Keep each guard in a
+root-only file and calculate its SHA after capture:
+
+```sh
+python3 deploy/sporting_proof_runtime.py --stage --runtime "$uploaded_runtime" \
+  --runtime-manifest-sha256 "$runtime_sha"
+python3 deploy/comparison_activate.py capture --public-database freediving_release_20260924_11 > "$guard"
+sha256sum "$guard"
+python3 deploy/provision_sporting_proof_reader.py --execute --update-runtime \
+  --database freediving_release_20260924_11 --canonical-database freediving_canonical \
+  --public-database freediving_release_20260924_11 \
+  --runtime "$staged_runtime" --runtime-manifest-sha256 "$runtime_sha" \
+  --app-manifest "$bundle/private-owner-manifest.json" --app-manifest-sha256 "$app_sha" \
+  --config-sha256 "$existing_proof_config_sha" --guard "$guard" --guard-sha256 "$guard_sha"
+python3 deploy/comparison_activate.py capture --public-database freediving_release_20260924_11 > "$guard"
+sha256sum "$guard"
+# Stage 1: compatible application and proof runtime, writer disabled.
+python3 deploy/comparison_activate.py activate \
+  --public-database freediving_release_20260924_11 \
+  --bundle "$bundle" --bundle-manifest-sha256 "$app_sha" \
+  --config "$existing_comparison_config" --config-sha256 "$comparison_config_sha" \
+  --proof-config /var/lib/freediving-owner-evidence/sporting-proof-reader/config.json \
+  --guard "$guard"
+# Capture the active compatible application's guard before creating the role.
+python3 deploy/comparison_activate.py capture --public-database freediving_release_20260924_11 > "$guard"
+sha256sum "$guard"
+# Stage 2: provision capability without receipts, then activate the SAME app.
+python3 deploy/provision_source_review.py --execute \
+  --database freediving_release_20260924_11 --public-database freediving_release_20260924_11 \
+  --runtime "$staged_runtime" --runtime-manifest-sha256 "$runtime_sha" \
+  --app-manifest "$bundle/private-owner-manifest.json" --app-manifest-sha256 "$app_sha" \
+  --guard "$guard" --guard-sha256 "$guard_sha"
+python3 deploy/provision_source_review.py --verify
+python3 deploy/comparison_activate.py capture --public-database freediving_release_20260924_11 > "$guard"
+sha256sum "$guard"
+python3 deploy/comparison_activate.py activate \
+  --public-database freediving_release_20260924_11 \
+  --bundle "$bundle" --bundle-manifest-sha256 "$app_sha" \
+  --config "$existing_comparison_config" --config-sha256 "$comparison_config_sha" \
+  --proof-config /var/lib/freediving-owner-evidence/sporting-proof-reader/config.json \
+  --source-review-config /var/lib/freediving-owner-evidence/source-review/config.json \
+  --guard "$guard"
+```
+
+Recalculate `$guard_sha` from each newly captured guard before provisioning.
+Stage 1 must complete with no `OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG` in either
+environment. Use the same exact `$bundle`, `$app_sha` and proof runtime in stage 2.
+The first guard has `protected.source_review: null`. After provisioning, the next
+guard pins reviewer config, exact effective grants and shared runtime. Activation
+checks its database/runtime match the proof reader and candidate, checks mode and
+service group readability, then atomically adds
+`OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG` to both private environments. These checks
+perform no receipt INSERT probe. Rollback records pin this capability and every
+current PostgreSQL authority table in both paired databases. Changed grants,
+config/runtime or any table digest refuses rollback before restoring derived
+files. The retained current proof configuration is also read through the
+checkpoint's `before.app` as the service identity before any swap. An incompatible
+B34 application with the new runtime refuses rollback before replacing files.
+
+The final stage 2 rollback disables the reviewer environment while retaining the
+compatible application/runtime and the new role/config/data. It creates no
+receipt and restores no database or authority ledger. Invoke only the final
+stage 2 checkpoint after a fresh authority/table guard:
+
+```sh
+python3 deploy/comparison_activate.py rollback \
+  --public-database freediving_release_20260924_11
+```
+
+Do not restore the earlier B34 app or old proof runtime over current capabilities.
+Stage 1 failures that cannot return to a compatible application retain their
+checkpoint for forward repair. Never use a stale checkpoint over newer receipts.
+
+Deploy the gateway route change using the existing profile and custom domain:
+
+```sh
+wrangler --profile alphacompose --config deploy/wrangler.jsonc deploy
+```
+
+This route-only deployment needs no database migration, public app replacement or
+secret rotation. Validate authenticated owner proof forms, exact source inspector
+and current publication diagnostics on
+[the sporting workspace](https://poc.alphacompose.com/owner-evidence/sporting).
+Keep all 67 guarded PostgreSQL tables and all 86 existing public responses identical
+to the pre-activation manifest. Health and inspection are reads only; do not submit
+accept/revoke, sporting Approve/Reverse or relationship decisions during activation.

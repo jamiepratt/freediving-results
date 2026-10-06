@@ -35,7 +35,7 @@ OWNER_FILES = (
 HOST_FILES = (
     'deploy/owner_evidence_activate.py', 'deploy/freediving-owner-evidence.service',
     'deploy/canonical_status_runtime.py', 'deploy/sporting_proof_runtime.py',
-    'deploy/provision_sporting_proof_reader.py',
+    'deploy/provision_sporting_proof_reader.py', 'deploy/provision_source_review.py',
     'deploy/comparison_runtime.py', 'deploy/comparison_activate.py',
     'deploy/provision_canonical_status_reader.py', 'deploy/provision_sporting_authority.py', 'deploy/private_archive_extract.py',
     'scripts/private_evidence_transfer.py', 'scripts/private_evidence_ssh.py',

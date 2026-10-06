@@ -316,3 +316,32 @@ test('public sporting list, detail and exact peers use only the authenticated un
     assert.equal((await worker.fetch(req('/api/comparison', {method:'POST'}), env)).status, 405);
   } finally {globalThis.fetch = original;}
 });
+
+test('exact source accuracy writes require owner Access, origin and CSRF and preserve boundaries', async () => {
+  const path='/owner-evidence/api/sporting-authority/source-accuracy';
+  const headers={'Cf-Access-Jwt-Assertion':await token(),Origin:'https://poc.alphacompose.com',
+    'Content-Type':'application/json','X-Freediving-CSRF':'abc'};
+  const body=JSON.stringify({action:'accept',id:'exact-version',csrf_token:'abc'});
+  const original=globalThis.fetch;
+  let writes=0;
+  globalThis.fetch=async (url,options)=>{
+    if(url.endsWith('/cdn-cgi/access/certs'))return Response.json({keys:[jwk]});
+    writes++;
+    assert.match(new URL(url).pathname,/^\/owner-evidence\/api\/sporting-authority\/(?:stage|actions|relationships|source-accuracy)$/);
+    assert.equal(options.headers.get('X-Freediving-Owner-Email'),'owner@example.com');
+    assert.equal(options.headers.get('X-Freediving-CSRF'),'abc');
+    assert.equal(options.headers.get('Origin'),'https://poc.alphacompose.com');
+    assert.equal(new TextDecoder().decode(options.body),body);
+    return Response.json({revision:1});
+  };
+  try {
+    for (const action of ['stage','actions','relationships','source-accuracy']) {
+      assert.equal((await worker.fetch(req('/owner-evidence/api/sporting-authority/'+action,{method:'POST',headers,body}),privateEnv)).status,200);
+    }
+    for(const change of [{'X-Freediving-CSRF':''},{Origin:'https://evil.example'},{'Cf-Access-Jwt-Assertion':''}])
+      assert.equal((await worker.fetch(req(path,{method:'POST',headers:{...headers,...change},body}),privateEnv)).status,403);
+    assert.equal((await worker.fetch(req(path+'/all',{method:'POST',headers,body}),privateEnv)).status,405);
+    assert.equal((await worker.fetch(req(path,{method:'PUT',headers,body}),privateEnv)).status,405);
+    assert.equal(writes,4);
+  }finally{globalThis.fetch=original;}
+});
