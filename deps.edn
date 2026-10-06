@@ -4,7 +4,8 @@
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojure/clojure {:mvn/version "1.12.0"}}
  :mvn/repos {"rpl" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}}
- :aliases {:test-source-accuracy-review {:extra-paths ["test"] :main-opts ["-m" "freediving.source-accuracy-review-test"]}
+ :aliases {:test-source-accuracy-http-integration {:extra-paths ["test"] :main-opts ["-m" "freediving.source-accuracy-http-integration-test"]}
+           :test-source-accuracy-review {:extra-paths ["test"] :main-opts ["-m" "freediving.source-accuracy-review-test"]}
            :test-private-sporting-proofs-integration {:extra-paths ["test"] :main-opts ["-m" "freediving.private-sporting-proofs-integration-test"]}
            :test-private-sporting-proofs {:extra-paths ["test"] :main-opts ["-m" "freediving.private-sporting-proofs-test"]}
            :test-selection-migration {:extra-paths ["test"] :main-opts ["-m" "freediving.selection-migration-test"]}

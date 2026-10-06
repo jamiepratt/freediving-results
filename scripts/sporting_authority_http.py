@@ -368,6 +368,8 @@ def get(handler, parsed):
             ledger = getattr(handler.server, 'relationship_reviews', None)
             from private_sporting_relationships import inventory
             handler._json({'schema': 'sporting-exact-proof-diagnostics/v1', 'pins': context['pins'],
+                           'context_pins_sha256': digest(context['pins']),
+                           'source_review_available': getattr(handler.server, 'source_accuracy_review', None) is not None,
                            'inventory_sha256': digest(inventory(context)),
                            'reviewed_references': [r['reference'] for r in rows],
                            'relationship_revision': len(ledger.history()) if ledger else 0,
