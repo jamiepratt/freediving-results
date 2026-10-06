@@ -23,7 +23,7 @@ import urllib.request
 
 SERVICE = 'freediving-owner-evidence.service'
 HEALTH_STARTUP_TIMEOUT = 30
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/private_attempt_inspector.py', 'scripts/owner_decision_store.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/retained_aida_diff.py', 'scripts/private_attempt_inspector.py', 'scripts/owner_decision_store.py',
          'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
          'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
          'scripts/cmas_microplus_finalize.py',
@@ -36,7 +36,7 @@ REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGI
                           'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
 LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
                                    'scripts/private_attempt_inspector.py',
-                                   'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py',
+                                   'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/retained_aida_diff.py',
                                    'scripts/owner_decision_store.py',
                                    'scripts/aida_snapshot_observations.py',
                                    'scripts/issue55_aida_selected_html.py',

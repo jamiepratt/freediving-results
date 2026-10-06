@@ -24,6 +24,7 @@ PAGE = b'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name
 <p>Review exact source meaning, finality and cited rules first. Select the exact cohort separately, then approve its publication.
 Extraction review, same-attempt decisions, athlete identity and public eligibility retain their independent authority.</p>
 <p>Supported scope: 2026 pool DNF women. Unknown facts stay explicit. Disqualified achieved distances remain hypothetical.</p>
+<p><a href="/owner-evidence/sporting/aida-diff">Open complete AIDA June 3 women retained-version comparison</a></p>
 <div id="status" role="status">Loading current private reviews...</div><button id="refresh">Refresh</button>
 <section id="proofs"><h2>Exact upstream source proofs</h2><p id="proof-status" role="status">Loading exact current source inventory...</p><div id="proof-rows"></div><div id="proof-pages"></div></section><section id="proposals"></section></main></body></html>'''
 STYLE = b'''body{font:16px system-ui;color:#17302f;background:#f5f7f5;margin:0}main{max-width:1180px;margin:32px auto;padding:24px}
@@ -253,6 +254,12 @@ def parser_versions(comparison):
 
 
 def configure(origin, snapshot_dir, env):
+    origin.aida_diff_config = env.get('OWNER_EVIDENCE_AIDA_DIFF_CONFIG')
+    if origin.aida_diff_config:
+        from retained_aida_diff import read_service
+        if not Path(origin.aida_diff_config).is_absolute() or Path(origin.aida_diff_config).resolve().is_relative_to(Path(snapshot_dir).resolve()):
+            raise ValueError('invalid independent retained diff configuration path')
+        read_service(origin.aida_diff_config)
     name = env.get('OWNER_EVIDENCE_SPORTING_CONFIG')
     origin.sporting = None
     origin.sporting_request_key = None
@@ -350,6 +357,16 @@ def _body(handler, limit):
 
 
 def get(handler, parsed):
+    if parsed.path == '/owner-evidence/sporting/aida-diff':
+        if parsed.query:
+            handler._reply(400); return True
+        try:
+            from retained_aida_diff import read_service
+            body = read_service(handler.server.aida_diff_config)
+            handler._reply(200, body, 'text/html; charset=utf-8')
+        except (ValueError, OSError, TypeError, KeyError, AttributeError):
+            handler._reply(503)
+        return True
     if hasattr(handler.server, 'sporting_deadlines'):
         handler.server.sporting_deadlines.deadline = getattr(handler, 'read_deadline', time.monotonic() + READ_BUDGET_SECONDS)
     if parsed.path == PREFIX + '/proofs':
