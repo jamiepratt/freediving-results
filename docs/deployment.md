@@ -372,7 +372,9 @@ sudo -n python3 <code>/deploy/comparison_activate.py activate \
 ```
 
 Activation runs the actual reader as the evidence service user before any active
-swap, verifies 138 source positions/276 retained versions with zero real ranks,
+swap, closes its reusable reader on success/failure and kills the preflight process
+group on a 14-second timeout, verifies 138 source positions/276 retained versions
+with zero real ranks,
 checks CMAS PDF access, rereads the complete live guard, and probes the
 authenticated inspector after restart. The guard hashes owner history, all
 canonical/public tables, existing app/config/env/unit, presentation status,
@@ -380,7 +382,11 @@ snapshot/source manifests, canonical reader/runtime/export, and public code/conf
 It refuses drift. The root-private activation checkpoint supports
 `comparison_activate.py rollback --public-database <public-database>` for known
 derived states only, including interrupted swaps. Rollback restores private
-app/env/comparison config and preserves newer human history/status/database data.
+app/env/comparison config and the prior service unit, then reloads systemd before
+restart. The packaged, manifest-pinned service unit is installed by normal
+activation. It retains MemoryMax=1G and uses TasksMax=64 for at most two JVM readers with 256 MiB heap caps,, 16 admitted socket handlers and one PDF renderer. Per-request
+comparison health must complete within 14 seconds. Legacy checkpoints keep their
+original exact unit guard. Rollback preserves newer human history/status/database data.
 It refuses changed backups or a newer deployment. No schema migration, sporting
 approval, public eligibility update, or public deployment occurs in this path.
 

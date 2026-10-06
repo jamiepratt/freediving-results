@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -94,7 +95,7 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
     table_reader=table_reader or _pg_tables
     app=(layout.app/'current').resolve(strict=True)
     ledger=layout.state/'decisions/ledger.sqlite';_regular(ledger)
-    with sqlite3.connect('file:'+str(ledger)+'?mode=ro',uri=True) as db:
+    with closing(sqlite3.connect('file:'+str(ledger)+'?mode=ro',uri=True)) as db:
         db.execute('BEGIN')
         owner={}
         for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall():
@@ -208,24 +209,49 @@ def stage_payload(config, state, uid, gid, expected_config_sha256):
 def _checkpoint(layout):return layout.state/'comparison-activation-checkpoint'
 
 
+SERVICE_PROBE_TIMEOUT = 14
+
+
 def _service_probe(app, config, uid, gid):
-    code=('import sys,json,hashlib;sys.path.insert(0,sys.argv[1]);'
-          'from private_attempt_inspector import create_reader;'
-          'r=create_reader({"OWNER_EVIDENCE_COMPARISON_CONFIG":sys.argv[2]});v=r({},None);'
-          'assert v["counts"]["source_positions"]==138;'
-          'assert v["counts"]["retained_observation_versions"]==276;'
-          'assert v["counts"]["distinct_sporting_attempts"] is None;'
-          'assert v["counts"]["eligible_peer_cohorts"]==0;'
-          'assert v["coverage"]["ranked"]==0;'
-          'sources=json.load(open(sys.argv[2])).get("source_objects",{});'
-          'row=r({"federation":"CMAS","limit":1},None)["rows"][0] if sources else None;'
-          'body=r.source_bytes(row) if row else None;'
-          'assert not sources or (body.startswith(b"%PDF-") and hashlib.sha256(body).hexdigest()==row["source_id"]);'
-          'print("verified")')
+    code = """
+import sys, json, hashlib
+sys.path.insert(0, sys.argv[1])
+from private_attempt_inspector import create_reader
+reader = create_reader({"OWNER_EVIDENCE_COMPARISON_CONFIG": sys.argv[2]})
+try:
+    value = reader({}, None)
+    assert value["counts"]["source_positions"] == 138
+    assert value["counts"]["retained_observation_versions"] == 276
+    assert value["counts"]["distinct_sporting_attempts"] is None
+    assert value["counts"]["eligible_peer_cohorts"] == 0
+    assert value["coverage"]["ranked"] == 0
+    sources = json.load(open(sys.argv[2])).get("source_objects", {})
+    row = reader({"federation": "CMAS", "limit": 1}, None)["rows"][0] if sources else None
+    body = reader.source_bytes(row) if row else None
+    assert not sources or (body.startswith(b"%PDF-") and hashlib.sha256(body).hexdigest() == row["source_id"])
+    print("verified")
+finally:
+    close = getattr(reader, "close", None)
+    if close:
+        close()
+"""
     identity={}
     if uid!=os.geteuid() or gid!=os.getegid():identity={'user':uid,'group':gid,'extra_groups':[]}
-    result=subprocess.run(['/usr/bin/python3','-I','-c',code,str(app/'scripts'),str(config)],capture_output=True,timeout=60,env={'PATH':'/usr/bin:/bin'},**identity)
-    if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('service comparison reader preflight refused')
+    # A timed-out preflight must also terminate children owned by the reader.
+    process=subprocess.Popen(['/usr/bin/python3','-I','-B','-c',code,str(app/'scripts'),str(config)],
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
+        env={'PATH':'/usr/bin:/bin'},**identity)
+    try:
+        stdout,_=process.communicate(timeout=SERVICE_PROBE_TIMEOUT)
+    except BaseException:
+        try:os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+        process.communicate()
+        raise ValueError('service comparison reader preflight refused') from None
+    # Also clean children after an unsuccessful close or a legacy reader exit.
+    try:os.killpg(process.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    if process.returncode or stdout.strip()!=b'verified':raise ValueError('service comparison reader preflight refused')
 
 
 def _comparison_health(values):
@@ -234,7 +260,7 @@ def _comparison_health(values):
              'X-Freediving-Owner-Gateway':values['OWNER_EVIDENCE_GATEWAY_SECRET'],
              'X-Freediving-Owner-Email':values['OWNER_EVIDENCE_EMAILS'].split(',')[0]}
     url='http://127.0.0.1:8081/owner-evidence/api/attempt-inspector?limit=1'
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(urllib.request.Request(url,headers=headers),timeout=60) as response:
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(urllib.request.Request(url,headers=headers),timeout=14) as response:
         value=json.load(response)
         if (response.status!=200 or 'no-store' not in response.headers.get('Cache-Control','') or value.get('schema')!='private-attempt-inspector/v1' or
             value.get('counts')!={'source_positions':138,'retained_observation_versions':276,'distinct_sporting_attempts':None,'eligible_peer_cohorts':0} or
@@ -248,17 +274,19 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
     checkpoint=_checkpoint(layout);_regular(checkpoint/'record.json')
     record=json.loads((checkpoint/'record.json').read_text())
     if record['status'] not in ('active','pending'):raise ValueError('comparison checkpoint not rollbackable')
-    if _sha(layout.units/SERVICE)!=record['unit_sha256']:raise ValueError('service unit changed; rollback refused')
     if capture_sporting_guard(layout)!=record.get('sporting_guard'):raise ValueError('sporting authority changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
+    if _sha(layout.units/SERVICE) not in [state.get('unit',record['unit_sha256']) for state in allowed]:
+        raise ValueError('service unit changed; rollback refused')
     if (current_app not in [r['app'] for r in allowed] or
         any((_sha(path) if path.exists() else None) not in [r[name] for r in allowed] for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed)])):
         raise ValueError('derived state changed; rollback refused')
     for state in (record['before'],record['after']):
         if _tree(Path(state['app']))!=state['app_files']:raise ValueError('rollback app changed')
-    for name in ('config','env','comparison'):
+    names=('config','env','comparison','unit') if 'unit' in record['before'] else ('config','env','comparison')
+    for name in names:
         if record['before'][name] is not None:
             backup=checkpoint/('before-'+name);_regular(backup)
             if _sha(backup)!=record['before'][name]:raise ValueError('rollback backup changed')
@@ -268,6 +296,9 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
         else:
             _atomic_write(path,(checkpoint/('before-'+name)).read_bytes(),0o640 if name=='comparison' else 0o600)
             if name=='comparison':os.chown(path,os.geteuid(),owner_gid)
+    if 'unit' in record['before'] and record['before']['unit']!=record['after']['unit']:
+        _atomic_write(layout.units/SERVICE,(checkpoint/'before-unit').read_bytes(),0o644)
+        command('systemctl','daemon-reload')
     command('systemctl','restart',SERVICE)
     _atomic_write(checkpoint/'record.json',json.dumps({**record,'status':'rolled_back'},sort_keys=True).encode(),0o600)
 
@@ -291,16 +322,19 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
     if expected_guard.get('schema')!='private-comparison-activation-guard/v1' or guard()!=expected_guard:raise ValueError('live guard changed')
     app=_stage_directory(layout.app/'versions',_sha(manifest_path),files,os.geteuid(),os.getegid(),0o644)
     installed=layout.state/'comparison/config.json'
-    before={'app':str((layout.app/'current').resolve()),'app_files':expected_guard['app']['files'],'config':_sha(layout.config),'env':_sha(layout.state/'active.env'),'comparison':_sha(installed) if installed.exists() else None}
+    before={'app':str((layout.app/'current').resolve()),'app_files':expected_guard['app']['files'],'config':_sha(layout.config),'env':_sha(layout.state/'active.env'),'comparison':_sha(installed) if installed.exists() else None,'unit':expected_guard['derived']['unit']}
     pin=('OWNER_EVIDENCE_COMPARISON_CONFIG='+str(installed)+'\n').encode()
     contents={name:b''.join(line for line in path.read_bytes().splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_COMPARISON_CONFIG='))+pin for name,path in [('config',layout.config),('env',layout.state/'active.env')]}
     checkpoint=_checkpoint(layout)
     if checkpoint.is_symlink():raise ValueError('linked comparison checkpoint')
     if (checkpoint/'record.json').exists() and json.loads((checkpoint/'record.json').read_text())['status']=='pending':raise ValueError('pending comparison activation requires reviewed recovery')
     checkpoint.mkdir(mode=0o700,exist_ok=True);checkpoint.chmod(0o700)
-    for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed)]:
+    for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed),('unit',layout.units/SERVICE)]:
         if before[name] is not None:_atomic_write(checkpoint/('before-'+name),path.read_bytes(),0o600)
-    after={'app':str(app.resolve()),'app_files':_tree(app),'config':hashlib.sha256(contents['config']).hexdigest(),'env':hashlib.sha256(contents['env']).hexdigest(),'comparison':_sha(config)}
+    after={'app':str(app.resolve()),'app_files':_tree(app),'config':hashlib.sha256(contents['config']).hexdigest(),'env':hashlib.sha256(contents['env']).hexdigest(),'comparison':_sha(config),'unit':before['unit']}
+    unit_name='deploy/'+SERVICE
+    unit=app/unit_name if unit_name in manifest['files'] else None
+    if unit is not None:after['unit']=_sha(unit)
     probe_config=_stage_directory(layout.state/'comparison-staged',_sha(config),[('config.json',config)],os.geteuid(),owner_gid,0o640)/'config.json'
     probe_config.parent.chmod(0o750)
     (service_probe or _service_probe)(app,probe_config,owner_uid,owner_gid)
@@ -318,13 +352,16 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         _atomic_write(layout.config,contents['config'],0o600)
         _atomic_write(layout.state/'active.env',contents['env'],0o600)
         _atomic_link(layout.app/'current',app)
+        if unit is not None and before['unit']!=after['unit']:
+            _atomic_write(layout.units/SERVICE,unit.read_bytes(),0o644)
+            command('systemctl','daemon-reload')
         command('systemctl','restart',SERVICE)
         if health:health()
         else:
             values=_read_values(contents['config']);_comparison_health(values)
         current=guard()
         if (current.get('sporting')!=expected_guard.get('sporting') or current['authority']!=expected_guard['authority'] or current['protected']!=expected_guard['protected'] or
-            current['derived']['unit']!=expected_guard['derived']['unit'] or
+            current['derived']['unit']!=after['unit'] or
             current['app']!={'path':after['app'],'files':after['app_files']} or
             any(current['derived'][key]!=after[key] for key in ('config','env','comparison'))):
             raise ValueError('live authority changed during activation')

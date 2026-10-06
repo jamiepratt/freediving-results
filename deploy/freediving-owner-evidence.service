@@ -22,7 +22,7 @@ ReadWritePaths=/var/lib/freediving-owner-evidence/decisions
 ReadWritePaths=/var/lib/freediving-owner-evidence/status
 InaccessiblePaths=/etc/freediving/public.env /etc/freediving/migration.env
 MemoryMax=1G
-TasksMax=32
+TasksMax=64
 
 [Install]
 WantedBy=multi-user.target

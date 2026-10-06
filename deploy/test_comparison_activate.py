@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import comparison_activate
@@ -194,6 +195,43 @@ class ComparisonActivationTests(unittest.TestCase):
         self.assertEqual(pdf.stat().st_mode&0o777,0o640)
         self.assertEqual(pdf.parent.stat().st_mode&0o777,0o750)
 
+
+    def test_service_preflight_closes_reader_after_success_and_failure(self):
+        scripts=self.root/'probe-scripts';scripts.mkdir()
+        sentinel=self.root/'closed'
+        (scripts/'private_attempt_inspector.py').write_text("""
+from pathlib import Path
+class Reader:
+    def __call__(self,*args):
+        return {"counts":{"source_positions":138,"retained_observation_versions":276,"distinct_sporting_attempts":None,"eligible_peer_cohorts":0},"coverage":{"ranked":0}}
+    def close(self):Path(%r).write_text('closed')
+def create_reader(env):return Reader()
+""" % str(sentinel))
+        app=self.root/'probe-app';app.mkdir();(app/'scripts').symlink_to(scripts)
+        comparison_activate._service_probe(app,self.config,os.geteuid(),os.getegid())
+        self.assertEqual(sentinel.read_text(),'closed')
+        sentinel.unlink()
+        module=scripts/'private_attempt_inspector.py'
+        module.write_text(module.read_text().replace('138','137'))
+        with self.assertRaisesRegex(ValueError,'preflight refused'):
+            comparison_activate._service_probe(app,self.config,os.geteuid(),os.getegid())
+        self.assertEqual(sentinel.read_text(),'closed')
+
+
+    def test_timed_out_service_preflight_terminates_owned_child(self):
+        app=self.root/'slow-app';scripts=app/'scripts';scripts.mkdir(parents=True)
+        heartbeat=self.root/'heartbeat'
+        child="import time;from pathlib import Path\nwhile True:\n with Path(%r).open('a') as stream:stream.write('alive\\n')\n time.sleep(0.03)" % str(heartbeat)
+        (scripts/'private_attempt_inspector.py').write_text("import subprocess,time\ndef create_reader(env):\n subprocess.Popen(['/usr/bin/python3','-c',%r])\n time.sleep(10)\n" % child)
+        with mock.patch.object(comparison_activate,'SERVICE_PROBE_TIMEOUT',0.4):
+            started=time.monotonic()
+            with self.assertRaisesRegex(ValueError,'preflight refused'):
+                comparison_activate._service_probe(app,self.config,os.geteuid(),os.getegid())
+        self.assertLess(time.monotonic()-started,2)
+        self.assertTrue(heartbeat.exists())
+        before=heartbeat.read_bytes();time.sleep(0.15)
+        self.assertEqual(heartbeat.read_bytes(),before)
+
     def test_service_read_execution_failure_refuses_before_active_swaps(self):
         def refused(*args):raise ValueError('service comparison reader preflight refused')
         with self.assertRaisesRegex(ValueError,'service comparison reader preflight refused'):
@@ -208,6 +246,72 @@ class ComparisonActivationTests(unittest.TestCase):
         self.assertEqual(installed.read_text(),'prior-root-config')
         self.assertEqual(installed.stat().st_uid,os.geteuid())
         self.assertEqual(installed.stat().st_mode&0o777,0o640)
+
+
+    def add_candidate_service_unit(self):
+        unit=self.new/'deploy'/'freediving-owner-evidence.service'
+        unit.parent.mkdir();unit.write_bytes(b'[Service]\nTasksMax=64\nMemoryMax=1G\n')
+        manifest=self.new/'private-owner-manifest.json'
+        value=json.loads(manifest.read_text());value['files']['deploy/freediving-owner-evidence.service']=self.sha(unit)
+        manifest.write_text(json.dumps(value))
+        return unit.read_bytes()
+
+    def test_packaged_unit_activates_and_rolls_back_with_derived_app(self):
+        candidate=self.add_candidate_service_unit()
+        protected=self.guard()
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
+        unit=self.layout.units/'freediving-owner-evidence.service'
+        self.assertEqual(unit.read_bytes(),candidate)
+        self.assertEqual(unit.stat().st_mode&0o777,0o644)
+        self.assertEqual(self.commands,[('systemctl','daemon-reload'),('systemctl','restart','freediving-owner-evidence.service')])
+        self.assertEqual(self.guard()['authority'],protected['authority'])
+        self.assertEqual(self.guard()['protected'],protected['protected'])
+        rollback_comparison(self.layout,command=self.command)
+        self.assertEqual(unit.read_bytes(),b'retained-unit')
+        self.assertEqual(self.commands[-2:],[('systemctl','daemon-reload'),('systemctl','restart','freediving-owner-evidence.service')])
+
+
+    def test_failed_health_restores_packaged_unit_and_keeps_newer_human_event(self):
+        self.add_candidate_service_unit()
+        def unhealthy():
+            with sqlite3.connect(self.ledger) as db:db.execute('INSERT INTO events VALUES (228)')
+            raise RuntimeError('unhealthy')
+        with self.assertRaisesRegex(RuntimeError,'unhealthy'):
+            activate_comparison(self.new,self.config,self.layout,self.pins,**{**self.kw,'health':unhealthy})
+        self.assertEqual((self.layout.units/'freediving-owner-evidence.service').read_bytes(),b'retained-unit')
+        self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+        with sqlite3.connect(self.ledger) as db:self.assertEqual(db.execute('SELECT max(revision) FROM events').fetchone()[0],228)
+
+    def test_tampered_unit_backup_refuses_before_any_derived_restore(self):
+        self.add_candidate_service_unit()
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
+        before=self.guard()
+        (self.layout.state/'comparison-activation-checkpoint/before-unit').write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError,'backup changed'):
+            rollback_comparison(self.layout,command=self.command)
+        self.assertEqual(self.guard(),before)
+
+    def test_legacy_unit_checkpoint_can_restore_its_known_derived_state(self):
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
+        checkpoint=self.layout.state/'comparison-activation-checkpoint/record.json'
+        record=json.loads(checkpoint.read_text())
+        for state in ('before','after'):record[state].pop('unit')
+        checkpoint.write_text(json.dumps(record))
+        rollback_comparison(self.layout,command=self.command)
+        self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+        self.assertEqual((self.layout.units/'freediving-owner-evidence.service').read_bytes(),b'retained-unit')
+
+
+    def test_interrupted_unit_swap_rolls_back_only_recorded_old_or_new_unit(self):
+        self.add_candidate_service_unit()
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
+        checkpoint=self.layout.state/'comparison-activation-checkpoint'
+        record=json.loads((checkpoint/'record.json').read_text());record['status']='pending'
+        (checkpoint/'record.json').write_text(json.dumps(record))
+        (self.layout.units/'freediving-owner-evidence.service').write_bytes((checkpoint/'before-unit').read_bytes())
+        rollback_comparison(self.layout,command=self.command)
+        self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+        self.assertEqual((self.layout.units/'freediving-owner-evidence.service').read_bytes(),b'retained-unit')
 
     def test_changed_service_unit_refuses_rollback_before_restoring_derived_files(self):
         activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
