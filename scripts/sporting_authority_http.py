@@ -6,6 +6,10 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import threading
+import time
+from urllib.parse import parse_qs
+from private_attempt_inspector import _remaining, READ_BUDGET_SECONDS
 
 from sporting_authority import SportingAuthority, ConflictError, canonical, digest, private_bytes
 from unified_evidence_query import SnapshotQuery
@@ -21,7 +25,7 @@ PAGE = b'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name
 Extraction review, same-attempt decisions, athlete identity and public eligibility retain their independent authority.</p>
 <p>Supported scope: 2026 pool DNF women. Unknown facts stay explicit. Disqualified achieved distances remain hypothetical.</p>
 <div id="status" role="status">Loading current private reviews...</div><button id="refresh">Refresh</button>
-<section id="proposals"></section></main></body></html>'''
+<section id="proofs"><h2>Exact upstream source proofs</h2><p id="proof-status" role="status">Loading exact current source inventory...</p><div id="proof-rows"></div><div id="proof-pages"></div></section><section id="proposals"></section></main></body></html>'''
 STYLE = b'''body{font:16px system-ui;color:#17302f;background:#f5f7f5;margin:0}main{max-width:1180px;margin:32px auto;padding:24px}
 h1{font-size:32px}article{background:white;border:1px solid #cad6ce;border-radius:10px;margin:24px 0;padding:24px}
 table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid #d7dfda;padding:10px;text-align:left;vertical-align:top}
@@ -49,13 +53,37 @@ for(const action of [next,...(item.action!=='stage'&&item.action!=='reverse'?['r
 if(!reason.value.trim()){document.getElementById('status').textContent='Enter your review reason.';return;}b.disabled=true;try{const r=await fetch(root+'/actions',{method:'POST',headers:{'Content-Type':'application/json','X-Freediving-CSRF':current.csrf_token},
 body:JSON.stringify({id:p.id,action,reason:reason.value,expected_revision:current.revision,idempotency_key:crypto.randomUUID(),csrf_token:current.csrf_token})});
 if(!r.ok)throw Error('Review refused ('+r.status+'). Refresh exact current authority and check independent upstream approvals.');await load();}
-catch(e){document.getElementById('status').textContent=e.message;b.disabled=false;}});card.append(b);}list.append(card);}}
+catch(e){document.getElementById('status').textContent=e.message;b.disabled=false;}});card.append(b);}list.append(card);}await loadProofs(0);}
 catch(e){document.getElementById('status').textContent=e.message;}}
+let proofGeneration=0;
+async function loadProofs(offset){const generation=++proofGeneration,container=document.getElementById('proof-rows');
+container.replaceChildren();document.getElementById('proof-pages').replaceChildren();document.getElementById('proof-status').textContent='Reading fresh exact upstream proofs...';
+try{const r=await fetch(root+'/proofs?offset='+offset+'&limit=20',{cache:'no-store'});if(!r.ok)throw Error('Exact upstream proofs unavailable ('+r.status+'). Retry fresh source authority.');
+const proof=await r.json();if(generation!==proofGeneration)return;
+document.getElementById('proof-status').textContent=proof.source_positions+' source positions - '+proof.pagination.total+' retained versions - relationship revision '+proof.relationship_revision+'. Missing canonical mappings are import gaps. Versions are not distinct sporting attempts.';
+for(const row of proof.rows){const card=node('article'),ref=row.reference;card.append(node('h3',(row.federation||'Source')+' / ordinal '+ref.ordinal+' / '+ref['parser-version']),
+details('Exact immutable source, parser, candidate and coordinates',{reference:ref,coordinates:row.coordinates}),details('Current independent authority and provenance',row.diagnostics),details('Current permitted upstream facts',row.upstream),details('Extracted values for source review',row.parsed_fields||{}));
+const access=row.source_access||{};if(access.retained_row_id){const a=node('a','Open verified source position and retained versions');a.href='/owner-evidence/api/attempt-inspector/source/'+access.retained_row_id;a.target='_blank';card.append(a);
+if(access.original_replay==='available_private_pdf'&&access.original_page){const pdf=node('a','Open cited original PDF page');pdf.href=a.href+'/page/'+access.original_page;pdf.target='_blank';card.append(node('p'),pdf);}}
+card.append(node('p',access.reason||'Original access requires exact private source binding.'));
+if(row.relationship_review&&row.relationship_review.action==='review'){const revoke=node('button','Withdraw independent relationship review');revoke.addEventListener('click',async()=>{revoke.disabled=true;try{const result=await fetch(root+'/relationships',{method:'POST',headers:{'Content-Type':'application/json','X-Freediving-CSRF':current.csrf_token},body:JSON.stringify({assertion:row.relationship_review.assertion,action:'reverse',expected_revision:proof.relationship_revision,idempotency_key:crypto.randomUUID(),csrf_token:current.csrf_token})});if(!result.ok)throw Error('Relationship withdrawal refused ('+result.status+'). Refresh review state.');await load();}catch(e){document.getElementById('proof-status').textContent=e.message;revoke.disabled=false;}});card.append(revoke);}
+if(proof.relationship_available){const form=node('details');form.append(node('summary','Independent typed relationship review'));
+form.append(node('p','Review every retained version in this inventory and all possible repeat/conflicting source positions. This records distinctness and resolved conflicts for this one exact representative. Extraction acceptance and publication eligibility require their separate authorities.'));
+const checkbox=node('input');checkbox.type='checkbox';const attest=node('label','I reviewed the complete exact inventory and this row is a distinct attempt with resolved source conflicts.');attest.prepend(checkbox);form.append(attest,details('Complete inventory requiring review',proof.reviewed_references));
+const inputs={};for(const [key,title] of [['reason','Evidence and relationship reason'],['url','HTTPS authority citation'],['locator','Exact source locator']]){const label=node('label',title),input=node(key==='reason'?'textarea':'input');inputs[key]=input;label.append(input);form.append(label);}
+const button=node('button','Record independent relationship review');button.addEventListener('click',async()=>{if(!checkbox.checked){document.getElementById('proof-status').textContent='Complete the exhaustive inventory review before recording authority.';return;}
+button.disabled=true;const assertion={reference:ref,coordinates:row.coordinates,inventory_sha256:proof.inventory_sha256,canonical_binding_sha256:proof.pins.canonical_upstream_sha256,reviewed_references:proof.reviewed_references,'same-attempt':'distinct','source-conflict':'resolved',reason:inputs.reason.value,citation:{url:inputs.url.value,locator:inputs.locator.value}};
+try{const result=await fetch(root+'/relationships',{method:'POST',headers:{'Content-Type':'application/json','X-Freediving-CSRF':current.csrf_token},body:JSON.stringify({assertion,action:'review',expected_revision:proof.relationship_revision,idempotency_key:crypto.randomUUID(),csrf_token:current.csrf_token})});if(!result.ok)throw Error('Independent review refused ('+result.status+'). Refresh exact inventory and inspect current conflicts.');await load();}
+catch(e){document.getElementById('proof-status').textContent=e.message;button.disabled=false;}});form.append(button);card.append(form);}container.append(card);}
+const pages=document.getElementById('proof-pages');for(const [label,next] of [['Previous',offset-20],['Next',offset+20]]){if(next>=0&&next<proof.pagination.total){const b=node('button',label);b.addEventListener('click',()=>loadProofs(next));pages.append(b);}}}
+catch(e){if(generation===proofGeneration){container.replaceChildren();document.getElementById('proof-status').textContent=e.message;}}}
 document.getElementById('refresh').addEventListener('click',load);load();'''
 
 
-def live_context(origin, snapshot_dir, env, config_path, *, review=False):
+def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadline=None):
     """Read exact active pins. Legacy same-attempt approvals grant no sporting facts."""
+    deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + READ_BUDGET_SECONDS)
+    _remaining(deadline)
     config = json.loads(private_bytes(config_path, 65536))
     with SnapshotQuery(snapshot_dir) as snapshot:
         snapshot_sha = snapshot.manifest['snapshot_sha256']
@@ -86,28 +114,61 @@ def live_context(origin, snapshot_dir, env, config_path, *, review=False):
         rules[sha] = item['url']
     rows = []
     if review:
-        if origin.comparison_reader is None:
+        if origin.comparison_reader is None or not comparison_config:
             raise ValueError('exact sporting rows unavailable')
-        authority = origin.status_authority()
+        authority = origin.status_authority(deadline=deadline)
         if authority is None:
             raise ValueError('fresh owner/source status unavailable')
         pins['owner_authority_sha256'] = digest(authority)
         parsers = parser_versions(comparison)
-        result = origin.comparison_reader({'year': '2026', 'environment': 'pool',
-                                           'discipline': 'DNF', 'gender': 'women', 'limit': 200}, None)
-        for row in result['rows']:
-            parser = parsers.get((row['reference'].get('job-id'), row['reference'].get('artifact-sha256')))
-            if parser is None:
-                raise ValueError('exact sporting parser version unavailable')
-            rows.append({'reference': {**row['reference'], 'parser-version': parser}, 'coordinates': row['row_coordinate'],
-                         'year': str(row['year']), 'environment': row['environment'],
-                         'discipline': row['discipline'].lower(), 'gender': row['gender'],
-                         # No existing ledger authenticates exact extraction, distinct
-                         # attempt and public eligibility for these rows. Unknown stays
-                         # explicit; review cannot manufacture upstream decisions.
-                         'upstream': {}})
+        filters = {'year': '2026', 'environment': 'pool', 'discipline': 'DNF', 'gender': 'women', 'limit': 200}
+        offset = 0
+        while True:
+            result = origin.read_comparison({**filters, 'offset': offset}, None, deadline=deadline)
+            origin.bind_inspector_sources(result, {**filters, 'offset': offset}, deadline=deadline)
+            for row in result['rows']:
+                versions = row.get('retained-versions') or [{'reference': row['reference'], 'candidate': row.get('candidate', {})}]
+                for version in versions:
+                    reference = version['reference']
+                    parser = parsers.get((reference.get('job-id'), reference.get('artifact-sha256')))
+                    if parser is None:
+                        raise ValueError('exact sporting parser version unavailable')
+                    rows.append({'reference': {**reference, 'parser-version': parser},
+                                 'coordinates': version.get('candidate', {}).get('coordinates', row['row_coordinate']),
+                                 'year': str(row['year']), 'environment': row['environment'],
+                                 'discipline': row['discipline'].lower(), 'gender': row['gender'],
+                                 'federation': row.get('federation', row.get('source', {}).get('federation', 'unknown')),
+                                 'source_access': row.get('source_access', {}),
+                                 'parsed_fields': version.get('candidate', {}).get('parsed', row.get('parsed_fields', {})),
+                                 'upstream': {}, 'diagnostics': {}})
+            offset += len(result['rows'])
+            total = result.get('pagination', {}).get('total', offset)
+            if len(rows) > 400:
+                raise ValueError('exact sporting inventory exceeds bound')
+            if offset >= total:
+                break
+            if not result['rows']:
+                raise ValueError('exact sporting inventory incomplete')
+    reader = getattr(origin, 'sporting_proof_reader', None)
+    if reader is None:
+        pins['canonical_upstream_status'] = 'unavailable'
+        for row in rows:
+            row['diagnostics'] = {'capability': {'state': 'unavailable',
+                'reason': 'Restricted exact source proof reader is not configured; no independent authority granted'}}
+    else:
+        request = [{'reference': row['reference'], 'coordinates': row['coordinates']} for row in rows]
+        proof = reader(request, deadline=deadline)
+        pins['canonical_upstream_sha256'] = proof['binding_sha256']
+        pins['canonical_upstream_config_sha256'] = proof['config_sha256']
+        pins['canonical_scope_bindings'] = proof['scope_bindings']
+        for row, verified in zip(rows, proof['rows']):
+            row.update({k: v for k, v in verified.items() if k not in ('reference', 'coordinates')})
+        fresh = reader([], deadline=deadline)
+        if any(proof[key] != fresh[key] for key in ('binding_sha256', 'config_sha256', 'scope_bindings')):
+            raise ConflictError('exact upstream authority changed while collecting sporting context')
     if owner.revision != before or owner.active_snapshot_sha256 != snapshot_sha:
         raise ConflictError('owner source changed while collecting sporting context')
+    _remaining(deadline)
     return {'pins': pins, 'rows': rows, 'rules': rules}
 
 
@@ -136,11 +197,14 @@ def configure(origin, snapshot_dir, env):
     name = env.get('OWNER_EVIDENCE_SPORTING_CONFIG')
     origin.sporting = None
     origin.sporting_request_key = None
+    origin.sporting_proof_reader = None
+    origin.relationship_reviews = None
+    origin.sporting_deadlines = threading.local()
     if not name:
         return
     config_path = Path(name)
     data = json.loads(private_bytes(config_path, 65536))
-    if (not isinstance(data, dict) or set(data) - {'rule_objects'} !=
+    if (not isinstance(data, dict) or set(data) - {'rule_objects', 'relationship_ledger_path'} !=
             {'schema', 'ledger_path', 'signing_key_path', 'request_key_path'}
             or data['schema'] != 'sporting-authority-service/v1'
             or any(not Path(data[k]).is_absolute() or Path(data[k]).resolve().is_relative_to(Path(snapshot_dir).resolve())
@@ -149,11 +213,34 @@ def configure(origin, snapshot_dir, env):
     request_key = private_bytes(data['request_key_path'], 256).decode('ascii').strip()
     if not 32 <= len(request_key) <= 256 or any(c.isspace() for c in request_key):
         raise ValueError('invalid sporting request key')
+    from private_sporting_proofs import create_reader
+    origin.sporting_proof_reader = create_reader(env)
+    def base(review=False):
+        return live_context(origin, snapshot_dir, env, config_path, review=review,
+                            deadline=getattr(origin.sporting_deadlines, 'deadline', None))
     def read():
-        return live_context(origin, snapshot_dir, env, config_path)
-    read.review = lambda: live_context(origin, snapshot_dir, env, config_path, review=True)
+        context = base()
+        return origin.relationship_reviews.proofs(context) if origin.relationship_reviews else context
+    read.review = lambda: origin.relationship_reviews.proofs(base(True)) if origin.relationship_reviews else base(True)
+    origin.sporting_proof_context = read.review
+    if data.get('relationship_ledger_path'):
+        from private_sporting_relationships import RelationshipReviews
+        ledger = Path(data['relationship_ledger_path'])
+        if not ledger.is_absolute() or ledger.resolve().is_relative_to(Path(snapshot_dir).resolve()):
+            raise ValueError('invalid independent relationship ledger path')
+        origin.relationship_reviews = RelationshipReviews(ledger, lambda: base(True))
+        origin.relationship_reviews.read_lock = lambda: origin.read_lock(getattr(origin.sporting_deadlines, 'deadline', None))
     origin.sporting = SportingAuthority(data['ledger_path'], data['signing_key_path'], read)
     origin.sporting_request_key = request_key
+    origin.sporting.read_lock = lambda: origin.read_lock(getattr(origin.sporting_deadlines, 'deadline', None))
+    original_close = origin.sporting.close
+    def close():
+        original_close()
+        if origin.relationship_reviews:
+            origin.relationship_reviews.close()
+        if origin.sporting_proof_reader:
+            origin.sporting_proof_reader.close()
+    origin.sporting.close = close
 
 
 def is_machine(handler):
@@ -183,6 +270,34 @@ def _body(handler, limit):
 
 
 def get(handler, parsed):
+    if hasattr(handler.server, 'sporting_deadlines'):
+        handler.server.sporting_deadlines.deadline = getattr(handler, 'read_deadline', time.monotonic() + READ_BUDGET_SECONDS)
+    if parsed.path == PREFIX + '/proofs':
+        try:
+            params = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+            if set(params) - {'offset', 'limit'} or any(len(v) != 1 for v in params.values()):
+                raise ValueError('invalid exact proof pagination')
+            offset, limit = int(params.get('offset', ['0'])[0]), int(params.get('limit', ['20'])[0])
+            if not 0 <= offset <= 400 or not 1 <= limit <= 50:
+                raise ValueError('invalid exact proof page')
+        except ValueError:
+            handler._reply(400); return True
+        try:
+            context = handler.server.sporting_proof_context()
+            rows = context['rows']
+            ledger = getattr(handler.server, 'relationship_reviews', None)
+            from private_sporting_relationships import inventory
+            handler._json({'schema': 'sporting-exact-proof-diagnostics/v1', 'pins': context['pins'],
+                           'inventory_sha256': digest(inventory(context)),
+                           'reviewed_references': [r['reference'] for r in rows],
+                           'relationship_revision': len(ledger.history()) if ledger else 0,
+                           'relationship_available': ledger is not None and 'canonical_upstream_sha256' in context['pins'],
+                           'source_positions': len({digest({'source-sha256': r['reference']['source-sha256'], 'coordinates': {k: v for k, v in r['coordinates'].items() if k in ('page', 'line', 'table', 'row')}}) for r in rows}),
+                           'pagination': {'offset': offset, 'limit': limit, 'total': len(rows)},
+                           'rows': rows[offset:offset + limit]})
+        except (ValueError, OSError, sqlite3.Error, AttributeError):
+            handler._reply(503)
+        return True
     assets = {'/owner-evidence/sporting': (PAGE, 'text/html; charset=utf-8'),
               '/owner-evidence/assets/sporting.js': (SCRIPT, 'text/javascript; charset=utf-8'),
               '/owner-evidence/assets/sporting.css': (STYLE, 'text/css; charset=utf-8')}
@@ -207,12 +322,13 @@ def get(handler, parsed):
 
 
 def post(handler, parsed):
-    if parsed.path not in (CURRENT, PREFIX + '/stage', PREFIX + '/actions') or parsed.query:
+    if parsed.path not in (CURRENT, PREFIX + '/stage', PREFIX + '/actions', PREFIX + '/relationships') or parsed.query:
         return False
     if handler.server.sporting is None:
         handler._reply(503)
         return True
     try:
+        handler.server.sporting_deadlines.deadline = time.monotonic() + READ_BUDGET_SECONDS
         if parsed.path == CURRENT:
             if not is_machine(handler):
                 handler._reply(403); return True
@@ -229,7 +345,15 @@ def post(handler, parsed):
             body = _body(handler, MAX_STAGE)
             if not hmac.compare_digest(body.get('csrf_token', ''), handler._csrf()):
                 handler._reply(403); return True
-            if parsed.path.endswith('/stage'):
+            if parsed.path.endswith('/relationships'):
+                if set(body) != {'assertion', 'action', 'expected_revision', 'idempotency_key', 'csrf_token'}:
+                    raise ValueError('invalid relationship action fields')
+                ledger = handler.server.relationship_reviews
+                if ledger is None:
+                    handler._reply(503); return True
+                result = ledger.act(body['assertion'], action=body['action'], expected_revision=body['expected_revision'],
+                                    idempotency_key=body['idempotency_key'], actor=handler._one('X-Freediving-Owner-Email'))
+            elif parsed.path.endswith('/stage'):
                 if set(body) != {'proposal', 'expected_revision', 'idempotency_key', 'csrf_token'}:
                     raise ValueError('invalid sporting stage fields')
                 result = handler.server.sporting.stage(body['proposal'], expected_revision=body['expected_revision'],

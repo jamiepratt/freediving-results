@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -58,6 +59,8 @@ class Fixture:
         self.thread.start()
         self.proposal_id = 'synthetic-public-cohort'
         self.browser_proxy = None
+        self.genuine_reader = None
+        self.genuine_relationships = None
 
     def config(self):
         public = subprocess.check_output(['openssl', 'pkey', '-in', str(self.key), '-pubout', '-outform', 'DER'])
@@ -86,6 +89,76 @@ class Fixture:
             raise ValueError('synthetic owner queue failed')
         return body
 
+    def canonical_context(self, config, rows):
+        """Opt-in real isolated PostgreSQL authority transport; no supplied upstream facts."""
+        import importlib.util
+        import private_sporting_proofs
+        from private_sporting_relationships import RelationshipReviews
+        if set(config) != {'jdbc_url', 'database', 'canonical_jdbc_url', 'canonical_database'}:
+            raise ValueError('isolated canonical context configuration required')
+        if self.genuine_reader is not None:
+            raise ValueError('canonical fixture already configured')
+        spec = importlib.util.spec_from_file_location('synthetic_proof_package', ROOT / 'deploy/canonical_status_runtime.py')
+        package = importlib.util.module_from_spec(spec); spec.loader.exec_module(package)
+        runtime = self.root / 'proof-runtime'
+        source_root = Path(os.environ.get('FREEDIVING_PRIVATE_TEST_SOURCE_ROOT', str(ROOT))).resolve()
+        manifest = package.build_runtime(source_root, runtime, 'isolated-synthetic-only', private_sporting_proofs)
+        path = self.root / 'proof-config.json'
+        path.write_bytes(canonical({**config, 'runtime_path': str(runtime), 'runtime_manifest_sha256': manifest}))
+        path.chmod(0o600)
+        self.genuine_reader = private_sporting_proofs.create_reader({'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': str(path)})
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 400:
+            raise ValueError('isolated exact retained source rows required')
+        for row in rows:
+            if set(row) != {'reference', 'coordinates', 'year', 'environment', 'discipline', 'gender'}:
+                raise ValueError('canonical fixture input cannot supply upstream assertions')
+        self.context['rows'] = copy.deepcopy(rows)
+        def base():
+            proof = self.genuine_reader([{'reference': r['reference'], 'coordinates': r['coordinates']} for r in rows])
+            return {'pins': {**self.context['pins'], 'canonical_upstream_sha256': proof['binding_sha256'],
+                             'canonical_scope_bindings': proof['scope_bindings']},
+                    'rows': [{**r, **verified} for r, verified in zip(rows, proof['rows'])],
+                    'rules': copy.deepcopy(self.context['rules'])}
+        self.genuine_relationships = RelationshipReviews(self.root / 'relationships.sqlite', base)
+        self.server.relationship_reviews = self.genuine_relationships
+        def current():
+            return self.genuine_relationships.proofs(base())
+        self.server.sporting.context_reader = current
+        self.server.sporting_proof_context = current
+        return current()
+
+    def canonical_relationships(self):
+        """Synthetic explicit human intent through the actual authenticated owner route."""
+        from private_sporting_relationships import inventory
+        current = self.server.sporting.context_reader()
+        for row in current['rows']:
+            state = self.server.sporting.context_reader()
+            csrf = self.review()['csrf_token']
+            assertion = {'reference': row['reference'], 'coordinates': row['coordinates'],
+                         'inventory_sha256': digest(inventory(state)),
+                         'canonical_binding_sha256': state['pins']['canonical_upstream_sha256'],
+                         'reviewed_references': [r['reference'] for r in state['rows']],
+                         'same-attempt': 'distinct', 'source-conflict': 'resolved',
+                         'reason': 'Isolated synthetic owner explicitly reviewed the exhaustive exact source inventory',
+                         'citation': {'url': 'https://example.test/isolated-relationship-authority',
+                                      'locator': 'Exact retained source and all synthetic possible repeats'}}
+            status, result = self.request('/owner-evidence/api/sporting-authority/relationships', {
+                'assertion': assertion, 'action': 'review', 'expected_revision': len(self.genuine_relationships.history()),
+                'idempotency_key': 'synthetic-relationship-' + str(len(self.genuine_relationships.history())), 'csrf_token': csrf})
+            if status != 200:
+                return status, result
+        return 200, {'relationship_revision': len(self.genuine_relationships.history())}
+
+    def reverse_relationship(self, index=0):
+        current = self.server.sporting.context_reader()
+        row = current['rows'][index]
+        csrf = self.review()['csrf_token']
+        return self.request('/owner-evidence/api/sporting-authority/relationships', {
+            'assertion': row['relationship_review']['assertion'], 'action': 'reverse',
+            'expected_revision': len(self.genuine_relationships.history()),
+            'idempotency_key': 'reverse-relationship-' + str(len(self.genuine_relationships.history())),
+            'csrf_token': csrf})
+
     def stage(self, publication):
         self.proposal_id = 'synthetic-public-cohort-' + str(self.review()['revision'])
         rows, evidence = [], []
@@ -101,6 +174,11 @@ class Fixture:
                 upstream['source-selection'] = {'value': item['facts']['source-selection']['value'],
                                                 'event_sha256': digest(['synthetic-selection', ref])}
             upstream['publication'] = {'value': 'approved', 'event_sha256': digest(['synthetic-public-eligibility', ref]), 'reference': ref}
+            if self.genuine_reader is not None:
+                matches = [r for r in self.server.sporting.context_reader()['rows'] if r.get('public_reference') == ref]
+                if len(matches) != 1:
+                    raise ValueError('genuine exact public source mapping absent')
+                retained, coords = matches[0]['reference'], matches[0]['coordinates']
             rows.append({'reference': retained, 'coordinates': coords, 'year': '2026',
                          'environment': 'pool', 'discipline': 'dnf', 'gender': 'women', 'upstream': upstream,
                          'public_reference': ref})
@@ -109,7 +187,8 @@ class Fixture:
         if any(item.get('hypothetical') is not None for item in publication['rows']):
             rules.add('hypothetical')
         rule_sha = digest('isolated synthetic source rule document')
-        self.context['rows'] = rows
+        if self.genuine_reader is None:
+            self.context['rows'] = rows
         self.context['rules'] = {rule_sha: 'https://example.test/synthetic-rules.pdf'}
         now = datetime.now(timezone.utc)
         proposal = {'id': self.proposal_id, 'publication': publication, 'evidence': evidence,
@@ -157,7 +236,12 @@ class Fixture:
         if self.browser_proxy is not None:
             self.browser_proxy.shutdown(); self.proxy_thread.join(timeout=3); self.browser_proxy.server_close()
         self.server.shutdown(); self.thread.join(timeout=3)
-        self.server.server_close(); self.tmp.cleanup()
+        self.server.server_close()
+        if self.genuine_relationships is not None:
+            self.genuine_relationships.close()
+        if self.genuine_reader is not None:
+            self.genuine_reader.close()
+        self.tmp.cleanup()
 
 
 def main():
@@ -171,7 +255,15 @@ def main():
             try:
                 request = json.loads(line)
                 op = request['op']
-                if op == 'stage':
+                if op == 'canonical-context':
+                    status, result = 200, fixture.canonical_context(request['config'], request['rows'])
+                elif op == 'canonical-relationships':
+                    status, result = fixture.canonical_relationships()
+                elif op == 'reverse-relationship':
+                    status, result = fixture.reverse_relationship(request.get('index', 0))
+                elif op == 'canonical-proof':
+                    status, result = 200, fixture.server.sporting.context_reader()
+                elif op == 'stage':
                     status, result = fixture.stage(request['publication'])
                 elif op == 'approve':
                     for action in ('source-approve', 'select-cohort', 'publish'):

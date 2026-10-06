@@ -472,7 +472,10 @@ def _bounded_get(method):
         self.read_deadline = time.monotonic() + READ_BUDGET_SECONDS
         if path == STATUS_PATH:
             return method(self)
-        expensive = (path == '/owner-evidence/api/attempt-inspector'
+        expensive = (path in ('/owner-evidence/api/attempt-inspector',
+                             '/owner-evidence/api/sporting-authority/proofs',
+                             '/owner-evidence/api/sporting-authority/review',
+                             '/owner-evidence/api/sporting-authority/preview')
                      or any(pattern.fullmatch(path) for pattern in
                             (INSPECTOR_SOURCE_PATH, INSPECTOR_PAGE_PATH, SOURCE_VIEW_PATH,
                              SOURCE_PAGE_PATH, SOURCE_IMAGE_PATH)))

@@ -122,9 +122,81 @@ class SportingAuthorityHTTPTest(unittest.TestCase):
         self.assertEqual(context['rows'][0]['reference']['parser-version'], 'cmas-2026-indoor-time/2')
         self.assertEqual(context['rows'][0]['discipline'], 'dnf')
         self.assertEqual(context['rows'][0]['upstream'], {})
+        reads = []
+        def proof_reader(rows, *, deadline=None):
+            reads.append(rows)
+            return {'binding_sha256': 'e' * 64, 'config_sha256': 'f' * 64,
+                    'scope_bindings': {'source': '1' * 64, 'relationships': '2' * 64},
+                    'rows': [{**r, 'upstream': {'review': {'value': 'verified', 'event_sha256': '3' * 64}},
+                              'diagnostics': {'mapping': {'state': 'current'}}} for r in rows]}
+        origin.sporting_proof_reader = proof_reader
+        minimal = live_context(origin, directory, {**env, 'OWNER_EVIDENCE_COMPARISON_CONFIG': str(comparison)}, config)
+        self.assertEqual(minimal['pins']['canonical_upstream_sha256'], 'e' * 64)
+        self.assertEqual(minimal['rows'], [])
+        exact = live_context(origin, directory, {**env, 'OWNER_EVIDENCE_COMPARISON_CONFIG': str(comparison)}, config, review=True)
+        self.assertEqual(exact['rows'][0]['upstream']['review']['value'], 'verified')
+        self.assertEqual(reads[-1], [])
+        def drift(rows, *, deadline=None):
+            value = proof_reader(rows, deadline=deadline)
+            if not rows:
+                value['binding_sha256'] = '9' * 64
+            return value
+        origin.sporting_proof_reader = drift
+        with self.assertRaisesRegex(ValueError, 'upstream authority changed'):
+            live_context(origin, directory, {**env, 'OWNER_EVIDENCE_COMPARISON_CONFIG': str(comparison)}, config, review=True)
+        origin.sporting_proof_reader = proof_reader
         (runtime / relative).write_text('tampered')
         with self.assertRaisesRegex(ValueError, 'metadata changed'):
             live_context(origin, directory, {**env, 'OWNER_EVIDENCE_COMPARISON_CONFIG': str(comparison)}, config, review=True)
+
+
+
+class ExactProofDiagnosticHTTPTest(unittest.TestCase):
+    def test_authenticated_diagnostics_exist_without_sporting_proposals(self):
+        f = Fixture()
+        self.addCleanup(f.close)
+        f.server.sporting_proof_context = lambda: {
+            'pins': {'canonical_upstream_sha256': 'a' * 64}, 'rules': {},
+            'rows': [{'reference': {'source-sha256': 'b' * 64, 'artifact-sha256': 'c' * 64,
+                       'candidate-id': 'isolated-row', 'ordinal': 1, 'job-id': 'd' * 64,
+                       'parser-version': 'isolated/1'}, 'coordinates': {'table': 1, 'row': 1},
+                      'upstream': {}, 'diagnostics': {'mapping': {'state': 'missing',
+                       'reason': 'Exact AIDA import mapping absent'}}, 'year': '2026',
+                      'environment': 'pool', 'discipline': 'dnf', 'gender': 'women'}]}
+        status, value = f.request('/owner-evidence/api/sporting-authority/proofs?offset=0&limit=20')
+        self.assertEqual(status, 200)
+        self.assertEqual(value['pagination']['total'], 1)
+        self.assertEqual(value['rows'][0]['diagnostics']['mapping']['state'], 'missing')
+        self.assertEqual(value['relationship_revision'], 0)
+        self.assertNotIn('csrf_token', canonical(value).decode())
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/proofs?offset=-1')[0], 400)
+
+class IndependentRelationshipOwnerHTTPTest(unittest.TestCase):
+    def test_owner_uses_separate_typed_authority_with_csrf_and_cas(self):
+        from private_sporting_relationships import RelationshipReviews
+        from test_private_sporting_relationships import context, assertion
+        f = Fixture(); self.addCleanup(f.close)
+        current = context(); ledger = RelationshipReviews(f.root / 'typed.sqlite', lambda: current)
+        self.addCleanup(ledger.close)
+        f.server.relationship_reviews = ledger
+        f.server.sporting_proof_context = lambda: ledger.proofs(current)
+        csrf = f.review()['csrf_token']
+        body = {'assertion': assertion(current), 'action': 'review', 'expected_revision': 0,
+                'idempotency_key': 'typed-one', 'csrf_token': csrf}
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/relationships',
+                                 {**body, 'csrf_token': 'bad'})[0], 403)
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/relationships',
+                                 {**body, 'actor': 'forged'})[0], 400)
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/relationships', body)[0], 200)
+        self.assertEqual(f.review()['revision'], 0)
+        self.assertEqual(ledger.history()[0]['actor'], OWNER)
+        proof = f.request('/owner-evidence/api/sporting-authority/proofs')[1]
+        self.assertEqual(proof['rows'][0]['upstream']['same-attempt']['value'], 'distinct')
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/relationships',
+                                 {**body, 'action': 'reverse', 'idempotency_key': 'stale'})[0], 409)
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/relationships',
+                                 {**body, 'action': 'reverse', 'expected_revision': 1, 'idempotency_key': 'reverse'})[0], 200)
+        self.assertEqual(f.request('/owner-evidence/api/sporting-authority/proofs')[1]['rows'][0]['upstream'], {})
 
 
 if __name__ == '__main__':

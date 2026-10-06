@@ -257,6 +257,12 @@ class SportingAuthority:
         self.db.close()
 
     def _history(self):
+        if hasattr(self, "read_lock"):
+            with self.read_lock():
+                return self._history_unlocked()
+        return self._history_unlocked()
+
+    def _history_unlocked(self):
         events, previous = [], ZERO
         for row in self.db.execute('SELECT * FROM sporting_events ORDER BY revision'):
             event, detail = json.loads(row['safe_json']), json.loads(row['private_json'])
