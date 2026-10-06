@@ -79,6 +79,15 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 
+    def test_canonical_reader_config_is_scoped_to_the_selected_private_layout(self):
+        path = self.layout.state / 'canonical-reader' / 'config.json'
+        self.config.write_text(self.config.read_text() +
+                               'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG=' + str(path) + '\n')
+        self.assertEqual(_config(self.config, os.getuid(), self.digest,
+                                canonical_config_path=path)['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'], str(path))
+        with self.assertRaises(ValueError):
+            _config(self.config, os.getuid(), self.digest)
+
     def test_consolidated_queue_pin_requires_fixed_private_host_path_and_digest(self):
         base = self.config.read_text()
         settings = ('OWNER_EVIDENCE_ISSUE172_QUEUE_FILE=/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json\n'

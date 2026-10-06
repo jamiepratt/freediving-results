@@ -66,7 +66,7 @@ def _sha(path):
     return digest.hexdigest()
 
 
-def _config(path, owner_uid, expected):
+def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/freediving-owner-evidence/canonical-reader/config.json')):
     _regular(path)
     info = path.stat()
     if info.st_uid != owner_uid or info.st_mode & 0o077:
@@ -92,8 +92,7 @@ def _config(path, owner_uid, expected):
         raise ValueError('private environment does not match snapshot')
     secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
     if ('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG' in values and
-            values['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'] !=
-            '/var/lib/freediving-owner-evidence/canonical-reader/config.json'):
+            values['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'] != str(canonical_config_path)):
         raise ValueError('invalid private canonical status configuration')
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
@@ -397,7 +396,8 @@ def _restore_checkpoint(layout, command):
         if (previous['app'] is None) != (previous['snapshot'] is None):
             raise ValueError('incomplete prior activation')
         _config(path / 'before-config', os.geteuid(),
-                Path(previous['snapshot']).name if previous['snapshot'] else None)
+                Path(previous['snapshot']).name if previous['snapshot'] else None,
+                canonical_config_path=layout.state / 'canonical-reader' / 'config.json')
         if previous['app'] is not None:
             prior_app = Path(previous['app'])
             prior_snapshot = Path(previous['snapshot'])
@@ -497,7 +497,8 @@ def activate_queue(queue_source, expected_queue_sha256, audit_source,
         _regular(path)
         if not re.fullmatch(r'[a-f0-9]{64}', digest) or _sha(path) != digest:
             raise ValueError('private queue input differs from pinned hash')
-    values = _config(layout.config, os.geteuid(), expected_snapshot_sha256)
+    values = _config(layout.config, os.geteuid(), expected_snapshot_sha256,
+                     canonical_config_path=layout.state / 'canonical-reader' / 'config.json')
     current = layout.state / 'current'
     if (not current.is_symlink() or current.resolve().name != expected_snapshot_sha256 or
             not re.fullmatch(r'[a-f0-9]{64}', expected_snapshot_sha256)):
@@ -639,7 +640,8 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
     command = command or _system_command
     if update_config_pin:
         _restore_checkpoint(layout, command)
-    values = _config(layout.config, os.geteuid(), None if update_config_pin else expected)
+    values = _config(layout.config, os.geteuid(), None if update_config_pin else expected,
+                     canonical_config_path=layout.state / 'canonical-reader' / 'config.json')
     prior_pin = values['OWNER_EVIDENCE_SNAPSHOT_SHA256']
     if update_config_pin and (not source_bundle or not expected_source_manifest_sha256):
         raise ValueError('candidate pin requires a matching private source bundle')
@@ -896,7 +898,8 @@ def main():
         parser.error('activation requires bundle, snapshot and source-bundle inputs')
     try:
         _restore_checkpoint(layout, _system_command)
-        _config(layout.config, os.geteuid(), None)
+        _config(layout.config, os.geteuid(), None,
+                canonical_config_path=layout.state / 'canonical-reader' / 'config.json')
         _inputs(args.bundle_dir, args.snapshot_source, args.expected_sha256)
         if bool(args.roster_source) != bool(args.expected_roster_sha256):
             raise ValueError('roster staging inputs incomplete')
