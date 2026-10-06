@@ -134,6 +134,32 @@ class ProvisionCanonicalTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.verify_target_versions(versions, expected)
 
+    def test_current_normal_migration_prefix_and_empty_sporting_policy_seed(self):
+        module = load()
+        expected = module.expected_migrations()
+        current_order = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20, 21,
+                         3, 4, 5, 6, 8, 9, 10, 19, 22)
+        for count in range(len(current_order) + 1):
+            with self.subTest(count=count):
+                module.verify_target_versions({n: expected[n] for n in current_order[:count]}, expected)
+        module.verify_target_versions({n: expected[n] for n in range(1, 22)}, expected)
+        def query(_, sql, __):
+            if 'FROM pg_tables' in sql:
+                return 'public_sporting_authority_events\npublic_sporting_members\npublic_sporting_policy_events\nschema_migrations'
+            if 'SELECT policy_version' in sql:
+                return 'aida-baseline-v1'
+            return '1' if 'public_sporting_policy_events' in sql else '0'
+        with mock.patch.object(module, 'query', side_effect=query):
+            self.assertTrue(module.target_empty('freediving_canonical', '5432'))
+        def changed_policy(_, sql, __):
+            return 'different-policy' if 'SELECT policy_version' in sql else query(_, sql, __)
+        with mock.patch.object(module, 'query', side_effect=changed_policy):
+            self.assertFalse(module.target_empty('freediving_canonical', '5432'))
+        def nonempty_authority(_, sql, __):
+            return '1' if 'count(*) FROM freediving.public_sporting_authority_events' in sql else query(_, sql, __)
+        with mock.patch.object(module, 'query', side_effect=nonempty_authority):
+            self.assertFalse(module.target_empty('freediving_canonical', '5432'))
+
     def test_environment_and_output_never_disclose_credentials(self):
         module = load()
         with mock.patch('subprocess.run', side_effect=RuntimeError('secret_sentinel')):

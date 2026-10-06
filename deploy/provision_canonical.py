@@ -18,6 +18,9 @@ MARKER = 'freediving-private-canonical-v1'
 NAME = 'freediving_canonical'
 MIGRATION_ORDER = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20,
                    3, 4, 5, 6, 8, 9, 10, 19)
+# Current shared deployment installs 21 during reviews, then public sporting schema 22 last.
+CURRENT_MIGRATION_ORDER = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20, 21,
+                           3, 4, 5, 6, 8, 9, 10, 19, 22)
 
 
 def failure_message():
@@ -75,7 +78,7 @@ def target_versions(database, port):
 
 def verify_target_versions(actual, expected):
     allowed = [set(MIGRATION_ORDER[:n]) for n in range(len(MIGRATION_ORDER) + 1)]
-    allowed.append(set(range(1, 22)))
+    allowed.extend(set(CURRENT_MIGRATION_ORDER[:n]) for n in range(len(CURRENT_MIGRATION_ORDER) + 1))
     if set(actual) not in allowed:
         raise ValueError('Unexpected canonical migration')
     if any(actual[version] != expected[version] for version in actual):
@@ -83,7 +86,7 @@ def verify_target_versions(actual, expected):
 
 
 def target_empty(database, port):
-    # Only the two migration-owned singleton rows may exist.
+    # Only migration-owned corpus, publication and sporting policy singleton rows may exist.
     rows = query(database, "SELECT tablename FROM pg_tables WHERE schemaname='freediving' ORDER BY tablename", port)
     for table in rows.splitlines():
         if not re.fullmatch(r'[a-z_][a-z0-9_]*', table):
@@ -91,7 +94,7 @@ def target_empty(database, port):
         if table == 'schema_migrations':
             continue
         count = int(query(database, 'SELECT count(*) FROM freediving.' + table, port))
-        if count != (1 if table in ('publication_policy_events', 'evaluation_corpus') else 0):
+        if count != (1 if table in ('publication_policy_events', 'evaluation_corpus', 'public_sporting_policy_events') else 0):
             return False
         if table == 'evaluation_corpus' and query(
                 database, 'SELECT mode FROM freediving.evaluation_corpus', port) != 'real':
@@ -99,6 +102,10 @@ def target_empty(database, port):
         if table == 'publication_policy_events' and query(
                 database, 'SELECT policy_version FROM freediving.publication_policy_events', port
         ) != 'extraction-publication/1':
+            return False
+        if table == 'public_sporting_policy_events' and query(
+                database, 'SELECT policy_version FROM freediving.public_sporting_policy_events', port
+        ) != 'aida-baseline-v1':
             return False
     return True
 
