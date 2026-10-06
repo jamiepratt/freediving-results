@@ -88,6 +88,36 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
 
+    def test_reader_permission_failure_uses_service_identity_before_activation(self):
+        reader_config = self.layout.state / 'canonical-reader' / 'config.json'
+        reader_config.parent.mkdir(parents=True)
+        runtime = Path(self.temp.name) / 'runtime'
+        runtime.mkdir()
+        manifest = runtime / 'manifest.json'
+        manifest.write_text(json.dumps({'candidate': 'a' * 40}))
+        reader_config.write_text(json.dumps({'runtime_path': str(runtime),
+                                            'runtime_manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}))
+        reader_config.chmod(0o640)
+        (self.bundle / 'private-owner-manifest.json').write_text(json.dumps({'candidate': 'a' * 40}))
+        self.config.write_text(self.config.read_text() +
+                               'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG=' + str(reader_config) + '\n')
+        uid, gid = os.getuid() + 1000, os.getgid() + 1000
+        def reader(command, **kwargs):
+            self.assertEqual(kwargs.get('user'), uid)
+            self.assertEqual(kwargs.get('group'), gid)
+            self.assertEqual(kwargs.get('extra_groups'), [])
+            self.assertEqual(kwargs.get('env'), {'PATH': '/usr/bin:/bin'})
+            return SimpleNamespace(returncode=1, stdout=b'', stderr=b'secret diagnostics')
+        prior = self.config.read_bytes()
+        with mock.patch('owner_evidence_activate.subprocess.run', side_effect=reader):
+            with self.assertRaisesRegex(ValueError, '^canonical status read capability unavailable$'):
+                activate(self.bundle, self.source, self.digest, self.layout,
+                         command=self.command, health=lambda: None, owner_uid=uid, owner_gid=gid)
+        self.assertEqual(self.config.read_bytes(), prior)
+        self.assertEqual(self.calls, [])
+        self.assertFalse((self.layout.app / 'current').exists())
+        self.assertFalse((self.layout.state / 'active.env').exists())
+
     def test_consolidated_queue_pin_requires_fixed_private_host_path_and_digest(self):
         base = self.config.read_text()
         settings = ('OWNER_EVIDENCE_ISSUE172_QUEUE_FILE=/var/lib/freediving-owner-evidence/issue172-queue/owner-queue-v1.json\n'

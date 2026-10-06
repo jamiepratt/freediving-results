@@ -158,7 +158,7 @@ def _roster_inputs(source, expected, snapshot_digest):
         raise ValueError('roster manifest or content differs from pinned snapshot')
 
 
-def _canonical_reader_inputs(bundle, values):
+def _canonical_reader_inputs(bundle, values, owner_uid, owner_gid):
     name = values.get('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG')
     if not name:
         return
@@ -176,8 +176,12 @@ def _canonical_reader_inputs(bundle, values):
             'from private_canonical_status import create_reader;'
             'r=create_reader({"OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG":sys.argv[2]})();'
             'assert r["scopes"].get("same_attempt");print("verified")')
-    result = subprocess.run(['python3', '-I', '-c', code, str(bundle / 'scripts'), name],
-                            capture_output=True, timeout=15)
+    identity = {}
+    if owner_uid != os.geteuid() or owner_gid != os.getegid():
+        identity = {'user': owner_uid, 'group': owner_gid, 'extra_groups': []}
+    result = subprocess.run(['/usr/bin/python3', '-I', '-c', code, str(bundle / 'scripts'), name],
+                            capture_output=True, timeout=15, env={'PATH': '/usr/bin:/bin'},
+                            **identity)
     if result.returncode or result.stdout.strip() != b'verified':
         raise ValueError('canonical status read capability unavailable')
 
@@ -654,7 +658,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
             if line.startswith(prior_assignment) else line
             for line in candidate_config.splitlines(keepends=True))
     _inputs(bundle, source, expected)
-    _canonical_reader_inputs(bundle, values)
+    _canonical_reader_inputs(bundle, values, owner_uid, owner_gid)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
     if roster_source:

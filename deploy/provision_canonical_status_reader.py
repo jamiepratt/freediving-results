@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import sys
 
@@ -32,9 +33,26 @@ def grant_sql(password):
             + ','.join('freediving.' + table for table in TABLES) + ' TO ' + ROLE + '; COMMIT;')
 
 
+def _unlinked(path, *, regular=False):
+    path = Path(path).absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError('linked canonical capability input')
+    if regular and not path.is_file():
+        raise ValueError('missing canonical capability input')
+
+
 def provision(args):
     if os.geteuid() != 0:
         raise ValueError('root host checkpoint required')
+    for path in (args.runtime / 'manifest.json', args.export,
+                 Path('/var/lib/freediving-owner-evidence/status/presentation-status.json')):
+        _unlinked(path, regular=True)
+    _unlinked(CONFIG)
+    if CONFIG.parent.exists():
+        info = CONFIG.parent.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('unsafe canonical capability directory')
+    group = grp.getgrnam('freediving-evidence').gr_gid
     sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
     if (not re.fullmatch(r'[0-9a-f]{64}', args.snapshot)
             or sha(args.runtime / 'manifest.json') != args.runtime_manifest_sha256
@@ -63,8 +81,10 @@ def provision(args):
     created = False
     try:
         CONFIG.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-        group = grp.getgrnam('freediving-evidence').gr_gid
         os.chown(CONFIG.parent, 0, group)
+        CONFIG.parent.chmod(0o750)
+        os.chown(args.export, 0, group)
+        args.export.chmod(0o640)
         fd = os.open(CONFIG, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
         created = True
         with os.fdopen(fd, 'w') as stream:

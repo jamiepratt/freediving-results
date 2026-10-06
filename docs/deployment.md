@@ -221,13 +221,20 @@ python3 deploy/canonical_status_runtime.py --candidate <commit> --output /privat
 The manifest binds nine Clojure sources and five pinned JARs. The JVM needs Java 17+;
 it uses one visible processor, Serial GC and a 256 MiB heap. Activation verifies
 that runtime and private code share the exact candidate commit, then verifies the
-configured read capability before changing active links. Staging the runtime,
-frozen export and config is a separate operator checkpoint from snapshot activation.
+configured read capability as the `freediving-evidence` UID/GID with no supplementary
+groups before changing active links. This check reads the config, frozen exports,
+nested runtime sources and JARs as the service identity and suppresses child
+diagnostics. Staging the runtime, frozen export and config is a separate operator
+checkpoint from snapshot activation.
 
 `deploy/provision_canonical_status_reader.py` prepares the host capability explicitly.
 Its default prints effects; `--execute` creates `canonical_status_read` with only
 SELECT on the nine required canonical tables and writes the private config. It
-requires exact snapshot, runtime manifest, export and existing status hashes.
+explicitly sets the reader directory to root:`freediving-evidence` 0750 and the
+config and pinned export to root:`freediving-evidence` 0640, including under umask
+0077. Linked inputs/ancestors and unsafe existing reader directories refuse before
+role creation. It requires exact snapshot, runtime manifest, export and existing
+status hashes.
 Existing config or role refuses creation; verify and reuse it rather than rotating
 credentials during reruns. Authorize this capability/config change with the code
 and status refresh. This helper changes no canonical evidence or owner history.
@@ -326,6 +333,29 @@ python3 deploy/private_owner_preflight.py --candidate "$CANDIDATE" \
   --prepare --confirm "$CANDIDATE" \
   --output /private/owner-code-checkpoint/owner-code.tar
 ```
+
+For approved host installation, extract each exact code/runtime tar with the
+packaged `deploy/private_archive_extract.py` helper and its independently retained
+archive hash. Use a new destination in an existing unlinked parent that the
+service can traverse:
+
+```sh
+sudo -n python3 /exact-code/deploy/private_archive_extract.py \
+  --archive /private/owner-code.tar --archive-sha256 <archive-sha256> \
+  --target /opt/freediving/private-stage/code
+sudo -n python3 /exact-code/deploy/private_archive_extract.py \
+  --archive /private/canonical-runtime.tar --archive-sha256 <archive-sha256> \
+  --target /opt/freediving/private-stage/runtime
+```
+
+The helper verifies and extracts the same open archive, refuses existing targets,
+linked inputs/ancestors, traversal, non-regular members, duplicate names and
+file/directory collisions. Each new directory is explicitly 0755 and each regular
+file 0644 regardless of umask 0077; root execution retains root ownership. File
+bytes remain pinned. This contract is for code/runtime only. It leaves the archive,
+parent, credentials, private backups and derived caches at their existing modes.
+Use the root/app-group 0750/0640 provisioner contract for reader secrets and frozen
+exports, then run activation's service-identity preflight before changing links.
 
 The archive is mode 0600, includes per-file SHA-256 values and cannot overwrite an
 existing archive. Its `host_ready: false` output is intentional. Archive creation

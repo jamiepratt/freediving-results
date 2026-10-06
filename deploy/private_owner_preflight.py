@@ -34,7 +34,7 @@ OWNER_FILES = (
 HOST_FILES = (
     'deploy/owner_evidence_activate.py', 'deploy/freediving-owner-evidence.service',
     'deploy/canonical_status_runtime.py',
-    'deploy/provision_canonical_status_reader.py',
+    'deploy/provision_canonical_status_reader.py', 'deploy/private_archive_extract.py',
     'scripts/private_evidence_transfer.py', 'scripts/private_evidence_ssh.py',
     'scripts/unified_evidence_snapshot.py',
     'scripts/local_evidence_run.py', 'scripts/evidence_presentation.py',

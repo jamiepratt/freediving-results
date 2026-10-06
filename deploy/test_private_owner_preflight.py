@@ -11,6 +11,7 @@ import unittest
 
 SCRIPT = Path(__file__).with_name('private_owner_preflight.py')
 MATCHING_PRIVATE_HELPERS = {
+    'deploy/private_archive_extract.py',
     'scripts/local_evidence_run.py',
     'scripts/evidence_presentation.py',
     'scripts/private_evidence_remote.py',
