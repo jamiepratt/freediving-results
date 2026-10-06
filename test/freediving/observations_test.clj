@@ -14,7 +14,8 @@
             [freediving.depth-2026-test :as geometry-fixture]
             [freediving.extraction-test :as extraction-fixture]
             [freediving.archive-test :as fixture]
-            [freediving.observations :as observations])
+            [freediving.observations :as observations]
+            [freediving.reviews :as reviews])
   (:import [java.sql DriverManager]
            [java.security MessageDigest]
            [java.util HexFormat]))
@@ -321,3 +322,29 @@
       (is (= (:observations before) (:observations (observations/inspect app (:job-id artifact)))))
       (is (= (hash-value [(:source-sha256 artifact) [{:page 1 :line 1}]])
              (get-in before [:observations 0 :candidate_id]))))))
+
+(defn- identity-table-state []
+  (with-open [connection (DriverManager/getConnection admin)
+              statement (.createStatement connection)]
+    (into {}
+          (for [table ["canonical_identity_view" "athlete_identity_events" "source_identity_snapshot" "source_identity_observations"]]
+            (with-open [result (.executeQuery statement (str "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text FROM freediving." table " t"))]
+              (.next result)
+              [table (.getString result 1)])))))
+
+(deftest source-only-import-and-replay-preserve-all-identity-authorities
+  (reviews/migrate! admin "observations_app" "reviews_owner")
+  (let [{:keys [root artifact] :as baseline} (synthetic 1 "cmas-baseline/1")]
+    (publish! baseline)
+    (observations/import! app root (:job-id artifact))
+    (let [before (identity-table-state)
+          source (synthetic 1 "cmas-unreviewed/1")
+          job (get-in source [:artifact :job-id])]
+      (publish! source)
+      (is (= :created (:status (observations/import! app (:root source) job {:source-only? true}))))
+      (is (= before (identity-table-state)))
+      (is (= :skipped (:status (observations/import! app (:root source) job {:source-only? true}))))
+      (is (= before (identity-table-state)))
+      (is (= 4 (:observations (observations/counts app))))
+      (is (= (get-in source [:artifact :candidates])
+             (mapv :payload (:observations (observations/inspect app job))))))))

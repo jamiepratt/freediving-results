@@ -18,6 +18,8 @@ The live partial release of 28 September 2026 uses PDF policy 1, including four 
 
 Run `observations/migrate!` as the database owner before importing schema 4. It applies checksummed migration 007, extending the extraction schema constraint without rewriting historical rows. The normal restricted application role still only inserts and reads observations. There is no network acquisition inside the parser.
 
+For a bounded source-only append that must preserve existing identity authorities, use `(observations/import! database-url archive-root job-id {:source-only? true})`. Both a new import and an identical replay skip canonical identity reconciliation. The default import behavior is unchanged. This option still verifies the complete retained artifact and appends every candidate, including unselected rows; it supplies no review or publication decision.
+
 ## Evidence and interpretation
 
 Supported tables have exact AIDA attempt headers, either the 11-column championship layout or the 12-column layout with Line and Official Top. The eight-column ranking layout is supplemental and separately identified. Unrecognized tables have explicit coverage counts; malformed rows remain unparsed. Missing source ranges, merged cells and nested tables do not become parsed rows.

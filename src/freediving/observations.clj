@@ -221,9 +221,9 @@
              :kind kind :classification_reason reason :payload_edn (encoded candidate)}))
         (range) (:candidates a)))
 (defn import!
-  "Verify completed archive derivation, atomically append immutable observations. Optional progress hook runs inside transaction."
+  "Verify completed archive derivation, atomically append immutable observations. Optional progress hook runs inside transaction. :source-only? true skips all identity reconciliation."
   ([url root job-id] (import! url root job-id {}))
-  ([url root job-id {:keys [on-progress]}]
+  ([url root job-id {:keys [on-progress source-only?]}]
    (let [{:keys [artifact bytes hash]} (verified root job-id)]
      (with-open [c (connect url)]
        (.setAutoCommit c false)
@@ -239,7 +239,7 @@
                               (= (:schema-version artifact) (:schema_version existing))
                               (= (observation-rows artifact)
                                  (query c "SELECT ordinal,candidate_id,kind,classification_reason,payload_edn FROM freediving.observations WHERE job_id=? ORDER BY ordinal" job-id))) (fail! "Conflicting artifact for existing extraction job"))
-               (identity/reconcile-import! c)
+               (when-not source-only? (identity/reconcile-import! c))
                (.commit c) {:status :skipped :job-id job-id :observations (count (:candidates artifact))})
            (do
              (execute! c "INSERT INTO freediving.extractions(job_id,artifact_sha256,source_sha256,parser_version,schema_version,artifact_bytes) VALUES (?,?,?,?,?,?)"
@@ -250,7 +250,7 @@
                  (execute! c "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) VALUES (?,?,?,?,?,?)"
                            job-id ordinal candidate-id kind reason (encoded candidate))
                  (when on-progress (on-progress {:phase :observation-inserted :ordinal ordinal :job-id job-id}))))
-             (identity/reconcile-import! c)
+             (when-not source-only? (identity/reconcile-import! c))
              (.commit c) {:status :created :job-id job-id :observations (count (:candidates artifact))}))
          (catch Exception e (.rollback c) (throw e)))))))
 (defn list-extractions [url]
