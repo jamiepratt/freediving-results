@@ -221,7 +221,7 @@
          {:result-id (sha (.getBytes (str (:job-id reference) "/" (:ordinal reference)) "UTF-8"))
           :observation-id (:id (first (query c "SELECT encode(sha256(convert_to(row(?,?,?,?)::text,'UTF8')),'hex') AS id"
                                              (:job-id reference) (:ordinal reference) (:candidate-id reference) (:artifact-sha256 reference))))}))
-(defn- mapped-proof [c state mode relationship-state revision-state publication-state row]
+(defn- mapped-proof [c state mode relationship-state revision-state publication-state plan row]
   (try
     (if-let [{:keys [artifact]} (exact-target state row)]
       (let [reference (:reference row) coordinates (:coordinates row)
@@ -244,7 +244,6 @@
                                            {:id (:id latest) :revision (:revision latest) :action (:action latest)
                                             :reason (subs (:reason record) 0 (min 500 (count (:reason record))))})
                           :proof {:value "verified" :event_sha256 (digest latest)}} review)
-                plan (selections/projection-plan c (if (:eligible? diagnosis) [latest] []))
                 eligible (and (:eligible? diagnosis) (some #(= (:id latest) (:id %)) (:validations plan)))
                 public-ref (when eligible (public-reference c reference))
                 proof (when eligible {:value "approved" :event_sha256 (digest {:validation latest :policy (:publication_policy_events state)
@@ -298,10 +297,17 @@
                                                                       ((juxt :job_id :ordinal) %)) (:observations state))) rows)
                                  publication-state (when (= mode "source")
                                                      (into {} (map (juxt (juxt :job-id :ordinal) identity)
-                                                                   (publication/diagnose-many jdbc_url (mapv :reference targets)))))]
+                                                                   (publication/diagnose-many jdbc_url (mapv :reference targets)))))
+                                 eligible-targets (when (= mode "source")
+                                                    (keep (fn [row]
+                                                            (let [reference (:reference row)]
+                                                              (when (:eligible? (get publication-state ((juxt :job-id :ordinal) reference)))
+                                                                (last (target-events state :publication_decisions reference))))) targets))
+                                 plan (when (and (= mode "source") (seq targets))
+                                        (selections/projection-plan c (vec eligible-targets)))]
                              {:schema "private-sporting-proofs/v1" :database database :binding_sha256 pin
                               :rows (binding [publication/*artifacts* (atom {}) *decoded-artifacts* (atom {})]
-                                      (mapv #(mapped-proof c state mode relationship-state revision-state publication-state %) rows))})))]
+                                      (mapv #(mapped-proof c state mode relationship-state revision-state publication-state plan %) rows))})))]
     (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint (authority c mode)))))
            "Canonical sporting authority changed during read")
     result))

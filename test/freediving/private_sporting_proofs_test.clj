@@ -235,6 +235,39 @@
     (is (thrown-with-msg? Exception #"Invalid exact sporting row"
                           (read-proof (assoc-in config [:rows 0 :coordinates :unknown-column] 1))))))
 
+(deftest full-inventory-read-replays-current-source-selection-once-and-never-reuses-prior-authority
+  (let [{:keys [config target artifact]} (sample)
+        second-target (assoc target :ordinal 1)
+        second-reference (assoc (revisions/reference fixture/app second-target) :parser-version (:parser-version artifact))
+        absent (mapv (fn [n] {:reference {:job-id (fixture/hash-value [:missing-job n]) :ordinal 0
+                                          :candidate-id (fixture/hash-value [:missing-candidate n])
+                                          :source-sha256 (fixture/hash-value [:missing-source n])
+                                          :artifact-sha256 (fixture/hash-value [:missing-artifact n]) :parser-version "unimported/1"}
+                              :coordinates {:table 1 :row (inc n)}}) (range 274))
+        rows (into (conj (:rows config) {:reference second-reference :coordinates (get-in artifact [:candidates 1 :coordinates])}) absent)
+        config (assoc config :rows rows)
+        original selections/projection-plan calls (atom 0)
+        read-current (fn [] (reset! calls 0)
+                       (with-redefs [selections/projection-plan (fn [c validations]
+                                                                  (swap! calls inc)
+                                                                  (original c validations))]
+                         (read-proof config)))
+        validation (publication-fixture/request target "current-batched-validation")]
+    (publication/decide! publication-fixture/reviewer validation)
+    (let [first-read (read-current)]
+      (is (= 1 @calls))
+      (is (= 276 (count (:rows first-read))))
+      (is (= "approved" (get-in first-read [:rows 0 :upstream :publication :value])))
+      (is (nil? (get-in first-read [:rows 1 :upstream :publication])))
+      (is (= 274 (count (filter #(= "not-imported" (get-in % [:diagnostics :mapping :state])) (:rows first-read)))))
+      (publication/decide! publication-fixture/reviewer
+                           (assoc validation :id "current-batched-revocation" :base-revision 1 :action :revoke :attestations {}))
+      (let [second-read (read-current)]
+        (is (= 1 @calls))
+        (is (not= (:binding_sha256 first-read) (:binding_sha256 second-read)))
+        (is (nil? (get-in second-read [:rows 0 :upstream :publication])))
+        (is (nil? (get-in second-read [:rows 0 :public_reference])))))))
+
 (defn connector-fixture!
   "Only isolated disposable PostgreSQL. Emit exact real APIs/readers for HTTP tests."
   [path]
