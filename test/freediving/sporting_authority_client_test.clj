@@ -66,6 +66,14 @@
       (spit (.toFile file) (authority/canonical-json cfg))
       (Files/setPosixFilePermissions file #{PosixFilePermission/OWNER_READ PosixFilePermission/OWNER_WRITE})
       (is (= cfg (authority/read-config (str file))))
+      ;; A root-owned file is the real deployment case. Its filesystem principal
+      ;; is the only stand-in on developer machines where tests run unprivileged.
+      (let [original-user (System/getProperty "user.name")]
+        (try
+          (System/setProperty "user.name" "root")
+          (with-redefs-fn {#'authority/file-owner (fn [_ _] "root")}
+            #(is (= cfg (authority/read-config (str file)))))
+          (finally (System/setProperty "user.name" original-user))))
       (Files/createSymbolicLink link file (make-array FileAttribute 0))
       (is (thrown? Exception (authority/read-config (str link))))
       (Files/setPosixFilePermissions file #{PosixFilePermission/OWNER_READ PosixFilePermission/OTHERS_READ})

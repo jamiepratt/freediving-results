@@ -27,6 +27,7 @@
 (defn- exact! [value keys]
   (when-not (and (map? value) (= keys (set (map name (clojure.core/keys value))))) (reject!)))
 (defn- digest? [v] (and (string? v) (boolean (re-matches #"[a-f0-9]{64}" v))))
+(defn- file-owner [file options] (str (Files/getOwner file options)))
 (defn read-config [path]
   (when path
     (let [file (Path/of path (make-array String 0)) parent (.getParent file)
@@ -38,7 +39,7 @@
                      (not-any? unsafe (Files/getPosixFilePermissions file options))
                      (not-any? #{PosixFilePermission/GROUP_WRITE PosixFilePermission/OTHERS_WRITE}
                                (Files/getPosixFilePermissions parent options))
-                     (#{"root" (System/getProperty "user.name")} (str (Files/getOwner file options)))) (reject!))
+                     ((hash-set "root" (System/getProperty "user.name")) (file-owner file options))) (reject!))
       (json/read-str (slurp path) :key-fn keyword))))
 (defn config [] (read-config (System/getenv "FREEDIVING_SPORTING_AUTHORITY_CONFIG")))
 (defn- config! [cfg]
