@@ -30,9 +30,9 @@ STYLE = b'''body{font:16px system-ui;color:#17302f;background:#f5f7f5;margin:0}m
 h1{font-size:32px}article{background:white;border:1px solid #cad6ce;border-radius:10px;margin:24px 0;padding:24px}
 table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid #d7dfda;padding:10px;text-align:left;vertical-align:top}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}button{padding:10px 16px;margin:8px;border:1px solid #6c8880;border-radius:6px;background:white}
-label{display:block;margin-top:16px}textarea{width:90%;min-height:60px;font:inherit}a{color:#155f52}.notice{padding:16px;background:#e7eee9}'''
+label{display:block;margin-top:16px}textarea{width:90%;min-height:60px;font:inherit}a{color:#155f52}button:disabled{opacity:.55;cursor:not-allowed}.accuracy{border-top:1px solid #cad6ce;margin-top:20px;padding-top:12px}.notice{padding:16px;background:#e7eee9}'''
 SCRIPT = b'''"use strict";
-const root='/owner-evidence/api/sporting-authority';let current,loadGeneration=0;
+const root='/owner-evidence/api/sporting-authority';let current,loadGeneration=0;const accuracyRequests=new Map();
 const node=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
 function details(title,value){const d=node('details');d.append(node('summary',title),node('pre',JSON.stringify(value,null,2)));return d;}
 async function load(){const generation=++loadGeneration;++proofGeneration;current=undefined;for(const id of ['proposals','proof-rows','proof-pages'])document.getElementById(id).replaceChildren();document.getElementById('status').textContent='Loading fresh current private reviews...';document.getElementById('proof-status').textContent='Current source authority pending fresh read.';try{const r=await fetch(root+'/review',{cache:'no-store'});if(!r.ok)throw Error('Private authority unavailable ('+r.status+')');
@@ -55,6 +55,37 @@ body:JSON.stringify({id:p.id,action,reason:reason.value,expected_revision:curren
 if(!r.ok)throw Error('Review refused ('+r.status+'). Refresh exact current authority and check independent upstream approvals.');await load();}
 catch(e){document.getElementById('status').textContent=e.message;b.disabled=false;}});card.append(b);}list.append(card);}await loadProofs(0);}
 catch(e){if(generation!==loadGeneration)return;current=undefined;for(const id of ['proposals','proof-rows','proof-pages'])document.getElementById(id).replaceChildren();document.getElementById('status').textContent=e.message;document.getElementById('proof-status').textContent='Exact source authority unavailable. Refresh current proof.';}}
+function fieldDifferences(previous,current,path=''){
+const differences=[];for(const key of new Set([...Object.keys(previous||{}),...Object.keys(current||{})])){const a=previous?.[key],b=current?.[key],name=path?path+'.'+key:key;
+if(a&&b&&typeof a==='object'&&typeof b==='object'&&!Array.isArray(a)&&!Array.isArray(b))differences.push(...fieldDifferences(a,b,name));
+else if(JSON.stringify(a)!==JSON.stringify(b))differences.push({field:name,this_version:a,sibling_version:b});}return differences;}
+function sourceVersions(card,row){const base={raw:row.source_review?.raw||row.raw_fields||{},parsed:row.source_review?.parsed||row.parsed_fields||{}};
+const siblings=(row.retained_siblings||[]).map(version=>({...version,differences_from_this_version:fieldDifferences(base,{raw:version.raw||{},parsed:version.parsed||{}})}));
+card.append(details('Same-position retained versions and differences',siblings),details('Selected date and acquisition provenance',row.source_review?.context||row.date_provenance||{}));}
+function publicationReview(card,row){const d=row.diagnostics?.publication||{},form=node('section');form.append(node('h4','Current publication diagnostics'));
+const state=v=>v===true?'yes':v===false?'no':'unknown';form.append(node('p','Ready for validation: '+state(d.ready_for_validation)+' | Validated: '+state(d.validated)+' | Selected: '+state(d.selected)+' | Delivery: '+state(d.delivered)),
+node('p','Active policy: '+(d.active_policy_version||'unknown')+' | Field review revision: '+(d.review_revision??'unknown')+' | Source accuracy revision: '+(d.source_accuracy_revision??'unknown')),
+details('Substantive errors separate from accuracy',d.substantive_errors||[]),details('Validation, policy, selection and delivery blockers',{validation:d.validation_reasons,policy:d.policy_reasons,selection:d.selection_reasons,delivery:d.delivery_reasons}),details('Exact publication version binding',d.version_binding||row.reference));
+const button=node('button','Publication review unavailable - preservation checkpoint required');button.disabled=true;form.append(button,node('p','A separate authority and policy checkpoint must preserve the 81 current public results before enabling publication review. HTML policy 2 can withdraw those results. Visual accuracy alone does not establish finality, source selection or publication eligibility.'));card.append(form);}
+function accuracyReview(card,row,proof){
+const review=row.source_review||{},form=node('section');form.className='accuracy';
+form.append(node('h4','Source visual accuracy - one exact retained version'),node('p','Compare this version with its cited source. Acceptance records only faithful extraction of this row. Preliminary results, source anomalies and publication require separate decisions.'));
+const available=review.enabled===true&&proof.source_review_available===true&&!!proof.pins?.canonical_scope_bindings?.source&&!!proof.context_pins_sha256;
+if(!available)form.append(node('p','Source-only inspection. '+(review.reason||(!proof.source_review_available?'Source reviewer unavailable.':'Exact source binding unavailable.'))));
+form.append(details('Raw and parsed values',{raw:review.raw||row.raw_fields,parsed:review.parsed||row.parsed_fields}),details('Known source anomalies',review.anomalies||row.known_anomalies||[]));
+const checkbox=node('input');checkbox.type='checkbox';checkbox.accuracyAttestation=true;checkbox.checked=false;checkbox.disabled=!available;
+const label=node('label','I compared this exact version and row against its cited source and confirm visual accuracy.');label.prepend(checkbox);form.append(label);
+const reason=node('textarea');reason.accuracyReason=true;reason.disabled=!available;const reasonLabel=node('label','Visual accuracy review reason');reasonLabel.append(reason);form.append(reasonLabel);
+const action=review.active_event?'revoke':'accept',button=node('button',action==='accept'?'Accept this exact version visual accuracy':'Revoke this exact version visual accuracy');
+const enable=()=>{button.disabled=!available||!checkbox.checked||!reason.value.trim();};checkbox.addEventListener('change',enable);reason.addEventListener('input',enable);enable();
+button.addEventListener('click',async()=>{if(button.disabled||!current)return;button.disabled=true;
+const key=JSON.stringify([row.reference,row.coordinates,action,reason.value.trim()]);
+let body=accuracyRequests.get(key);if(!body){body={id:crypto.randomUUID(),action,reference:row.reference,coordinates:row.coordinates,expected_source_binding_sha256:proof.pins.canonical_scope_bindings.source,base_revision:review.revision||0,event_id:review.active_event||null,reason:reason.value.trim(),source_visual_accuracy:true,expected_context_pins_sha256:proof.context_pins_sha256,csrf_token:current.csrf_token};accuracyRequests.set(key,body);}
+let message;try{const response=await fetch(root+'/source-accuracy',{method:'POST',headers:{'Content-Type':'application/json','X-Freediving-CSRF':body.csrf_token},body:JSON.stringify(body)});
+if(response.ok){accuracyRequests.delete(key);message='Exact version visual accuracy recorded. Publication authority stays separate.';}
+else{if(response.status!==503)accuracyRequests.delete(key);message='Visual accuracy review refused ('+response.status+'). Refresh exact source and current review state.';}}
+catch(e){message='Visual accuracy response unavailable. Refresh source state before retrying the same exact review.';}
+await load();document.getElementById('proof-status').textContent=message;});form.append(button);card.append(form);}
 let proofGeneration=0;
 async function loadProofs(offset){const generation=++proofGeneration,container=document.getElementById('proof-rows');
 container.replaceChildren();document.getElementById('proof-pages').replaceChildren();document.getElementById('proof-status').textContent='Reading fresh exact upstream proofs...';
@@ -65,7 +96,7 @@ for(const row of proof.rows){const card=node('article'),ref=row.reference;card.a
 details('Exact immutable source, parser, candidate and coordinates',{reference:ref,coordinates:row.coordinates}),details('Current independent authority and provenance',row.diagnostics),details('Current permitted upstream facts',row.upstream),details('Extracted values for source review',row.parsed_fields||{}));
 const access=row.source_access||{};if(access.retained_row_id){const a=node('a','Open verified source position and retained versions');a.href='/owner-evidence/api/attempt-inspector/source/'+access.retained_row_id;a.target='_blank';card.append(a);
 if(access.original_replay==='available_private_pdf'&&access.original_page){const pdf=node('a','Open cited original PDF page');pdf.href=a.href+'/page/'+access.original_page;pdf.target='_blank';card.append(node('p'),pdf);}}
-card.append(node('p',access.reason||'Original access requires exact private source binding.'));
+card.append(node('p',access.reason||'Original access requires exact private source binding.'));sourceVersions(card,row);accuracyReview(card,row,proof);publicationReview(card,row);
 if(row.relationship_review&&row.relationship_review.action==='review'){const revoke=node('button','Withdraw independent relationship review');revoke.addEventListener('click',async()=>{revoke.disabled=true;try{const result=await fetch(root+'/relationships',{method:'POST',headers:{'Content-Type':'application/json','X-Freediving-CSRF':current.csrf_token},body:JSON.stringify({assertion:row.relationship_review.assertion,action:'reverse',expected_revision:proof.relationship_revision,idempotency_key:crypto.randomUUID(),csrf_token:current.csrf_token})});if(!result.ok)throw Error('Relationship withdrawal refused ('+result.status+'). Refresh review state.');await load();}catch(e){document.getElementById('proof-status').textContent=e.message;revoke.disabled=false;}});card.append(revoke);}
 if(proof.relationship_available){const form=node('details');form.append(node('summary','Independent typed relationship review'));
 form.append(node('p','Review every retained version in this inventory and all possible repeat/conflicting source positions. This records distinctness and resolved conflicts for this one exact representative. Extraction acceptance and publication eligibility require their separate authorities.'));
@@ -94,6 +125,18 @@ def retained_rows(origin, comparison, *, deadline, bind_sources=True):
             origin.bind_inspector_sources(result, {**filters, 'offset': offset}, deadline=deadline)
         for row in result['rows']:
             versions = row.get('retained-versions') or [{'reference': row['reference'], 'candidate': row.get('candidate', {})}]
+            siblings = []
+            for sibling in versions:
+                sibling_reference = sibling['reference']
+                sibling_parser = parsers.get((sibling_reference.get('job-id'), sibling_reference.get('artifact-sha256')))
+                candidate = sibling.get('candidate') or {}
+                siblings.append({'reference': {**sibling_reference, 'parser-version': sibling_parser},
+                                 'coordinates': candidate.get('coordinates', row['row_coordinate']),
+                                 'raw': candidate.get('raw', {}), 'parsed': candidate.get('parsed', {}),
+                                 'anomalies': candidate.get('flags', []) + candidate.get('unresolved-reasons', []),
+                                 'date_provenance': {'parsed_event_date': (candidate.get('parsed') or {}).get('event-date'),
+                                                     'source_view': sibling.get('source', {}),
+                                                     'source_access': row.get('source_access', {})}})
             for version in versions:
                 reference = version['reference']
                 parser = parsers.get((reference.get('job-id'), reference.get('artifact-sha256')))
@@ -105,6 +148,11 @@ def retained_rows(origin, comparison, *, deadline, bind_sources=True):
                              'discipline': row['discipline'].lower(), 'gender': row['gender'],
                              'federation': row.get('federation', row.get('source', {}).get('federation', 'unknown')),
                              'source_access': row.get('source_access', {}),
+                             'retained_siblings': siblings,
+                             'raw_fields': version.get('candidate', {}).get('raw', row.get('raw_fields', {})),
+                             'known_anomalies': version.get('candidate', {}).get('flags', []) + version.get('candidate', {}).get('unresolved-reasons', []),
+                             'date_provenance': {'parsed_event_date': version.get('candidate', {}).get('parsed', {}).get('event-date'),
+                                                 'source_view': version.get('source', {})},
                              'parsed_fields': version.get('candidate', {}).get('parsed', row.get('parsed_fields', {})),
                              'upstream': {}, 'diagnostics': {}})
         offset += len(result['rows'])

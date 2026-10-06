@@ -28,3 +28,12 @@ test('accuracy acceptance targets one exact imported version with unchecked atte
 });
 
 test('unimported accuracy remains visibly disabled',async()=>{const u=ui(),p=vm.runInContext('load()',u.ctx);u.pending[0].resolve(reply(review));await tick();u.pending[1].resolve(reply({...proof,source_review_available:true,rows:[{...proof.rows[0],source_review:{enabled:false,reason:'Exact canonical import missing'}}]}));await p;const card=u.node('proof-rows').children[0];assert.match(card.text,/Source-only inspection/);const button=descendants(card).find(n=>n.text==='Accept this exact version visual accuracy');assert.ok(button);assert.equal(button.disabled,true);});
+
+test('source-only inspection explains sibling differences and separate publication checkpoint',async()=>{
+ const u=ui(),p=vm.runInContext('load()',u.ctx);u.pending[0].resolve(reply(review));await tick();
+ const row={...proof.rows[0],raw_fields:{line:'v1 raw'},parsed_fields:{performance:'103',event_date:'2026-06-03'},known_anomalies:['preliminary'],retained_siblings:[{reference:{...ref,'parser-version':'isolated/2'},coordinates:{table:1,row:2},raw:{line:'v2 raw'},parsed:{performance:'104'},anomalies:['retained source flag'],date_provenance:{selected_date:'2026-06-03'}}],diagnostics:{publication:{ready_for_validation:false,validated:false,selected:false,delivered:null,delivery_state:'not-verified',active_policy_version:'extraction-publication/1',review_revision:0,source_accuracy_revision:0,substantive_errors:[['substantive-source-flag','preliminary']],version_binding:ref,html_policy_transition:{enabled:false}}}};
+ u.pending[1].resolve(reply({...proof,rows:[row]}));await p;const card=u.node('proof-rows').children[0];
+ assert.match(card.text,/Same-position retained versions and differences/);assert.match(card.text,/v2 raw/);assert.match(card.text,/performance/);assert.match(card.text,/retained source flag/);assert.match(card.text,/2026-06-03/);
+ assert.match(card.text,/Ready for validation: no/);assert.match(card.text,/Validated: no/);assert.match(card.text,/Selected: no/);assert.match(card.text,/Delivery: unknown/);assert.match(card.text,/preserve the 81 current public results/);
+ const button=descendants(card).find(n=>n.tag==='button'&&n.text==='Publication review unavailable - preservation checkpoint required');assert.ok(button);assert.equal(button.disabled,true);
+});
