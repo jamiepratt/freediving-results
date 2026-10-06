@@ -6,6 +6,7 @@ pins. Existing capabilities are verified, never broadened or silently replaced.
 Resolved database credentials are written only to their intended host config.
 """
 import argparse
+import copy
 import grp
 import hashlib
 import json
@@ -235,10 +236,71 @@ def provision(args):
         raise
 
 
+def update_runtime(args):
+    """CAS update of two derived runtime pins; preserve every existing credential/grant."""
+    if os.geteuid()!=0:raise ValueError('root proof runtime update checkpoint required')
+    if not args.runtime.is_absolute():raise ValueError('absolute staged proof runtime required')
+    from comparison_activate import capture_guard, _tree
+    from owner_evidence_activate import Layout, _atomic_write
+    for path,pin in ((CONFIG,args.config_sha256),(args.runtime/'manifest.json',args.runtime_manifest_sha256),
+                     (args.app_manifest,args.app_manifest_sha256),(args.guard,args.guard_sha256)):
+        if not isinstance(pin,str) or not re.fullmatch('[0-9a-f]{64}',pin) or digest(path)!=pin:
+            raise ValueError('sporting proof runtime update input pin changed')
+    existing=verify_config(CONFIG)
+    if (existing['database'],existing['canonical_database'])!=(args.database,args.canonical_database):
+        raise ValueError('sporting proof runtime update database differs')
+    runtime=json.loads((args.runtime/'manifest.json').read_text())
+    app=json.loads(args.app_manifest.read_text())
+    if not re.fullmatch('[0-9a-f]{40}',runtime['candidate']) or runtime['candidate']!=app['candidate']:
+        raise ValueError('sporting proof runtime update differs from private code')
+    unlinked(args.runtime)
+    if _tree(args.runtime)!={**runtime['files'],'manifest.json':args.runtime_manifest_sha256}:
+        raise ValueError('sporting proof runtime update files changed')
+    source_grants=verify_grants(args.database)
+    canonical_grants=verify_grants(args.canonical_database,CANONICAL_TABLES)
+    layout=Layout(Path('/opt/freediving/owner-evidence/app'),Path('/var/lib/freediving-owner-evidence'),
+                  Path('/etc/systemd/system'),Path('/etc/freediving/owner-evidence.env'))
+    expected=json.loads(args.guard.read_text())
+    if (expected.get('schema')!='private-comparison-activation-guard/v1'
+            or expected.get('protected',{}).get('sporting_proof') is None
+            or capture_guard(layout,args.public_database)!=expected):
+        raise ValueError('live authority guard changed before proof runtime update')
+    updated={**existing,'runtime_path':str(args.runtime),'runtime_manifest_sha256':args.runtime_manifest_sha256}
+    if updated==existing:return False
+    before=CONFIG.read_bytes();info=CONFIG.stat()
+    if hashlib.sha256(before).hexdigest()!=args.config_sha256:
+        raise ValueError('proof capability changed before runtime update')
+    after=(json.dumps(updated,sort_keys=True)+'\n').encode()
+    # Last authority/grant CAS occurs immediately before the one derived config swap.
+    if capture_guard(layout,args.public_database)!=expected:
+        raise ValueError('live authority changed before proof runtime swap')
+    try:
+        _atomic_write(CONFIG,after,info.st_mode&0o777);os.chown(CONFIG,info.st_uid,info.st_gid)
+        if (verify_grants(args.database)!=source_grants or
+                verify_grants(args.canonical_database,CANONICAL_TABLES)!=canonical_grants):
+            raise ValueError('proof runtime update grants changed')
+        current=copy.deepcopy(capture_guard(layout,args.public_database))
+        prior=expected['protected']['sporting_proof']
+        proof=current['protected']['sporting_proof']
+        if proof['config']['sha256']!=hashlib.sha256(after).hexdigest():
+            raise ValueError('proof runtime update configuration changed')
+        proof['config']['sha256']=prior['config']['sha256']
+        proof['runtime']=prior['runtime']
+        if current!=expected:raise ValueError('live authority changed during proof runtime update')
+        return True
+    except BaseException:
+        # Only undo our exact config write. Preserve concurrent newer capability writes.
+        if digest(CONFIG)==hashlib.sha256(after).hexdigest():
+            _atomic_write(CONFIG,before,info.st_mode&0o777);os.chown(CONFIG,info.st_uid,info.st_gid)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--verify', action='store_true')
+    parser.add_argument('--update-runtime', action='store_true')
+    parser.add_argument('--config-sha256')
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--runtime-manifest-sha256')
     parser.add_argument('--app-manifest', type=Path)
@@ -250,7 +312,7 @@ def main():
     parser.add_argument('--canonical-database', default=CANONICAL_DATABASE)
     args = parser.parse_args()
     try:
-        if args.execute and args.verify:
+        if args.verify and (args.execute or args.update_runtime):
             raise ValueError('choose one proof capability action')
         if args.verify:
             data=verify_config()
@@ -262,8 +324,11 @@ def main():
             if not all((args.runtime, args.runtime_manifest_sha256, args.app_manifest,
                         args.app_manifest_sha256, args.guard, args.guard_sha256)):
                 raise ValueError('exact proof capability inputs and guard required')
-            provision(args)
-        print(json.dumps({'executed': args.execute, 'verified': args.verify, 'role': ROLE,
+            if args.update_runtime:
+                if not args.config_sha256:raise ValueError('exact existing proof config pin required')
+                update_runtime(args)
+            else:provision(args)
+        print(json.dumps({'executed': args.execute, 'verified': args.verify, 'runtime_update':args.update_runtime, 'role': ROLE,
                           'grants': {args.database: ['SELECT freediving.' + table for table in TABLES],
                                      args.canonical_database: ['SELECT freediving.' + table for table in CANONICAL_TABLES]},
                           'config': str(CONFIG), 'data_writes': 0}))

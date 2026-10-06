@@ -66,6 +66,26 @@ python3 deploy/provision_sporting_proof_reader.py --execute \
   --guard "$guard" --guard-sha256 "$guard_sha"
 ```
 
+For a later committed proof runtime, stage it first and capture a fresh guard while
+the installed capability still points to its old runtime. Add `--update-runtime`
+and the exact existing capability SHA to the same host checkpoint command:
+
+```sh
+python3 deploy/provision_sporting_proof_reader.py --execute --update-runtime \
+  --database freediving_release_20260924_11 --canonical-database freediving_canonical \
+  --public-database freediving_release_20260924_11 \
+  --runtime "$staged_runtime" --runtime-manifest-sha256 "$runtime_sha" \
+  --app-manifest "$bundle/private-owner-manifest.json" --app-manifest-sha256 "$app_sha" \
+  --config-sha256 "$existing_proof_config_sha" --guard "$guard" --guard-sha256 "$guard_sha"
+```
+
+This verifies exact existing grants before and after the update and changes only
+`runtime_path` and `runtime_manifest_sha256`. Credentials, database targets,
+source data and authority history remain unchanged. A stale guard/config pin
+refuses the update; a change observed after swapping restores only this exact
+derived config write. A concurrent newer config is preserved. Capture a new guard
+before private app activation.
+
 Capture a new guard after this capability exists. Attach the independent typed
 relationship ledger using the exact current signer provision/config pins and code
 archive. This initializes empty immutable schema at

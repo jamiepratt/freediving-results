@@ -1,5 +1,11 @@
 """Independent exact sporting proof capability boundaries."""
+import argparse
+from contextlib import ExitStack
+import copy
+import hashlib
 import importlib.util
+import json
+import tempfile
 import os
 from pathlib import Path
 import secrets
@@ -54,6 +60,71 @@ class SportingProofCapabilityTests(unittest.TestCase):
                 {key: value for key, value in report['tables'].items() if key != 'freediving.extractions'}):
             with self.assertRaises(ValueError):
                 helper.validate_grants({**report, 'tables': changed})
+
+
+class SportingProofRuntimeUpdateTests(SportingProofCapabilityTests):
+    def test_guarded_update_preserves_credentials_and_all_authority_and_refuses_stale_pins(self):
+        helper=self.helper()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();config=root/'config.json'
+            old=root/'old';old.mkdir();(old/'manifest.json').write_text(json.dumps({'candidate':'a'*40,'files':{}}))
+            new=root/'new';new.mkdir();(new/'manifest.json').write_text(json.dumps({'candidate':'b'*40,'files':{}}))
+            manifest=root/'app-manifest.json';manifest.write_text(json.dumps({'candidate':'b'*40}))
+            value={'jdbc_url':'jdbc:postgresql://127.0.0.1:5432/source?user=sporting_proof_read&password='+'a'*48+'&connectTimeout=5&socketTimeout=10',
+                'database':'source','canonical_jdbc_url':'jdbc:postgresql://127.0.0.1:5432/canonical?user=sporting_proof_read&password='+'a'*48+'&connectTimeout=5&socketTimeout=10',
+                'canonical_database':'canonical','runtime_path':str(old),'runtime_manifest_sha256':helper.digest(old/'manifest.json')}
+            config.write_text(json.dumps(value,sort_keys=True)+'\n');config.chmod(0o640)
+            info=config.stat()
+            protected={'schema':'private-comparison-activation-guard/v1','authority':{'events':227},'protected':{'sporting_proof':{
+                'config':{'path':str(config),'sha256':helper.digest(config),'uid':info.st_uid,'gid':info.st_gid,'mode':0o640},
+                'runtime':{'path':str(old),'files':{},'candidate':'a'*40},
+                'source_grants':{'exact':11},'canonical_grants':{'exact':5}}}}
+            guard_file=root/'guard.json';guard_file.write_text(json.dumps(protected))
+            args=argparse.Namespace(runtime=new,runtime_manifest_sha256=helper.digest(new/'manifest.json'),
+                app_manifest=manifest,app_manifest_sha256=helper.digest(manifest),guard=guard_file,
+                guard_sha256=helper.digest(guard_file),config_sha256=helper.digest(config),
+                database='source',canonical_database='canonical',public_database='source')
+            def guard(*unused):
+                current=copy.deepcopy(protected)
+                data=json.loads(config.read_text())
+                proof=current['protected']['sporting_proof']
+                proof['config']['sha256']=helper.digest(config)
+                proof['runtime']={'path':data['runtime_path'],'files':{},'candidate':'a'*40 if data['runtime_path']==str(old) else 'b'*40}
+                return current
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(helper,'CONFIG',config))
+                stack.enter_context(patch.object(helper.os,'geteuid',return_value=0))
+                stack.enter_context(patch.object(helper.os,'chown'))
+                stack.enter_context(patch.object(helper,'verify_grants',return_value={'exact':'verified'}))
+                stack.enter_context(patch.object(helper,'verify_config',side_effect=lambda path:json.loads(path.read_text())))
+                stack.enter_context(patch('comparison_activate.capture_guard',side_effect=guard))
+                self.assertTrue(helper.update_runtime(args))
+                updated=json.loads(config.read_text())
+                self.assertEqual({k:v for k,v in updated.items() if k not in ('runtime_path','runtime_manifest_sha256')},
+                                 {k:v for k,v in value.items() if k not in ('runtime_path','runtime_manifest_sha256')})
+                self.assertEqual(updated['runtime_path'],str(new))
+                self.assertEqual(config.stat().st_mode&0o777,0o640)
+                after=config.read_bytes()
+                with self.assertRaises(ValueError):helper.update_runtime(args)
+                self.assertEqual(config.read_bytes(),after)
+                # An authority change after the config CAS restores only our config;
+                # the simulated newer authority remains visible to the caller.
+                original=(json.dumps(value,sort_keys=True)+'\n').encode()
+                config.write_bytes(original)
+                calls=[0]
+                def changing_guard(*unused):
+                    calls[0]+=1
+                    current=guard()
+                    if calls[0]>=3:current['authority']['events']=228
+                    return current
+                with patch('comparison_activate.capture_guard',side_effect=changing_guard):
+                    with self.assertRaisesRegex(ValueError,'during proof runtime update'):
+                        helper.update_runtime(args)
+                self.assertEqual(config.read_bytes(),original)
+                # Changed effective grants after a swap also deny and retain credentials.
+                with patch.object(helper,'verify_grants',side_effect=[{'exact':'verified'},{'exact':'verified'},ValueError('widened grant')]):
+                    with self.assertRaisesRegex(ValueError,'widened grant'):helper.update_runtime(args)
+                self.assertEqual(config.read_bytes(),original)
 
 
 @unittest.skipUnless(os.environ.get('SPORTING_PROOF_POSTGRES_TEST') == '1', 'explicit isolated PostgreSQL test')
