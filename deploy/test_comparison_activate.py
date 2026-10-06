@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import sys
 import tempfile
 import time
@@ -620,3 +621,130 @@ class AidaDiffActivationTests(unittest.TestCase):
                 aida_diff_config=self.diff_config,aida_diff_probe=refused)
         self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())
         self.assertNotIn(b'OWNER_EVIDENCE_AIDA_DIFF_CONFIG=',self.layout.config.read_bytes())
+
+
+class SportingRulesActivationTests(unittest.TestCase):
+    sha = ComparisonActivationTests.sha
+
+    def setUp(self):
+        ComparisonActivationTests.setUp(self)
+        self.rule = self.root/'synthetic-rule.pdf'; self.rule.write_bytes(b'synthetic rule'); self.rule.chmod(0o640)
+        self.catalog = self.root/'catalog.json'
+        self.catalog.write_text(json.dumps({'schema':'sporting-rule-bindings/v1', 'documents':[{
+            'id':'synthetic-rule', 'path':str(self.rule), 'sha256':self.sha(self.rule),
+            'url':'https://example.invalid/rules.pdf', 'issuer':'Synthetic fixture', 'edition':'2026 fixture',
+            'effective_from':'2026-01-01', 'effective_until':None,
+            'scope':{'federation':'AIDA','discipline':'DNF'}, 'citations':[{
+                'id':'fixture-points','page':1,'section':'Fixture 1','claim':'source-points',
+                'interpretation':'Fixture only, not production rule authority'}]}], 'bindings':[]}))
+        self.catalog.chmod(0o640)
+        self.rules = self.root/'rules.json'
+        self.rules.write_text(json.dumps({'schema':'sporting-rule-bindings-service/v1',
+            'catalog':{'path':str(self.catalog),'sha256':self.sha(self.catalog)}})); self.rules.chmod(0o640)
+
+    def test_staged_rules_are_private_immutable_and_do_not_activate_authority(self):
+        installed = comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        self.assertEqual(installed,self.layout.state/'sporting-rules/config.json')
+        pin = self.guard()['protected']['sporting_rules']
+        self.assertEqual(pin['config']['mode'],0o640)
+        self.assertEqual(Path(pin['catalog']['path']).parent.stat().st_mode&0o777,0o750)
+        self.assertEqual(pin['objects']['synthetic-rule']['sha256'],self.sha(self.rule))
+        self.assertEqual(pin['objects']['synthetic-rule']['mode'],0o640)
+        self.assertNotIn(b'OWNER_EVIDENCE_SPORTING_RULES_CONFIG=',self.layout.config.read_bytes())
+
+        self.assertEqual(self.guard()['authority'],self.pins['authority'])
+        before = installed.read_bytes()
+        comparison_activate.stage_sporting_rules(self.rules,self.layout.state,os.geteuid(),os.getegid(),self.sha(self.rules))
+        self.assertEqual(installed.read_bytes(),before)
+        self.catalog.write_text(json.dumps({'schema':'sporting-rule-bindings/v1','documents':[],'bindings':[],'changed':True}))
+        self.rules.write_text(json.dumps({'schema':'sporting-rule-bindings-service/v1',
+            'catalog':{'path':str(self.catalog),'sha256':self.sha(self.catalog)}}))
+        with self.assertRaises(ValueError):
+            comparison_activate.stage_sporting_rules(self.rules,self.layout.state,os.geteuid(),os.getegid(),self.sha(self.rules))
+        self.assertEqual(installed.read_bytes(),before)
+
+
+    def test_changed_object_or_world_readable_registration_refuses_before_activation(self):
+        installed=comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        pins=self.guard()
+        object_path=Path(pins['protected']['sporting_rules']['objects']['synthetic-rule']['path'])
+        original=object_path.read_bytes()
+        object_path.write_bytes(b'changed exact rules')
+        with self.assertRaisesRegex(ValueError,'object changed'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=installed,sporting_rules_probe=lambda *args:None)
+        object_path.write_bytes(original)
+        installed.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'unsafe sporting rule'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=installed,sporting_rules_probe=lambda *args:None)
+        self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())
+
+    def test_registered_rule_catalog_guard_prevents_changed_activation_and_rollback(self):
+        installed = comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        pins = self.guard()
+        activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+            sporting_rules_config=installed,sporting_rules_probe=lambda *args:None)
+        self.assertIn(('OWNER_EVIDENCE_SPORTING_RULES_CONFIG='+str(installed)).encode(),self.layout.config.read_bytes())
+        self.assertEqual(self.guard()['authority'],pins['authority'])
+        active=(self.layout.app/'current').resolve()
+        catalog=Path(json.loads(installed.read_text())['catalog']['path'])
+        catalog.write_bytes(b'changed')
+        with self.assertRaises(ValueError):rollback_comparison(self.layout,command=self.command)
+        self.assertEqual(active,(self.layout.app/'current').resolve())
+        self.assertEqual(catalog.read_bytes(),b'changed')
+
+    def test_rules_service_probe_cas_and_derived_only_rollback(self):
+        installed = comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        pins=self.guard()
+        def change_after_read(*args): installed.chmod(0o600)
+        with self.assertRaisesRegex(ValueError,'live guard changed before activation'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=installed,sporting_rules_probe=change_after_read)
+        self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())
+        installed.chmod(0o640)
+        with self.assertRaisesRegex(ValueError,'configuration path'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=self.rules,sporting_rules_probe=lambda *args:None)
+        activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+            sporting_rules_config=installed,sporting_rules_probe=lambda *args:None)
+        before=installed.read_bytes()
+        rollback_comparison(self.layout,command=self.command)
+        self.assertEqual(installed.read_bytes(),before)
+        self.assertNotIn(b'OWNER_EVIDENCE_SPORTING_RULES_CONFIG=',self.layout.config.read_bytes())
+
+    def test_packaged_rules_are_read_by_the_actual_service_identity_before_activation(self):
+        import owner_evidence_activate
+        installed=comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        pins=self.guard()
+        with self.assertRaisesRegex(ValueError,'sporting rule service read refused'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=installed)
+        self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())
+        checkout=Path(__file__).resolve().parent.parent
+        files={'app.py':self.sha(self.new/'app.py')}
+        for name in owner_evidence_activate.FILES:
+            if name.startswith('scripts/'):
+                output=self.new/name;output.parent.mkdir(exist_ok=True)
+                shutil.copyfile(checkout/name,output);files[name]=self.sha(output)
+        (self.new/'private-owner-manifest.json').write_text(json.dumps({'candidate':'a'*40,'files':files}))
+        activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+            sporting_rules_config=installed)
+        self.assertIn(('OWNER_EVIDENCE_SPORTING_RULES_CONFIG='+str(installed)).encode(),self.layout.config.read_bytes())
+        self.assertEqual(self.guard()['authority'],pins['authority'])
+
+    def test_widened_catalog_directory_refuses_service_activation(self):
+        installed=comparison_activate.stage_sporting_rules(self.rules,self.layout.state,
+            os.geteuid(),os.getegid(),self.sha(self.rules))
+        pins=self.guard()
+        catalog=Path(json.loads(installed.read_text())['catalog']['path'])
+        catalog.parent.chmod(0o755)
+        with self.assertRaisesRegex(ValueError,'unsafe sporting rule directory'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw,
+                sporting_rules_config=installed,sporting_rules_probe=lambda *args:None)
+        self.assertEqual(self.old.resolve(),(self.layout.app/'current').resolve())

@@ -27,7 +27,7 @@ class ActivationTests(unittest.TestCase):
         self.bundle = root / 'bundle'
         (self.bundle / 'scripts').mkdir(parents=True)
         (self.bundle / 'resources').mkdir()
-        for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'private_canonical_status.py', 'private_sporting_proofs.py', 'private_sporting_relationships.py', 'sporting_authority.py', 'sporting_authority_http.py', 'private_attempt_inspector.py', 'unified_evidence_query.py', 'route_roster_query.py',
+        for name in ('owner_evidence_origin.py', 'private_presentation_status.py', 'private_canonical_status.py', 'private_sporting_proofs.py', 'private_sporting_relationships.py', 'sporting_authority.py', 'sporting_authority_http.py', 'sporting_rule_bindings.py', 'retained_aida_diff.py', 'private_attempt_inspector.py', 'unified_evidence_query.py', 'route_roster_query.py',
                      'aida_snapshot_observations.py', 'cmas_microplus_snapshot_observations.py',
                      'issue55_aida_selected_html.py', 'cmas_microplus_ingest.py',
                      'cmas_microplus_finalize.py',
@@ -96,6 +96,19 @@ class ActivationTests(unittest.TestCase):
                                 canonical_config_path=self.layout.state/'canonical-reader/config.json')['OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'], str(path))
         with self.assertRaises(ValueError):
             _config(self.config, os.getuid(), self.digest)
+
+    def test_normal_activation_refuses_changed_independent_rule_catalog(self):
+        self.layout=Layout(self.layout.app.resolve(),self.layout.state.resolve(),
+            self.layout.units.resolve(),self.layout.config.resolve())
+        rules=self.layout.state/'sporting-rules/config.json'
+        rules.parent.mkdir(parents=True);rules.parent.chmod(0o750)
+        catalog=rules.parent/'catalog.json';catalog.write_text('{"changed":true}');catalog.chmod(0o640)
+        rules.write_text(json.dumps({'schema':'sporting-rule-bindings-service/v1',
+            'catalog':{'path':str(catalog),'sha256':'a'*64}}));rules.chmod(0o640)
+        self.config.write_text(self.config.read_text()+'OWNER_EVIDENCE_SPORTING_RULES_CONFIG='+str(rules)+'\n')
+        with self.assertRaisesRegex(ValueError,'catalog changed'):
+            self.run_activation()
+        self.assertEqual(self.calls,[])
 
     def test_source_review_config_and_read_only_capability_preflight(self):
         import owner_evidence_activate as helper

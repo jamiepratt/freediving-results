@@ -202,6 +202,122 @@ def _aida_diff_probe(app, config, uid, gid):
     if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('retained AIDA diff service read refused')
 
 
+def _rules_private_bytes(path, maximum=16*1024*1024):
+    path=Path(path)
+    if any(part.is_symlink() for part in (path,*path.parents)):
+        raise ValueError('linked sporting rule input')
+    _regular(path)
+    if path.stat().st_size>maximum:raise ValueError('oversized sporting rule input')
+    return path.read_bytes()
+
+
+def _rules_read(config):
+    # The deploy entry point runs outside scripts; the packaged app probe runs
+    # against the candidate's independent validator as the service identity.
+    scripts=str(Path(__file__).resolve().parent.parent/'scripts')
+    if scripts not in sys.path:sys.path.insert(0,scripts)
+    from sporting_rule_bindings import read_config
+    return read_config(config,_rules_private_bytes)
+
+
+def capture_sporting_rules_guard(layout):
+    """Pin independently registered rule evidence without granting sporting facts."""
+    path=layout.state/'sporting-rules/config.json'
+    if not path.exists() and not path.is_symlink():return None
+    def entry(file):
+        _rules_private_bytes(file,32*1024*1024)
+        info=file.stat()
+        if info.st_uid!=os.geteuid() or info.st_mode&0o027:
+            raise ValueError('unsafe sporting rule input')
+        return {'path':str(file),'sha256':_sha(file),'uid':info.st_uid,
+                'gid':info.st_gid,'mode':info.st_mode&0o777}
+    config=entry(path)
+    value=json.loads(path.read_text())
+    catalog,pins=_rules_read(path)
+    catalog_path=Path(value['catalog']['path'])
+    objects={doc['id']:entry(Path(doc['path'])) for doc in catalog['documents']}
+    directories={}
+    for file in [path,catalog_path,*[Path(doc['path']) for doc in catalog['documents']]]:
+        if not file.is_relative_to(layout.state):raise ValueError('unregistered sporting rule input')
+        directory=file.parent
+        while directory!=layout.state:
+            info=directory.stat()
+            if info.st_uid!=os.geteuid() or info.st_gid!=config['gid'] or info.st_mode&0o777!=0o750:
+                raise ValueError('unsafe sporting rule directory')
+            directories[str(directory)]={'uid':info.st_uid,'gid':info.st_gid,'mode':info.st_mode&0o777}
+            directory=directory.parent
+    return {'config':config,'catalog':entry(catalog_path),'pins':pins,
+            'objects':objects,'directories':directories}
+
+
+def _private_stage(parent, name, files, uid, gid):
+    """The shared app stager uses public traversal; private rules require 0750."""
+    if any(path.is_symlink() for path in (parent,*parent.parents)):
+        raise ValueError('linked sporting rules payload directory')
+    target=_stage_directory(parent,name,files,uid,gid,0o640)
+    for directory in [parent,target,*[p for p in target.rglob('*') if p.is_dir()]]:
+        directory.chmod(0o750);os.chown(directory,uid,gid)
+    return target
+
+
+def stage_sporting_rules(config, state, uid, gid, expected_config_sha256):
+    """Register new immutable rule inputs. Existing registrations cannot change.
+
+    This writes no ledger, source table, signer or active environment. Capture a
+    new full live guard after registration before binding the service environment.
+    """
+    config=Path(config)
+    if _sha(config)!=expected_config_sha256:raise ValueError('staged sporting rules config changed')
+    catalog,_=_rules_read(config)
+    parent=Path(state)/'sporting-rules-payloads'
+    if any(p.is_symlink() for p in (parent,*parent.parents)):
+        raise ValueError('linked sporting rules payload directory')
+    existing=Path(state)/'sporting-rules/config.json'
+    if existing.exists() or existing.is_symlink():
+        capture_sporting_rules_guard(Layout(Path(),Path(state),Path(),Path()))
+    parent.mkdir(mode=0o750,exist_ok=True);parent.chmod(0o750);os.chown(parent,uid,gid)
+    installed_catalog=json.loads(json.dumps(catalog))
+    for doc in installed_catalog['documents']:
+        source=Path(doc['path'])
+        target=_private_stage(parent/'objects',doc['sha256'],[('object',source)],uid,gid)/'object'
+        doc['path']=str(target)
+    data=(json.dumps(installed_catalog,sort_keys=True)+'\n').encode()
+    catalog_hash=hashlib.sha256(data).hexdigest()
+    staged=parent/'staged-catalog.json'
+    if staged.is_symlink():raise ValueError('linked sporting rules catalog stage')
+    _atomic_write(staged,data,0o640);os.chown(staged,uid,gid)
+    target=_private_stage(parent/'catalogs',catalog_hash,[('catalog.json',staged)],uid,gid)/'catalog.json'
+    staged.unlink()
+    contents=(json.dumps({'schema':'sporting-rule-bindings-service/v1',
+        'catalog':{'path':str(target),'sha256':catalog_hash}},sort_keys=True)+'\n').encode()
+    directory=Path(state)/'sporting-rules'
+    if any(p.is_symlink() for p in (directory,*directory.parents)):
+        raise ValueError('linked sporting rules configuration directory')
+    directory.mkdir(mode=0o750,exist_ok=True);directory.chmod(0o750);os.chown(directory,uid,gid)
+    output=directory/'config.json'
+    if output.exists() or output.is_symlink():
+        _rules_private_bytes(output)
+        if output.read_bytes()!=contents:raise ValueError('registered sporting rules config changed')
+    else:
+        fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o640)
+        with os.fdopen(fd,'wb') as stream:stream.write(contents);stream.flush();os.fsync(stream.fileno())
+        output.chmod(0o640);os.chown(output,uid,gid)
+    capture_sporting_rules_guard(Layout(Path(),Path(state),Path(),Path()))
+    return output
+
+
+def _sporting_rules_probe(app, config, uid, gid):
+    """Read every citation/object using candidate code as the private service UID."""
+    code=('import sys;sys.path.insert(0,sys.argv[1]);from sporting_rule_bindings import read_config;'
+          'from sporting_authority import private_bytes;'
+          'catalog,pins=read_config(sys.argv[2],private_bytes);'
+          'assert pins["sporting_rule_config_sha256"];print("verified")')
+    identity={} if (uid,gid)==(os.geteuid(),os.getegid()) else {'user':uid,'group':gid,'extra_groups':[]}
+    result=subprocess.run(['/usr/bin/python3','-I','-B','-c',code,str(app/'scripts'),str(config)],
+        env={'PATH':'/usr/bin:/bin'},capture_output=True,timeout=15,**identity)
+    if result.returncode or result.stdout.strip()!=b'verified':raise ValueError('sporting rule service read refused')
+
+
 def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/current'),
                   public_configs=(Path('/etc/freediving/public.env'),Path('/etc/freediving/migration.env')),
                   table_reader=None):
@@ -230,6 +346,7 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
             'protected':{'files':{str(path):_sha(path) for path in protected_paths},'canonical_runtime':{'path':str(runtime),'files':_tree(runtime)},
                          'sporting_proof':capture_proof_guard(layout),'source_review':capture_source_review_guard(layout),
                          **({'aida_diff':capture_aida_diff_guard(layout)} if (layout.state/'aida-diff/config.json').exists() or (layout.state/'aida-diff/config.json').is_symlink() else {}),
+                         **({'sporting_rules':capture_sporting_rules_guard(layout)} if (layout.state/'sporting-rules/config.json').exists() or (layout.state/'sporting-rules/config.json').is_symlink() else {}),
                          'public_app':{'path':str(public_current),'files':_tree(public_current)},'public_configs':{str(path):_sha(path) for path in public_configs}},
             'sporting':capture_sporting_guard(layout),
             'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database),
@@ -440,7 +557,7 @@ def _comparison_health(values):
     else:inspector()
 
 
-def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof_probe=None, authority_reader=None, aida_diff_probe=None):
+def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof_probe=None, authority_reader=None, aida_diff_probe=None, sporting_rules_probe=None):
     """Restore derived app/config only, irrespective of newer genuine human events."""
     command=command or _system_command
     checkpoint=_checkpoint(layout);_regular(checkpoint/'record.json')
@@ -455,6 +572,8 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
         raise ValueError('source authority changed; rollback refused')
     if 'aida_diff_guard' in record and capture_aida_diff_guard(layout)!=record['aida_diff_guard']:
         raise ValueError('retained AIDA diff capability changed; rollback refused')
+    if 'sporting_rules_guard' in record and capture_sporting_rules_guard(layout)!=record['sporting_rules_guard']:
+        raise ValueError('sporting rule capability changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
@@ -477,6 +596,8 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
     previous_values=_read_values((checkpoint/'before-config').read_bytes())
     if previous_values.get('OWNER_EVIDENCE_AIDA_DIFF_CONFIG'):
         (aida_diff_probe or _aida_diff_probe)(Path(record['before']['app']),Path(previous_values['OWNER_EVIDENCE_AIDA_DIFF_CONFIG']),owner_uid,owner_gid)
+    if previous_values.get('OWNER_EVIDENCE_SPORTING_RULES_CONFIG'):
+        (sporting_rules_probe or _sporting_rules_probe)(Path(record['before']['app']),Path(previous_values['OWNER_EVIDENCE_SPORTING_RULES_CONFIG']),owner_uid,owner_gid)
     _atomic_link(layout.app/'current',Path(record['before']['app']))
     for name,path in [('config',layout.config),('env',layout.state/'active.env'),('comparison',installed)]:
         if record['before'][name] is None:path.unlink(missing_ok=True)
@@ -492,7 +613,7 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0, proof
 
 def activate_comparison(bundle, config, layout, expected_guard, *, guard,
                         command=None, health=None, owner_uid=0, owner_gid=0,
-                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None, source_review_config=None, aida_diff_config=None, aida_diff_probe=None):
+                        bundle_manifest_sha256=None, config_sha256=None, service_probe=None, proof_config=None, proof_probe=None, source_review_config=None, aida_diff_config=None, aida_diff_probe=None, sporting_rules_config=None, sporting_rules_probe=None):
     command=command or _system_command
     bundle,config=Path(bundle),Path(config)
     if proof_config is not None and Path(proof_config)!=layout.state/'sporting-proof-reader/config.json':
@@ -501,6 +622,8 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         raise ValueError('invalid source review configuration path')
     if aida_diff_config is not None and Path(aida_diff_config)!=layout.state/'aida-diff/config.json':
         raise ValueError('invalid retained AIDA diff configuration path')
+    if sporting_rules_config is not None and Path(sporting_rules_config)!=layout.state/'sporting-rules/config.json':
+        raise ValueError('invalid sporting rules configuration path')
     manifest_path=bundle/'private-owner-manifest.json';_regular(manifest_path)
     if bundle_manifest_sha256 and _sha(manifest_path)!=bundle_manifest_sha256:raise ValueError('staged app manifest changed')
     if config_sha256 and _sha(config)!=config_sha256:raise ValueError('staged comparison config changed')
@@ -538,6 +661,11 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         if diff_guard is None or diff_guard!=capture_aida_diff_guard(layout):raise ValueError('retained AIDA diff capability not guarded')
         diff_pin=('OWNER_EVIDENCE_AIDA_DIFF_CONFIG='+str(aida_diff_config)+'\n').encode()
         contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_AIDA_DIFF_CONFIG='))+diff_pin for name,body in contents.items()}
+    if sporting_rules_config is not None:
+        rules_guard=expected_guard['protected'].get('sporting_rules')
+        if rules_guard is None or rules_guard!=capture_sporting_rules_guard(layout):raise ValueError('sporting rules capability not guarded')
+        rules_pin=('OWNER_EVIDENCE_SPORTING_RULES_CONFIG='+str(sporting_rules_config)+'\n').encode()
+        contents={name:b''.join(line for line in body.splitlines(keepends=True) if not line.startswith(b'OWNER_EVIDENCE_SPORTING_RULES_CONFIG='))+rules_pin for name,body in contents.items()}
     checkpoint=_checkpoint(layout)
     if checkpoint.is_symlink():raise ValueError('linked comparison checkpoint')
     if (checkpoint/'record.json').exists() and json.loads((checkpoint/'record.json').read_text())['status']=='pending':raise ValueError('pending comparison activation requires reviewed recovery')
@@ -557,10 +685,12 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         _source_review_inputs(bundle,{'OWNER_EVIDENCE_SOURCE_REVIEW_CONFIG':str(source_review_config),
                                     'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG':str(proof_config)},owner_uid,owner_gid)
     if aida_diff_config is not None:(aida_diff_probe or _aida_diff_probe)(app,Path(aida_diff_config),owner_uid,owner_gid)
+    if sporting_rules_config is not None:(sporting_rules_probe or _sporting_rules_probe)(app,Path(sporting_rules_config),owner_uid,owner_gid)
     # Runtime and packet are revalidated after the service-user read/execute probe.
     _comparison_config(config)
     record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'proof_guard':expected_guard['protected'].get('sporting_proof'),'source_review_guard':expected_guard['protected'].get('source_review'),'source_authority_guard':expected_guard['authority'].get('source_review_tables'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
     if 'aida_diff' in expected_guard['protected']:record['aida_diff_guard']=expected_guard['protected']['aida_diff']
+    if 'sporting_rules' in expected_guard['protected']:record['sporting_rules_guard']=expected_guard['protected']['sporting_rules']
     # Last full authority/CAS read occurs after staging and immediately before swaps.
     if guard()!=expected_guard:raise ValueError('live guard changed before activation')
     _atomic_write(checkpoint/'record.json',json.dumps(record,sort_keys=True).encode(),0o600)
@@ -586,7 +716,7 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
             any(current['derived'][key]!=after[key] for key in ('config','env','comparison'))):
             raise ValueError('live authority changed during activation')
     except BaseException:
-        rollback_comparison(layout,command=command,owner_uid=owner_uid,owner_gid=owner_gid,proof_probe=proof_probe,aida_diff_probe=aida_diff_probe)
+        rollback_comparison(layout,command=command,owner_uid=owner_uid,owner_gid=owner_gid,proof_probe=proof_probe,aida_diff_probe=aida_diff_probe,sporting_rules_probe=sporting_rules_probe)
         raise
     _atomic_write(checkpoint/'record.json',json.dumps({**record,'status':'active'},sort_keys=True).encode(),0o600)
     return 'activated'
@@ -594,12 +724,13 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('capture','stage','activate','rollback'))
+    parser.add_argument('action',choices=('capture','stage','stage-rules','activate','rollback'))
     parser.add_argument('--public-database',required=True)
     parser.add_argument('--guard',type=Path)
     parser.add_argument('--proof-config',type=Path)
     parser.add_argument('--source-review-config',type=Path)
     parser.add_argument('--aida-diff-config',type=Path)
+    parser.add_argument('--sporting-rules-config',type=Path)
     parser.add_argument('--bundle',type=Path);parser.add_argument('--config',type=Path)
     parser.add_argument('--bundle-manifest-sha256');parser.add_argument('--config-sha256')
     args=parser.parse_args()
@@ -610,6 +741,10 @@ def main():
         guard=lambda:capture_guard(layout,args.public_database)
         if args.action=='capture':print(json.dumps(guard(),sort_keys=True));return 0
         if os.geteuid()!=0:raise ValueError('host activation requires root')
+        if args.action=='stage-rules':
+            if not args.config or not args.config_sha256:raise ValueError('stage rules requires exact configuration pin')
+            config=stage_sporting_rules(args.config,layout.state,0,account.pw_gid,args.config_sha256)
+            print(json.dumps({'config':str(config),'config_sha256':_sha(config),'authority_writes':0}));return 0
         if args.action=='stage':
             if not args.config or not args.config_sha256:raise ValueError('stage requires exact configuration pin')
             config=stage_payload(args.config,layout.state,0,account.pw_gid,args.config_sha256)
@@ -617,7 +752,7 @@ def main():
         if args.action=='rollback':rollback_comparison(layout,owner_uid=account.pw_uid,owner_gid=account.pw_gid)
         else:
             if not all((args.guard,args.bundle,args.config,args.bundle_manifest_sha256,args.config_sha256)):raise ValueError('activation requires exact stage and live guard pins')
-            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config,source_review_config=args.source_review_config,aida_diff_config=args.aida_diff_config)
+            activate_comparison(args.bundle,args.config,layout,json.loads(args.guard.read_text()),guard=guard,owner_uid=account.pw_uid,owner_gid=account.pw_gid,bundle_manifest_sha256=args.bundle_manifest_sha256,config_sha256=args.config_sha256,proof_config=args.proof_config,source_review_config=args.source_review_config,aida_diff_config=args.aida_diff_config,sporting_rules_config=args.sporting_rules_config)
         print(json.dumps({'result':'PASS','action':args.action,'data_writes':0}))
         return 0
     except Exception:

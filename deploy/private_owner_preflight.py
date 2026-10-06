@@ -20,7 +20,7 @@ import tempfile
 # Keep in sync with deploy/owner_evidence_activate.py FILES and SSH stage imports.
 OWNER_FILES = (
     'scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py',
-    'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/retained_aida_diff.py',
+    'scripts/private_canonical_status.py', 'scripts/private_sporting_proofs.py', 'scripts/private_sporting_relationships.py', 'scripts/sporting_authority.py', 'scripts/sporting_authority_http.py', 'scripts/retained_aida_diff.py', 'scripts/sporting_rule_bindings.py',
     'scripts/private_attempt_inspector.py',
     'scripts/owner_decision_store.py', 'scripts/aida_snapshot_observations.py',
     'scripts/issue55_aida_selected_html.py',

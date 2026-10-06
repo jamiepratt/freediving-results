@@ -104,7 +104,7 @@ class PrivateOwnerPreflightCLI(unittest.TestCase):
                 shutil.copyfile(checkout / name, staged / Path(name).name)
         result = subprocess.run(
             [sys.executable, '-I', '-c',
-             'import sys; sys.path.insert(0, sys.argv[1]); import owner_evidence_origin',
+             'import sys; sys.path.insert(0, sys.argv[1]); import owner_evidence_origin; import sporting_rule_bindings',
              str(staged)], capture_output=True, text=True, cwd=staged)
         self.assertEqual(result.returncode, 0, result.stderr)
 
