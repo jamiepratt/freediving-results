@@ -1,5 +1,6 @@
 (ns freediving.private-sporting-proofs-test
-  (:require [clojure.string]
+  (:require [clojure.edn :as edn]
+            [clojure.string]
             [clojure.data.json :as json]
             [clojure.test :refer [deftest is use-fixtures run-tests]]
             [freediving.observations :as observations]
@@ -55,7 +56,7 @@
         full-source (read-proof config)
         full-relationships (read-proof relationship-config)
         unused (fn [& _] (throw (ex-info "Unused row diagnostics invoked" {})))]
-    (with-redefs [revisions/diagnostics unused publication/diagnose-many unused
+    (with-redefs [revisions/diagnostics unused publication/diagnose-many-on unused
                   attempt/private-readback unused selections/projection-plan unused]
       (doseq [[request full] [[config full-source] [relationship-config full-relationships]]]
         (let [pin-only (read-proof (assoc request :rows []))]
@@ -142,15 +143,32 @@
         other-reference (assoc (revisions/reference fixture/app other-target) :parser-version (:parser-version artifact))
         config (update config :rows conj {:reference other-reference :coordinates (get-in artifact [:candidates 1 :coordinates])})
         sha-var (ns-resolve 'freediving.private-sporting-proofs 'sha)
-        original @sha-var artifact-checks (atom 0)]
-    (with-redefs-fn {sha-var (fn [bytes]
+        original @sha-var artifact-checks (atom 0)
+        original-read edn/read-string artifact-decodes (atom 0) payload-decodes (atom 0)
+        artifact-text (String. ^bytes (:artifact-bytes stored) "UTF-8")
+        view-digest (ns-resolve 'freediving.private-sporting-proofs 'digest)
+        original-digest @view-digest view-checks (atom 0)
+        view (select-keys artifact [:acquisitions :context :source-page-url :view-url])]
+    (with-redefs-fn {view-digest (fn [value]
+                                   (when (= view value) (swap! view-checks inc))
+                                   (original-digest value))
+                     #'edn/read-string (fn [& args]
+                                         (when (= artifact-text (last args)) (swap! artifact-decodes inc))
+                                         (let [value (apply original-read args)]
+                                           (when (= (first (:candidates artifact)) value) (swap! payload-decodes inc))
+                                           value))
+                     sha-var (fn [bytes]
                                (when (java.util.Arrays/equals ^bytes (:artifact-bytes stored) ^bytes bytes)
                                  (swap! artifact-checks inc))
                                (original bytes))}
       #(let [proof (read-proof config)]
          (is (= ["mapped" "mapped"] (mapv (fn [row] (get-in row [:diagnostics :mapping :state])) (:rows proof))))
-         (is (= "approved" (get-in proof [:rows 0 :upstream :publication :value])))))
+         (is (= "approved" (get-in proof [:rows 0 :upstream :publication :value])))
+         (is (every? (fn [row] (= (original-digest view) (get-in row [:diagnostics :mapping :source_view_sha256]))) (:rows proof)))))
     (is (= 1 @artifact-checks))
+    (is (= 1 @artifact-decodes))
+    (is (= 1 @payload-decodes))
+    (is (= 1 @view-checks))
     (fixture/sql! fixture/admin "ALTER TABLE freediving.extractions DISABLE TRIGGER immutable_extractions")
     (fixture/sql! fixture/admin "UPDATE freediving.extractions SET artifact_bytes=artifact_bytes || convert_to(' ','UTF8')")
     (let [changed (read-proof config)]
@@ -208,12 +226,12 @@
 
 (deftest authority-mutation-between-owned-reads-denies-old-context
   (let [{:keys [config target]} (sample)
-        original publication/diagnose-many
+        original publication/diagnose-many-on
         entered (promise) continue (promise)]
-    (with-redefs [publication/diagnose-many (fn [url targets]
-                                              (deliver entered true)
-                                              @continue
-                                              (original url targets))]
+    (with-redefs [publication/diagnose-many-on (fn [url targets]
+                                                 (deliver entered true)
+                                                 @continue
+                                                 (original url targets))]
       (let [reading (future (try (read-proof config) (catch Exception e (.getMessage e))))]
         @entered
         (publication/decide! publication-fixture/reviewer (publication-fixture/request target "concurrent"))
@@ -373,3 +391,59 @@
                   (str "INSERT INTO freediving.observations(job_id,ordinal,candidate_id,kind,classification_reason,payload_edn) SELECT job_id,ordinal,repeat('0',64),kind,classification_reason,payload_edn FROM freediving.observations WHERE job_id='"
                        (:job-id target) "' AND ordinal=" (:ordinal target)))
     (is (thrown-with-msg? Exception #"Ambiguous exact source" (read-proof config)))))
+
+(deftest decoded-payload-reuse-never-survives-a-new-request-or-changed-source-row
+  (let [{:keys [config stored]} (sample)
+        before (read-proof config)
+        changed (assoc-in (get-in stored [:artifact :candidates 0]) [:parsed :source-name] "Changed synthetic retained source")]
+    (is (= "mapped" (get-in before [:rows 0 :diagnostics :mapping :state])))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.observations DISABLE TRIGGER immutable_observations")
+    (with-open [c (java.sql.DriverManager/getConnection fixture/admin)
+                s (.prepareStatement c "UPDATE freediving.observations SET payload_edn=? WHERE ordinal=0")]
+      (.setString s 1 (pr-str changed)) (.executeUpdate s))
+    (fixture/sql! fixture/admin "ALTER TABLE freediving.observations ENABLE TRIGGER immutable_observations")
+    (let [after (read-proof config)]
+      (is (not= (:binding_sha256 before) (:binding_sha256 after)))
+      (is (= "scope-mismatch" (get-in after [:rows 0 :diagnostics :mapping :state])))
+      (is (empty? (get-in after [:rows 0 :upstream])))
+      (is (false? (get-in after [:rows 0 :source_review :enabled]))))))
+
+(deftest row-snapshot-materializes-only-requested-payloads-and-artifact-bytes
+  (let [{:keys [config target]} (sample)
+        other (publication-fixture/html-sample)
+        authority (requiring-resolve 'freediving.private-sporting-proofs/authority)]
+    (with-open [c (java.sql.DriverManager/getConnection proof-url)]
+      (.setReadOnly c true)
+      (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+      (.setAutoCommit c false)
+      (let [full (authority c "source") scoped (authority c "source" (:rows config))
+            row-key [(:job-id target) (:ordinal target)]
+            outside (assoc (first (:rows config)) :reference (assoc (get-in config [:rows 0 :reference]) :ordinal 1))
+            review-target (requiring-resolve 'freediving.private-sporting-proofs/source-review-target)]
+        (is (< (count (:observations scoped)) (count (:observations full))))
+        (is (= #{row-key} (set (keys (:observations-by-key scoped)))))
+        (is (= (get (:observations-by-key full) row-key) (get (:observations-by-key scoped) row-key)))
+        (is (= (mapv #(dissoc % :artifact_bytes) (:extractions full))
+               (mapv #(dissoc % :artifact_bytes) (:extractions scoped))))
+        (is (java.util.Arrays/equals ^bytes (get-in full [:extractions-by-job (:job-id target) :artifact_bytes])
+                                     ^bytes (get-in scoped [:extractions-by-job (:job-id target) :artifact_bytes])))
+        (is (nil? (get-in scoped [:extractions-by-job (:job-id other) :artifact_bytes])))
+        (is (thrown-with-msg? Exception #"Canonical import required" (review-target c outside scoped)))
+        (is (thrown-with-msg? Exception #"coordinate mismatch"
+                              (review-target c (assoc-in (first (:rows config)) [:coordinates :line] 999) scoped)))))))
+
+(deftest unrelated-authority-mutation-still-denies-a-scoped-row-read
+  (let [{:keys [config]} (sample)
+        other (publication-fixture/html-sample)
+        original publication/diagnose-many-on entered (promise) continue (promise)]
+    (with-redefs [publication/diagnose-many-on (fn [c targets]
+                                                 (deliver entered true) @continue (original c targets))]
+      (let [reading (future (try (read-proof config) (catch Exception e (.getMessage e))))]
+        @entered
+        (try
+          (publication/decide! publication-fixture/reviewer
+                               (assoc (publication-fixture/request other "unrelated-concurrent")
+                                      :action :revoke
+                                      :evidence [(get-in (observations/inspect fixture/app (:job-id other)) [:artifact :candidates 0 :coordinates])]))
+          (finally (deliver continue true)))
+        (is (= "Canonical sporting authority changed during read" @reading))))))

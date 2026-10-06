@@ -1,6 +1,6 @@
 (ns freediving.private-sporting-proofs
   "Restricted exact-row authority readback. Historical receipts never grant current facts."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.string :as str] [clojure.data.json :as json]
             [clojure.edn :as edn]
             [freediving.aida-html :as html]
             [freediving.html-evidence :as evidence]
@@ -68,10 +68,21 @@
             (let [key (key-fn row)]
               (need! (not (contains? index key)) "Ambiguous exact source snapshot")
               (assoc index key row))) {} rows))
-(defn- authority [c mode]
-  (let [state (into {} (map (fn [table] [(keyword table) (query c (str "SELECT * FROM freediving." table))]) (mode-tables mode)))]
-    (assoc state :observations-by-key (exact-index (:observations state) (juxt :job_id :ordinal))
-           :extractions-by-job (exact-index (:extractions state) :job_id))))
+(defn- authority
+  ([c mode] (authority c mode nil))
+  ([c mode requested]
+   (let [keys (mapv (juxt :job-id :ordinal) (map :reference requested))
+         jobs (vec (distinct (map first keys)))
+         state (into {} (map (fn [table]
+                               [(keyword table)
+                                (cond
+                                  (and requested (= table "observations"))
+                                  (apply query c (str "SELECT * FROM freediving.observations WHERE (job_id,ordinal) IN (" (str/join "," (repeat (count keys) "(?,?)")) ")") (mapcat identity keys))
+                                  (and requested (= table "extractions"))
+                                  (apply query c (str "SELECT job_id,artifact_sha256,source_sha256,parser_version,schema_version,imported_at,CASE WHEN job_id IN (" (str/join "," (repeat (count jobs) "?")) ") THEN artifact_bytes ELSE NULL END AS artifact_bytes FROM freediving.extractions") jobs)
+                                  :else (query c (str "SELECT * FROM freediving." table)))]) (mode-tables mode)))]
+     (assoc state :connection c :observations-by-key (exact-index (:observations state) (juxt :job_id :ordinal))
+            :extractions-by-job (exact-index (:extractions state) :job_id)))))
 (defn- fingerprint
   "V2 pin: PostgreSQL hashes every raw row column, including bytes and timestamps.
    Sorted per-table hash vectors preserve duplicate multiplicity without exposing
@@ -111,13 +122,15 @@
    :source-sha256 (:source_sha256 extraction) :artifact-sha256 (:artifact_sha256 extraction)
    :parser-version (:parser_version extraction)})
 (def ^:dynamic *decoded-artifacts* nil)
-(defn- artifact-binding [extraction]
-  (let [artifact (edn/read-string (String. ^bytes (:artifact_bytes extraction) "UTF-8"))
+(defn- artifact-binding [extraction c]
+  (let [artifact (or (publication/cached-source-artifact c (:job_id extraction))
+                     (edn/read-string (String. ^bytes (:artifact_bytes extraction) "UTF-8")))
         identity-keys (if (= 4 (:schema-version artifact)) html/identity-keys
                           [:source-sha256 :acquisitions :evidence-sha256 :actor :config
                            :parser-version :schema-version :pdfinfo-version :tool])]
     {:artifact artifact :artifact-sha256 (sha (:artifact_bytes extraction))
-     :job-id (html/digest (select-keys artifact identity-keys))}))
+     :job-id (html/digest (select-keys artifact identity-keys))
+     :source-view-sha256 (digest (select-keys artifact [:acquisitions :context :source-page-url :view-url]))}))
 (defn- exact-target [state {:keys [reference coordinates]}]
   (when-let [row (if (contains? state :observations-by-key)
                    (get (:observations-by-key state) [(:job-id reference) (:ordinal reference)])
@@ -126,10 +139,11 @@
                        (get (:extractions-by-job state) (:job-id reference))
                        (some #(when (= (:job-id reference) (:job_id %)) %) (:extractions state)))
           binding (or (when *decoded-artifacts* (get @*decoded-artifacts* (:job-id reference)))
-                      (let [value (artifact-binding extraction)]
+                      (let [value (artifact-binding extraction (:connection state))]
                         (when *decoded-artifacts* (swap! *decoded-artifacts* assoc (:job-id reference) value)) value))
           artifact (:artifact binding)
-          payload (edn/read-string (:payload_edn row))
+          payload (or (publication/cached-source-payload (:connection state) (:job_id row) (:ordinal row) (:payload_edn row))
+                      (edn/read-string (:payload_edn row)))
           actual (base-reference row extraction)]
       (need! (and (= actual reference)
                   (= (:artifact-sha256 reference) (:artifact-sha256 binding))
@@ -147,7 +161,7 @@
              "Exact row source/artifact/parser/coordinate mismatch")
       (when (evidence/html? artifact)
         (evidence/bound-context! artifact payload (:ordinal reference) (:source-sha256 reference)))
-      {:row row :artifact artifact :payload payload})))
+      {:row row :artifact artifact :payload payload :source-view-sha256 (:source-view-sha256 binding)})))
 (defn- target-events [state table reference]
   (vec (sort-by :revision (filter #(= ((juxt :job-id :ordinal) reference) ((juxt :job_id :ordinal) %)) (get state table)))))
 (defn source-review-capability! [c] (capability! c "review"))
@@ -306,11 +320,11 @@
                                              (:job-id reference) (:ordinal reference) (:candidate-id reference) (:artifact-sha256 reference))))}))
 (defn- mapped-proof [c state mode relationship-state revision-state publication-state plan row]
   (try
-    (if-let [{:keys [artifact payload]} (exact-target state row)]
+    (if-let [{:keys [artifact payload source-view-sha256]} (exact-target state row)]
       (let [reference (:reference row) coordinates (:coordinates row)
             mapped (assoc-in (gap row "mapped" "full-exact-source-binding-verified")
                              [:diagnostics :mapping :source_view_sha256]
-                             (digest (select-keys artifact [:acquisitions :context :source-page-url :view-url])))]
+                             source-view-sha256)]
         (if (= mode "relationships")
           (assoc-in mapped [:diagnostics :same-attempt]
                     (relationship-diagnostic relationship-state reference coordinates))
@@ -397,27 +411,29 @@
                            (need! (= database (:database (first (query c "SELECT current_database() AS database"))))
                                   "Sporting proof database changed")
                            (capability! c mode)
-                           (let [pin (fingerprint c mode) state (when (seq rows) (authority c mode))
-                                 relationship-state (when (and (seq rows) (= mode "relationships") (seq (:canonical_attempt_state state)))
-                                                      (attempt/private-readback jdbc_url))
-                                 revision-state (when (and (seq rows) (= mode "source")) (revisions/diagnostics jdbc_url))
-                                 targets (filterv (fn [row] (contains? (:observations-by-key state)
-                                                                       [(get-in row [:reference :job-id]) (get-in row [:reference :ordinal])])) rows)
-                                 publication-state (when (and (seq rows) (= mode "source"))
-                                                     (into {} (map (juxt (juxt :job-id :ordinal) identity)
-                                                                   (publication/diagnose-many jdbc_url (mapv :reference targets)))))
-                                 eligible-targets (when (= mode "source")
-                                                    (keep (fn [row]
-                                                            (let [reference (:reference row)]
-                                                              (when (:eligible? (get publication-state ((juxt :job-id :ordinal) reference)))
-                                                                (last (target-events state :publication_decisions reference))))) targets))
-                                 raw-plan (when (and (= mode "source") (seq targets))
-                                            (revisions/with-verified-snapshot-cache
-                                              c #(selections/projection-plan c (vec eligible-targets))))
-                                 plan (when raw-plan (assoc raw-plan :metadata-sha256 (digest (:metadata raw-plan))))]
-                             {:schema "private-sporting-proofs/v1" :database database :binding_sha256 pin
-                              :rows (binding [publication/*artifacts* (atom {}) *decoded-artifacts* (atom {})]
-                                      (mapv #(mapped-proof c state mode relationship-state revision-state publication-state plan %) rows))})))]
+                           (publication/with-source-snapshot-cache
+                             c (fn []
+                                 (let [pin (fingerprint c mode) state (when (seq rows) (authority c mode rows))
+                                       relationship-state (when (and (seq rows) (= mode "relationships") (seq (:canonical_attempt_state state)))
+                                                            (attempt/private-readback jdbc_url))
+                                       revision-state (when (and (seq rows) (= mode "source")) (revisions/diagnostics jdbc_url))
+                                       targets (filterv (fn [row] (contains? (:observations-by-key state)
+                                                                             [(get-in row [:reference :job-id]) (get-in row [:reference :ordinal])])) rows)
+                                       publication-state (when (and (seq rows) (= mode "source"))
+                                                           (into {} (map (juxt (juxt :job-id :ordinal) identity)
+                                                                         (publication/diagnose-many-on c (mapv :reference targets)))))
+                                       eligible-targets (when (= mode "source")
+                                                          (keep (fn [row]
+                                                                  (let [reference (:reference row)]
+                                                                    (when (:eligible? (get publication-state ((juxt :job-id :ordinal) reference)))
+                                                                      (last (target-events state :publication_decisions reference))))) targets))
+                                       raw-plan (when (and (= mode "source") (seq targets))
+                                                  (revisions/with-verified-snapshot-cache
+                                                    c #(selections/projection-plan c (vec eligible-targets))))
+                                       plan (when raw-plan (assoc raw-plan :metadata-sha256 (digest (:metadata raw-plan))))]
+                                   {:schema "private-sporting-proofs/v1" :database database :binding_sha256 pin
+                                    :rows (binding [*decoded-artifacts* (atom {})]
+                                            (mapv #(mapped-proof c state mode relationship-state revision-state publication-state plan %) rows))})))))]
     (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint c mode))))
            "Canonical sporting authority changed during read")
     result))

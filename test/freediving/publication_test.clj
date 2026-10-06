@@ -349,3 +349,82 @@
     (is (= (zipmap tables (repeat 1)) @reads))
     (publication/activate-policy! fixture/admin "unknown-fresh-policy" "Changed after batch")
     (is (every? #(some #{:policy-inactive} (:reasons %)) (publication/diagnose-many reviewer targets)))))
+
+(deftest source-diagnostics-share-artifacts-only-on-the-exact-read-only-connection
+  (publication/activate-policy! fixture/admin "extraction-publication/2" "Synthetic explicit activation")
+  (let [t (html-sample) expected (publication/diagnose-many reviewer [t])
+        diagnose-on (requiring-resolve 'freediving.publication/diagnose-many-on)
+        cached (requiring-resolve 'freediving.publication/cached-source-artifact)
+        payload (requiring-resolve 'freediving.publication/cached-source-payload)]
+    (with-open [c (java.sql.DriverManager/getConnection reviewer)
+                other (java.sql.DriverManager/getConnection reviewer)]
+      (doseq [connection [c other]]
+        (.setReadOnly connection true)
+        (.setTransactionIsolation connection java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+        (.setAutoCommit connection false))
+      (publication/with-source-snapshot-cache
+        c #(do (is (= expected (diagnose-on c [t])))
+               (is (= (:job-id t) (:job-id (cached c (:job-id t)))))
+               (is (identical? (cached c (:job-id t)) (cached c (:job-id t))))
+               (is (nil? (cached other (:job-id t))))
+               (let [encoded (with-open [s (.prepareStatement c "SELECT payload_edn FROM freediving.observations WHERE job_id=? AND ordinal=?")]
+                               (.setString s 1 (:job-id t)) (.setInt s 2 (:ordinal t))
+                               (with-open [r (.executeQuery s)] (.next r) (.getString r 1)))
+                     candidate (get-in (cached c (:job-id t)) [:candidates (:ordinal t)])]
+                 (is (= candidate (payload c (:job-id t) (:ordinal t) encoded)))
+                 (is (identical? (payload c (:job-id t) (:ordinal t) encoded)
+                                 (payload c (:job-id t) (:ordinal t) encoded)))
+                 (is (nil? (payload other (:job-id t) (:ordinal t) encoded)))
+                 (is (nil? (payload c (:job-id t) (:ordinal t) (str encoded " "))))
+                 (is (nil? (payload c (:job-id t) (:ordinal t) nil)))
+                 (is (nil? (payload c "missing" 0 nil))))
+               (is (thrown-with-msg? Exception #"source snapshot" (diagnose-on other [t])))
+               (.setAutoCommit c true)
+               (is (thrown-with-msg? Exception #"read-only snapshot" (cached c (:job-id t))))))
+      (is (nil? (cached c (:job-id t)))))
+    (doseq [change [#(.setReadOnly % false)
+                    #(.setAutoCommit % true)
+                    #(.setTransactionIsolation % java.sql.Connection/TRANSACTION_READ_COMMITTED)]]
+      (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+        (.setReadOnly c true)
+        (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+        (.setAutoCommit c false)
+        (publication/with-source-snapshot-cache
+          c #(do (change c)
+                 (is (thrown-with-msg? Exception #"read-only snapshot" (diagnose-on c [t])))))))))
+
+(defn tracked-connection [c flags isolation-checks]
+  (java.lang.reflect.Proxy/newProxyInstance
+   (.getClassLoader java.sql.Connection) (into-array Class [java.sql.Connection])
+   (reify java.lang.reflect.InvocationHandler
+     (invoke [_ _ method args]
+       (let [name (.getName ^java.lang.reflect.Method method)]
+         (when (= "getTransactionIsolation" name) (swap! isolation-checks inc))
+         (if-let [flag ({"isReadOnly" :readonly "getAutoCommit" :autocommit "getTransactionIsolation" :isolation} name)]
+           (if (contains? @flags flag) (get @flags flag) (.invoke ^java.lang.reflect.Method method c args))
+           (.invoke ^java.lang.reflect.Method method c args)))))))
+
+(deftest owned-diagnosis-validates-isolation-at-boundaries-without-repeated-show-queries
+  (let [t (sample) targets [t t] expected (publication/diagnose-many reviewer targets)
+        flags (atom {}) checks (atom 0)]
+    (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+      (.setReadOnly c true) (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+      (.setAutoCommit c false)
+      (let [tracked (tracked-connection c flags checks)]
+        (is (= expected (publication/with-source-snapshot-cache tracked #(publication/diagnose-many-on tracked targets))))
+        (is (<= @checks 8))))))
+
+(deftest owned-diagnosis-refuses-profile-changes-before-exporting-any-result
+  (let [t (sample) query-var (ns-resolve 'freediving.publication 'query) original @query-var]
+    (doseq [[flag value] [[:readonly false] [:autocommit true] [:isolation java.sql.Connection/TRANSACTION_READ_COMMITTED]]]
+      (with-open [c (java.sql.DriverManager/getConnection reviewer)]
+        (.setReadOnly c true) (.setTransactionIsolation c java.sql.Connection/TRANSACTION_REPEATABLE_READ)
+        (.setAutoCommit c false)
+        (let [flags (atom {}) tracked (tracked-connection c flags (atom 0))]
+          (with-redefs-fn {query-var (fn [connection sql & args]
+                                       (let [result (apply original connection sql args)]
+                                         (when (.contains ^String sql "FROM freediving.observations WHERE")
+                                           (swap! flags assoc flag value))
+                                         result))}
+            #(is (thrown-with-msg? Exception #"read-only snapshot"
+                                   (publication/with-source-snapshot-cache tracked (fn [] (publication/diagnose-many-on tracked [t])))))))))))

@@ -1,4 +1,5 @@
 """Owned HTTP boundary for sporting authority, separate from existing decisions."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import json
@@ -168,6 +169,21 @@ def retained_rows(origin, comparison, *, deadline, bind_sources=True):
     return rows
 
 
+def _review_inventory(origin, comparison, deadline):
+    """Join both independent reads inside one request deadline; export no partial context."""
+    _remaining(deadline)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix='sporting-inventory') as pool:
+        pending = pool.submit(retained_rows, origin, comparison, deadline=deadline)
+        try:
+            authority = origin.status_authority(deadline=deadline)
+            if authority is None:
+                raise ValueError('fresh owner/source status unavailable')
+            rows = pending.result(timeout=_remaining(deadline))
+            return authority, rows
+        finally:
+            pending.cancel()
+
+
 def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadline=None):
     """Read exact active pins. Legacy same-attempt approvals grant no sporting facts."""
     deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + READ_BUDGET_SECONDS)
@@ -204,11 +220,8 @@ def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadli
     if review:
         if origin.comparison_reader is None or not comparison_config:
             raise ValueError('exact sporting rows unavailable')
-        authority = origin.status_authority(deadline=deadline)
-        if authority is None:
-            raise ValueError('fresh owner/source status unavailable')
+        authority, rows = _review_inventory(origin, comparison, deadline)
         pins['owner_authority_sha256'] = digest(authority)
-        rows = retained_rows(origin, comparison, deadline=deadline)
     reader = getattr(origin, 'sporting_proof_reader', None)
     if reader is None:
         pins['canonical_upstream_status'] = 'unavailable'

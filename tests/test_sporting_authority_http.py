@@ -672,3 +672,104 @@ class ExactSourceAccuracyOwnerHTTPTest(unittest.TestCase):
 
 def canonical_digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+class ReviewInventoryReadTest(unittest.TestCase):
+    def test_independent_reads_overlap_and_share_the_exact_deadline(self):
+        import threading
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import sporting_authority_http as http
+        started = threading.Event()
+        authority_started = threading.Event()
+        deadline = time.monotonic() + 1
+        rows = [{'reference': {'job-id': 'synthetic'}, 'coordinates': {'table': 0, 'row': 1}}]
+        def inventory(origin, comparison, *, deadline):
+            self.assertEqual(deadline, expected_deadline)
+            started.set()
+            self.assertTrue(authority_started.wait(.5))
+            return rows
+        def authority(*, deadline):
+            self.assertEqual(deadline, expected_deadline)
+            self.assertTrue(started.wait(.5))
+            authority_started.set()
+            return {'current': True}
+        expected_deadline = deadline
+        with patch.object(http, 'retained_rows', inventory):
+            value = http._review_inventory(SimpleNamespace(status_authority=authority), {}, deadline)
+        self.assertEqual(value, ({'current': True}, rows))
+        self.assertIs(value[1], rows)
+        self.assertFalse(any(t.name.startswith('sporting-inventory') for t in threading.enumerate()))
+
+    def test_failed_owner_read_joins_the_owned_inventory_worker(self):
+        import threading
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import sporting_authority_http as http
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def inventory(*args, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(.5))
+            finished.set()
+            return []
+        def authority(**kwargs):
+            self.assertTrue(started.wait(.5))
+            release.set()
+            raise ValueError('synthetic owner refusal')
+        with patch.object(http, 'retained_rows', inventory):
+            with self.assertRaisesRegex(ValueError, 'owner refusal'):
+                http._review_inventory(SimpleNamespace(status_authority=authority), {}, time.monotonic() + 1)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(any(t.name.startswith('sporting-inventory') for t in threading.enumerate()))
+
+    def test_missing_owner_or_failed_inventory_never_exports_partial_rows(self):
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import sporting_authority_http as http
+        with patch.object(http, 'retained_rows', return_value=[{'private': 'synthetic'}]):
+            with self.assertRaisesRegex(ValueError, 'status unavailable'):
+                http._review_inventory(SimpleNamespace(status_authority=lambda **_: None), {}, time.monotonic() + 1)
+        with patch.object(http, 'retained_rows', side_effect=ValueError('synthetic exact reference refusal')):
+            with self.assertRaisesRegex(ValueError, 'exact reference refusal'):
+                http._review_inventory(SimpleNamespace(status_authority=lambda **_: {'current': True}), {}, time.monotonic() + 1)
+
+    def test_expired_deadline_admits_neither_read(self):
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        import sporting_authority_http as http
+        origin = SimpleNamespace(status_authority=Mock())
+        with patch.object(http, 'retained_rows') as inventory:
+            with self.assertRaises(ValueError):
+                http._review_inventory(origin, {}, time.monotonic() - 1)
+            inventory.assert_not_called()
+            origin.status_authority.assert_not_called()
+
+    def test_exhausted_inventory_deadline_joins_before_returning_failure(self):
+        import threading
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from private_attempt_inspector import ComparisonTimeout
+        import sporting_authority_http as http
+        entered, finished = threading.Event(), threading.Event()
+        deadline = time.monotonic() + .04
+        def inventory(*args, **kwargs):
+            self.assertEqual(kwargs['deadline'], deadline)
+            entered.set()
+            try:
+                threading.Event().wait(max(0, deadline - time.monotonic()))
+                raise ComparisonTimeout('synthetic exhausted inventory budget')
+            finally:
+                finished.set()
+        def authority(**kwargs):
+            self.assertTrue(entered.wait(.5))
+            return {'current': True}
+        with patch.object(http, 'retained_rows', inventory):
+            with self.assertRaises((TimeoutError, ComparisonTimeout)):
+                http._review_inventory(SimpleNamespace(status_authority=authority), {}, deadline)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(any(t.name.startswith('sporting-inventory') for t in threading.enumerate()))

@@ -60,23 +60,45 @@
 (defn- nonblank? [x] (and (string? x) (not (str/blank? x))))
 (def ^:dynamic *artifacts* nil)
 (def ^:dynamic ^:private *source-snapshot-cache* nil)
+(def ^:dynamic ^:private *checked-source-snapshot* nil)
 (defn- read-only-snapshot! [^Connection c]
   (when-not (and (.isReadOnly c) (not (.getAutoCommit c))
-                 (#{Connection/TRANSACTION_REPEATABLE_READ Connection/TRANSACTION_SERIALIZABLE}
-                  (.getTransactionIsolation c)))
+                 (or (identical? c (:connection *checked-source-snapshot*))
+                     (#{Connection/TRANSACTION_REPEATABLE_READ Connection/TRANSACTION_SERIALIZABLE}
+                      (.getTransactionIsolation c))))
     (fail! "Source cache requires a read-only snapshot")))
 (defn with-source-snapshot-cache
   "Reuse extraction bytes and target rows only on this read-only snapshot connection."
   [^Connection c f]
-  (read-only-snapshot! c)
-  (binding [*source-snapshot-cache* {:connection c :extractions (atom {}) :targets (atom {})
-                                     :envelopes (java.util.IdentityHashMap.)}
+  (binding [*checked-source-snapshot* nil] (read-only-snapshot! c))
+  (binding [*checked-source-snapshot* nil *source-snapshot-cache* {:connection c :extractions (atom {}) :targets (atom {}) :payloads (atom {})
+                                                                   :envelopes (java.util.IdentityHashMap.)}
             *artifacts* (atom {})]
     (f)))
 (defn- source-cache [c]
-  (when (identical? c (:connection *source-snapshot-cache*))
+  (when (and c (identical? c (:connection *source-snapshot-cache*)))
     (read-only-snapshot! c)
     *source-snapshot-cache*))
+(defn- strict-source-cache [c]
+  (binding [*checked-source-snapshot* nil] (source-cache c)))
+(defn cached-source-artifact
+  "Return a decoded artifact only within its exact verified read-only snapshot."
+  [c job]
+  (when (strict-source-cache c) (get @*artifacts* job)))
+(defn- cached-payload [cache job ordinal encoded]
+  (when-let [entry (when cache (get @cache [job ordinal]))]
+    (when (and (string? encoded) (= encoded (:encoded entry))) (:payload entry))))
+(defn cached-source-payload
+  "Return a raw decoded payload only for the exact encoded row in this snapshot."
+  [c job ordinal encoded]
+  (cached-payload (:payloads (strict-source-cache c)) job ordinal encoded))
+(defn- decoded-payload [c row]
+  (let [cache (:payloads (source-cache c)) encoded (:payload_edn row)
+        payload (or (cached-payload cache (:job_id row) (:ordinal row) encoded)
+                    (edn/read-string encoded))]
+    (when cache
+      (swap! cache assoc [(:job_id row) (:ordinal row)] {:encoded encoded :payload payload}))
+    payload))
 (defn- cached-extraction [c job]
   (let [cache (:extractions (source-cache c))]
     (or (get @cache job)
@@ -109,7 +131,7 @@
               a (edn/read-string (String. ^bytes (:artifact_bytes row) "UTF-8"))]
           (when cache (swap! cache assoc job a)) a))))
 (defn- state [c t]
-  (let [o (target c t) payload (edn/read-string (:payload_edn o))
+  (let [o (target c t) payload (decoded-payload c o)
         artifact (artifact c (:job-id t))
         ds (rows c "review_decisions" t)
         ps (into {} (map (fn [r] [(:id r) (edn/read-string (:body_edn r))])
@@ -196,7 +218,7 @@
                  (query c "SELECT pg_advisory_xact_lock(781246915)")
                  (execute! c "INSERT INTO freediving.publication_policy_events(policy_version,reason) VALUES(?,?)" version reason)
                  {:policy-version (active-policy c)})))
-(defn- diagnosis [c t]
+(defn- snapshot-diagnosis [c t]
   (let [s (state c t) active (active-policy c) reasons (blockers s active) last-decision (last (rows c "publication_decisions" t))
         policy (if (supported-policies active) active current-policy)
         eligible (and (contains? supported-policies active) (empty? reasons) (= "validate" (:action last-decision))
@@ -209,6 +231,13 @@
                                                                                                                (= "revoke" (:action last-decision)) [:validation-revoked]
                                                                                                                (not= policy (:policy_version last-decision)) [:policy-version-changed]
                                                                                                                (not= (:review-revision s) (:review_revision last-decision)) [:review-revision-changed])))}))
+(defn- diagnosis [c t]
+  (if-let [cache (strict-source-cache c)]
+    ;; Only owned SELECT/pure helpers run inside this private synchronous scope.
+    ;; Guard flags at every access; verify isolation again before exporting data.
+    (binding [*checked-source-snapshot* cache]
+      (try (snapshot-diagnosis c t) (finally (strict-source-cache c))))
+    (snapshot-diagnosis c t)))
 (defn- read-snapshot
   ([url f] (read-snapshot url f false))
   ([url f readonly?]
@@ -217,20 +246,21 @@
      (.setTransactionIsolation c Connection/TRANSACTION_REPEATABLE_READ) (.setAutoCommit c false)
      (let [r (f c)] (.commit c) r))))
 (defn diagnose [url t] (read-snapshot url #(diagnosis % t)))
+(defn diagnose-many-on
+  "Private diagnostics on the caller's exact connection-bound read-only snapshot."
+  [c targets]
+  (when-not (strict-source-cache c) (fail! "Read-only source snapshot required"))
+  (let [tables (into {} (for [table ["review_decisions" "review_proposals" "publication_decisions"]]
+                          [table (group-by (juxt :job_id :ordinal)
+                                           (query c (str "SELECT * FROM freediving." table (if (= table "review_proposals") " ORDER BY id" " ORDER BY revision"))))]))
+        policy (active-policy c)]
+    (binding [*source-snapshot-cache* (assoc *source-snapshot-cache*
+                                             :diagnostic-tables tables :diagnostic-policy [policy])]
+      (mapv (fn [t] (merge (select-keys t [:job-id :ordinal]) (diagnosis c t))) targets))))
 (defn diagnose-many
   "Private read-only diagnostics in one snapshot; artifact decoding cached per job."
   [url targets]
-  (read-snapshot url
-                 (fn [c]
-                   (with-source-snapshot-cache c
-                     #(let [tables (into {} (for [table ["review_decisions" "review_proposals" "publication_decisions"]]
-                                              [table (group-by (juxt :job_id :ordinal)
-                                                               (query c (str "SELECT * FROM freediving." table (if (= table "review_proposals") " ORDER BY id" " ORDER BY revision"))))]))
-                            policy (active-policy c)]
-                        (binding [*source-snapshot-cache* (assoc *source-snapshot-cache*
-                                                                 :diagnostic-tables tables :diagnostic-policy [policy])]
-                          (mapv (fn [t] (merge (select-keys t [:job-id :ordinal]) (diagnosis c t))) targets)))))
-                 true))
+  (read-snapshot url #(with-source-snapshot-cache % (fn [] (diagnose-many-on % targets))) true))
 (defn history [url t] (read-snapshot url (fn [c] (target c t) (mapv body (rows c "publication_decisions" t)))))
 (def request-keys #{:id :job-id :ordinal :base-revision :review-revision :policy-version :observation :action :actor :reason :evidence :attestations})
 (defn decide! [url r]
