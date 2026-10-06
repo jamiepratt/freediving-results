@@ -19,10 +19,10 @@
                      (let [{:keys [artifact]} (get input-roots (get-in public-row [:source :federation]))
                            target {:job-id (:job-id artifact) :ordinal (get-in public-row [:reference :ordinal])}
                            reference (assoc (revisions/reference fixture/app target) :parser-version (:parser-version artifact))
-                           coord {:page 1 :line (inc (:ordinal target))}
-                           evidence (merge reference coord {:source-kind :pdf :schema-version (:schema-version artifact)
-                                                            :acquisition-id (get-in artifact [:acquisitions 0 :acquisition-id])
-                                                            :observation-id (str "local-observation:" (:job-id target) ":" (:ordinal target))})]
+                           coord (get-in artifact [:candidates (:ordinal target) :coordinates])
+                           evidence (merge reference (select-keys coord [:page :line]) {:source-kind :pdf :schema-version (:schema-version artifact)
+                                                                                        :acquisition-id (get-in artifact [:acquisitions 0 :acquisition-id])
+                                                                                        :observation-id (str "local-observation:" (:job-id target) ":" (:ordinal target))})]
                        (reviews/accept-pdf-extraction! (System/getenv "FREEDIVING_TEST_REVIEW_URL")
                                                        (merge target {:id (str "owner-extraction-" (get public-row :result-id))
                                                                       :base-revision 0 :evidence evidence

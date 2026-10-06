@@ -9,7 +9,10 @@
             [freediving.event-selections :as selections]
             [freediving.publication :as publication]
             [freediving.public-results :as public]
-            [freediving.publication-test :as publication-fixture]))
+            [freediving.publication-test :as publication-fixture]
+            [freediving.depth-2026-test :as pdf-fixture]
+            [freediving.indoor-2026-test :as indoor-fixture]
+            [freediving.indoor-time-2026-test :as time-fixture]))
 
 (def proof-url (clojure.string/replace fixture/app "user=observations_app" "user=proof_source"))
 (def relationship-url (clojure.string/replace fixture/app "user=observations_app" "user=proof_relationships"))
@@ -40,7 +43,7 @@
         artifact (:artifact stored)
         reference (assoc (revisions/reference fixture/app t) :parser-version (:parser-version artifact))]
     {:config {:jdbc_url proof-url :database "observations_test" :mode "source"
-              :rows [{:reference reference :coordinates {:page 1 :line 1}}]}
+              :rows [{:reference reference :coordinates (get-in artifact [:candidates 0 :coordinates])}]}
      :target t :artifact artifact :stored stored}))
 
 (deftest exact-unimported-row-is-an-observable-gap-not-zero-attempts
@@ -192,6 +195,45 @@
     (fixture/sql! fixture/admin "ALTER TABLE freediving.pdf_extraction_reviews DISABLE TRIGGER immutable_pdf_extraction_reviews")
     (fixture/sql! fixture/admin "UPDATE freediving.pdf_extraction_reviews SET revision=3,body_edn=replace(body_edn,':revision 1',':revision 3')")
     (is (empty? (get-in (read-proof config) [:rows 0 :upstream])))))
+
+(deftest actual-cmas-parser-column-bounds-bind-the-exact-owned-source-row
+  (let [{:keys [root result]} (pdf-fixture/extract-stream
+                               [(str (indoor-fixture/header "DNF" "SENIORS - WOMEN" "11")
+                                     (indoor-fixture/row 640 ["1" "SAMPLE Person" "AIN" "113,5" "113,5" "GOLD MEDAL"]))
+                                (str (time-fixture/speed-header "2X50" "SENIORS - WOMEN" "12")
+                                     (indoor-fixture/row 640 ["1" "TIME Person" "AIN" "00:40.00" "00:40.00"]))])
+        _ (observations/import! fixture/app root (:job-id result))
+        target {:job-id (:job-id result) :ordinal 0}
+        reference (assoc (revisions/reference fixture/app target) :parser-version (:parser-version result))
+        coordinates (get-in result [:candidates 0 :coordinates])
+        config {:jdbc_url proof-url :database "observations_test" :mode "source"
+                :rows [{:reference reference :coordinates coordinates}]}
+        ref (merge reference (select-keys coordinates [:page :line])
+                   {:source-kind :pdf :schema-version (:schema-version result)
+                    :acquisition-id (get-in result [:acquisitions 0 :acquisition-id])
+                    :observation-id (str "local-observation:" (:job-id target) ":0")})]
+    (is (= "cmas-2026-indoor-time/2" (:parser-version result)))
+    (is (= #{:page :line :column-start :column-end} (set (keys coordinates))))
+    (reviews/accept-pdf-extraction! publication-fixture/reviewer
+                                    (merge target {:id "real-shaped-pdf-review" :base-revision 0 :evidence ref
+                                                   :owner-receipt-sha256 (apply str (repeat 64 "a"))
+                                                   :owner-response {:task-id "isolated-owner" :user-message-id "isolated-column-review"
+                                                                    :response-annotation-index 0 :selected-text "Accept extraction 0-0"}
+                                                   :actor "owner" :reason "Inspected the exact source row and retained column bounds"}))
+    (let [request (assoc (publication-fixture/request target "real-shaped-publication")
+                         :evidence [(select-keys coordinates [:page :line])])]
+      (publication/decide! publication-fixture/reviewer request))
+    (let [proof (read-proof config)]
+      (is (= coordinates (get-in proof [:rows 0 :coordinates])))
+      (is (= "mapped" (get-in proof [:rows 0 :diagnostics :mapping :state])))
+      (is (= "verified" (get-in proof [:rows 0 :upstream :review :value])))
+      (is (= "approved" (get-in proof [:rows 0 :upstream :publication :value]))))
+    (doseq [key [:column-start :column-end]]
+      (let [changed (read-proof (update-in config [:rows 0 :coordinates key] inc))]
+        (is (= "scope-mismatch" (get-in changed [:rows 0 :diagnostics :mapping :state])))
+        (is (empty? (get-in changed [:rows 0 :upstream])))))
+    (is (thrown-with-msg? Exception #"Invalid exact sporting row"
+                          (read-proof (assoc-in config [:rows 0 :coordinates :unknown-column] 1))))))
 
 (defn connector-fixture!
   "Only isolated disposable PostgreSQL. Emit exact real APIs/readers for HTTP tests."

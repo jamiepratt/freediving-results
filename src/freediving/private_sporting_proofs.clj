@@ -74,7 +74,9 @@
                       ((juxt :job-id :candidate-id :source-sha256 :artifact-sha256) reference))
               (string? (:parser-version reference)) (seq (:parser-version reference))
               (or (and (= #{:page :line} (set (keys coordinates))) (every? pos-int? (vals coordinates)))
-                  (and (= #{:table :row} (set (keys coordinates))) (every? nat-int? (vals coordinates)))))
+                  (and (= #{:table :row} (set (keys coordinates))) (every? nat-int? (vals coordinates)))
+                  (and (= #{:page :line :column-start :column-end} (set (keys coordinates)))
+                       (every? pos-int? (vals coordinates)) (< (:column-start coordinates) (:column-end coordinates)))))
          "Invalid exact sporting row request"))
 (defn- gap [row state reason]
   (assoc row :upstream {} :diagnostics {:mapping {:state state :reasons [reason]}
@@ -109,7 +111,7 @@
                                    (or (when (seq (:source-lines payload))
                                          (mapv #(select-keys % [:page :line]) (:source-lines payload)))
                                        [(evidence/coordinates artifact payload)])]))
-                  (= coordinates (evidence/coordinates artifact payload))
+                  (= coordinates (:coordinates payload))
                   (seq (:acquisitions artifact))
                   (every? #(= (:source-sha256 reference) (get-in % [:manifest :sha256])) (:acquisitions artifact)))
              "Exact row source/artifact/parser/coordinate mismatch")
@@ -133,7 +135,8 @@
                      [(:id receipt) (:revision receipt) (name (:action receipt))])
                   (= (:request receipt) (dissoc receipt :request :action :revision))
                   (= reference (select-keys (:evidence receipt) reference-keys))
-                  (= coordinates (select-keys (:evidence receipt) (keys coordinates)))
+                  (= (select-keys coordinates [:page :line])
+                     (select-keys (:evidence receipt) [:page :line]))
                   (= :pdf (get-in receipt [:evidence :source-kind]))
                   (= (:schema-version artifact) (get-in receipt [:evidence :schema-version]))
                   (= (str "local-observation:" (:job-id reference) ":" (:ordinal reference))
@@ -209,7 +212,7 @@
                   (= (dissoc reference :parser-version) (:observation record))
                   (= [(:candidate_id row) (:artifact_sha256 row) (:source_sha256 row)]
                      ((juxt :candidate-id :artifact-sha256 :source-sha256) reference))
-                  (some #{coordinates} (:evidence record))
+                  (some #{(select-keys coordinates (if (contains? coordinates :table) [:table :row] [:page :line]))} (:evidence record))
                   (or (= :revoke (:action record))
                       (= {:source-visual-accuracy true :no-unresolved-substantive-errors true} (:attestations record))))
              "Publication receipt scope or attestations changed"))))
