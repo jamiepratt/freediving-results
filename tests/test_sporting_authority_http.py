@@ -200,6 +200,23 @@ class IndependentRelationshipOwnerHTTPTest(unittest.TestCase):
 
 
 class SportingProofStartupHTTPTest(unittest.TestCase):
+    def comparison_config(self, fixture):
+        from pathlib import Path
+        root = fixture.root / 'startup-runtime'
+        relative = 'src/freediving/attempt_view_adapter.clj'
+        source = Path(__file__).resolve().parents[1] / relative
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_bytes(source.read_bytes())
+        manifest = root / 'manifest.json'
+        manifest.write_bytes(canonical({'files': {relative: hashlib.sha256(source.read_bytes()).hexdigest()}}))
+        packet = fixture.root / 'startup-packet.edn'; packet.write_text('isolated startup pin'); packet.chmod(0o600)
+        config = fixture.root / 'startup-comparison.json'
+        config.write_bytes(canonical({'runtime_path': str(root),
+            'runtime_manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            'packet': {'path': str(packet), 'sha256': hashlib.sha256(packet.read_bytes()).hexdigest()}}))
+        config.chmod(0o600)
+        return str(config)
+
     def startup(self, fixture, *, comparison=False):
         from owner_evidence_origin import make_server
         return make_server(fixture.root / 'out', {
@@ -208,7 +225,7 @@ class SportingProofStartupHTTPTest(unittest.TestCase):
             'OWNER_EVIDENCE_SNAPSHOT_SHA256': fixture.server.query.manifest['snapshot_sha256'],
             'OWNER_EVIDENCE_SPORTING_CONFIG': str(fixture.root / 'sporting.json'),
             'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': 'isolated-proof-boundary',
-            **({'OWNER_EVIDENCE_COMPARISON_CONFIG': 'isolated-comparison-boundary'} if comparison else {})})
+            **({'OWNER_EVIDENCE_COMPARISON_CONFIG': self.comparison_config(fixture)} if comparison else {})})
 
     def test_owner_server_initializes_current_paired_proofs_before_returning(self):
         import time
@@ -265,14 +282,17 @@ class SportingProofStartupHTTPTest(unittest.TestCase):
         with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
             server = self.startup(f, comparison=True)
         self.addCleanup(server.server_close)
-        self.assertEqual([(item[0], item[1]) for item in calls], [('proof', []), ('comparison', {'limit': 1})])
+        self.assertEqual([item[0] for item in calls], ['proof', 'comparison', 'comparison', 'proof'])
+        self.assertEqual(calls[1][1], {'limit': 1})
+        self.assertEqual(calls[2][1]['discipline'], 'DNF')
+        self.assertEqual(calls[3][1], [])
         self.assertGreaterEqual(calls[1][2], calls[0][2])
         self.assertFalse(closed)
         # Prewarming must not wrap readers in a retained result cache.
         self.assertIs(server.sporting_proof_reader, proof)
         self.assertIs(server.comparison_reader, comparison)
         server.sporting_proof_reader([], deadline=time.monotonic() + 12)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
 
     def test_comparison_warm_failure_closes_both_runtimes_before_server_start(self):
         from unittest.mock import patch
@@ -289,6 +309,97 @@ class SportingProofStartupHTTPTest(unittest.TestCase):
         with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
             with self.assertRaisesRegex(ComparisonTimeout, 'comparison warm-up failed'):
                 self.startup(f, comparison=True)
+        self.assertCountEqual(closed, ['proof', 'comparison'])
+
+    def test_startup_reads_all_exact_retained_versions_before_full_proof_warm(self):
+        import time
+        from unittest.mock import patch
+        f = Fixture(); self.addCleanup(f.close)
+        calls, closed = [], []
+        newer = {'job-id': 'b035efaef9e24ba8cee6e2b5cbcfa85416702068713442098dd7bfe1259fba65',
+                 'artifact-sha256': 'c4d68ff2c14eb8a797658e247e10373114b7370c763b60afa9e7068835b3e6cf'}
+        older = {'job-id': 'cff457431610c929a54970f77477aa5e44679a34cab1db74a7af4f3e6e54ee61',
+                 'artifact-sha256': '0b47b35617de991d54e20a0c573443e080c6301c5b5fbc32b5d542088c099fe2'}
+        raw = []
+        for ordinal in range(138):
+            coordinate = {'page': 5, 'line': ordinal + 1, 'column-start': 1, 'column-end': 90}
+            ref = {**newer, 'source-sha256': '1' * 64, 'ordinal': ordinal, 'candidate-id': hashlib.sha256(str(ordinal).encode()).hexdigest()}
+            raw.append({'reference': ref, 'row_coordinate': coordinate,
+                        'retained-versions': [{'reference': {**ref, **older}, 'candidate': {'coordinates': coordinate}},
+                                              {'reference': ref, 'candidate': {'coordinates': coordinate}}],
+                        'year': '2026', 'environment': 'pool', 'discipline': 'DNF', 'gender': 'women'})
+        def proof(rows, *, deadline=None):
+            self.assertGreater(deadline, time.monotonic())
+            self.assertLessEqual(deadline - time.monotonic(), 12)
+            calls.append(('proof', rows, deadline))
+            return {'schema': 'private-sporting-proofs/v1', 'rows': []}
+        proof.close = lambda: closed.append('proof')
+        def comparison(filters, authority, *, deadline=None):
+            self.assertIsNone(authority)
+            calls.append(('comparison', filters, deadline))
+            return {'rows': raw[:1] if filters == {'limit': 1} else raw,
+                    'pagination': {'total': 138}}
+        comparison.verify_current = lambda authority: None
+        comparison.close = lambda: closed.append('comparison')
+        with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
+            server = self.startup(f, comparison=True)
+        self.addCleanup(server.server_close)
+        self.assertEqual([c[0] for c in calls], ['proof', 'comparison', 'comparison', 'proof'])
+        exact = calls[-1][1]
+        self.assertEqual(len(exact), 276)
+        self.assertEqual(exact[0]['coordinates'], {'page': 5, 'line': 1, 'column-start': 1, 'column-end': 90})
+        self.assertEqual(exact[1]['reference']['parser-version'], 'cmas-2026-indoor-time/2')
+        self.assertTrue(all(set(r) == {'reference', 'coordinates'} for r in exact))
+        self.assertEqual(server.inspector_sources, {})
+        self.assertEqual(server.sporting._history(), [])
+        self.assertFalse(closed)
+        self.assertTrue(all(calls[i][2] <= calls[i + 1][2] for i in range(3)))
+
+
+    def test_full_proof_warm_failure_closes_runtimes_without_starting_owner_http(self):
+        from unittest.mock import patch
+        from private_attempt_inspector import ComparisonTimeout
+        f = Fixture(); self.addCleanup(f.close)
+        closed, calls = [], []
+        exact = {'reference': {'job-id': 'b035efaef9e24ba8cee6e2b5cbcfa85416702068713442098dd7bfe1259fba65',
+            'artifact-sha256': 'c4d68ff2c14eb8a797658e247e10373114b7370c763b60afa9e7068835b3e6cf',
+            'source-sha256': '1' * 64, 'candidate-id': '2' * 64, 'ordinal': 1},
+            'row_coordinate': {'page': 5, 'line': 1, 'column-start': 1, 'column-end': 90},
+            'year': '2026', 'environment': 'pool', 'discipline': 'DNF', 'gender': 'women'}
+        def proof(rows, *, deadline=None):
+            calls.append(rows)
+            if rows:
+                raise ComparisonTimeout('isolated full exact proof warm-up failed')
+            return {'schema': 'private-sporting-proofs/v1', 'rows': []}
+        proof.close = lambda: closed.append('proof')
+        def comparison(filters, authority, *, deadline=None):
+            return {'rows': [exact], 'pagination': {'total': 1}}
+        comparison.verify_current = lambda authority: None
+        comparison.close = lambda: closed.append('comparison')
+        with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
+            with self.assertRaisesRegex(ComparisonTimeout, 'full exact proof warm-up failed'):
+                self.startup(f, comparison=True)
+        self.assertEqual([len(rows) for rows in calls], [0, 1])
+        self.assertCountEqual(closed, ['proof', 'comparison'])
+
+    def test_unbound_inventory_parser_refuses_startup_and_closes_runtimes(self):
+        from unittest.mock import patch
+        f = Fixture(); self.addCleanup(f.close)
+        closed, calls = [], []
+        def proof(rows, *, deadline=None):
+            calls.append(rows)
+            return {'schema': 'private-sporting-proofs/v1', 'rows': []}
+        proof.close = lambda: closed.append('proof')
+        def comparison(filters, authority, *, deadline=None):
+            return {'rows': [{'reference': {'job-id': '0' * 64, 'artifact-sha256': '1' * 64},
+                    'row_coordinate': {'table': 1, 'row': 2}, 'year': '2026', 'environment': 'pool',
+                    'discipline': 'DNF', 'gender': 'women'}], 'pagination': {'total': 1}}
+        comparison.verify_current = lambda authority: None
+        comparison.close = lambda: closed.append('comparison')
+        with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
+            with self.assertRaisesRegex(ValueError, 'parser version unavailable'):
+                self.startup(f, comparison=True)
+        self.assertEqual(calls, [[]])
         self.assertCountEqual(closed, ['proof', 'comparison'])
 
 

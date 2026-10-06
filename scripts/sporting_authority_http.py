@@ -80,6 +80,45 @@ catch(e){if(generation===proofGeneration){container.replaceChildren();document.g
 document.getElementById('refresh').addEventListener('click',load);load();'''
 
 
+def retained_rows(origin, comparison, *, deadline, bind_sources=True):
+    """Collect the complete pinned retained inventory, without granting authority."""
+    deadline = min(deadline, time.monotonic() + READ_BUDGET_SECONDS)
+    _remaining(deadline)
+    rows = []
+    parsers = parser_versions(comparison)
+    filters = {'year': '2026', 'environment': 'pool', 'discipline': 'DNF', 'gender': 'women', 'limit': 200}
+    offset = 0
+    while True:
+        result = origin.read_comparison({**filters, 'offset': offset}, None, deadline=deadline)
+        if bind_sources:
+            origin.bind_inspector_sources(result, {**filters, 'offset': offset}, deadline=deadline)
+        for row in result['rows']:
+            versions = row.get('retained-versions') or [{'reference': row['reference'], 'candidate': row.get('candidate', {})}]
+            for version in versions:
+                reference = version['reference']
+                parser = parsers.get((reference.get('job-id'), reference.get('artifact-sha256')))
+                if parser is None:
+                    raise ValueError('exact sporting parser version unavailable')
+                rows.append({'reference': {**reference, 'parser-version': parser},
+                             'coordinates': version.get('candidate', {}).get('coordinates', row['row_coordinate']),
+                             'year': str(row['year']), 'environment': row['environment'],
+                             'discipline': row['discipline'].lower(), 'gender': row['gender'],
+                             'federation': row.get('federation', row.get('source', {}).get('federation', 'unknown')),
+                             'source_access': row.get('source_access', {}),
+                             'parsed_fields': version.get('candidate', {}).get('parsed', row.get('parsed_fields', {})),
+                             'upstream': {}, 'diagnostics': {}})
+        offset += len(result['rows'])
+        total = result.get('pagination', {}).get('total', offset)
+        if len(rows) > 400:
+            raise ValueError('exact sporting inventory exceeds bound')
+        if offset >= total:
+            break
+        if not result['rows']:
+            raise ValueError('exact sporting inventory incomplete')
+    _remaining(deadline)
+    return rows
+
+
 def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadline=None):
     """Read exact active pins. Legacy same-attempt approvals grant no sporting facts."""
     deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + READ_BUDGET_SECONDS)
@@ -120,35 +159,7 @@ def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadli
         if authority is None:
             raise ValueError('fresh owner/source status unavailable')
         pins['owner_authority_sha256'] = digest(authority)
-        parsers = parser_versions(comparison)
-        filters = {'year': '2026', 'environment': 'pool', 'discipline': 'DNF', 'gender': 'women', 'limit': 200}
-        offset = 0
-        while True:
-            result = origin.read_comparison({**filters, 'offset': offset}, None, deadline=deadline)
-            origin.bind_inspector_sources(result, {**filters, 'offset': offset}, deadline=deadline)
-            for row in result['rows']:
-                versions = row.get('retained-versions') or [{'reference': row['reference'], 'candidate': row.get('candidate', {})}]
-                for version in versions:
-                    reference = version['reference']
-                    parser = parsers.get((reference.get('job-id'), reference.get('artifact-sha256')))
-                    if parser is None:
-                        raise ValueError('exact sporting parser version unavailable')
-                    rows.append({'reference': {**reference, 'parser-version': parser},
-                                 'coordinates': version.get('candidate', {}).get('coordinates', row['row_coordinate']),
-                                 'year': str(row['year']), 'environment': row['environment'],
-                                 'discipline': row['discipline'].lower(), 'gender': row['gender'],
-                                 'federation': row.get('federation', row.get('source', {}).get('federation', 'unknown')),
-                                 'source_access': row.get('source_access', {}),
-                                 'parsed_fields': version.get('candidate', {}).get('parsed', row.get('parsed_fields', {})),
-                                 'upstream': {}, 'diagnostics': {}})
-            offset += len(result['rows'])
-            total = result.get('pagination', {}).get('total', offset)
-            if len(rows) > 400:
-                raise ValueError('exact sporting inventory exceeds bound')
-            if offset >= total:
-                break
-            if not result['rows']:
-                raise ValueError('exact sporting inventory incomplete')
+        rows = retained_rows(origin, comparison, deadline=deadline)
     reader = getattr(origin, 'sporting_proof_reader', None)
     if reader is None:
         pins['canonical_upstream_status'] = 'unavailable'
@@ -221,6 +232,14 @@ def configure(origin, snapshot_dir, env):
         origin.sporting_proof_reader([], deadline=time.monotonic() + READ_BUDGET_SECONDS)
         if origin.comparison_reader is not None:
             origin.read_comparison({'limit': 1}, None, deadline=time.monotonic() + READ_BUDGET_SECONDS)
+            from private_attempt_inspector import _private_bytes, _pinned
+            comparison = json.loads(_private_bytes(env['OWNER_EVIDENCE_COMPARISON_CONFIG'], 65536))
+            _pinned(comparison['packet'])
+            rows = retained_rows(origin, comparison, deadline=time.monotonic() + READ_BUDGET_SECONDS,
+                                 bind_sources=False)
+            origin.sporting_proof_reader(
+                [{'reference': row['reference'], 'coordinates': row['coordinates']} for row in rows],
+                deadline=time.monotonic() + READ_BUDGET_SECONDS)
     def base(review=False):
         return live_context(origin, snapshot_dir, env, config_path, review=review,
                             deadline=getattr(origin.sporting_deadlines, 'deadline', None))
