@@ -1,5 +1,6 @@
 """Private comparison activation preserves authority while changing derived code."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest import mock
 import comparison_activate
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -181,6 +183,18 @@ class ComparisonActivationTests(unittest.TestCase):
             activate_comparison(self.new,self.config,self.layout,self.pins,**{**self.kw,'guard':guard})
         self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
         self.assertEqual(self.commands,[])
+
+    def test_full_source_proof_503_rolls_back_derived_deployment_without_restoring_authority(self):
+        values,bodies,requests,opener=SportingComparisonHealthTests().fixture(self.root)
+        bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']=urllib.error.HTTPError('http://synthetic',503,'Unavailable',{},None)
+        before=self.layout.config.read_bytes()
+        with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
+            with self.assertRaises(urllib.error.HTTPError):
+                activate_comparison(self.new,self.config,self.layout,self.pins,
+                    **{**self.kw,'health':lambda:comparison_activate._comparison_health(values)})
+        self.assertEqual((self.layout.app/'current').resolve(),self.old.resolve())
+        self.assertEqual(self.layout.config.read_bytes(),before)
+        self.assertEqual(self.guard()['authority'],self.pins['authority'])
 
     def test_failed_health_rolls_back_derived_files_and_preserves_new_human_event(self):
         def health():
@@ -370,5 +384,72 @@ def create_reader(env):return Reader()
         with self.assertRaisesRegex(ValueError,'unit changed'):
             rollback_comparison(self.layout,command=self.command)
         self.assertEqual((self.layout.app/'current').resolve(),before)
+
+
+class SportingComparisonHealthTests(unittest.TestCase):
+    def fixture(self,root):
+        capability=root/'proof-config.json';capability.write_text('synthetic exact private proof capability')
+        scopes={'source':'a'*64,'relationships':'b'*64}
+        pins={'snapshot_sha256':'c'*64,'owner_revision':227,'owner_binding_revision':215,
+              'canonical_upstream_config_sha256':hashlib.sha256(capability.read_bytes()).hexdigest(),
+              'canonical_upstream_sha256':hashlib.sha256(json.dumps(scopes,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+              'canonical_scope_bindings':scopes}
+        bodies={'/owner-evidence/api/sporting-authority/review':{'schema':'sporting-authority-review/v1','revision':0,
+                    'currentness':'available','proposals':[],'csrf_token':'never-persist-review-token'},
+                '/owner-evidence/api/sporting-authority/proofs?limit=1':{'schema':'sporting-exact-proof-diagnostics/v1',
+                    'pins':pins,'source_positions':138,'pagination':{'offset':0,'limit':1,'total':276},
+                    'relationship_available':True,'relationship_revision':0,'rows':[{'reference':{'source-sha256':'d'*64},
+                    'coordinates':{'page':1,'line':1},'upstream':{},'diagnostics':{'mapping':{'state':'unmapped'}}}]},
+                '/owner-evidence/api/attempt-inspector?limit=1':{'schema':'private-attempt-inspector/v1',
+                    'counts':{'source_positions':138,'retained_observation_versions':276,'distinct_sporting_attempts':None,'eligible_peer_cohorts':0},
+                    'coverage':{'ranked':0},'pagination':{'total':138}}}
+        values={'OWNER_EVIDENCE_SNAPSHOT_SHA256':'c'*64,'OWNER_EVIDENCE_ORIGIN_HOST':'owner-origin.alphacompose.com',
+                'OWNER_EVIDENCE_GATEWAY_SECRET':'synthetic-private-gateway','OWNER_EVIDENCE_EMAILS':'owner@example.invalid',
+                'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG':str(capability)}
+        requests=[]
+        class Response(io.BytesIO):
+            status=200
+            headers={'Cache-Control':'no-store'}
+        class Opener:
+            def open(self,request,timeout):
+                requests.append(request.full_url.split(':8081')[1])
+                self.assert_auth(request)
+                body=bodies[requests[-1]]
+                if isinstance(body,Exception):raise body
+                return Response(json.dumps(body).encode())
+            def assert_auth(self,request):
+                assert request.get_method()=='GET'
+                assert request.get_header('X-freediving-owner-gateway')==values['OWNER_EVIDENCE_GATEWAY_SECRET']
+                assert request.get_header('X-freediving-owner-email')=='owner@example.invalid'
+        return values,bodies,requests,Opener()
+
+    def test_health_follows_ui_read_order_and_accepts_explicit_unmapped_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            values,bodies,requests,opener=self.fixture(Path(directory))
+            with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
+                comparison_activate._comparison_health(values)
+            self.assertEqual(requests,['/owner-evidence/api/sporting-authority/review',
+                '/owner-evidence/api/sporting-authority/proofs?limit=1','/owner-evidence/api/attempt-inspector?limit=1'])
+
+    def test_current_nonempty_source_review_envelope_remains_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            values,bodies,requests,opener=self.fixture(Path(directory))
+            review=bodies['/owner-evidence/api/sporting-authority/review']
+            review['revision']=3;review['proposals']=[{'proposal':{'id':'retained-staged-proposal'},'action':'select-cohort','revision':3}]
+            with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
+                comparison_activate._comparison_health(values)
+            self.assertEqual(len(requests),3)
+
+    def test_full_inventory_proof_denial_or_missing_current_binding_fails_health(self):
+        for failure in ('unavailable-review','proof503','invalid-proof-binding','missing-capability'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
+                values,bodies,requests,opener=self.fixture(Path(directory))
+                if failure=='unavailable-review':bodies['/owner-evidence/api/sporting-authority/review']['currentness']='unavailable'
+                if failure=='proof503':bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']=urllib.error.HTTPError('http://synthetic',503,'Unavailable',{},None)
+                if failure=='invalid-proof-binding':bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']['pins']['canonical_upstream_sha256']='f'*64
+                if failure=='missing-capability':bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']['relationship_available']=False
+                with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
+                    with self.assertRaises((ValueError,urllib.error.HTTPError)):comparison_activate._comparison_health(values)
+                self.assertNotIn('/owner-evidence/api/attempt-inspector?limit=1',requests)
 
 if __name__=='__main__':unittest.main()

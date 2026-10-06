@@ -299,6 +299,48 @@ def _comparison_health(values):
     headers={'Host':values['OWNER_EVIDENCE_ORIGIN_HOST'],
              'X-Freediving-Owner-Gateway':values['OWNER_EVIDENCE_GATEWAY_SECRET'],
              'X-Freediving-Owner-Email':values['OWNER_EVIDENCE_EMAILS'].split(',')[0]}
+    if values.get('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'):
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def read(path):
+            with opener.open(urllib.request.Request('http://127.0.0.1:8081/owner-evidence/api/'+path,headers=headers),timeout=14) as response:
+                if response.status!=200 or 'no-store' not in response.headers.get('Cache-Control',''):
+                    raise ValueError('private sporting proof readiness refused')
+                return json.load(response)
+        # Follow the owned UI's read order, warming the same persistent proof JVM.
+        # CSRF/proposal bodies remain process-local and are never persisted or logged.
+        review=read('sporting-authority/review')
+        if (not isinstance(review,dict) or review.get('schema')!='sporting-authority-review/v1'
+                or type(review.get('revision')) is not int or not 0<=review['revision']<=10000
+                or review.get('currentness')!='available' or not isinstance(review.get('proposals'),list)
+                or len(review['proposals'])>10000 or not isinstance(review.get('csrf_token'),str)
+                or not 16<=len(review['csrf_token'])<=256
+                or any(not isinstance(item,dict) or not isinstance(item.get('proposal'),dict)
+                       or not isinstance(item['proposal'].get('id'),str) or not item['proposal']['id']
+                       or type(item.get('revision')) is not int or not 1<=item['revision']<=review['revision']
+                       or item.get('action') not in ('stage','source-approve','select-cohort','publish','reverse') for item in review['proposals'])):
+            raise ValueError('private sporting review readiness refused')
+        proof=read('sporting-authority/proofs?limit=1')
+        pins=proof.get('pins',{}) if isinstance(proof,dict) else {}
+        scopes=pins.get('canonical_scope_bindings',{}) if isinstance(pins,dict) else {}
+        hash_value=lambda value:isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) is not None
+        if (not isinstance(proof,dict) or proof.get('schema')!='sporting-exact-proof-diagnostics/v1'
+                or proof.get('source_positions')!=138 or proof.get('pagination')!={'offset':0,'limit':1,'total':276}
+                or proof.get('relationship_available') is not True
+                or type(proof.get('relationship_revision')) is not int or not 0<=proof['relationship_revision']<=10000
+                or not isinstance(pins,dict) or pins.get('snapshot_sha256')!=values['OWNER_EVIDENCE_SNAPSHOT_SHA256']
+                or any(type(pins.get(key)) is not int or pins[key]<0 for key in ('owner_revision','owner_binding_revision'))
+                or not isinstance(scopes,dict) or set(scopes)!={'source','relationships'}
+                or not all(hash_value(value) for value in scopes.values())
+                or not hash_value(pins.get('canonical_upstream_sha256'))
+                or pins['canonical_upstream_sha256']!=hashlib.sha256(json.dumps(scopes,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                or pins.get('canonical_upstream_config_sha256')!=_sha(Path(values['OWNER_EVIDENCE_SPORTING_PROOF_CONFIG']))
+                or not isinstance(proof.get('rows'),list) or len(proof['rows'])!=1
+                or any(not isinstance(row,dict) or not isinstance(row.get('reference'),dict)
+                       or not isinstance(row.get('coordinates'),dict) or not isinstance(row.get('upstream'),dict)
+                       or not isinstance(row.get('diagnostics'),dict)
+                       or not isinstance(row['diagnostics'].get('mapping'),dict)
+                       or not isinstance(row['diagnostics']['mapping'].get('state'),str) for row in proof['rows'])):
+            raise ValueError('private exact source proof readiness refused')
     url='http://127.0.0.1:8081/owner-evidence/api/attempt-inspector?limit=1'
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(urllib.request.Request(url,headers=headers),timeout=14) as response:
         value=json.load(response)
