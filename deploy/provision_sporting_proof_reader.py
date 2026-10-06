@@ -265,34 +265,69 @@ def update_runtime(args):
             or expected.get('protected',{}).get('sporting_proof') is None
             or capture_guard(layout,args.public_database)!=expected):
         raise ValueError('live authority guard changed before proof runtime update')
+    source_pin = getattr(args, 'source_review_config_sha256', None)
+    source_update = None
+    source_review = None
+    if expected['protected'].get('source_review') is not None:
+        import provision_source_review as source_review
+        if (not isinstance(source_pin, str) or not re.fullmatch('[0-9a-f]{64}', source_pin)
+                or digest(source_review.CONFIG) != source_pin):
+            raise ValueError('exact existing source review config pin required')
+        source_existing = source_review.verify_config(source_review.CONFIG)
+        if (source_existing['database'] != args.database
+                or (source_existing['runtime_path'], source_existing['runtime_manifest_sha256']) !=
+                   (existing['runtime_path'], existing['runtime_manifest_sha256'])
+                or 'src/freediving/source_accuracy_review.clj' not in runtime['files']):
+            raise ValueError('source review runtime update binding differs')
+        source_review_grants = source_review.verify_grants(args.database)
+        source_update = {**source_existing, 'runtime_path': str(args.runtime),
+                         'runtime_manifest_sha256': args.runtime_manifest_sha256}
+    elif source_pin is not None:
+        raise ValueError('source review config pin has no existing guarded capability')
     updated={**existing,'runtime_path':str(args.runtime),'runtime_manifest_sha256':args.runtime_manifest_sha256}
     if updated==existing:return False
-    before=CONFIG.read_bytes();info=CONFIG.stat()
-    if hashlib.sha256(before).hexdigest()!=args.config_sha256:
-        raise ValueError('proof capability changed before runtime update')
-    after=(json.dumps(updated,sort_keys=True)+'\n').encode()
-    # Last authority/grant CAS occurs immediately before the one derived config swap.
+    changes = [(CONFIG, updated, args.config_sha256, 'sporting_proof')]
+    if source_update is not None:
+        changes.append((source_review.CONFIG, source_update, source_pin, 'source_review'))
+    writes = []
+    for path, value, pin, name in changes:
+        before = path.read_bytes(); info = path.stat()
+        if hashlib.sha256(before).hexdigest() != pin:
+            raise ValueError('proof capability changed before runtime update')
+        after = (json.dumps(value, sort_keys=True) + '\n').encode()
+        writes.append((path, before, after, info, name))
+    # Both capabilities share one guard. Capture only after both derived swaps.
     if capture_guard(layout,args.public_database)!=expected:
         raise ValueError('live authority changed before proof runtime swap')
+    completed = []
     try:
-        _atomic_write(CONFIG,after,info.st_mode&0o777);os.chown(CONFIG,info.st_uid,info.st_gid)
+        for path, before, after, info, name in writes:
+            if path.read_bytes() != before:
+                raise ValueError('proof capability changed before runtime swap')
+            _atomic_write(path,after,info.st_mode&0o777)
+            completed.append((path,before,after,info,name))
+            os.chown(path,info.st_uid,info.st_gid)
         if (verify_grants(args.database)!=source_grants or
-                verify_grants(args.canonical_database,CANONICAL_TABLES)!=canonical_grants):
+                verify_grants(args.canonical_database,CANONICAL_TABLES)!=canonical_grants or
+                (source_update is not None and source_review.verify_grants(args.database)!=source_review_grants)):
             raise ValueError('proof runtime update grants changed')
         current=copy.deepcopy(capture_guard(layout,args.public_database))
-        prior=expected['protected']['sporting_proof']
-        proof=current['protected']['sporting_proof']
-        if proof['config']['sha256']!=hashlib.sha256(after).hexdigest():
-            raise ValueError('proof runtime update configuration changed')
-        proof['config']['sha256']=prior['config']['sha256']
-        proof['runtime']=prior['runtime']
+        for path, before, after, info, name in writes:
+            prior=expected['protected'][name]
+            capability=current['protected'][name]
+            if capability['config']['sha256']!=hashlib.sha256(after).hexdigest():
+                raise ValueError('proof runtime update configuration changed')
+            capability['config']['sha256']=prior['config']['sha256']
+            capability['runtime']=prior['runtime']
         if current!=expected:raise ValueError('live authority changed during proof runtime update')
         return True
     except BaseException:
-        # Only undo our exact config write. Preserve concurrent newer capability writes.
-        if digest(CONFIG)==hashlib.sha256(after).hexdigest():
-            _atomic_write(CONFIG,before,info.st_mode&0o777);os.chown(CONFIG,info.st_uid,info.st_gid)
+        # Undo only our exact config writes. Never restore DB history or a newer config.
+        for path, before, after, info, name in reversed(completed):
+            if digest(path)==hashlib.sha256(after).hexdigest():
+                _atomic_write(path,before,info.st_mode&0o777);os.chown(path,info.st_uid,info.st_gid)
         raise
+
 
 
 def main():
@@ -301,6 +336,7 @@ def main():
     parser.add_argument('--verify', action='store_true')
     parser.add_argument('--update-runtime', action='store_true')
     parser.add_argument('--config-sha256')
+    parser.add_argument('--source-review-config-sha256')
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--runtime-manifest-sha256')
     parser.add_argument('--app-manifest', type=Path)
@@ -312,6 +348,8 @@ def main():
     parser.add_argument('--canonical-database', default=CANONICAL_DATABASE)
     args = parser.parse_args()
     try:
+        if args.source_review_config_sha256 and not (args.execute and args.update_runtime):
+            raise ValueError('source review config pin requires guarded runtime update')
         if args.verify and (args.execute or args.update_runtime):
             raise ValueError('choose one proof capability action')
         if args.verify:

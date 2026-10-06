@@ -191,3 +191,106 @@ class SportingProofPostgresTests(SportingProofCapabilityTests):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SportingProofCoupledReviewUpdateTests(SportingProofCapabilityTests):
+    def test_shared_runtime_swap_preserves_both_credentials_and_refuses_stale_or_concurrent_authority(self):
+        helper = self.helper()
+        import provision_source_review as source_review
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            old, new = root / 'old', root / 'new'
+            for runtime, candidate in ((old, 'a' * 40), (new, 'b' * 40)):
+                runtime.mkdir()
+                code = runtime / 'src/freediving/source_accuracy_review.clj'
+                code.parent.mkdir(parents=True)
+                code.write_text('(ns freediving.source-accuracy-review)\n')
+                (runtime / 'manifest.json').write_text(json.dumps({'candidate': candidate,
+                    'files': {'src/freediving/source_accuracy_review.clj': helper.digest(code)}}))
+            config, source_config = root / 'proof.json', root / 'review.json'
+            value = {'database': 'source', 'canonical_database': 'canonical',
+                     'jdbc_url': 'private-proof-credential', 'canonical_jdbc_url': 'private-canonical-credential',
+                     'runtime_path': str(old), 'runtime_manifest_sha256': helper.digest(old / 'manifest.json')}
+            source_value = {'database': 'source', 'jdbc_url': 'private-review-credential',
+                            'runtime_path': str(old), 'runtime_manifest_sha256': helper.digest(old / 'manifest.json')}
+            for path, record in ((config, value), (source_config, source_value)):
+                path.write_text(json.dumps(record, sort_keys=True) + '\n')
+                path.chmod(0o640)
+            original = {path: path.read_bytes() for path in (config, source_config)}
+            authority = {'events': 227}
+            def guard(*unused):
+                protected = {}
+                for name, path in (('sporting_proof', config), ('source_review', source_config)):
+                    current = json.loads(path.read_text())
+                    runtime = Path(current['runtime_path'])
+                    info = path.stat()
+                    protected[name] = {'config': {'path': str(path), 'sha256': helper.digest(path),
+                        'uid': info.st_uid, 'gid': info.st_gid, 'mode': info.st_mode & 0o777},
+                        'runtime': {'path': str(runtime), 'files': {},
+                            'candidate': json.loads((runtime / 'manifest.json').read_text())['candidate']},
+                        'source_grants': {'exact': 11}}
+                if protected['sporting_proof']['runtime'] != protected['source_review']['runtime']:
+                    raise ValueError('shared runtime mismatch')
+                return {'schema': 'private-comparison-activation-guard/v1',
+                        'authority': dict(authority), 'protected': protected}
+            app = root / 'app.json'; app.write_text(json.dumps({'candidate': 'b' * 40}))
+            guard_file = root / 'guard.json'; guard_file.write_text(json.dumps(guard()))
+            args = argparse.Namespace(runtime=new, runtime_manifest_sha256=helper.digest(new / 'manifest.json'),
+                app_manifest=app, app_manifest_sha256=helper.digest(app), guard=guard_file,
+                guard_sha256=helper.digest(guard_file), config_sha256=helper.digest(config),
+                source_review_config_sha256=helper.digest(source_config), database='source',
+                canonical_database='canonical', public_database='source')
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(helper, 'CONFIG', config))
+                stack.enter_context(patch.object(source_review, 'CONFIG', source_config))
+                stack.enter_context(patch.object(helper.os, 'geteuid', return_value=0))
+                stack.enter_context(patch.object(helper.os, 'chown'))
+                stack.enter_context(patch.object(helper, 'verify_config', side_effect=lambda path: json.loads(path.read_text())))
+                stack.enter_context(patch.object(source_review, 'verify_config', side_effect=lambda path: json.loads(path.read_text())))
+                stack.enter_context(patch.object(helper, 'verify_grants', return_value={'exact': 11}))
+                grants = stack.enter_context(patch.object(source_review, 'verify_grants', return_value={'exact': '11+2'}))
+                stack.enter_context(patch('comparison_activate.capture_guard', side_effect=guard))
+                correct_source_pin = args.source_review_config_sha256
+                args.source_review_config_sha256 = '0' * 64
+                with self.assertRaisesRegex(ValueError, 'source review config pin'):
+                    helper.update_runtime(args)
+                for path in original: self.assertEqual(path.read_bytes(), original[path])
+                args.source_review_config_sha256 = correct_source_pin
+                self.assertTrue(helper.update_runtime(args))
+                for path, prior in ((config, value), (source_config, source_value)):
+                    updated = json.loads(path.read_text())
+                    self.assertEqual(updated['runtime_path'], str(new))
+                    self.assertEqual({k:v for k,v in updated.items() if not k.startswith('runtime_')},
+                                     {k:v for k,v in prior.items() if not k.startswith('runtime_')})
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+                with self.assertRaises(ValueError): helper.update_runtime(args)
+                for path in original: path.write_bytes(original[path])
+                # Post-swap elevation rolls back our exact two derived configs only.
+                grants.side_effect = [{'exact': '11+2'}, ValueError('widened source grant')]
+                with self.assertRaisesRegex(ValueError, 'widened source grant'): helper.update_runtime(args)
+                for path in original: self.assertEqual(path.read_bytes(), original[path])
+                grants.side_effect = None
+                calls = [0]
+                def changing_guard(*unused):
+                    calls[0] += 1
+                    if calls[0] >= 3: authority['events'] = 228
+                    return guard()
+                with patch('comparison_activate.capture_guard', side_effect=changing_guard):
+                    with self.assertRaisesRegex(ValueError, 'during proof runtime update'): helper.update_runtime(args)
+                self.assertEqual(authority['events'], 228)
+                for path in original: self.assertEqual(path.read_bytes(), original[path])
+                authority['events'] = 227
+                # A newer config written externally is retained, never replaced on failure.
+                newer = {**source_value, 'jdbc_url': 'concurrent-private-review-credential'}
+                def concurrent_grants(*unused):
+                    source_config.write_text(json.dumps(newer, sort_keys=True) + '\n')
+                    raise ValueError('concurrent capability')
+                n = [0]
+                def concurrent_verify(*unused):
+                    n[0] += 1
+                    if n[0] == 2: return concurrent_grants()
+                    return {'exact': '11+2'}
+                grants.side_effect = concurrent_verify
+                with self.assertRaisesRegex(ValueError, 'concurrent capability'): helper.update_runtime(args)
+                self.assertEqual(json.loads(source_config.read_text()), newer)
+                self.assertEqual(config.read_bytes(), original[config])
