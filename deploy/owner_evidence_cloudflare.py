@@ -67,7 +67,8 @@ def parse_origin_env(content):
                    'OWNER_EVIDENCE_STATUS_CLIENT_ID'}
     queue_keys = {'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE', 'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'}
     import_keys = {'OWNER_EVIDENCE_IMPORT_TOKEN', 'OWNER_EVIDENCE_IMPORT_CLIENT_ID'}
-    allowed = required | status_keys | queue_keys | import_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED'}
+    allowed = required | status_keys | queue_keys | import_keys | {'OWNER_EVIDENCE_DECISION_API_ENABLED',
+                                                                'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'}
     if (not required <= values.keys() or set(values) - allowed or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
             values['OWNER_EVIDENCE_ORIGIN_HOST'] != PRIVATE_HOST):

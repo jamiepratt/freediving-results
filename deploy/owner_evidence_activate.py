@@ -23,7 +23,7 @@ import urllib.request
 
 SERVICE = 'freediving-owner-evidence.service'
 HEALTH_STARTUP_TIMEOUT = 30
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/owner_decision_store.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/owner_decision_store.py',
          'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
          'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
          'scripts/cmas_microplus_finalize.py',
@@ -35,6 +35,7 @@ FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_statu
 REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGIN_HOST',
                           'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
 LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
+                                   'scripts/private_canonical_status.py',
                                    'scripts/owner_decision_store.py',
                                    'scripts/aida_snapshot_observations.py',
                                    'scripts/issue55_aida_selected_html.py',
@@ -82,6 +83,7 @@ def _config(path, owner_uid, expected):
                                           'OWNER_EVIDENCE_IMPORT_CLIENT_ID',
                                           'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                                           'OWNER_EVIDENCE_STATUS_CLIENT_ID',
+                                          'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
@@ -89,6 +91,10 @@ def _config(path, owner_uid, expected):
             not re.fullmatch(r'[a-f0-9]{64}', values['OWNER_EVIDENCE_SNAPSHOT_SHA256'])):
         raise ValueError('private environment does not match snapshot')
     secret = values['OWNER_EVIDENCE_GATEWAY_SECRET']
+    if ('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG' in values and
+            values['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'] !=
+            '/var/lib/freediving-owner-evidence/canonical-reader/config.json'):
+        raise ValueError('invalid private canonical status configuration')
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
     if not (16 <= len(secret) <= 256 and secret.isascii() and
@@ -151,6 +157,30 @@ def _roster_inputs(source, expected, snapshot_digest):
             roster.get('schema') != 'issue55-route-roster/v1' or
             _sha(source / 'roster.json') != expected):
         raise ValueError('roster manifest or content differs from pinned snapshot')
+
+
+def _canonical_reader_inputs(bundle, values):
+    name = values.get('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG')
+    if not name:
+        return
+    _regular(Path(name))
+    config = json.loads(Path(name).read_text())
+    runtime_manifest = Path(config['runtime_path']) / 'manifest.json'
+    _regular(runtime_manifest)
+    if _sha(runtime_manifest) != config['runtime_manifest_sha256']:
+        raise ValueError('canonical reader runtime pin changed')
+    manifest_path = bundle / 'private-owner-manifest.json'
+    _regular(manifest_path)
+    if json.loads(runtime_manifest.read_text())['candidate'] != json.loads(manifest_path.read_text())['candidate']:
+        raise ValueError('canonical reader runtime differs from private code candidate')
+    code = ('import sys;sys.path.insert(0,sys.argv[1]);'
+            'from private_canonical_status import create_reader;'
+            'r=create_reader({"OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG":sys.argv[2]})();'
+            'assert r["scopes"].get("same_attempt");print("verified")')
+    result = subprocess.run(['python3', '-I', '-c', code, str(bundle / 'scripts'), name],
+                            capture_output=True, timeout=15)
+    if result.returncode or result.stdout.strip() != b'verified':
+        raise ValueError('canonical status read capability unavailable')
 
 
 def _source_bundle_inputs(code, source, expected, snapshot_digest):
@@ -622,6 +652,7 @@ def activate(bundle, source, expected, layout, *, roster_source=None, expected_r
             if line.startswith(prior_assignment) else line
             for line in candidate_config.splitlines(keepends=True))
     _inputs(bundle, source, expected)
+    _canonical_reader_inputs(bundle, values)
     if bool(roster_source) != bool(expected_roster_sha256):
         raise ValueError('roster staging inputs incomplete')
     if roster_source:

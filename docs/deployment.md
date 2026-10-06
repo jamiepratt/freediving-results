@@ -203,6 +203,42 @@ Public services restart after failure and reboot.
 
 ## Operations and rollback
 
+### Private canonical status reader
+
+The owner origin accepts `OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG` only at
+`/var/lib/freediving-owner-evidence/canonical-reader/config.json`. This root-owned
+0640 file, readable by the `freediving-evidence` group, selects the canonical
+database, frozen export files and a separately pinned JVM runtime. It contains a
+dedicated database credential and stays on the host. The reader passes credentials
+to the JVM through stdin and suppresses child diagnostics.
+
+From an exact clean committed checkout, package that runtime outside the repository:
+
+```sh
+python3 deploy/canonical_status_runtime.py --candidate <commit> --output /private/canonical-runtime
+```
+
+The manifest binds nine Clojure sources and five pinned JARs. The JVM needs Java 17+;
+it uses one visible processor, Serial GC and a 256 MiB heap. Activation verifies
+that runtime and private code share the exact candidate commit, then verifies the
+configured read capability before changing active links. Staging the runtime,
+frozen export and config is a separate operator checkpoint from snapshot activation.
+
+`deploy/provision_canonical_status_reader.py` prepares the host capability explicitly.
+Its default prints effects; `--execute` creates `canonical_status_read` with only
+SELECT on the nine required canonical tables and writes the private config. It
+requires exact snapshot, runtime manifest, export and existing status hashes.
+Existing config or role refuses creation; verify and reuse it rather than rotating
+credentials during reruns. Authorize this capability/config change with the code
+and status refresh. This helper changes no canonical evidence or owner history.
+
+Identity and same-attempt readbacks use their existing replay and projection
+verifiers in read-only repeatable-read transactions. A failed scope stays unknown.
+The attempt receipt additionally requires exact frozen export proposals and owner
+event bindings. An identity view requiring rebuild cannot become current through
+a status refresh. Roll back only derived status/code/config after checking current
+owner and canonical guards; retain later human history and the read capability.
+
 ```sh
 ssh bridge-vps 'sudo systemctl status freediving-public freediving-tunnel'
 ssh bridge-vps 'sudo journalctl -u freediving-public -n 30 --no-pager'

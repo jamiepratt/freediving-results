@@ -225,6 +225,27 @@
                                                 (fail! "Canonical attempt store is uninitialized"))
                            projection (relationships/project-attempts ledger)]
                        projection))))
+(defn private-readback
+  "Verify immutable evidence, replayed events and materialization in one read-only
+   repeatable-read transaction. A SELECT-only capability needs no advisory lock."
+  [url]
+  (with-open [connection (DriverManager/getConnection url)]
+    (.setAutoCommit connection false)
+    (.setReadOnly connection true)
+    (.setTransactionIsolation connection Connection/TRANSACTION_REPEATABLE_READ)
+    (try
+      (let [{:keys [state ledger]} (or (some-> (read-current connection) check-view!)
+                                       (fail! "Canonical attempt store is uninitialized"))
+            database (:database (first (query connection "SELECT current_database() AS database")))
+            raw-events (query connection "SELECT revision,id,body_edn FROM freediving.canonical_attempt_events ORDER BY revision")
+            raw-evidence (first (query connection "SELECT body_edn FROM freediving.canonical_attempt_evidence WHERE digest=?"
+                                       (:evidence_digest state)))
+            result {:database database :ledger ledger
+                    :projection (relationships/project-attempts ledger)
+                    :evidence-sha256 (digest {:evidence (:body_edn raw-evidence)
+                                              :events raw-events :state state})}]
+        (.commit connection) result)
+      (catch Exception error (.rollback connection) (throw error)))))
 (defn rebuild!
   "Recover a partial/stale private projection from immutable evidence and events."
   [url]

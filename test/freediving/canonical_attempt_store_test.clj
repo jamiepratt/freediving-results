@@ -17,6 +17,20 @@
     (reviews/migrate! admin "observations_app" "reviews_owner")
     (f)))
 
+(deftest canonical-readback-uses-a-select-only-capability-and-refuses-a-stale-view
+  (let [base (source-fixture/attempt-fixture)
+        public (System/getenv "FREEDIVING_TEST_PUBLIC_URL")]
+    (store/persist! app base)
+    (fixture/sql! admin "GRANT USAGE ON SCHEMA freediving TO reviews_public")
+    (fixture/sql! admin "GRANT SELECT ON freediving.canonical_attempt_evidence, freediving.canonical_attempt_events, freediving.canonical_attempt_state TO reviews_public")
+    (let [readback (store/private-readback public)]
+      (is (= base (:ledger readback)))
+      (is (= (relationships/project-attempts base) (:projection readback)))
+      (is (= "observations_test" (:database readback)))
+      (is (re-matches #"[0-9a-f]{64}" (:evidence-sha256 readback))))
+    (fixture/sql! app "UPDATE freediving.canonical_attempt_state SET projection_edn='{}'")
+    (is (thrown? clojure.lang.ExceptionInfo (store/private-readback public)))))
+
 (deftest durable-attempt-revision-and-private-count-recover
   (let [base (source-fixture/attempt-fixture)
         revision {:id "source-revision" :action :accept :type :source-revision
