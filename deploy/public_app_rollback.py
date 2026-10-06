@@ -14,6 +14,7 @@ from prepare_database import endpoint, read_config
 
 VIEW='freediving.public_sporting_comparison'
 BASE_SELECT=['freediving.public_event_coverage','freediving.public_results']
+BRIDGE_TABLES={'public_sporting_bridge_receipts'}
 NEW_TABLES={'public_sporting_policy_events','public_sporting_authority_events','public_sporting_members'}
 
 @dataclass
@@ -79,6 +80,14 @@ def role_guard(state):
     if state['owner']!='freediving_migrator' or state['role']['unsafe'] or sorted(state['role']['select']) not in (BASE_SELECT, sorted(BASE_SELECT+[VIEW])):raise ValueError('Public role boundary changed')
     if state['view'] is not None and state['view']!={'kind':'v','owner':'freediving_migrator'}:raise ValueError('Sporting view owner changed')
 
+def bridge_files(layout):
+    paths=[layout.config/'sporting-authority.env']
+    directory=layout.config/'sporting-authority'
+    if directory.is_symlink():raise ValueError('Linked sporting capability directory')
+    if directory.exists():paths.extend(sorted(directory.rglob('*')))
+    if any(p.is_symlink() for p in paths):raise ValueError('Linked sporting capability input')
+    return {str(p.relative_to(layout.config)):{'sha256':sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists() if not p.is_dir()}
+
 def capture(candidate,layout=Layout(),reader=None):
     candidate=release(candidate,layout)
     if not layout.current.is_symlink():raise ValueError('Prior app pointer absent')
@@ -86,8 +95,8 @@ def capture(candidate,layout=Layout(),reader=None):
     prior_unit=sha(previous/'deploy/freediving-public.service')
     if sha(layout.unit)!=prior_unit:raise ValueError('Installed prior unit differs')
     state=(reader or (lambda:read_state(layout)))();role_guard(state)
-    if set(state['versions']) not in ({str(n) for n in range(1,22)},{str(n) for n in range(1,23)}):raise ValueError('Exact supported migration set required')
-    return {'schema':'public-derived-rollback/v1','candidate':str(candidate),'previous':str(previous),'candidate_tree':tree_digest(candidate),'previous_tree':tree_digest(previous),'candidate_migration_22':sha(candidate/'resources/migrations/022-public-sporting-comparison.sql'),'candidate_unit':sha(candidate/'deploy/freediving-public.service'),'previous_unit':prior_unit,'configs':{name:sha(layout.config/name) for name in ('public.env','migration.env')},'state':state}
+    if set(state['versions']) not in tuple({str(n) for n in range(1,end)} for end in (22,23,24)):raise ValueError('Exact supported migration set required')
+    return {'schema':'public-derived-rollback/v1','candidate':str(candidate),'previous':str(previous),'candidate_tree':tree_digest(candidate),'previous_tree':tree_digest(previous),'candidate_migration_22':sha(candidate/'resources/migrations/022-public-sporting-comparison.sql'),'candidate_migration_23':sha(candidate/'resources/migrations/023-sporting-authority-bridge.sql') if (candidate/'resources/migrations/023-sporting-authority-bridge.sql').exists() else None,'bridge_files':bridge_files(layout),'candidate_unit':sha(candidate/'deploy/freediving-public.service'),'previous_unit':prior_unit,'configs':{name:sha(layout.config/name) for name in ('public.env','migration.env')},'state':state}
 
 def assess(checkpoint,candidate,layout=Layout(),reader=None):
     candidate=release(candidate,layout)
@@ -99,14 +108,23 @@ def assess(checkpoint,candidate,layout=Layout(),reader=None):
     if sha(previous/'deploy/freediving-public.service')!=checkpoint['previous_unit']:raise ValueError('Previous unit changed')
     if {name:sha(layout.config/name) for name in checkpoint['configs']}!=checkpoint['configs']:raise ValueError('Configuration changed')
     if sha(candidate/'resources/migrations/022-public-sporting-comparison.sql')!=checkpoint['candidate_migration_22']:raise ValueError('Candidate migration changed')
+    if bridge_files(layout)!=checkpoint.get('bridge_files',{}):raise ValueError('Sporting capability configuration changed')
     current=(reader or (lambda:read_state(layout)))();role_guard(current)
     before=checkpoint['state'];role_guard(before)
     if current['database']!=before['database'] or current['port']!=before['port']:raise ValueError('Database changed')
-    if current['versions']!={**before['versions'],'22':checkpoint['candidate_migration_22']}:raise ValueError('Migration checksum changed')
+    expected={**before['versions'],'22':checkpoint['candidate_migration_22']}
+    bridge=checkpoint.get('candidate_migration_23')
+    if bridge:
+        if sha(candidate/'resources/migrations/023-sporting-authority-bridge.sql')!=bridge:raise ValueError('Candidate bridge migration changed')
+        expected['23']=bridge
+    if current['versions']!=expected:raise ValueError('Migration checksum changed')
+    if bridge and not (previous/'resources/migrations/023-sporting-authority-bridge.sql').exists():
+        if checkpoint.get('bridge_files') or any(current['tables'].get(name,{}).get('count',0)>0 for name in ('public_sporting_authority_events','public_sporting_members','public_sporting_bridge_receipts')):
+            raise ValueError('Prior unguarded app cannot serve live sporting authority; keep guarded candidate')
     if not set(before['tables'])<=set(current['tables']):raise ValueError('Retained table missing')
     if any(current['tables'][name]!=value for name,value in before['tables'].items()):raise ValueError('Retained authority/data changed')
     added=set(current['tables'])-set(before['tables'])
-    if added not in (set(),NEW_TABLES):raise ValueError('Unexpected added table')
+    if added not in (set(),NEW_TABLES,BRIDGE_TABLES,NEW_TABLES|BRIDGE_TABLES):raise ValueError('Unexpected added table')
     if sorted(before['role']['select'])==BASE_SELECT:
         if current['policy']!=[{'revision':1,'policy_version':'aida-baseline-v1','db_role':'freediving_migrator'}]:raise ValueError('Sporting policy changed')
         if current['tables'].get('public_sporting_policy_events',{}).get('count')!=1 or any(current['tables'].get(name,{}).get('count')!=0 for name in NEW_TABLES-{'public_sporting_policy_events'}):raise ValueError('Sporting facts require a new rollback assessment')

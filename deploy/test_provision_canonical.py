@@ -138,7 +138,7 @@ class ProvisionCanonicalTests(unittest.TestCase):
         module = load()
         expected = module.expected_migrations()
         current_order = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20, 21,
-                         3, 4, 5, 6, 8, 9, 10, 19, 22)
+                         3, 4, 5, 6, 8, 9, 10, 19, 22, 23)
         for count in range(len(current_order) + 1):
             with self.subTest(count=count):
                 module.verify_target_versions({n: expected[n] for n in current_order[:count]}, expected)

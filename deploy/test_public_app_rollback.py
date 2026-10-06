@@ -38,6 +38,39 @@ class PublicRollbackTests(unittest.TestCase):
             live['role']['select'].append(rollback.VIEW)
             yield prior,candidate,layout,before,live,checkpoint
 
+    def test_schema_twenty_three_absent_authority_allows_empty_prior_app(self):
+        with self.case() as (prior,candidate,layout,before,live,checkpoint):
+            migration=candidate/'resources/migrations/023-sporting-authority-bridge.sql'
+            migration.write_text('bridge')
+            layout.current.unlink();layout.current.symlink_to(prior)
+            layout.unit.write_bytes((prior/'deploy/freediving-public.service').read_bytes())
+            before=copy.deepcopy(live)
+            checkpoint=rollback.capture(candidate,layout,reader=lambda:copy.deepcopy(before))
+            layout.current.unlink();layout.current.symlink_to(candidate)
+            layout.unit.write_bytes((candidate/'deploy/freediving-public.service').read_bytes())
+            live['versions']['23']=rollback.sha(migration)
+            live['tables']['public_sporting_bridge_receipts']={'count':0,'sha256':'empty'}
+            rollback.rollback(checkpoint,candidate,layout,reader=lambda:copy.deepcopy(live))
+            self.assertEqual(layout.current.resolve(),prior.resolve())
+            self.assertIn('23',live['versions'])
+
+    def test_live_bridge_or_retained_facts_refuse_prior_unguarded_app(self):
+        for configured in (False,True):
+            with self.subTest(configured=configured),self.case() as (prior,candidate,layout,before,live,checkpoint):
+                migration=candidate/'resources/migrations/023-sporting-authority-bridge.sql'
+                migration.write_text('bridge')
+                if configured:(layout.config/'sporting-authority.env').write_text('configured')
+                layout.current.unlink();layout.current.symlink_to(prior)
+                layout.unit.write_bytes((prior/'deploy/freediving-public.service').read_bytes())
+                checkpoint=rollback.capture(candidate,layout,reader=lambda:copy.deepcopy(live))
+                layout.current.unlink();layout.current.symlink_to(candidate)
+                layout.unit.write_bytes((candidate/'deploy/freediving-public.service').read_bytes())
+                live['versions']['23']=rollback.sha(migration)
+                live['tables']['public_sporting_bridge_receipts']={'count':0 if configured else 1,'sha256':'retained'}
+                with self.assertRaisesRegex(ValueError,'unguarded'):
+                    rollback.rollback(checkpoint,candidate,layout,reader=lambda:copy.deepcopy(live))
+                self.assertEqual(layout.current.resolve(),candidate.resolve())
+
     def test_old_app_restarts_after_new_grant_without_restoring_data(self):
         with self.case() as (prior,candidate,layout,before,live,checkpoint):
             calls=[]

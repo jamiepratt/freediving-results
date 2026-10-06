@@ -1,6 +1,7 @@
 """Guarded migration-only operator boundary, with synthetic dependencies."""
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -29,22 +30,22 @@ class MigrationOnlyTests(unittest.TestCase):
             self.assertNotIn(command, wrapper)
 
     def test_release_has_exact_checksums_and_refuses_partial_or_altered_database(self):
-        expected = module.expected_migrations()
-        self.assertEqual(set(expected), set(range(1, 23)))
+        with tempfile.TemporaryDirectory() as tmp:
+            migrations=Path(tmp)/'migrations'
+            shutil.copytree(module.MIGRATION_DIR,migrations)
+            (migrations/'023-sporting-authority-bridge.sql').write_text('synthetic migration23')
+            with mock.patch.object(module,'MIGRATION_DIR',migrations):
+                expected = module.expected_migrations()
+        self.assertEqual(set(expected), set(range(1, 24)))
         self.assertEqual(expected[6], '53c690232ff844de6237b7e82c9bdc4b5996c19ac77a38aff2598ab779f07b92')
         self.assertEqual(expected[21], '4ac5a9b06e10b8785500e4bf7009c392a1d9562ea6aaf626c6620d26e18c5939')
-        self.assertEqual(module.verify_versions({n: expected[n] for n in range(1, 8)}, expected,
-                                                (set(range(1, 8)), set(range(1, 21)), set(range(1, 23)))), 7)
-        self.assertEqual(module.verify_versions({n: expected[n] for n in range(1, 21)}, expected,
-                                                (set(range(1, 8)), set(range(1, 21)), set(range(1, 23)))), 20)
-        self.assertEqual(module.verify_versions(expected, expected,
-                                                (set(range(1, 8)), set(range(1, 21)), set(range(1, 23)))), 22)
-        for actual in ({n: expected[n] for n in range(1, 7)},
-                       {**expected, 23: 'extra'},
-                       {**expected, 7: 'altered'}):
-            with self.subTest(actual=actual), self.assertRaises(ValueError):
-                module.verify_versions(actual, expected,
-                                       (set(range(1, 8)), set(range(1, 21)), set(range(1, 23))))
+        allowed=tuple(set(range(1,n)) for n in (8,21,23,24))
+        self.assertEqual(module.verify_versions({n:expected[n] for n in range(1,8)},expected,allowed),7)
+        self.assertEqual(module.verify_versions({n:expected[n] for n in range(1,21)},expected,allowed),20)
+        self.assertEqual(module.verify_versions(expected,expected,allowed),23)
+        for actual in ({n: expected[n] for n in range(1,7)}, {**expected,24:'extra'}, {**expected,7:'altered'}):
+            with self.subTest(actual=actual),self.assertRaises(ValueError):
+                module.verify_versions(actual,expected,allowed)
 
     def test_private_backup_is_streamed_to_postgres_without_exposing_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,7 +164,7 @@ class MigrationOnlyTests(unittest.TestCase):
             self.assertEqual([call.args[0][0] for call in run.call_args_list], ['systemctl', 'systemctl'])
             self.assertEqual(os.readlink(current), str(snapshot))
 
-    def test_host_checkpoint_migrates_twenty_two_then_retries_without_public_mutation(self):
+    def test_host_checkpoint_migrates_twenty_three_then_retries_without_public_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             revision = 'a' * 40
@@ -176,8 +177,8 @@ class MigrationOnlyTests(unittest.TestCase):
                                    config_dir=root / 'config', backup_dir=backups,
                                    public_current=root / 'public', owner_current=root / 'owner',
                                    owner_status=root / 'status')
-            expected = {n: 'digest' for n in range(1, 23)}
-            versions = {n: 'digest' for n in range(1, 22)}
+            expected = {n: 'digest' for n in range(1, 24)}
+            versions = {n: 'digest' for n in range(1, 23)}
             events = []
 
             def fake_run(argv, **kwargs):
@@ -215,7 +216,7 @@ class MigrationOnlyTests(unittest.TestCase):
                  mock.patch.object(module, 'verify_roles'), \
                  mock.patch.object(module, 'version_state', side_effect=lambda *a: dict(versions)), \
                  mock.patch.object(module, 'counts', side_effect=lambda _db, _port, tables:
-                                   (3, 5) if tables == module.SOURCE_TABLES else (1, 0, 0) if tables == module.SPORTING_TABLES else
+                                   (3, 5) if tables == module.SOURCE_TABLES else (1, 0, 0) if tables == module.SPORTING_TABLES else (0,) if tables==module.BRIDGE_TABLES else
                                    (0, 0, 0, 0, 0, 0, 81)), \
                  mock.patch.object(module, 'deployment_state', return_value=('prior-release', 'owner-state')), \
                  mock.patch.object(module, 'ensure_private_dir', side_effect=fake_private_dir), \

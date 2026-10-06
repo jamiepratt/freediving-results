@@ -40,7 +40,7 @@ bash deploy/release.sh
 The normal workflow packages only source, resources, deployment scripts and pinned
 JAR dependencies. On an existing host it uses the guarded migration checkpoint below:
 exact checksum preflight, fresh root-private backup and disposable restore drill,
-then all 21 checksummed migrations without seeding data. A first host install creates
+then all 23 checksummed migrations without seeding data. A first host install creates
 an empty database and uses the bootstrap backup/migration path. It switches the
 release, verifies readiness, provisions the tunnel/DNS idempotently, publishes the
 Worker and verifies the custom domain.
@@ -627,8 +627,65 @@ open until remote checks and the wider UI acceptance are complete.
 
 ## Empty public sporting projection
 
-The normal deployment applies exact checksum-guarded migrations 1-22. Migration 22 creates a separate public sporting fact ledger and safe derived view without inserting sporting approvals, source selections or attempts. The public reader receives only `SELECT` on `public_results`, `public_event_coverage` and `public_sporting_comparison`; no sporting ledger, member, private canonical or function capability is granted. Startup and subsequent sporting requests reject widened database capabilities.
+The normal deployment applies exact checksum-guarded migrations 1-23. Migration 22 creates a separate public sporting fact ledger and safe derived view without inserting sporting approvals, source selections or attempts. The public reader receives only `SELECT` on `public_results`, `public_event_coverage` and `public_sporting_comparison`; no sporting ledger, member, private canonical or function capability is granted. Startup and subsequent sporting requests reject widened database capabilities.
 
 The guarded migration checkpoint preserves all existing public/source counts and existing sporting counts. Its first migration expects one initial scoring-policy event and zero sporting authority/member rows. Schema-current retries rerun idempotent deployment configuration to restore the exact new-view grant after an application rollback. Changing that grant is separate from changing source or owner authority.
 
 A prior application that predates the new view rejects its reader grant. Application rollback must therefore revoke only the new derived-view reader grant before restarting the prior application, under the normal activation checkpoint. The additive schema stays installed. Do not restore a database dump over newer owner events or public records. The initial empty sporting projection and source-record preservation are code/runtime evidence, not proof of real current sporting eligibility; those gates remain [issue #194](https://github.com/jamiepratt/freediving-results/issues/194).
+
+## Current sporting authority bridge
+
+The normal public release applies exact migrations 1-23. Migration23 adds an
+immutable signed-delivery receipt ledger and binds sporting facts to those
+receipts. It creates no real reviews, members or selections. The public role
+retains exactly its three projection SELECT grants. Private canonical reader
+permissions stay unchanged.
+
+Public sporting reads require a fresh challenge-bound Ed25519 response from the
+private owner service. Missing configuration, unavailable authority, changed
+revision, expiry or signature mismatch withholds ranks and refuses old detail or
+peer links. Preparing a local sporting snapshot alone cannot establish current
+private authority. The request HMAC credential grants loopback transport access;
+it cannot sign source decisions.
+
+Install matching private owner code through its existing guarded activation,
+including `sporting_authority.py` and `sporting_authority_http.py`. Keep the frozen
+source snapshot, canonical reader/runtime, owner history and existing feed pins.
+From the exact staged public release, prepare the separate host capability with
+fresh environment hashes. The command takes hashes, never secret values:
+
+```sh
+sudo -n python3 <release>/deploy/provision_sporting_authority.py prepare
+sudo -n python3 <release>/deploy/provision_sporting_authority.py prepare --execute \
+  --public-env-sha256 <sha256-of-/etc/freediving/public.env> \
+  --owner-env-sha256 <sha256-of-/var/lib/freediving-owner-evidence/active.env>
+sudo -n python3 <release>/deploy/provision_sporting_authority.py verify
+sudo -n systemctl daemon-reload
+sudo -n systemctl restart freediving-owner-evidence.service
+```
+
+Then use the normal committed `deploy/release.sh` path. Preparation generates the
+Ed25519 signer only on the host. Its private config/key/request credential are
+root/evidence-group0750/0640 under the separate sporting-bridge directory. Only
+its ledger child is service-owned0700 and writable. No source decision is seeded.
+The public config is root/public-group0750/0640 and contains only a pinned public
+verification key and independent request credential. Root-only optional environment
+files bind these capabilities without editing existing deployment secrets. A
+root-owned private unit drop-in adds only that configuration and writable ledger.
+Reusing unchanged capability files verifies their private receipt and permissions;
+partial setup or drift refuses overwrite. Preserve such files for assessment.
+
+Subsequent normal public activation verifies the installed capability before
+migration or switching code. Its rollback checkpoint pins the optional public
+bridge files. Rollback to an app preceding migration23 is permitted only with no
+bridge capability and zero sporting authority/member/receipt rows. Otherwise it
+refuses the old app because that app lacks the live read guard. Keep the guarded
+release and use a repaired guarded release for recovery. Rollback never restores
+a database or private ledger over newer human history.
+
+Genuine exact-evidence staging/review and authenticated source finality remain
+owner actions. The empty installed bridge is code/runtime evidence only;
+[issue #194](https://github.com/jamiepratt/freediving-results/issues/194) retains its
+real source, selection and live comparison acceptance gates.
+
+Private comparison activation also pins the optional bridge capability and queries its current committed SQLite schema and rows in a read-only transaction. Its checkpoint hashes these pins and table digests without backing up ledger bytes or keys. A changed signer, request capability, schema or genuine source event refuses stale activation or rollback before derived files change. A sporting capability added after an older checkpoint also requires a fresh assessment.

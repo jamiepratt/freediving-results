@@ -7,6 +7,7 @@ User=freediving
 Group=freediving
 WorkingDirectory=/opt/freediving/current
 EnvironmentFile=/etc/freediving/public.env
+EnvironmentFile=-/etc/freediving/sporting-authority.env
 ExecStart=/usr/bin/java -Xms64m -Xmx384m -cp src:resources:lib/* clojure.main -m freediving.public-server 8785
 Restart=on-failure
 RestartSec=5

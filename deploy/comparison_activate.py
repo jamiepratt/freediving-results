@@ -7,6 +7,7 @@ refuses to overwrite another deployment. Human status/history are never backed u
 or restored by this helper. Input packets and runtimes are staged separately.
 """
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -51,6 +52,39 @@ def _pg_tables(database):
     return result
 
 
+def capture_sporting_guard(layout):
+    """Pin capabilities and a transaction-consistent SQLite schema/row snapshot.
+
+    Neither signing keys nor ledger bytes are backed up or restored. WAL files
+    are deliberately excluded: query the actual current committed rows.
+    """
+    bridge=layout.state/'sporting-bridge'
+    paths=[bridge/name for name in ('config.json','signing.pem','request.key','provision.json')]
+    paths.extend([layout.config.parent/'sporting-owner.env',layout.config.parent/'sporting-authority.env',
+                  layout.config.parent/'sporting-authority/config.json',
+                  layout.units/'freediving-owner-evidence.service.d/sporting-authority.conf'])
+    if bridge.is_symlink() or any(p.is_symlink() for p in paths):raise ValueError('linked sporting guard input')
+    if not bridge.exists():
+        if any(p.exists() for p in paths):raise ValueError('partial sporting capability')
+        return None
+    # Host capability preparation writes all four core files before its receipt.
+    for path in paths[:4]:_regular(path)
+    ledger=bridge/'ledger/authority.sqlite'
+    if ledger.parent.is_symlink() or ledger.is_symlink():raise ValueError('linked sporting ledger')
+    state={'exists':ledger.exists(),'schema':None,'tables':{}}
+    if ledger.exists():
+        _regular(ledger)
+        with closing(sqlite3.connect('file:'+str(ledger)+'?mode=ro',uri=True)) as db:
+            db.execute('BEGIN')
+            state['schema']=hashlib.sha256(json.dumps(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name").fetchall(),separators=(',',':')).encode()).hexdigest()
+            for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall():
+                rows=db.execute('SELECT * FROM "'+name.replace('"','""')+'"').fetchall()
+                encoded=json.dumps(sorted(rows,key=repr),ensure_ascii=False,separators=(',',':'),default=lambda b:{'bytes':b.hex()})
+                state['tables'][name]={'count':len(rows),'sha256':hashlib.sha256(encoded.encode()).hexdigest()}
+            db.rollback()
+    return {'files':{str(p):{'sha256':_sha(p),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':p.stat().st_mode&0o777} for p in paths if p.exists()},'ledger':state}
+
+
 def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/current'),
                   public_configs=(Path('/etc/freediving/public.env'),Path('/etc/freediving/migration.env')),
                   table_reader=None):
@@ -78,6 +112,7 @@ def capture_guard(layout, public_database, *, public_app=Path('/opt/freediving/c
                        'comparison':_sha(comparison_path) if comparison_path.exists() else None},
             'protected':{'files':{str(path):_sha(path) for path in protected_paths},'canonical_runtime':{'path':str(runtime),'files':_tree(runtime)},
                          'public_app':{'path':str(public_current),'files':_tree(public_current)},'public_configs':{str(path):_sha(path) for path in public_configs}},
+            'sporting':capture_sporting_guard(layout),
             'authority':{'owner_tables':owner,'canonical_tables':table_reader('freediving_canonical'),'public_tables':table_reader(public_database)}}
 
 
@@ -212,6 +247,7 @@ def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
     record=json.loads((checkpoint/'record.json').read_text())
     if record['status'] not in ('active','pending'):raise ValueError('comparison checkpoint not rollbackable')
     if _sha(layout.units/SERVICE)!=record['unit_sha256']:raise ValueError('service unit changed; rollback refused')
+    if capture_sporting_guard(layout)!=record.get('sporting_guard'):raise ValueError('sporting authority changed; rollback refused')
     installed=layout.state/'comparison/config.json'
     current_app=str((layout.app/'current').resolve())
     allowed=(record['before'],record['after']) if record['status']=='pending' else (record['after'],)
@@ -268,7 +304,7 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
     (service_probe or _service_probe)(app,probe_config,owner_uid,owner_gid)
     # Runtime and packet are revalidated after the service-user read/execute probe.
     _comparison_config(config)
-    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
+    record={'schema':'private-comparison-activation-checkpoint/v1','status':'pending','before':before,'after':after,'candidate':manifest['candidate'],'unit_sha256':expected_guard['derived']['unit'],'sporting_guard':expected_guard.get('sporting'),'guard_sha256':hashlib.sha256(json.dumps(expected_guard,sort_keys=True).encode()).hexdigest()}
     # Last full authority/CAS read occurs after staging and immediately before swaps.
     if guard()!=expected_guard:raise ValueError('live guard changed before activation')
     _atomic_write(checkpoint/'record.json',json.dumps(record,sort_keys=True).encode(),0o600)
@@ -285,7 +321,7 @@ def activate_comparison(bundle, config, layout, expected_guard, *, guard,
         else:
             values=_read_values(contents['config']);_comparison_health(values)
         current=guard()
-        if (current['authority']!=expected_guard['authority'] or current['protected']!=expected_guard['protected'] or
+        if (current.get('sporting')!=expected_guard.get('sporting') or current['authority']!=expected_guard['authority'] or current['protected']!=expected_guard['protected'] or
             current['derived']['unit']!=expected_guard['derived']['unit'] or
             current['app']!={'path':after['app'],'files':after['app_files']} or
             any(current['derived'][key]!=after[key] for key in ('config','env','comparison'))):

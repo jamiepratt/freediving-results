@@ -18,9 +18,9 @@ MARKER = 'freediving-private-canonical-v1'
 NAME = 'freediving_canonical'
 MIGRATION_ORDER = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20,
                    3, 4, 5, 6, 8, 9, 10, 19)
-# Current shared deployment installs 21 during reviews, then public sporting schema 22 last.
+# Current shared deployment installs 21 during reviews, then public sporting schema22 and authority bridge23 last.
 CURRENT_MIGRATION_ORDER = (1, 7, 11, 2, 12, 13, 14, 15, 16, 17, 18, 20, 21,
-                           3, 4, 5, 6, 8, 9, 10, 19, 22)
+                           3, 4, 5, 6, 8, 9, 10, 19, 22, 23)
 
 
 def failure_message():

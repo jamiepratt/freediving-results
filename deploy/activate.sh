@@ -10,6 +10,9 @@ existing_deployment=0
 if [[ -f /etc/freediving/public.env ]]; then
   existing_deployment=1
 fi
+if [[ -e /etc/freediving/sporting-authority.env || -L /etc/freediving/sporting-authority.env ]]; then
+  python3 "$release/deploy/provision_sporting_authority.py" verify
+fi
 rollback_checkpoint=''
 if [[ "$existing_deployment" == 1 ]]; then
   install -d -m 0700 /var/backups/freediving

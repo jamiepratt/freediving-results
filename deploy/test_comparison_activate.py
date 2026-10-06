@@ -50,6 +50,34 @@ class ComparisonActivationTests(unittest.TestCase):
 
     def sha(self,path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
+    def test_sporting_schema_rows_and_key_pins_guard_activation_and_rollback(self):
+        bridge=self.layout.state/'sporting-bridge';bridge.mkdir()
+        for name in ('config.json','signing.pem','request.key','provision.json'):(bridge/name).write_text('synthetic '+name)
+        ledger=bridge/'ledger/authority.sqlite';ledger.parent.mkdir()
+        with sqlite3.connect(ledger) as db:
+            db.execute('CREATE TABLE sporting_events (revision INTEGER, action TEXT)')
+            db.execute("INSERT INTO sporting_events VALUES (1,'approved')")
+        pins=self.guard()
+        self.assertEqual(pins['sporting']['ledger']['tables']['sporting_events']['count'],1)
+        activate_comparison(self.new,self.config,self.layout,pins,**self.kw)
+        with sqlite3.connect(ledger) as db:db.execute("INSERT INTO sporting_events VALUES (2,'reversed')")
+        before=(self.layout.app/'current').resolve()
+        with self.assertRaisesRegex(ValueError,'sporting authority changed'):
+            rollback_comparison(self.layout,command=self.command)
+        self.assertEqual((self.layout.app/'current').resolve(),before)
+        with sqlite3.connect(ledger) as db:self.assertEqual(db.execute('SELECT max(revision) FROM sporting_events').fetchone()[0],2)
+
+    def test_changed_sporting_signer_and_new_capability_refuse_stale_activation_or_rollback(self):
+        activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
+        bridge=self.layout.state/'sporting-bridge';bridge.mkdir()
+        for name in ('config.json','signing.pem','request.key','provision.json'):(bridge/name).write_text('synthetic '+name)
+        (bridge/'ledger').mkdir()
+        with self.assertRaisesRegex(ValueError,'sporting authority changed'):
+            rollback_comparison(self.layout,command=self.command)
+        pins=self.guard();(bridge/'signing.pem').write_text('changed')
+        with self.assertRaisesRegex(ValueError,'live guard changed'):
+            activate_comparison(self.new,self.config,self.layout,pins,**self.kw)
+
     def test_activation_changes_only_private_app_and_comparison_configuration(self):
         result=activate_comparison(self.new,self.config,self.layout,self.pins,**self.kw)
         self.assertEqual(result,'activated')
