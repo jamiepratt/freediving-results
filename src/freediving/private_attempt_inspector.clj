@@ -278,10 +278,19 @@
                           :parsed-ok-count (count (filter #(= "Ok" (get-in % [:candidate :parsed :remarks])) aida))
                           :parsed-dq-count (count (filter #(str/starts-with? (get-in % [:candidate :parsed :remarks] "") "Dq") aida))}}))))
 
+(defn- inspect-input [body]
+  (let [input (json/read-str body :key-fn keyword)
+        packet (edn/read-string (:packet_edn input))
+        authority (when (:authority_edn input) (edn/read-string (:authority_edn input)))]
+    (inspect packet (:filters input) authority)))
+
 (defn -main [& [mode bundle cutoff]]
-  (if (= mode "prepare")
-    (prn (prepare-packet bundle cutoff))
-    (let [input (json/read-str (slurp *in*) :key-fn keyword)
-          packet (edn/read-string (:packet_edn input))
-          authority (when (:authority_edn input) (edn/read-string (:authority_edn input)))]
-      (println (json/write-str (inspect packet (:filters input) authority))))))
+  (case mode
+    "prepare" (prn (prepare-packet bundle cutoff))
+    "serve" (doseq [line (line-seq (java.io.BufferedReader. *in*))]
+              ;; Each line carries freshly verified packet and authority. Keep only
+              ;; the JVM/compiled contracts, never sporting results or parsed packets.
+              (println (json/write-str (try (inspect-input line)
+                                            (catch Exception _ {:error "Private comparison rejected"}))))
+              (flush))
+    (println (json/write-str (inspect-input (slurp *in*))))))

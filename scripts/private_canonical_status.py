@@ -4,7 +4,27 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
+import time
+
+try:
+    from private_attempt_inspector import _Runtime, _remaining, READ_BUDGET_SECONDS
+except ModuleNotFoundError:
+    # Runtime packaging imports this file by pathname from deploy/.
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location('canonical_transport', Path(__file__).with_name('private_attempt_inspector.py'))
+    _module = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_module)
+    _Runtime, _remaining, READ_BUDGET_SECONDS = _module._Runtime, _module._remaining, _module.READ_BUDGET_SECONDS
+
+# Reuse the existing pinned verifier without changing its runtime or retaining
+# status/results. The trusted app wrapper calls its public contract every line.
+SERVE = '''(require '[clojure.data.json :as json]
+                    '[freediving.private-canonical-status :as status])
+(doseq [line (line-seq (java.io.BufferedReader. *in*))]
+  (println (json/write-str
+             (try (status/read-status (json/read-str line :key-fn keyword))
+                  (catch Exception _ {:error "Private canonical readback unavailable"}))))
+  (flush))'''
 
 SOURCES = ('private_canonical_status', 'canonical_attempt_store', 'athlete_identity',
            'source_relationships', 'candidates', 'reconciliation_flow',
@@ -27,8 +47,9 @@ def create_reader(env, *, runtime=None):
             raise ValueError('private canonical configuration permissions invalid')
         return json.loads(path.read_text())
     config()
+    engine = _Runtime('private-canonical-status-readback/v1', 4096)
 
-    def read():
+    def verified():
         data = config()
         if (set(data) != {'jdbc_url', 'database', 'snapshot_sha256', 'exports',
                          'runtime_path', 'runtime_manifest_sha256'}
@@ -64,19 +85,28 @@ def create_reader(env, *, runtime=None):
                     or member.is_symlink() or not member.is_file()
                     or hashlib.sha256(member.read_bytes()).hexdigest() != digest):
                 raise ValueError('canonical verifier runtime changed')
+        return data, exports, selected_runtime
+
+    def read(*, deadline=None):
+        deadline = min(deadline if deadline is not None else float('inf'),
+                       time.monotonic() + READ_BUDGET_SECONDS)
+        _remaining(deadline)
+        data, exports, selected_runtime = verified()
         command = ['/usr/bin/java', '-Xmx256m', '-XX:ActiveProcessorCount=1', '-XX:+UseSerialGC', '-cp',
                    str(selected_runtime / 'src') + os.pathsep +
                    os.pathsep.join(str(selected_runtime / 'lib' / jar) for jar in JARS),
-                   'clojure.main', '-m', 'freediving.private-canonical-status']
-        result = subprocess.run(command, input=json.dumps({**data, 'exports': exports}),
-                                text=True, capture_output=True, timeout=60,
-                                env={key: value for key, value in os.environ.items()
-                                     if key not in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', 'CLASSPATH')})
-        if result.returncode or len(result.stdout) > 4096:
-            raise ValueError('canonical readback unavailable')
-        value = json.loads(result.stdout)
+                   'clojure.main', '-e', SERVE]
+        value = engine.exchange(command, {**data, 'exports': exports}, deadline,
+                                data['runtime_manifest_sha256'])
         if (value.get('schema') != 'private-canonical-status-readback/v1'
                 or value.get('snapshot_sha256') != data['snapshot_sha256']):
             raise ValueError('canonical readback binding changed')
+        fresh_data, fresh_exports, _ = verified()
+        if data != fresh_data or exports != fresh_exports:
+            raise ValueError('canonical pins changed during read')
+        _remaining(deadline)
         return value
+    read.close = engine.close
+    read.deadline_supported = True
+    read.diagnostics = engine.diagnostics
     return read

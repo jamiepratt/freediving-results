@@ -353,6 +353,19 @@ host package. Archive regular package files without directory/link members and
 retain the archive/config hashes separately. Extract a pinned archive through
 `deploy/private_archive_extract.py` into a new root-private incoming directory.
 
+Comparison and canonical readers each reuse one JVM with a 256 MiB heap and
+one processor. Each reader admits one executing request and at most two waiting
+requests; overload returns a retriable busy error. The whole read, including queue
+wait, uses an absolute 12 second budget within the edge's 15 second deadline.
+Timeout and reader shutdown terminate and reap the JVM. There are no background
+pipe threads. Canonical reuse calls the existing pinned verifier for every input;
+its runtime/config/export pins are unchanged. Both readers recheck their pins
+before and after execution. Comparison publication also rechecks exact authority
+expiry; the origin independently rereads live authority before publishing ranks.
+`reader.close()` is required at service shutdown. Bounded diagnostic events report
+only correlation ID, queue/execution milliseconds and outcome, without request
+inputs, source content, athlete names or credentials.
+
 On the host, use these commands with the deployed public database name and exact
 private paths/hashes. The staged config initially retains local package paths;
 `stage` relocates only the fixed package layout and installs immutable private
