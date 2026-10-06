@@ -35,3 +35,17 @@ python3 scripts/historical_cohort.py ingest PRIVATE_MANIFEST.json PRIVATE_2023_C
 `ingest` calls the same gate before opening the candidate census. When open, it validates that every candidate event belongs to 2023 and writes a private stage outside the repository using 0700 directories and a 0600 file. An existing output directory must already be private. It never writes a live source, canonical or public database. The public Python `ordinary_ingest` entrypoint applies the same gate. Its stage is not extraction approval, athlete identity approval or publication authorization. This entrypoint stages private evidence only; existing legacy importers are not universally intercepted. Existing raw parsers remain callable for explicit bounded historical format prototypes; those parser calls do not import an ordinary year cohort.
 
 The contract tests use synthetic URLs, fields and events. They verify fail-closed behavior and query/stage semantics, not retained source accuracy or genuine owner acceptance. Retained sample verification is separate evidence.
+
+## Bounded 2024 selected-view staging
+
+`historical_aida_stage.py` stages an explicitly selected 2024 AIDA HTML view:
+
+```sh
+python3 scripts/historical_aida_stage.py PRIVATE_SOURCE.html PRIVATE_RECEIPT.json PRIVATE_STAGE.json --expected-source-sha256 EXPECTED_SHA256
+```
+
+It replays `issue55_aida_selected_html.build`, verifies the expected original hash and active selected date, and retains every row, raw cell, original HTML and exact receipt. `historical-aida-selected-html/v1` binds private observation versions to original hash, parser version and row position. Parsed positions receive versions; malformed positions remain unresolved without versions. These are private JSON versions, with zero database imports. Category, finality and distinct attempts stay unknown; all rows stay unreviewed.
+
+Every stored view is reverified against its retained original and receipt before addition or replay. Exact replay leaves stage bytes and mtime unchanged. Altered source bytes, receipt bindings or staged fields fail closed, including an altered payload whose internal digest was recomputed. Output must be outside the repository, with private directories/files; stage symlinks are rejected. Serialize calls for a given output. Receipt/path bindings are immutable, so reacquisition requires a separate stage. The private external index/checkpoint binds the stage file itself; its internal digest alone is not an external trust anchor.
+
+This adapter accepts 2024 selected dates only. The ordinary 2023 `ingest` entrypoint remains gated above. Existing legacy raw parsers remain independently callable for explicit bounded format prototypes. Neither path supplies owner review, public eligibility or a human exception. [The dated Kaunas report](historical-kaunas-2024-views-20261007.md) separates raw positions, private staged versions and database imports.
