@@ -186,9 +186,9 @@ class ComparisonActivationTests(unittest.TestCase):
 
     def test_full_source_proof_503_rolls_back_derived_deployment_without_restoring_authority(self):
         values,bodies,requests,opener=SportingComparisonHealthTests().fixture(self.root)
-        bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']=urllib.error.HTTPError('http://synthetic',503,'Unavailable',{},None)
+        bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']=urllib.error.HTTPError('http://synthetic',503,'Unavailable',{'Retry-After':'1'},None)
         before=self.layout.config.read_bytes()
-        with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
+        with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener),mock.patch.object(comparison_activate.time,'sleep'):
             with self.assertRaises(urllib.error.HTTPError):
                 activate_comparison(self.new,self.config,self.layout,self.pins,
                     **{**self.kw,'health':lambda:comparison_activate._comparison_health(values)})
@@ -415,6 +415,7 @@ class SportingComparisonHealthTests(unittest.TestCase):
                 requests.append(request.full_url.split(':8081')[1])
                 self.assert_auth(request)
                 body=bodies[requests[-1]]
+                if callable(body):body=body()
                 if isinstance(body,Exception):raise body
                 return Response(json.dumps(body).encode())
             def assert_auth(self,request):
@@ -423,13 +424,38 @@ class SportingComparisonHealthTests(unittest.TestCase):
                 assert request.get_header('X-freediving-owner-email')=='owner@example.invalid'
         return values,bodies,requests,Opener()
 
-    def test_health_follows_ui_read_order_and_accepts_explicit_unmapped_diagnostics(self):
+    def test_health_warms_review_and_inspector_before_exact_proofs_and_accepts_unmapped_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
             values,bodies,requests,opener=self.fixture(Path(directory))
             with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
                 comparison_activate._comparison_health(values)
             self.assertEqual(requests,['/owner-evidence/api/sporting-authority/review',
-                '/owner-evidence/api/sporting-authority/proofs?limit=1','/owner-evidence/api/attempt-inspector?limit=1'])
+                '/owner-evidence/api/attempt-inspector?limit=1','/owner-evidence/api/sporting-authority/proofs?limit=1'])
+
+    def test_retry_after_one_recovers_cold_read_within_three_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            values,bodies,requests,opener=self.fixture(Path(directory))
+            path='/owner-evidence/api/sporting-authority/review'
+            responses=iter([urllib.error.HTTPError('http://synthetic',503,'cold',{'Retry-After':'1'},None),
+                            urllib.error.HTTPError('http://synthetic',503,'cold',{'Retry-After':'1'},None),bodies[path]])
+            bodies[path]=lambda:next(responses)
+            with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener),mock.patch.object(comparison_activate.time,'sleep') as pause:
+                comparison_activate._comparison_health(values)
+            self.assertEqual(requests[:3],[path]*3)
+            self.assertEqual(pause.call_args_list,[mock.call(1),mock.call(1)])
+            self.assertEqual(requests[-2:],['/owner-evidence/api/attempt-inspector?limit=1','/owner-evidence/api/sporting-authority/proofs?limit=1'])
+
+    def test_permanent_or_malformed_retry_denial_remains_a_failed_health_gate(self):
+        for status,header,attempts in ((503,{'Retry-After':'1'},3),(503,{'Retry-After':'1.0'},1),(503,{},1),(500,{'Retry-After':'1'},1)):
+            with self.subTest(header=header),tempfile.TemporaryDirectory() as directory:
+                values,bodies,requests,opener=self.fixture(Path(directory))
+                path='/owner-evidence/api/sporting-authority/proofs?limit=1'
+                bodies[path]=urllib.error.HTTPError('http://synthetic',status,'unavailable',header,None)
+                with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener),mock.patch.object(comparison_activate.time,'sleep') as pause:
+                    with self.assertRaises(urllib.error.HTTPError):comparison_activate._comparison_health(values)
+                self.assertEqual(requests.count(path),attempts)
+                self.assertEqual(pause.call_count,attempts-1)
+                self.assertEqual(requests[-1],path)
 
     def test_current_nonempty_source_review_envelope_remains_readable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -450,6 +476,6 @@ class SportingComparisonHealthTests(unittest.TestCase):
                 if failure=='missing-capability':bodies['/owner-evidence/api/sporting-authority/proofs?limit=1']['relationship_available']=False
                 with mock.patch.object(comparison_activate,'_health'),mock.patch.object(comparison_activate.urllib.request,'build_opener',return_value=opener):
                     with self.assertRaises((ValueError,urllib.error.HTTPError)):comparison_activate._comparison_health(values)
-                self.assertNotIn('/owner-evidence/api/attempt-inspector?limit=1',requests)
+                self.assertEqual(requests[-1],'/owner-evidence/api/sporting-authority/review' if failure=='unavailable-review' else '/owner-evidence/api/sporting-authority/proofs?limit=1')
 
 if __name__=='__main__':unittest.main()

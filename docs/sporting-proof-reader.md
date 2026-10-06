@@ -118,12 +118,16 @@ python3 deploy/comparison_activate.py activate \
 Activation verifies the proof runtime matches the code candidate, runs the proof
 reader as the exact service UID/GID and rechecks current guards before publication.
 When the proof capability is enabled, authenticated health reads the sporting
-review first, matching the UI and warming the persistent proof JVM, then reads
+review first and then the existing inspector to warm their read runtimes before
+reading
 `/owner-evidence/api/sporting-authority/proofs?limit=1`. The page must report the
 complete 276-version inventory, 138 source positions, current paired canonical
 bindings and the exact installed capability hash. Explicit unmapped diagnostics
 are accepted. An unavailable review, 503, missing capability or invalid binding
-fails activation and invokes guarded rollback. Health submits no action and never
+fails activation and invokes guarded rollback. Only HTTP 503 with exactly
+`Retry-After: 1` permits up to three attempts with one second between attempts.
+Each request retains its existing 12 second service budget and 14 second client
+timeout; response validation stays strict. Health submits no action and never
 persists or logs review CSRF tokens.
 Rollback restores derived app/environment/comparison files only. New sporting or
 relationship history, changed signer/proof capability/runtime/grants, or another

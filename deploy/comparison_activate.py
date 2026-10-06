@@ -17,6 +17,8 @@ import sqlite3
 import signal
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from owner_evidence_activate import (Layout, SERVICE, _atomic_link, _atomic_write,
     _regular, _sha, _stage_directory, _system_command, _health)
@@ -299,14 +301,32 @@ def _comparison_health(values):
     headers={'Host':values['OWNER_EVIDENCE_ORIGIN_HOST'],
              'X-Freediving-Owner-Gateway':values['OWNER_EVIDENCE_GATEWAY_SECRET'],
              'X-Freediving-Owner-Email':values['OWNER_EVIDENCE_EMAILS'].split(',')[0]}
+    def inspector():
+        url='http://127.0.0.1:8081/owner-evidence/api/attempt-inspector?limit=1'
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(urllib.request.Request(url,headers=headers),timeout=14) as response:
+            value=json.load(response)
+            if (response.status!=200 or 'no-store' not in response.headers.get('Cache-Control','') or value.get('schema')!='private-attempt-inspector/v1' or
+                value.get('counts')!={'source_positions':138,'retained_observation_versions':276,'distinct_sporting_attempts':None,'eligible_peer_cohorts':0} or
+                value.get('coverage',{}).get('ranked')!=0 or value.get('pagination',{}).get('total')!=138):
+                raise ValueError('private comparison readiness refused')
     if values.get('OWNER_EVIDENCE_SPORTING_PROOF_CONFIG'):
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
         def read(path):
-            with opener.open(urllib.request.Request('http://127.0.0.1:8081/owner-evidence/api/'+path,headers=headers),timeout=14) as response:
-                if response.status!=200 or 'no-store' not in response.headers.get('Cache-Control',''):
-                    raise ValueError('private sporting proof readiness refused')
-                return json.load(response)
-        # Follow the owned UI's read order, warming the same persistent proof JVM.
+            for attempt in range(3):
+                try:
+                    with opener.open(urllib.request.Request('http://127.0.0.1:8081/owner-evidence/api/'+path,headers=headers),timeout=14) as response:
+                        if response.status!=200 or 'no-store' not in response.headers.get('Cache-Control',''):
+                            raise ValueError('private sporting proof readiness refused')
+                        return json.load(response)
+                except urllib.error.HTTPError as error:
+                    retry=(error.code==503 and error.headers is not None and error.headers.get('Retry-After')=='1')
+                    error.close()
+                    if not retry or attempt==2:raise
+                    # The existing 12s service deadline remains unchanged. Only
+                    # its advertised transient admission/cold-start refusal retries.
+                    time.sleep(1)
+        # Read the review first, then warm the existing comparison runtime with
+        # a genuine inspector request before the full retained proof inventory.
         # CSRF/proposal bodies remain process-local and are never persisted or logged.
         review=read('sporting-authority/review')
         if (not isinstance(review,dict) or review.get('schema')!='sporting-authority-review/v1'
@@ -319,6 +339,7 @@ def _comparison_health(values):
                        or type(item.get('revision')) is not int or not 1<=item['revision']<=review['revision']
                        or item.get('action') not in ('stage','source-approve','select-cohort','publish','reverse') for item in review['proposals'])):
             raise ValueError('private sporting review readiness refused')
+        inspector()
         proof=read('sporting-authority/proofs?limit=1')
         pins=proof.get('pins',{}) if isinstance(proof,dict) else {}
         scopes=pins.get('canonical_scope_bindings',{}) if isinstance(pins,dict) else {}
@@ -341,13 +362,7 @@ def _comparison_health(values):
                        or not isinstance(row['diagnostics'].get('mapping'),dict)
                        or not isinstance(row['diagnostics']['mapping'].get('state'),str) for row in proof['rows'])):
             raise ValueError('private exact source proof readiness refused')
-    url='http://127.0.0.1:8081/owner-evidence/api/attempt-inspector?limit=1'
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(urllib.request.Request(url,headers=headers),timeout=14) as response:
-        value=json.load(response)
-        if (response.status!=200 or 'no-store' not in response.headers.get('Cache-Control','') or value.get('schema')!='private-attempt-inspector/v1' or
-            value.get('counts')!={'source_positions':138,'retained_observation_versions':276,'distinct_sporting_attempts':None,'eligible_peer_cohorts':0} or
-            value.get('coverage',{}).get('ranked')!=0 or value.get('pagination',{}).get('total')!=138):
-            raise ValueError('private comparison readiness refused')
+    else:inspector()
 
 
 def rollback_comparison(layout, *, command=None, owner_uid=0, owner_gid=0):
