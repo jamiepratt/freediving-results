@@ -199,5 +199,98 @@ class IndependentRelationshipOwnerHTTPTest(unittest.TestCase):
         self.assertEqual(f.request('/owner-evidence/api/sporting-authority/proofs')[1]['rows'][0]['upstream'], {})
 
 
+class SportingProofStartupHTTPTest(unittest.TestCase):
+    def startup(self, fixture, *, comparison=False):
+        from owner_evidence_origin import make_server
+        return make_server(fixture.root / 'out', {
+            'OWNER_EVIDENCE_GATEWAY_SECRET': GATE, 'OWNER_EVIDENCE_EMAILS': OWNER,
+            'OWNER_EVIDENCE_ORIGIN_HOST': HOST,
+            'OWNER_EVIDENCE_SNAPSHOT_SHA256': fixture.server.query.manifest['snapshot_sha256'],
+            'OWNER_EVIDENCE_SPORTING_CONFIG': str(fixture.root / 'sporting.json'),
+            'OWNER_EVIDENCE_SPORTING_PROOF_CONFIG': 'isolated-proof-boundary',
+            **({'OWNER_EVIDENCE_COMPARISON_CONFIG': 'isolated-comparison-boundary'} if comparison else {})})
+
+    def test_owner_server_initializes_current_paired_proofs_before_returning(self):
+        import time
+        from unittest.mock import patch
+        f = Fixture(); self.addCleanup(f.close)
+        reads, closed = [], []
+        def reader(rows, *, deadline=None):
+            self.assertIsNotNone(deadline)
+            self.assertGreater(deadline, time.monotonic())
+            self.assertLessEqual(deadline - time.monotonic(), 12)
+            reads.append(rows)
+            return {'schema': 'private-sporting-proofs/v1', 'binding_sha256': 'a' * 64,
+                    'scope_bindings': {'source': 'b' * 64, 'relationships': 'c' * 64},
+                    'config_sha256': 'd' * 64, 'rows': []}
+        reader.close = lambda: closed.append(True)
+        with patch('private_sporting_proofs.create_reader', return_value=reader):
+            server = self.startup(f)
+        self.addCleanup(server.server_close)
+        self.assertEqual(reads, [[]])
+        self.assertIs(server.sporting_proof_reader, reader)
+        self.assertEqual(server.sporting._history(), [])
+        self.assertFalse(closed)
+        self.assertFalse(hasattr(server, 'cached_sporting_authority'))
+
+    def test_failed_initial_paired_read_closes_runtime_and_refuses_startup(self):
+        from unittest.mock import patch
+        from private_attempt_inspector import ComparisonTimeout
+        f = Fixture(); self.addCleanup(f.close)
+        closed = []
+        def reader(rows, *, deadline=None):
+            raise ComparisonTimeout('isolated cold proof read exceeded deadline')
+        reader.close = lambda: closed.append(True)
+        with patch('private_sporting_proofs.create_reader', return_value=reader):
+            with self.assertRaisesRegex(ComparisonTimeout, 'cold proof read'):
+                self.startup(f)
+        self.assertEqual(closed, [True])
+
+    def test_owner_startup_warms_comparison_without_authority_and_keeps_fresh_requests(self):
+        import time
+        from unittest.mock import patch
+        f = Fixture(); self.addCleanup(f.close)
+        calls, closed = [], []
+        def proof(rows, *, deadline=None):
+            calls.append(('proof', rows, deadline))
+            return {'schema': 'private-sporting-proofs/v1', 'rows': [], 'discarded': 'startup-only'}
+        proof.close = lambda: closed.append('proof')
+        def comparison(filters, authority, *, deadline=None):
+            calls.append(('comparison', filters, deadline))
+            self.assertIsNone(authority)
+            self.assertGreater(deadline, time.monotonic())
+            return {'rows': [], 'discarded': 'startup-only'}
+        comparison.verify_current = lambda authority: None
+        comparison.close = lambda: closed.append('comparison')
+        with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
+            server = self.startup(f, comparison=True)
+        self.addCleanup(server.server_close)
+        self.assertEqual([(item[0], item[1]) for item in calls], [('proof', []), ('comparison', {'limit': 1})])
+        self.assertGreaterEqual(calls[1][2], calls[0][2])
+        self.assertFalse(closed)
+        # Prewarming must not wrap readers in a retained result cache.
+        self.assertIs(server.sporting_proof_reader, proof)
+        self.assertIs(server.comparison_reader, comparison)
+        server.sporting_proof_reader([], deadline=time.monotonic() + 12)
+        self.assertEqual(len(calls), 3)
+
+    def test_comparison_warm_failure_closes_both_runtimes_before_server_start(self):
+        from unittest.mock import patch
+        from private_attempt_inspector import ComparisonTimeout
+        f = Fixture(); self.addCleanup(f.close)
+        closed = []
+        def proof(rows, *, deadline=None):
+            return {'schema': 'private-sporting-proofs/v1', 'rows': []}
+        proof.close = lambda: closed.append('proof')
+        def comparison(filters, authority, *, deadline=None):
+            raise ComparisonTimeout('isolated comparison warm-up failed')
+        comparison.verify_current = lambda authority: None
+        comparison.close = lambda: closed.append('comparison')
+        with patch('private_sporting_proofs.create_reader', return_value=proof), patch('private_attempt_inspector.create_reader', return_value=comparison):
+            with self.assertRaisesRegex(ComparisonTimeout, 'comparison warm-up failed'):
+                self.startup(f, comparison=True)
+        self.assertCountEqual(closed, ['proof', 'comparison'])
+
+
 if __name__ == '__main__':
     unittest.main()

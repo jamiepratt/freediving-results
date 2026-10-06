@@ -215,6 +215,12 @@ def configure(origin, snapshot_dir, env):
         raise ValueError('invalid sporting request key')
     from private_sporting_proofs import create_reader
     origin.sporting_proof_reader = create_reader(env)
+    if origin.sporting_proof_reader is not None:
+        # JVM initialization happens before the HTTP socket is bound. Discard
+        # authority results; every request still reads and rechecks current pins.
+        origin.sporting_proof_reader([], deadline=time.monotonic() + READ_BUDGET_SECONDS)
+        if origin.comparison_reader is not None:
+            origin.read_comparison({'limit': 1}, None, deadline=time.monotonic() + READ_BUDGET_SECONDS)
     def base(review=False):
         return live_context(origin, snapshot_dir, env, config_path, review=review,
                             deadline=getattr(origin.sporting_deadlines, 'deadline', None))

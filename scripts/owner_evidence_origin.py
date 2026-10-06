@@ -233,6 +233,20 @@ class PrivateOrigin(ThreadingHTTPServer):
             sporting_authority_http.configure(self, snapshot_dir, env)
             super().__init__(('127.0.0.1', port), PrivateOriginHandler)
         except Exception:
+            # No listener exists yet. Stop every initialized private runtime so
+            # a failed warm-up cannot leave a child or partial authority alive.
+            for reader in (self.comparison_reader, self.canonical_reader):
+                if hasattr(reader, 'close'):
+                    reader.close()
+            if getattr(self, 'sporting', None) is not None:
+                self.sporting.close()
+            else:
+                for resource in (getattr(self, 'sporting_proof_reader', None),
+                                 getattr(self, 'relationship_reviews', None)):
+                    if hasattr(resource, 'close'):
+                        resource.close()
+            if getattr(self, 'decisions', None) is not None:
+                self.decisions.close()
             self.query.close()
             raise
 
