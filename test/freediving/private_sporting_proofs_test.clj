@@ -6,6 +6,8 @@
             [freediving.observations-test :as fixture]
             [freediving.reviews :as reviews]
             [freediving.revisions :as revisions]
+            [freediving.canonical-attempt-store :as attempt]
+            [freediving.source-relationships-test :as relationship-fixture]
             [freediving.event-selections :as selections]
             [freediving.publication :as publication]
             [freediving.public-results :as public]
@@ -45,6 +47,26 @@
     {:config {:jdbc_url proof-url :database "observations_test" :mode "source"
               :rows [{:reference reference :coordinates (get-in artifact [:candidates 0 :coordinates])}]}
      :target t :artifact artifact :stored stored}))
+
+(deftest pin-only-reads-skip-row-diagnostics-but-bind-all-current-authority
+  (let [{:keys [config target]} (sample)
+        _ (attempt/persist! fixture/app (relationship-fixture/attempt-fixture))
+        relationship-config (assoc config :mode "relationships" :jdbc_url relationship-url)
+        full-source (read-proof config)
+        full-relationships (read-proof relationship-config)
+        unused (fn [& _] (throw (ex-info "Unused row diagnostics invoked" {})))]
+    (with-redefs [revisions/diagnostics unused publication/diagnose-many unused
+                  attempt/private-readback unused selections/projection-plan unused]
+      (doseq [[request full] [[config full-source] [relationship-config full-relationships]]]
+        (let [pin-only (read-proof (assoc request :rows []))]
+          (is (empty? (:rows pin-only)))
+          (is (= (:binding_sha256 full) (:binding_sha256 pin-only))))))
+    (publication/decide! publication-fixture/reviewer (publication-fixture/request target "pin-only-mutation"))
+    (let [after (read-proof (assoc config :rows []))]
+      (is (not= (:binding_sha256 full-source) (:binding_sha256 after)))
+      (is (= (:binding_sha256 (read-proof config)) (:binding_sha256 after))))
+    (fixture/sql! fixture/admin "GRANT SELECT ON freediving.canonical_attempt_events TO proof_source")
+    (is (thrown-with-msg? Exception #"capability" (read-proof (assoc config :rows []))))))
 
 (deftest exact-unimported-row-is-an-observable-gap-not-zero-attempts
   (let [sha (apply str (repeat 64 "a"))
