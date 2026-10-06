@@ -51,11 +51,11 @@ class RetainedSourceImportGuardTests(unittest.TestCase):
         database = 'guard_' + uuid.uuid4().hex
         subprocess.run(['createdb', '-T', template, database], check=True, capture_output=True)
         self.addCleanup(lambda: subprocess.run(['dropdb', database], check=True, capture_output=True))
-        before = capture_databases([database], peer=True)
+        before = capture_databases([database], source_database=database, peer=True)
         subprocess.run(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c',
             "CREATE OR REPLACE FUNCTION freediving.guard_catalog_probe() RETURNS integer LANGUAGE SQL AS 'SELECT 1'"],
             check=True, capture_output=True)
-        after = capture_databases([database], peer=True)
+        after = capture_databases([database], source_database=database, peer=True)
         self.assertNotEqual(before['databases'][database]['schema_sha256'], after['databases'][database]['schema_sha256'])
 
     def test_unrelated_writes_existing_changes_schema_and_missing_rows_refused(self):
@@ -119,3 +119,30 @@ class RetainedSourceImportGuardTests(unittest.TestCase):
         partial['databases']['source']['tables']['observations']['count'] -= 1
         with self.assertRaisesRegex(ValueError, 'partial'):
             preflight(partial, self.manifest)
+
+    def test_capture_source23_and_canonical21_without_migration_writes(self):
+        import os, subprocess, uuid
+        from retained_source_import_guard import capture_databases
+        if not os.environ.get('RETAINED_GUARD_TEST_PG'):
+            self.skipTest('isolated PostgreSQL inventory test not configured')
+        def database(versions):
+            name = 'guard_' + uuid.uuid4().hex
+            subprocess.run(['createdb', name], check=True, capture_output=True)
+            self.addCleanup(lambda: subprocess.run(['dropdb', name], check=True, capture_output=True))
+            sql = "CREATE SCHEMA freediving; CREATE TABLE freediving.schema_migrations(version integer PRIMARY KEY,sha256 text NOT NULL);"
+            sql += 'INSERT INTO freediving.schema_migrations VALUES ' + ','.join("(%d,'%s')" % (version, 'a'*64) for version in versions)
+            subprocess.run(['psql','-X','-v','ON_ERROR_STOP=1','-d',name,'-c',sql],check=True,capture_output=True)
+            return name
+        source = database(range(1,24)); canonical = database(range(1,22))
+        before = capture_databases([source,canonical],source_database=source,peer=True)
+        after = capture_databases([source,canonical],source_database=source,peer=True)
+        self.assertEqual(before,after)
+        self.assertEqual(before['databases'][source]['tables']['schema_migrations']['count'],23)
+        self.assertEqual(before['databases'][canonical]['tables']['schema_migrations']['count'],21)
+        for versions in (range(1,23), [v for v in range(1,24) if v!=12]):
+            wrong = database(versions)
+            with self.assertRaisesRegex(ValueError,'source.*23'):
+                capture_databases([wrong,canonical],source_database=wrong,peer=True)
+        gapped = database([1,2,4])
+        with self.assertRaisesRegex(ValueError,'contiguous'):
+            capture_databases([source,gapped],source_database=source,peer=True)

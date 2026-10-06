@@ -147,6 +147,8 @@ def _protected(snapshot, manifest):
 
 def preflight(before, manifest):
     """Declare exact remaining inserts; refuse conflicting or partial prior jobs."""
+    if before.get('source_database', manifest['database']) != manifest['database']:
+        raise ValueError('captured source database differs from append manifest')
     _protected(before, manifest)
     tables = before['databases'][manifest['database']]['tables']
     seen = {}
@@ -173,7 +175,10 @@ def verify_append(before, after, manifest, started_at, ended_at):
     if (before.get('schema') != 'retained-source-append-snapshot/v1' or after.get('schema') != before['schema']
             or manifest.get('schema') != 'retained-source-append-manifest/v1'):
         raise ValueError('invalid append guard schema')
-    database = manifest['database']; start = _instant(started_at); end = _instant(ended_at)
+    database = manifest['database']
+    if any(snapshot.get('source_database', database) != database for snapshot in (before, after)):
+        raise ValueError('captured source database differs from append manifest')
+    start = _instant(started_at); end = _instant(ended_at)
     if start > end: raise ValueError('invalid bounded import timestamp window')
     if (manifest['source_sha256'] != SOURCE or manifest['selector'] != {'selected_date': '2026-06-03', 'filters': {}}
             or set(manifest['expected']) != set(TABLES) or len(manifest['expected']['extractions']) != 2
@@ -224,8 +229,11 @@ def verify_append(before, after, manifest, started_at, ended_at):
             + (['authority.public_tables'] if manifest.get('public_database') == database else [])}
 
 
-def capture_databases(databases, *, peer=False, psql='psql', protected=None):
-    """Read every freediving table plus schema metadata in one transaction per DB."""
+def capture_databases(databases, *, source_database, peer=False, psql='psql', protected=None):
+    """Require source schema 23; preserve other existing contiguous inventories."""
+    _name(source_database)
+    if source_database not in databases or len(set(databases)) != len(databases):
+        raise ValueError('exact source database missing or duplicate capture database')
     rows = {}; schemas = {}; legacy_hashes = {}
     for database in databases:
         _name(database)
@@ -253,10 +261,15 @@ COMMIT;
             else:
                 table = _name(value['table']); tables[table] = json.loads(value['rows_text'])
                 legacy[table] = hashlib.sha256(value['rows_text'].encode()).hexdigest()
-        if catalog is None or [x['version'] for x in sorted(tables.get('schema_migrations', []), key=lambda x: x['version'])] != list(range(1, 24)):
-            raise ValueError('requires exact migration inventory 1 through 23')
+        versions = [x['version'] for x in sorted(tables.get('schema_migrations', []), key=lambda x: x['version'])]
+        if database == source_database and (catalog is None or versions != list(range(1, 24))):
+            raise ValueError('source database requires exact migration inventory 1 through 23')
+        if catalog is None or not versions or any(type(version) is not int for version in versions) or versions != list(range(1, versions[-1]+1)):
+            raise ValueError('guarded database requires existing contiguous migration inventory')
         rows[database] = tables; schemas[database] = hashlib.sha256(catalog.encode()).hexdigest(); legacy_hashes[database] = legacy
-    return snapshot_rows(rows, schemas, protected, legacy_hashes)
+    snapshot = snapshot_rows(rows, schemas, protected, legacy_hashes)
+    snapshot['source_database'] = source_database
+    return snapshot
 
 
 def _read(path, pin=None):
@@ -279,6 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     capture = commands.add_parser('capture'); capture.add_argument('--database', action='append', required=True)
+    capture.add_argument('--source-database', required=True)
     capture.add_argument('--peer', action='store_true'); capture.add_argument('--psql', default='psql')
     capture.add_argument('--protected-guard', required=True); capture.add_argument('--protected-guard-sha256', required=True)
     capture.add_argument('--output', required=True)
@@ -295,7 +309,7 @@ def main():
     verify.add_argument('--started-at', required=True); verify.add_argument('--ended-at', required=True); verify.add_argument('--output', required=True)
     args = parser.parse_args()
     if args.command == 'capture':
-        value = capture_databases(args.database, peer=args.peer, psql=args.psql,
+        value = capture_databases(args.database, source_database=args.source_database, peer=args.peer, psql=args.psql,
             protected=_read(args.protected_guard, args.protected_guard_sha256))
     elif args.command == 'manifest':
         value = build_manifest(args.database, _read(args.expected_rows, args.expected_rows_sha256),

@@ -14,8 +14,11 @@ be independently bound to that retained manifest by the importer rehearsal.
 Only the new extraction's database-generated `imported_at` differs from the
 rehearsal; verification requires it inside the declared apply window.
 
-`capture` reads every `freediving` table in each supplied database, requiring
-migration versions 1 through 23. It retains full existing-row SHA-256
+`capture --source-database <exact-source-target>` reads every `freediving` table
+in each supplied database. Only that source/public target requires migration
+versions 1 through 23. Other guarded databases retain their existing contiguous
+migration inventories, including the independent canonical database's versions
+1 through 21. No migrations run. Missing or gapped inventories refuse capture. It retains full existing-row SHA-256
 fingerprints, schema metadata (including functions, grants, triggers, indexes
 and views), and a separately pinned `comparison_activate.capture_guard` JSON.
 It stores hashes and ingestion identifiers, without athlete/artifact payloads.
