@@ -64,8 +64,20 @@
            "Sporting proof reader capability changed")))
 (defn- authority [c mode]
   (into {} (map (fn [table] [(keyword table) (query c (str "SELECT * FROM freediving." table))]) (mode-tables mode))))
-(defn- fingerprint [state]
-  (digest (into {} (map (fn [[table rows]] [table (vec (sort (map digest rows)))]) state))))
+(defn- fingerprint
+  "V2 pin: PostgreSQL hashes every raw row column, including bytes and timestamps.
+   Sorted per-table hash vectors preserve duplicate multiplicity without exposing
+   private artifacts to pin-only readers. No persisted or cross-request cache."
+  [c mode]
+  (digest {:method "postgresql-row-json-sha256/v2"
+           :tables (into {} (map (fn [table]
+                                   (let [hashes (mapv :row_sha
+                                                      (query c (str "SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.row_to_json(t)::text,'UTF8')),'hex') AS row_sha FROM freediving."
+                                                                    table " t")))]
+                                     (need! (every? #(and (string? %) (re-matches #"[0-9a-f]{64}" %)) hashes)
+                                            "Sporting proof raw authority hash invalid")
+                                     [(keyword table) (vec (sort hashes))]))
+                                 (mode-tables mode)))}))
 (defn- row-request! [{:keys [reference coordinates] :as row}]
   (need! (and (= #{:reference :coordinates} (set (keys row)))
               (= reference-keys (set (keys reference)))
@@ -289,7 +301,7 @@
                            (need! (= database (:database (first (query c "SELECT current_database() AS database"))))
                                   "Sporting proof database changed")
                            (capability! c mode)
-                           (let [state (authority c mode) pin (fingerprint state)
+                           (let [pin (fingerprint c mode) state (when (seq rows) (authority c mode))
                                  relationship-state (when (and (seq rows) (= mode "relationships") (seq (:canonical_attempt_state state)))
                                                       (attempt/private-readback jdbc_url))
                                  revision-state (when (and (seq rows) (= mode "source")) (revisions/diagnostics jdbc_url))
@@ -309,7 +321,7 @@
                              {:schema "private-sporting-proofs/v1" :database database :binding_sha256 pin
                               :rows (binding [publication/*artifacts* (atom {}) *decoded-artifacts* (atom {})]
                                       (mapv #(mapped-proof c state mode relationship-state revision-state publication-state plan %) rows))})))]
-    (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint (authority c mode)))))
+    (need! (= (:binding_sha256 result) (snapshot jdbc_url (fn [c] (capability! c mode) (fingerprint c mode))))
            "Canonical sporting authority changed during read")
     result))
 (defn -main [& _]

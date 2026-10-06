@@ -68,6 +68,28 @@
     (fixture/sql! fixture/admin "GRANT SELECT ON freediving.canonical_attempt_events TO proof_source")
     (is (thrown-with-msg? Exception #"capability" (read-proof (assoc config :rows []))))))
 
+(deftest pin-only-reads-hash-database-rows-without-materializing-private-artifacts
+  (let [{:keys [config target]} (sample)
+        validation (publication-fixture/request target "raw-pin-validation")
+        _ (publication/decide! publication-fixture/reviewer validation)
+        _ (publication/decide! publication-fixture/reviewer
+                               (assoc validation :id "raw-pin-revoke" :action :revoke :base-revision 1 :attestations {}))
+        full (read-proof config)
+        pin-only #(read-proof (assoc config :rows []))]
+    (with-redefs-fn {(ns-resolve 'freediving.private-sporting-proofs 'authority)
+                     (fn [& _] (throw (ex-info "Pin-only read materialized artifacts" {})))}
+      #(is (= (:binding_sha256 full) (:binding_sha256 (pin-only)))))
+    (doseq [[table trigger change]
+            [["extractions" "immutable_extractions" "imported_at=imported_at+interval '1 second'"]
+             ["publication_decisions" "immutable_publication_decisions" "body_edn=body_edn || ' '"]
+             ["observations" "immutable_observations" "payload_edn=payload_edn || ' '"]
+             ["extractions" "immutable_extractions" "artifact_bytes=artifact_bytes || convert_to(' ','UTF8')"]]]
+      (let [before (:binding_sha256 (pin-only))]
+        (fixture/sql! fixture/admin (str "ALTER TABLE freediving." table " DISABLE TRIGGER " trigger))
+        (fixture/sql! fixture/admin (str "UPDATE freediving." table " SET " change
+                                         (when (= table "publication_decisions") " WHERE id='raw-pin-validation'")))
+        (is (not= before (:binding_sha256 (pin-only))) (str "Current raw pin binds " change))))))
+
 (deftest exact-unimported-row-is-an-observable-gap-not-zero-attempts
   (let [sha (apply str (repeat 64 "a"))
         reference {:job-id sha :ordinal 0 :candidate-id sha :source-sha256 sha
