@@ -604,7 +604,10 @@ class DecisionStore:
         binding = self._binding()
         items = [self._inspect(row['id'], binding) for row in self.db.execute('SELECT id FROM proposals')]
         items = [p for p in items if (decision_type is None or p['type'] == decision_type)
-                 and (status is None or p['effective_status'] == status)
+                 and (status is None or p['effective_status'] == status or
+                      (p['effective_status'] == 'projection_pending' and
+                       status in {'human_approved', 'human_corrected', 'rejected', 'reversed'} and
+                       p['status'] == status))
                  and (source_name is None or p['source_name'] == source_name)]
         scored = sorted((p for p in items if p['provider_confidence'] is not None),
                         key=lambda p: (p['provider_confidence'], p['id']))

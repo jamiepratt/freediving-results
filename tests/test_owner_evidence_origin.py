@@ -18,6 +18,8 @@ from test_unified_evidence_query import snapshot
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from owner_evidence_origin import make_server
+from owner_decision_store import DecisionStore
+from test_owner_decision_store import proposal
 
 
 HOST = 'owner-private.alphacompose.com'
@@ -380,6 +382,45 @@ class PrivateOriginTest(unittest.TestCase):
         self.assertEqual(self.request('/owner-evidence/api/decisions?type=x&type=x')[0], 400)
         self.assertEqual(self.request('/owner-evidence/api/decisions/decision-1/preview?action=invalid')[0], 400)
         self.assertEqual(json.loads(self.request('/owner-evidence/api/decisions/audit-sample')[2])['blocking'], False)
+
+    def test_human_approved_api_returns_five_current_reviews_with_delivery_still_pending(self):
+        store = DecisionStore(Path(self.tmp.name) / 'owner-decisions.sqlite')
+        self.addCleanup(store.close)
+        self.server.decisions = store
+        digest = self.env['OWNER_EVIDENCE_SNAPSHOT_SHA256']
+        reference = {'kind': 'source-derived', 'source_sha256': 'c' * 64, 'citation': {'row': 1}}
+        store.bind_snapshot(digest, ['row-1'], expected_revision=0, idempotency_key='bind-source',
+                            _observation_refs={'row-1': {'source_sha256': 'c' * 64, 'refs': [],
+                                                         'source_derived_ref': reference}})
+        for index in range(5):
+            ident = f'approved-{index}'
+            p = proposal(ident)
+            p['evidence'][0] = {'id': 'row-1', 'version': reference,
+                                'citation': {'source_citation': {'source-sha256': 'c' * 64,
+                                                                 'locator': reference['citation']},
+                                             'observation_revision': reference}}
+            p['canonical_binding'] = {'decision_id': ident, 'observation_revisions': [reference],
+                                      'evidence_bindings': [{'snapshot_record_id': 'row-1',
+                                                             'observation_revision': reference}]}
+            store.register(digest, p, idempotency_key='register-' + ident)
+            store.act(ident, action='approve', expected_revision=store.revision,
+                      idempotency_key='approve-' + ident)
+        revision = store.revision
+        for filter_status in ('human_approved', 'projection_pending'):
+            status, headers, body = self.request(
+                '/owner-evidence/api/decisions?status=' + filter_status + '&limit=2&offset=1')
+            self.assertEqual(status, 200)
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            listing = json.loads(body)
+            self.assertEqual(listing['total'], 5)
+            self.assertEqual(listing['revision'], revision)
+            self.assertEqual([p['id'] for p in listing['items']], ['approved-1', 'approved-2'])
+            self.assertTrue(all(p['status'] == 'human_approved' and
+                                p['effective_status'] == 'projection_pending' and
+                                p['canonical_projection_status'] == 'pending' for p in listing['items']))
+        self.assertEqual(store.revision, revision)
+        self.assertEqual(len(store.human_events()['events']), 5)
+        self.assertEqual(store.projection()['active_decisions'], [])
 
     def test_queue_and_status_use_current_owner_binding_without_full_projection(self):
         class Decisions:

@@ -136,6 +136,30 @@ test('identity decisions distinguish pending review from verified canonical edge
   assert.doesNotMatch(node('decision-detail').visibleText, /Accepted canonical edge/);
 });
 
+test('Human approved queue and same attempt detail show saved review and separate pending delivery', async () => {
+  const items = Array.from({length: 5}, (_, i) => ({id: `approved-${i}`, type: 'same_attempt',
+    status: 'human_approved', effective_status: 'projection_pending', canonical_projection_status: 'pending',
+    provider_confidence: 0.8, evidence: [{citation: {row: i + 1}}], history: [{action: 'approve', revision: 221 + i}]}));
+  const {context, node, requests} = workspace({
+    '/api/decisions?status=human_approved&limit=25&offset=0': {revision: 225, total: 5, items, scoreless_items: [], scoreless_total: 0},
+    '/api/decisions/approved-0': items[0],
+  });
+  context.FormData = class { *[Symbol.iterator]() { yield ['status', 'human_approved']; yield ['limit', '25']; } };
+  await vm.runInContext('loadDecisions()', context);
+  assert.ok(requests.some(r => r.path === '/api/decisions?status=human_approved&limit=25&offset=0'));
+  const cards = node('decision-automatic').visibleText;
+  for (let i = 0; i < 5; i++) assert.match(cards, new RegExp(`approved-${i}`));
+  assert.match(cards, /Human approved/);
+  assert.match(cards, /canonical delivery pending/);
+  assert.doesNotMatch(cards, /Accepted canonical attempt/);
+  await vm.runInContext("inspectDecision('approved-0')", context);
+  const detail = node('decision-detail').visibleText;
+  assert.match(detail, /Human approved/);
+  assert.match(detail, /canonical delivery pending/);
+  assert.match(detail, /221/);
+  assert.doesNotMatch(detail, /Accepted canonical attempt|Preview Reverse|Preview correction/);
+});
+
 test('reversal previews dependent impact before writing with revision, CSRF and retry key', async () => {
   const {context, node, requests} = workspace({
     '/api/decisions/d1': {store_revision: 8, id: 'd1', status: 'automatic_approved', type: 'athlete_identity', evidence: [], history: []},

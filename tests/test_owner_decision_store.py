@@ -212,6 +212,134 @@ class DecisionStoreTest(unittest.TestCase):
         self.store.acknowledge_human_event('postgresql', second, 'pg:second')
         self.assertEqual(self.store.delivery_checkpoints()['postgresql'], second['store_revision'])
 
+    def source_bound_proposal(self, ident, **kwargs):
+        snapshot, name, packet_path, record_id, digest = self.recovered_aida_snapshot()
+        recovered = {name: packet_path}
+        self.store.bind_verified_snapshot(
+            snapshot, expected_revision=self.store.revision,
+            idempotency_key='source-bind-' + ident, recovered_packet_paths=recovered)
+        reference = load_source_observations(
+            snapshot, [name], recovered_packet_paths=recovered)['observations'][0]['source_observation_ref']
+        p = proposal(ident, evidence=record_id, **kwargs)
+        p['evidence'][0] = {'id': record_id, 'version': reference,
+                            'citation': {'source_citation': {'source-sha256': reference['source_sha256'],
+                                                            'locator': reference['citation']},
+                                         'observation_revision': reference}}
+        p['canonical_binding'] = {'decision_id': ident, 'observation_revisions': [reference],
+                                  'evidence_bindings': [{'snapshot_record_id': record_id,
+                                                         'observation_revision': reference}]}
+        return digest, p
+
+    def test_human_approved_filter_keeps_five_decisions_awaiting_canonical_delivery(self):
+        digest, first = self.source_bound_proposal('approved-0')
+        for index in range(5):
+            p = json.loads(json.dumps(first))
+            p['id'] = f'approved-{index}'
+            p['canonical_binding']['decision_id'] = p['id']
+            self.store.register(digest, p, idempotency_key='register-' + p['id'])
+            self.store.act(p['id'], action='approve', expected_revision=self.store.revision,
+                           idempotency_key='approve-' + p['id'])
+        queue = self.store.queue(status='human_approved', summary=True)
+        self.assertEqual(queue['total'], 5)
+        self.assertEqual([p['id'] for p in queue['items']], [f'approved-{i}' for i in range(5)])
+        self.assertTrue(all(p['status'] == 'human_approved' and
+                            p['effective_status'] == 'projection_pending' and
+                            p['canonical_projection_status'] == 'pending' for p in queue['items']))
+        self.assertEqual(self.store.queue(status='projection_pending')['total'], 5)
+        self.assertEqual(self.store.projection()['active_decisions'], [])
+        self.assertEqual(len(self.store.human_events()['events']), 5)
+
+    def test_review_filters_keep_current_corrections_rejections_and_reversals_pending_delivery(self):
+        digest, first = self.source_bound_proposal('corrected')
+        for ident, action in [('corrected', 'correct'), ('rejected', 'reject'), ('reversed', 'approve')]:
+            p = json.loads(json.dumps(first))
+            p['id'], p['subject_id'] = ident, ident
+            p['canonical_binding']['decision_id'] = ident
+            self.store.register(digest, p, idempotency_key='register-' + ident)
+            self.store.act(ident, action=action, expected_revision=self.store.revision,
+                           correction={'attempt': 'two'} if action == 'correct' else None,
+                           idempotency_key='action-' + ident)
+        for status, ident in [('human_corrected', 'corrected'), ('rejected', 'rejected'),
+                              ('human_approved', 'reversed')]:
+            items = self.store.queue(status=status)['items']
+            self.assertEqual([p['id'] for p in items], [ident])
+            self.assertEqual(items[0]['effective_status'], 'projection_pending')
+        for event in self.store.human_events()['events']:
+            for target in ('flow-ledger', 'postgresql'):
+                self.store.acknowledge_human_event(target, event, f'{target}:committed')
+        self.store.act('reversed', action='reverse', expected_revision=self.store.revision,
+                       idempotency_key='reverse')
+        self.assertEqual(self.store.queue(status='human_approved')['total'], 0)
+        for status, ident in [('human_corrected', 'corrected'), ('rejected', 'rejected'), ('reversed', 'reversed')]:
+            self.assertEqual([p['id'] for p in self.store.queue(status=status)['items']], [ident])
+        self.assertEqual(self.store.inspect('reversed')['effective_status'], 'projection_pending')
+        self.assertEqual(self.store.queue(status='projection_pending')['total'], 1)
+
+    def test_human_review_filters_exclude_invalidated_source_approvals_and_corrections(self):
+        digest, first = self.source_bound_proposal('approved')
+        for ident, action in [('approved', 'approve'), ('corrected', 'correct')]:
+            p = json.loads(json.dumps(first))
+            p['id'], p['subject_id'] = ident, ident
+            p['canonical_binding']['decision_id'] = ident
+            self.store.register(digest, p, idempotency_key='register-' + ident)
+            self.store.act(ident, action=action, expected_revision=self.store.revision,
+                           correction={'attempt': 'two'} if action == 'correct' else None,
+                           idempotency_key='action-' + ident)
+        record_id = first['evidence'][0]['id']
+        for snapshot_digest, evidence in [(SNAP_B, (record_id,)), (SNAP_A, ())]:
+            self.bind(snapshot_digest, evidence=evidence)
+            self.assertEqual(self.store.queue(status='human_approved')['total'], 0)
+            self.assertEqual(self.store.queue(status='human_corrected')['total'], 0)
+            self.assertEqual(self.store.queue(status='projection_pending')['total'], 0)
+            self.assertEqual(self.store.queue(status='invalidated')['total'], 2)
+        self.assertEqual(self.store.inspect('approved')['status'], 'human_approved')
+        self.assertEqual(self.store.inspect('corrected')['status'], 'human_corrected')
+
+    def test_human_approved_filter_excludes_pending_delivery_with_reversed_prerequisite(self):
+        digest, p = self.source_bound_proposal('dependent')
+        root = proposal('root', evidence=p['evidence'][0]['id'])
+        self.store.register(digest, root, idempotency_key='register-root')
+        self.store.act('root', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-root')
+        p['depends_on'] = ['root']
+        self.store.register(digest, p, idempotency_key='register-dependent')
+        self.store.act('dependent', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-dependent')
+        self.assertEqual(self.store.queue(status='human_approved')['total'], 2)
+        self.store.act('root', action='reverse', expected_revision=self.store.revision,
+                       idempotency_key='reverse-root')
+        self.assertEqual(self.store.queue(status='human_approved')['total'], 0)
+        self.assertEqual(self.store.inspect('dependent')['status'], 'human_approved')
+        self.assertEqual(self.store.inspect('dependent')['effective_status'], 'invalidated')
+
+    def test_human_approved_filter_counts_and_pages_delivered_pending_and_scoreless_reviews(self):
+        digest, first = self.source_bound_proposal('delivered', score=.5)
+        self.store.register(digest, first, idempotency_key='register-delivered')
+        self.store.act('delivered', action='approve', expected_revision=self.store.revision,
+                       idempotency_key='approve-delivered')
+        event = self.store.human_events()['events'][0]
+        for target in ('flow-ledger', 'postgresql'):
+            self.store.acknowledge_human_event(target, event, f'{target}:committed')
+        for ident, score in [('pending-low', .2), ('pending-high', .8), ('pending-scoreless', None)]:
+            p = json.loads(json.dumps(first))
+            p['id'], p['subject_id'], p['provider_confidence'] = ident, ident, score
+            p['canonical_binding']['decision_id'] = ident
+            self.store.register(digest, p, idempotency_key='register-' + ident)
+            self.store.act(ident, action='approve', expected_revision=self.store.revision,
+                           idempotency_key='approve-' + ident)
+        self.store.register(digest, proposal('unreviewed', evidence=first['evidence'][0]['id']),
+                            idempotency_key='register-unreviewed')
+        first_page = self.store.queue(status='human_approved', limit=1, summary=True)
+        self.assertEqual((first_page['total'], first_page['scoreless_total']), (4, 1))
+        self.assertEqual([p['id'] for p in first_page['items']], ['pending-low'])
+        self.assertEqual([p['id'] for p in first_page['scoreless_items']], ['pending-scoreless'])
+        next_page = self.store.queue(status='human_approved', limit=1, offset=1)
+        self.assertEqual(next_page['total'], 4)
+        self.assertEqual([p['id'] for p in next_page['items']], ['delivered'])
+        self.assertEqual(next_page['scoreless_items'], [])
+        self.assertEqual(self.store.queue(status='projection_pending')['total'], 3)
+        self.assertEqual(self.store.queue(status='pending')['total'], 1)
+
     def test_approval_survives_snapshot_replacement_with_same_evidence(self):
         self.assertIsNone(self.store.active_snapshot_sha256)
         self.bind()

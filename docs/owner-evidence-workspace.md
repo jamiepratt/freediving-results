@@ -14,10 +14,15 @@ bound to snapshot `278daebb34b6770cf52baf1cc412148f3384435c09fd113e5ab6267815bf6
 No live owner approval, correction, rejection, or reversal had been submitted.
 A trusted local delivery command can send
 human events through the signed Access feed to a durable flow ledger and canonical
-PostgreSQL callbacks, with a checkpoint for each destination. The browser still
-reports canonical projection status as unavailable; its local overlay counts do
-not attest that PostgreSQL has caught up. Automatic decisions shown here are never
+PostgreSQL callbacks, with a checkpoint for each destination. Source-derived
+owner decisions show delivery pending until both destinations acknowledge the
+exact event; decisions without a verified route show projection unavailable.
+Local overlay counts do not attest that PostgreSQL has caught up. Automatic decisions shown here are never
 human review attestations or public publication approval.
+
+Current human review filters include decisions awaiting canonical delivery;
+Human approved and Human corrected exclude approvals invalidated by stale evidence
+or inactive prerequisites. Canonical delivery pending remains a separate filter.
 
 For a trusted local import, run
 `python3 scripts/owner_decision_export_adapter.py deliver --decision-db DB --config CONFIG`.
