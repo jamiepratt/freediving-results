@@ -17,10 +17,13 @@ import tempfile
 from urllib.parse import urlsplit
 
 from owner_decision_store import ConflictError
+from sporting_rule_bindings import SEMANTIC, require_meaning
 
 POLICY = 'aida-baseline-v1'
 ZERO = '0' * 64
 HASH = re.compile(r'[a-f0-9]{64}\Z')
+SOURCE_FACTS = {'finality', 'source-authority', 'sanction', 'listing',
+                'international-sanction', 'official-event-placing', 'source-view'}
 FACTS = {'source-view', 'source-authority', 'finality', 'sanction', 'review', 'outcome',
          'same-attempt', 'source-conflict', 'final', 'scoring-policy', 'source-gender',
          'comparable-category', 'represented-country', 'listing', 'international-sanction',
@@ -50,9 +53,26 @@ def final_value(value):
     if (value['value'] is not None and (type(value['value']) not in (int, float) or value['value'] < 0)
             or value['unit'] != 'm' or value['basis'] not in ('verified-post-penalty', 'verified-source-achieved', 'unknown')
             or type(value['decimal-places']) is not int or not 0 <= value['decimal-places'] <= 6
-            or value['conversion'] not in ('verified', 'unknown')):
+            or value['conversion'] not in ('verified', 'unknown')
+            or value['basis'] == 'unknown' and (value['value'] is not None or value['conversion'] != 'unknown')):
         raise ValueError('invalid sporting final value')
     canonical(value)
+
+
+def unknown_fact(value):
+    if isinstance(value, dict):
+        return any(unknown_fact(item) for item in value.values())
+    return value is None or value == 'unknown'
+
+
+def require_source_fact(row, name, value):
+    if unknown_fact(value):
+        return
+    proof = row.get('upstream', {}).get(name)
+    if (not isinstance(proof, dict) or set(proof) != {'value', 'event_sha256'}
+            or not isinstance(proof['event_sha256'], str) or not HASH.fullmatch(proof['event_sha256'])
+            or proof['value'] != value):
+        raise ValueError('independent exact upstream source fact absent or changed: ' + name)
 
 
 def validate_publication(publication, evidence, rules, context):
@@ -70,7 +90,7 @@ def validate_publication(publication, evidence, rules, context):
         rule_fields.add('hypothetical')
     keys(rules, rule_fields)
     for rule in rules.values():
-        keys(rule, {'url', 'source-sha256', 'locator'})
+        keys(rule, {'url', 'source-sha256', 'locator'}, {'edition', 'section', 'claim'})
         if (context['rules'].get(rule['source-sha256']) != rule['url']
                 or not isinstance(rule['locator'], str) or not 1 <= len(rule['locator']) <= 500):
             raise ValueError('sporting rule not pinned in current private authority')
@@ -117,6 +137,10 @@ def validate_publication(publication, evidence, rules, context):
                     or any(fact['citation'].get(k) != v for k, v in proof['coordinates'].items() if k in ('page', 'line', 'table', 'row'))):
                 raise ValueError('sporting fact binding changed')
         facts = {k: f['value'] for k, f in row['facts'].items()}
+        for name in SOURCE_FACTS:
+            require_source_fact(match, name, facts[name])
+        for name in SEMANTIC - {'hypothetical'}:
+            require_meaning(match, name, facts[name], rules[name], POLICY)
         for name in ('review', 'same-attempt', 'source-conflict'):
             proof = match.get('upstream', {}).get(name)
             default = 'unresolved' if name == 'source-conflict' else 'unknown'
@@ -160,6 +184,8 @@ def validate_publication(publication, evidence, rules, context):
                 or facts['source-view']['environment'] not in ('pool', 'unknown')):
             raise ValueError('sporting source view mismatch')
         final_value(facts['final'])
+        if facts['outcome'] == 'disqualified' and facts['final']['value'] is not None:
+            raise ValueError('disqualified source cannot report a real final distance')
         cat = facts['comparable-category']
         keys(cat, {'group', 'para-class', 'age-class', 'age-equivalence'})
         if (cat['group'] not in ('women', 'unknown') or cat['para-class'] not in ('non-para', 'para', 'unknown')
@@ -180,6 +206,7 @@ def validate_publication(publication, evidence, rules, context):
             hypothetical = row['hypothetical']
             keys(hypothetical, {'value', 'binding', 'policy', 'citation'})
             final_value(hypothetical['value']); citation(hypothetical['citation'])
+            require_meaning(match, 'hypothetical', hypothetical['value'], rules['hypothetical'], POLICY)
             if (facts['outcome'] != 'disqualified' or hypothetical['binding'] != ref
                     or hypothetical['policy'] != POLICY or hypothetical['value']['basis'] != 'verified-source-achieved'
                     or any(hypothetical['citation'][k] != ref[k] for k in ('source-sha256', 'artifact-sha256'))

@@ -70,6 +70,16 @@
         (is (= 404 (:status (http/request url (:detail-api-url row)))))
         (is (= 404 (:status (http/request url (get-in row [:ranks 2 :api-url])))))
         (is (= 4 (get-in (http/request url "/api/results") [:body :total])))))))
+(deftest withdrawn-cited-rule-refuses-cached-ranks-detail-and-peer-replay
+  (fixture/synthetic-cohort!)
+  (http/with-server
+    (fn [url]
+      (let [row (first (get-in (http/request url "/api/comparison") [:body :rows]))]
+        (fixture/private-command! {:op "rule-withdraw"})
+        (is (= "withheld" (get-in (http/request url "/api/comparison") [:body :status])))
+        (is (= 404 (:status (http/request url (:detail-api-url row)))))
+        (is (= 404 (:status (http/request url (get-in row [:ranks 2 :api-url])))))
+        (is (= 4 (get-in (http/request url "/api/results") [:body :total])))))))
 (deftest signed-malformed-or-tampered-feed-never-writes-receipts-or-serves-old-links
   (doseq [op ["tamper" "missing-predecessor"]]
     (fixture/setup!)

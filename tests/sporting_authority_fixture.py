@@ -21,7 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from owner_evidence_origin import make_server
-from sporting_authority import canonical, digest
+from sporting_authority import canonical, digest, SOURCE_FACTS
+from sporting_rule_fixture import synthetic_catalog, synthetic_rule_refs, bind_synthetic
 from test_unified_evidence_query import snapshot
 
 HOST = 'synthetic-owner.alphacompose.com'
@@ -61,6 +62,8 @@ class Fixture:
         self.browser_proxy = None
         self.genuine_reader = None
         self.genuine_relationships = None
+        self.rule_catalog = None
+        self.synthetic_source_assertions = {}
 
     def config(self):
         public = subprocess.check_output(['openssl', 'pkey', '-in', str(self.key), '-pubout', '-outform', 'DER'])
@@ -115,10 +118,19 @@ class Fixture:
         self.context['rows'] = copy.deepcopy(rows)
         def base():
             proof = self.genuine_reader([{'reference': r['reference'], 'coordinates': r['coordinates']} for r in rows])
-            return {'pins': {**self.context['pins'], 'canonical_upstream_sha256': proof['binding_sha256'],
+            state = {'pins': {**self.context['pins'], 'canonical_upstream_sha256': proof['binding_sha256'],
                              'canonical_scope_bindings': proof['scope_bindings']},
                     'rows': [{**r, **verified} for r, verified in zip(rows, proof['rows'])],
                     'rules': copy.deepcopy(self.context['rules'])}
+            for row in state['rows']:
+                row['upstream'].update(self.synthetic_source_assertions.get(digest(row['reference']), {}))
+            if self.rule_catalog is not None:
+                # Add isolated synthetic source metadata, never supplied upstream approvals.
+                for row, binding in zip(state['rows'], self.rule_catalog['bindings']):
+                    row['federation'] = binding['scope']['federation']
+                    row['date_provenance'] = {'source_view': binding['source_view'], 'parsed_event_date': binding['event_date']}
+                bind_synthetic(state, self.rule_catalog)
+            return state
         self.genuine_relationships = RelationshipReviews(self.root / 'relationships.sqlite', base)
         self.server.relationship_reviews = self.genuine_relationships
         def current():
@@ -170,6 +182,9 @@ class Fixture:
                         'artifact-sha256': ref['artifact-sha256'], 'parser-version': 'isolated-synthetic/1'}
             upstream = {k: {'value': item['facts'][k]['value'], 'event_sha256': digest(['synthetic-upstream', k, ref])}
                         for k in ('review', 'same-attempt', 'source-conflict')}
+            source_assertions = {name: {'value': item['facts'][name]['value'],
+                'event_sha256': digest(['isolated-synthetic-source-assertion', name, ref])} for name in SOURCE_FACTS}
+            upstream.update(source_assertions)
             if 'source-selection' in item['facts']:
                 upstream['source-selection'] = {'value': item['facts']['source-selection']['value'],
                                                 'event_sha256': digest(['synthetic-selection', ref])}
@@ -179,6 +194,7 @@ class Fixture:
                 if len(matches) != 1:
                     raise ValueError('genuine exact public source mapping absent')
                 retained, coords = matches[0]['reference'], matches[0]['coordinates']
+                self.synthetic_source_assertions[digest(retained)] = source_assertions
             rows.append({'reference': retained, 'coordinates': coords, 'year': '2026',
                          'environment': 'pool', 'discipline': 'dnf', 'gender': 'women', 'upstream': upstream,
                          'public_reference': ref})
@@ -190,10 +206,12 @@ class Fixture:
         if self.genuine_reader is None:
             self.context['rows'] = rows
         self.context['rules'] = {rule_sha: 'https://example.test/synthetic-rules.pdf'}
+        self.rule_catalog = synthetic_catalog(publication, rows, rule_sha, 'https://example.test/synthetic-rules.pdf')
+        if self.genuine_reader is None:
+            bind_synthetic(self.context, self.rule_catalog)
         now = datetime.now(timezone.utc)
         proposal = {'id': self.proposal_id, 'publication': publication, 'evidence': evidence,
-                    'rules': {k: {'url': 'https://example.test/synthetic-rules.pdf', 'source-sha256': rule_sha,
-                                  'locator': 'Isolated synthetic rule for ' + k} for k in rules},
+                    'rules': synthetic_rule_refs(rules, rule_sha, 'https://example.test/synthetic-rules.pdf'),
                     'valid_until': (now + timedelta(days=1)).isoformat().replace('+00:00', 'Z')}
         current = self.review()
         return self.request('/owner-evidence/api/sporting-authority/stage', {
@@ -275,6 +293,13 @@ def main():
                 elif op == 'drift':
                     fixture.context['pins']['owner_revision'] += 1
                     status, result = 200, {'drift': True}
+                elif op == 'rule-withdraw':
+                    fixture.rule_catalog = None
+                    fixture.context['rules'] = {}
+                    for row in fixture.context['rows']:
+                        row.pop('sporting_rule_bindings', None)
+                    fixture.context['pins'].pop('sporting_rule_catalog_sha256', None)
+                    status, result = 200, {'rule_withdrawn': True}
                 elif op == 'unavailable':
                     fixture.server.sporting.context_reader = lambda: None
                     status, result = 200, {'unavailable': True}

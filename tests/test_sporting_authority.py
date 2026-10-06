@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from sporting_authority import SportingAuthority, ConflictError, canonical, digest
+from sporting_authority import SportingAuthority, ConflictError, canonical, digest, SOURCE_FACTS
+from sporting_rule_fixture import synthetic_catalog, synthetic_rule_refs, bind_synthetic
 
 
 def synthetic_context():
@@ -27,7 +28,12 @@ def synthetic_context():
                                     'source-conflict': 'resolved', 'publication': 'approved'}.items()},
                       'public_reference': ref}]}
     context['rows'][0]['upstream']['publication']['reference'] = ref
-    return context
+    proposal = synthetic_proposal(context)
+    for name in SOURCE_FACTS:
+        context['rows'][0]['upstream'][name] = {'value': proposal['publication']['rows'][0]['facts'][name]['value'],
+                                             'event_sha256': digest(['synthetic-source-claim', name])}
+    catalog = synthetic_catalog(proposal['publication'], context['rows'], 'd' * 64, 'https://example.test/rules.pdf')
+    return bind_synthetic(context, catalog)
 
 
 def synthetic_proposal(context):
@@ -60,8 +66,7 @@ def synthetic_proposal(context):
     return {'id': 'synthetic-cohort', 'publication': publication,
             'evidence': [{'reference': ref, 'retained_reference': copy.deepcopy(context['rows'][0]['reference']),
                           'coordinates': copy.deepcopy(context['rows'][0]['coordinates'])}],
-            'rules': {k: {'url': 'https://example.test/rules.pdf', 'source-sha256': 'd' * 64,
-                          'locator': 'synthetic exact rule paragraph'} for k in [*values, 'cohort']},
+            'rules': synthetic_rule_refs([*values, 'cohort'], 'd' * 64, 'https://example.test/rules.pdf'),
             'valid_until': '2026-10-07T00:00:00Z'}
 
 

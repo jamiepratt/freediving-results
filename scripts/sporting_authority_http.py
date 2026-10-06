@@ -64,6 +64,14 @@ else if(JSON.stringify(a)!==JSON.stringify(b))differences.push({field:name,this_
 function sourceVersions(card,row){const base={raw:row.source_review?.raw||row.raw_fields||{},parsed:row.source_review?.parsed||row.parsed_fields||{}};
 const siblings=(row.retained_siblings||[]).map(version=>({...version,differences_from_this_version:fieldDifferences(base,{raw:version.raw||{},parsed:version.parsed||{}})}));
 card.append(details('Same-position retained versions and differences',siblings),details('Selected date and acquisition provenance',row.source_review?.context||row.date_provenance||{}));}
+function ruleMeanings(card,row){const proof=row.sporting_rule_bindings||{state:'missing',bindings:[]},section=node('section');
+section.append(node('h4','Pinned sporting rules and source meanings'),node('p','Evidence: '+proof.state+' - '+(proof.reason||'Applicable rules do not establish final publication, source selection or distinctness.')));
+for(const binding of proof.bindings||[]){section.append(node('p','Exact source event date: '+(binding.event_date||'unknown')+' | Policy: '+binding.policy),details('Applicable source scope',binding.scope));
+for(const claim of binding.claims||[]){const doc=claim.document,cite=claim.citation,a=node('a',doc.issuer+' '+doc.edition+' - section '+cite.section+(cite.page?' - PDF page '+cite.page:''));a.href=doc.url;a.rel='noreferrer';a.target='_blank';section.append(a,
+node('p',claim.claim+': '+claim.interpretation+' | Rule applicability: '+(claim.supported?'supported':'unverified or conflicting')),
+node('p','Edition effective from '+(doc.effective_from||'unknown')+' to '+(doc.effective_until||'not specified')+' | '+claim.applicability.basis),details('Exact immutable rule and source claim',{document:doc,citation:cite,value:claim.value,reference:binding.reference,coordinates:binding.coordinates,source_view:binding.source_view,binding_sha256:binding.binding_sha256}));}
+section.append(details('Unknowns requiring independent evidence',binding.unknowns),details('Conflicting evidence',binding.conflicts));}
+section.append(details('Rule/source binding mismatches',proof.mismatches||[]));card.append(section);}
 function publicationReview(card,row){const d=row.diagnostics?.publication||{},form=node('section');form.append(node('h4','Current publication diagnostics'));
 const state=v=>v===true?'yes':v===false?'no':'unknown';form.append(node('p','Ready for validation: '+state(d.ready_for_validation)+' | Validated: '+state(d.validated)+' | Selected: '+state(d.selected)+' | Delivery: '+state(d.delivered)),
 node('p','Active policy: '+(d.active_policy_version||'unknown')+' | Field review revision: '+(d.review_revision??'unknown')+' | Source accuracy revision: '+(d.source_accuracy_revision??'unknown')),
@@ -95,7 +103,7 @@ try{const r=await fetch(root+'/proofs?offset='+offset+'&limit=20',{cache:'no-sto
 const proof=await r.json();if(generation!==proofGeneration)return;
 document.getElementById('proof-status').textContent=proof.source_positions+' source positions - '+proof.pagination.total+' retained versions - relationship revision '+proof.relationship_revision+'. Missing canonical mappings are import gaps. Versions are not distinct sporting attempts.';
 for(const row of proof.rows){const card=node('article'),ref=row.reference;card.append(node('h3',(row.federation||'Source')+' / ordinal '+ref.ordinal+' / '+ref['parser-version']),
-details('Exact immutable source, parser, candidate and coordinates',{reference:ref,coordinates:row.coordinates}),details('Current independent authority and provenance',row.diagnostics),details('Current permitted upstream facts',row.upstream),details('Extracted values for source review',row.parsed_fields||{}));
+details('Exact immutable source, parser, candidate and coordinates',{reference:ref,coordinates:row.coordinates}),details('Current independent authority and provenance',row.diagnostics),details('Current permitted upstream facts',row.upstream),details('Extracted values for source review',row.parsed_fields||{}));ruleMeanings(card,row);
 const access=row.source_access||{};if(access.retained_row_id){const a=node('a','Open verified source position and retained versions');a.href='/owner-evidence/api/attempt-inspector/source/'+access.retained_row_id;a.target='_blank';card.append(a);
 if(access.original_replay==='available_private_pdf'&&access.original_page){const pdf=node('a','Open cited original PDF page');pdf.href=a.href+'/page/'+access.original_page;pdf.target='_blank';card.append(node('p'),pdf);}}
 card.append(node('p',access.reason||'Original access requires exact private source binding.'));sourceVersions(card,row);accuracyReview(card,row,proof);publicationReview(card,row);
@@ -242,7 +250,22 @@ def live_context(origin, snapshot_dir, env, config_path, *, review=False, deadli
     if owner.revision != before or owner.active_snapshot_sha256 != snapshot_sha:
         raise ConflictError('owner source changed while collecting sporting context')
     _remaining(deadline)
-    return {'pins': pins, 'rows': rows, 'rules': rules}
+    context = {'pins': pins, 'rows': rows, 'rules': rules}
+    rules_config = env.get('OWNER_EVIDENCE_SPORTING_RULES_CONFIG')
+    if rules_config:
+        from sporting_rule_bindings import read_config, apply_catalog
+        catalog, rule_pins = read_config(rules_config, private_bytes)
+        apply_catalog(context, catalog, rule_pins)
+        # Recheck immutable bytes after assembling the complete context.
+        if read_config(rules_config, private_bytes)[1] != rule_pins:
+            raise ConflictError('sporting rule meaning changed while collecting context')
+    else:
+        pins['sporting_rule_status'] = 'unavailable'
+        for row in rows:
+            row['sporting_rule_bindings'] = {'state': 'missing', 'bindings': [], 'mismatches': [],
+                'reason': 'Independent pinned sporting rule and source meanings unavailable'}
+    _remaining(deadline)
+    return context
 
 
 def parser_versions(comparison):

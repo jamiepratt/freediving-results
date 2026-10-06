@@ -37,3 +37,15 @@ test('source-only inspection explains sibling differences and separate publicati
  assert.match(card.text,/Ready for validation: no/);assert.match(card.text,/Validated: no/);assert.match(card.text,/Selected: no/);assert.match(card.text,/Delivery: unknown/);assert.match(card.text,/preserve the 81 current public results/);
  const button=descendants(card).find(n=>n.tag==='button'&&n.text==='Publication review unavailable - preservation checkpoint required');assert.ok(button);assert.equal(button.disabled,true);
 });
+
+test('rule meanings show exact issuer citation and unsupported finality without enabling reviews',async()=>{
+ const u=ui(),p=vm.runInContext('load()',u.ctx);u.pending[0].resolve(reply(review));await tick();
+ const row={...proof.rows[0],sporting_rule_bindings:{state:'pinned',reason:'Rule meaning does not establish finality',bindings:[{binding_sha256:'a'.repeat(64),event_date:'2026-06-03',scope:{federation:'AIDA',discipline:'dnf'},policy:'aida-baseline-v1',unknowns:['Final publication unknown'],conflicts:[],claims:[{claim:'points-meaning',interpretation:'RED receives zero points; positive RP stays retained',supported:true,applicability:{status:'verified',basis:'Applicable edition begins 2026-05-25'},document:{issuer:'AIDA',edition:'17.8 March 2026',url:'https://official.example/rules.pdf',sha256:'b'.repeat(64),effective_from:'2026-05-25',effective_until:null,scope:{federation:'AIDA'}},citation:{section:'4.1.16.1',page:16}}]}],mismatches:[]}};
+ u.pending[1].resolve(reply({...proof,rows:[row]}));await p;const all=descendants(u.node('proof-rows').children[0]),link=all.find(n=>n.tag==='a'&&n.href==='https://official.example/rules.pdf');assert.ok(link);assert.match(link.text,/AIDA.*17.8 March 2026.*4.1.16.1/);assert.match(u.node('proof-rows').text,/Final publication unknown/);assert.match(u.node('proof-rows').text,/positive RP stays retained/);assert.equal(all.filter(n=>n.tag==='input'&&n.type==='checkbox').every(n=>n.checked===false),true);assert.equal(u.pending.filter(r=>r.options?.method==='POST').length,0);
+});
+
+test('failed fresh source read clears old cited rules and claims',async()=>{
+ const u=ui(),p=vm.runInContext('load()',u.ctx);u.pending[0].resolve(reply(review));await tick();
+ u.pending[1].resolve(reply({...proof,rows:[{...proof.rows[0],sporting_rule_bindings:{state:'missing',reason:'Rules pending exact source authority',bindings:[]}}]}));await p;assert.match(u.node('proof-rows').text,/Pinned sporting rules/);
+ const refresh=vm.runInContext('loadProofs(0)',u.ctx);assert.equal(u.node('proof-rows').children.length,0);u.pending.at(-1).resolve({ok:false,status:503});await refresh;assert.equal(u.node('proof-rows').text,'');assert.match(u.node('proof-status').text,/unavailable/);
+});
