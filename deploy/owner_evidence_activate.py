@@ -23,7 +23,7 @@ import urllib.request
 
 SERVICE = 'freediving-owner-evidence.service'
 HEALTH_STARTUP_TIMEOUT = 30
-FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/owner_decision_store.py',
+FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py', 'scripts/private_canonical_status.py', 'scripts/private_attempt_inspector.py', 'scripts/owner_decision_store.py',
          'scripts/aida_snapshot_observations.py', 'scripts/cmas_microplus_snapshot_observations.py',
          'scripts/issue55_aida_selected_html.py', 'scripts/cmas_microplus_ingest.py',
          'scripts/cmas_microplus_finalize.py',
@@ -35,6 +35,7 @@ FILES = ('scripts/owner_evidence_origin.py', 'scripts/private_presentation_statu
 REQUIRED_ENV = frozenset(('OWNER_EVIDENCE_GATEWAY_SECRET', 'OWNER_EVIDENCE_ORIGIN_HOST',
                           'OWNER_EVIDENCE_EMAILS', 'OWNER_EVIDENCE_SNAPSHOT_SHA256'))
 LEGACY_OPTIONAL_FILES = frozenset(('scripts/private_presentation_status.py',
+                                   'scripts/private_attempt_inspector.py',
                                    'scripts/private_canonical_status.py',
                                    'scripts/owner_decision_store.py',
                                    'scripts/aida_snapshot_observations.py',
@@ -84,6 +85,7 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
                                           'OWNER_EVIDENCE_STATUS_FILE', 'OWNER_EVIDENCE_STATUS_TOKEN',
                                           'OWNER_EVIDENCE_STATUS_CLIENT_ID',
                                           'OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG',
+                                          'OWNER_EVIDENCE_COMPARISON_CONFIG',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_FILE',
                                           'OWNER_EVIDENCE_ISSUE172_QUEUE_SHA256'} or
             values.get('OWNER_EVIDENCE_DECISION_API_ENABLED', '1') != '1' or
@@ -94,6 +96,9 @@ def _config(path, owner_uid, expected, *, canonical_config_path=Path('/var/lib/f
     if ('OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG' in values and
             values['OWNER_EVIDENCE_CANONICAL_STATUS_CONFIG'] != str(canonical_config_path)):
         raise ValueError('invalid private canonical status configuration')
+    if ('OWNER_EVIDENCE_COMPARISON_CONFIG' in values and
+            values['OWNER_EVIDENCE_COMPARISON_CONFIG'] != str(canonical_config_path.parent.parent / 'comparison' / 'config.json')):
+        raise ValueError('invalid private comparison configuration path')
     host = values['OWNER_EVIDENCE_ORIGIN_HOST']
     emails = values['OWNER_EVIDENCE_EMAILS'].split(',')
     if not (16 <= len(secret) <= 256 and secret.isascii() and

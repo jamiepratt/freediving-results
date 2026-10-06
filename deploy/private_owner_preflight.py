@@ -21,6 +21,7 @@ import tempfile
 OWNER_FILES = (
     'scripts/owner_evidence_origin.py', 'scripts/private_presentation_status.py',
     'scripts/private_canonical_status.py',
+    'scripts/private_attempt_inspector.py',
     'scripts/owner_decision_store.py', 'scripts/aida_snapshot_observations.py',
     'scripts/issue55_aida_selected_html.py',
     'scripts/cmas_microplus_snapshot_observations.py',
@@ -34,6 +35,7 @@ OWNER_FILES = (
 HOST_FILES = (
     'deploy/owner_evidence_activate.py', 'deploy/freediving-owner-evidence.service',
     'deploy/canonical_status_runtime.py',
+    'deploy/comparison_runtime.py', 'deploy/comparison_activate.py',
     'deploy/provision_canonical_status_reader.py', 'deploy/private_archive_extract.py',
     'scripts/private_evidence_transfer.py', 'scripts/private_evidence_ssh.py',
     'scripts/unified_evidence_snapshot.py',

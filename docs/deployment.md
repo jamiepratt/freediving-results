@@ -309,6 +309,50 @@ Do not close #172 before authenticated custom-domain readback succeeds.
 
 ### Candidate code checkpoint for private host setup
 
+The private comparison inspector uses an independent pinned runtime, preserving
+the existing canonical reader runtime and genuine owner decisions. Its release
+helper is `deploy/comparison_activate.py`. The authenticated view remains at
+`https://poc.alphacompose.com/owner-evidence`.
+
+`deploy/comparison_runtime.py --repo <checkout> --output <new-private-directory>
+--candidate <exact-commit> --bundle <verified-retained-bundle> --cutoff <UTC-cutoff>`
+packages committed comparison code/JARs and a private retained packet. It copies
+only the pinned CMAS PDF source; restricted AIDA HTML originals stay outside the
+host package. Archive regular package files without directory/link members and
+retain the archive/config hashes separately. Extract a pinned archive through
+`deploy/private_archive_extract.py` into a new root-private incoming directory.
+
+On the host, use these commands with the deployed public database name and exact
+private paths/hashes. The staged config initially retains local package paths;
+`stage` relocates only the fixed package layout and installs immutable private
+packet/runtime/PDF versions as root with the evidence-service group, files 0640
+and directories 0750. `stage` leaves active app/config pins unchanged.
+
+```sh
+sudo -n python3 <code>/deploy/comparison_activate.py stage \
+  --public-database <public-database> --config <payload>/config.json \
+  --config-sha256 <original-config-sha256>
+sudo -n python3 <code>/deploy/comparison_activate.py capture \
+  --public-database <public-database> > <root-private-guard.json>
+sudo -n python3 <code>/deploy/comparison_activate.py activate \
+  --public-database <public-database> --guard <root-private-guard.json> \
+  --bundle <code> --bundle-manifest-sha256 <owner-code-manifest-sha256> \
+  --config <returned-installed-config> --config-sha256 <returned-config-sha256>
+```
+
+Activation runs the actual reader as the evidence service user before any active
+swap, verifies 138 source positions/276 retained versions with zero real ranks,
+checks CMAS PDF access, rereads the complete live guard, and probes the
+authenticated inspector after restart. The guard hashes owner history, all
+canonical/public tables, existing app/config/env/unit, presentation status,
+snapshot/source manifests, canonical reader/runtime/export, and public code/config.
+It refuses drift. The root-private activation checkpoint supports
+`comparison_activate.py rollback --public-database <public-database>` for known
+derived states only, including interrupted swaps. Rollback restores private
+app/env/comparison config and preserves newer human history/status/database data.
+It refuses changed backups or a newer deployment. No schema migration, sporting
+approval, public eligibility update, or public deployment occurs in this path.
+
 `deploy/private_owner_preflight.py` prepares a code-only archive for a later,
 separately authorized private host setup. It is independent of `deploy/release.sh`.
 It reads one clean committed checkout, requires its exact HEAD SHA, and checks the
