@@ -102,6 +102,31 @@ class HistoricalAidaStageTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), before)
         self.assertEqual(self.output.stat().st_mtime_ns, before_stat.st_mtime_ns)
 
+    def test_stages_modern_startlist_results_and_replays_exact_versions(self):
+        source, receipt, sha = self.source()
+        evidence = json.loads(receipt.read_text())
+        url = 'https://www.aidainternational.org/StartList/4168?day_index=0'
+        evidence.update(requested_url=url, final_url=url)
+        evidence['source_citation']['url'] = url
+        evidence['source_citation']['table'] = 'table.table__data[id=""]'
+        body = source.read_bytes().replace(b'<table id="table_ajax">',
+                                          b'<table class="table__data u-spc-bottom--med" id="">')
+        source.write_bytes(body)
+        sha = hashlib.sha256(body).hexdigest()
+        evidence['body'].update(bytes=len(body), sha256=sha)
+        receipt.write_text(json.dumps(evidence))
+        result = self.run_stage(source, receipt, sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before = self.output.read_bytes()
+        mtime = self.output.stat().st_mtime_ns
+        stage = json.loads(before)
+        self.assertEqual(stage['views'][0]['source']['url'], url)
+        self.assertEqual(stage['summary']['observation_versions'], 1)
+        self.assertIsNone(stage['summary']['distinct_attempts'])
+        self.assertEqual(self.run_stage(source, receipt, sha).returncode, 0)
+        self.assertEqual(self.output.read_bytes(), before)
+        self.assertEqual(self.output.stat().st_mtime_ns, mtime)
+
     def test_rejects_changed_existing_view_even_when_replaying_another_view(self):
         first = self.source()
         second = self.source('2024-06-25', 'day_5')

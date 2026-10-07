@@ -125,13 +125,17 @@ def validate_receipt(receipt, source_path, source_bytes):
     for field in ('requested_url', 'final_url'):
         parts = urlsplit(receipt.get(field) or '')
         supported_path = (parts.path.startswith('/EventPage/') or
-                          re.fullmatch(r'/Events/EventResults-[0-9]+', parts.path) is not None)
+                          re.fullmatch(r'/Events/EventResults-[0-9]+', parts.path) is not None or
+                          re.fullmatch(r'/StartList/[0-9]+', parts.path) is not None)
         require(parts.scheme == 'https' and parts.netloc == 'www.aidainternational.org'
                 and supported_path, f'invalid {field}')
     require(receipt['final_url'] == receipt['source_citation']['url'], 'source citation URL mismatch')
     require(receipt['selected_view']['date'] == receipt['source_citation']['selected_date'],
             'source citation date mismatch')
-    require(receipt['source_citation']['table'] == 'table_ajax'
+    startlist_table = (re.fullmatch(r'/StartList/[0-9]+', urlsplit(receipt['final_url']).path)
+                      is not None and
+                      receipt['source_citation']['table'] == 'table.table__data[id=""]')
+    require((receipt['source_citation']['table'] == 'table_ajax' or startlist_table)
             and receipt['source_citation']['tbody'] == 'body_ajax', 'unsupported result table')
     try:
         date.fromisoformat(receipt['selected_view']['date'])
@@ -159,7 +163,11 @@ def build(source_path, receipt_path):
     source = source_bytes.decode('utf-8')
     selected = receipt['selected_view']
     active_view(source, selected['selector'], selected['date'])
-    table, table_start = one_element(source, 'table', 'table_ajax')
+    table_ref = receipt['source_citation']['table']
+    table, table_start = one_element(source, 'table', '' if table_ref != 'table_ajax' else 'table_ajax')
+    if table_ref != 'table_ajax':
+        require('table__data' in (attr(table.split('>', 1)[0] + '>', 'class') or '').split(),
+                'unsupported StartList table class')
     table_number = 1 + len(re.findall(r'<table\b', source[:table_start], re.I))
     tbody, _ = one_element(table, 'tbody', 'body_ajax')
     headers = re.findall(r'<th\b[^>]*>(.*?)</th\s*>', table[:table.index(tbody)], re.I | re.S)
@@ -170,7 +178,7 @@ def build(source_path, receipt_path):
     positions = []
     for ordinal, row in enumerate(rows, 1):
         cells = chunks(row, 'td')
-        position = {'table': 'table_ajax', 'table_number': table_number,
+        position = {'table': table_ref, 'table_number': table_number,
                     'tbody': 'body_ajax', 'row': ordinal + 1, 'tbody_row': ordinal,
                     'selector': selected['selector'], 'date': selected['date']}
         item = {'position': position, 'source_html': row,
@@ -192,7 +200,7 @@ def build(source_path, receipt_path):
                                         'content_type': receipt['content_type'],
                                         'selected_date': selected['date'],
                                         'selector': selected['selector'],
-                                        'table': 'table_ajax', 'table_number': table_number,
+                                        'table': table_ref, 'table_number': table_number,
                                         'tbody': 'body_ajax'},
             'summary': {'source_positions': len(positions), 'parsed': parsed,
                         'parse_unresolved': len(positions) - parsed,

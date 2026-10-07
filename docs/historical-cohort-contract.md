@@ -46,6 +46,16 @@ python3 scripts/historical_aida_stage.py PRIVATE_SOURCE.html PRIVATE_RECEIPT.jso
 
 It replays `issue55_aida_selected_html.build`, verifies the expected original hash and active selected date, and retains every row, raw cell, original HTML and exact receipt. `historical-aida-selected-html/v1` binds private observation versions to original hash, parser version and row position. Parsed positions receive versions; malformed positions remain unresolved without versions. These are private JSON versions, with zero database imports. Category, finality and distinct attempts stay unknown; all rows stay unreviewed.
 
+The bounded selected-view adapter also accepts observed numeric modern
+`/StartList/[0-9]+` Results URLs with query/fragment context retained. Its
+single empty-ID `table.table__data[id=""]` must retain `tbody#body_ajax`,
+recognized 11/12-column headers and the active selected date. URL recognition
+does not establish Results semantics for every StartList. Exact source/receipt,
+hash, table ambiguity, date and raw-cell guards still apply. Existing
+EventPage/EventResults outputs and parser version remain stable; the
+[7 October modern-source report](historical-six-midaugust-events-20261007.md)
+records actual acquisitions, source-specific private versions and limitations.
+
 Every stored view is reverified against its retained original and receipt before addition or replay. Exact replay leaves stage bytes and mtime unchanged. Altered source bytes, receipt bindings or staged fields fail closed, including an altered payload whose internal digest was recomputed. Output must be outside the repository, with private directories/files; stage symlinks are rejected. Serialize calls for a given output. Receipt/path bindings are immutable, so reacquisition requires a separate stage. The private external index/checkpoint binds the stage file itself; its internal digest alone is not an external trust anchor.
 
 This adapter accepts 2024 selected dates only. The ordinary 2023 `ingest` entrypoint remains gated above. Existing legacy raw parsers remain independently callable for explicit bounded format prototypes. Neither path supplies owner review, public eligibility or a human exception. [The dated Kaunas report](historical-kaunas-2024-views-20261007.md) separates raw positions, private staged versions and database imports.

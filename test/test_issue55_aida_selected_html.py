@@ -120,6 +120,53 @@ class SelectedHtmlPacketTests(unittest.TestCase):
         self.assertIsNone(packet)
         self.assertIn('sha256', result.stderr)
 
+    def test_cites_modern_startlist_results_with_observed_query_and_fragment(self):
+        url = 'https://www.aidainternational.org/StartList/4168?day_index=0#start'
+
+        def startlist_receipt(receipt):
+            receipt['requested_url'] = url
+            receipt['final_url'] = url
+            receipt['source_citation']['url'] = url
+            receipt['source_citation']['table'] = 'table.table__data[id=""]'
+
+        source = sample_html().replace('<table id="table_ajax">',
+                                       '<table class="table__data u-spc-bottom--med" id="">')
+        result, packet = self.run_packet(html=source, receipt_change=startlist_receipt)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(packet['source']['url'], url)
+        self.assertEqual(packet['summary']['parsed'], 1)
+        self.assertEqual(packet['positions'][0]['cells']['Diver']['value'], 'Ada & Eve')
+        self.assertEqual(packet['positions'][0]['position']['table'], 'table.table__data[id=""]')
+
+    def test_rejects_unobserved_startlist_route_shapes_and_origins(self):
+        for url in ('https://www.aidainternational.org/StartList/not-numeric',
+                    'https://www.aidainternational.org/StartList/4168/extra',
+                    'https://www.aidainternational.org/Events/StartList-4168',
+                    'https://example.org/StartList/4168'):
+            def change(receipt):
+                receipt.update(requested_url=url, final_url=url)
+                receipt['source_citation']['url'] = url
+            with self.subTest(url=url):
+                result, packet = self.run_packet(receipt_change=change)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(packet)
+
+    def test_startlist_table_selector_rejects_ambiguity_wrong_class_and_wrong_route(self):
+        table = '<table class="table__data u-spc-bottom--med" id="">'
+        source = sample_html().replace('<table id="table_ajax">', table)
+        for html, url in ((source.replace('table__data', 'other'),
+                           'https://www.aidainternational.org/StartList/4168'),
+                          (source + table + '</table>',
+                           'https://www.aidainternational.org/StartList/4168'),
+                          (source, 'https://www.aidainternational.org/EventPage/4168')):
+            def change(receipt):
+                receipt.update(requested_url=url, final_url=url)
+                receipt['source_citation'].update(url=url, table='table.table__data[id=""]')
+            with self.subTest(url=url, html=html):
+                result, packet = self.run_packet(html=html, receipt_change=change)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(packet)
+
     def test_rejects_receipt_status_and_citation_url_mismatch(self):
         for change in (lambda x: x.update(http_status=403),
                        lambda x: x['source_citation'].update(url='https://example.org/EventPage/4408')):
