@@ -43,6 +43,7 @@ Older references to an issue being open are historical, not current status.
 
 | Document | Status and read trigger |
 | --- | --- |
+| [7 October Hong Kong, FreedivingFriends and Cyprus views](docs/historical-hongkong-friends-cyprus-20261007.md) | Three observed 2024 dates, 92 private versions and bounded ranking grids; literal Cyprus geography disagreement, independent raw audit and closed ordinary 2023 gate. |
 | [7 October Warsaw, Taichung and October Monthly views](docs/historical-warsaw-taichung-octmonthly-20261007.md) | Three observed 2024 dates, 52 private versions and bounded ranking grids; independent raw audit, immutable prior references and closed ordinary 2023 gate. |
 | [2025 onward inventory](docs/2025-onward-source-inventory-20260926.md) | September batch history, with later additions. Consult exact pass/date before claiming coverage. |
 | [7 October bounded 2024 discovery](docs/historical-2024-inventory-20261007.md) | Dated route/lead manifest, explicit access and unchecked gaps, existing 2020 format replay, and closed ordinary 2023 staging gate. Consult before claiming historical coverage. |
