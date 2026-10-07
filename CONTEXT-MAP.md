@@ -43,6 +43,7 @@ Older references to an issue being open are historical, not current status.
 
 | Document | Status and read trigger |
 | --- | --- |
+| [7 October six September and August event views](docs/historical-six-september-august-events-20261007.md) | Six observed 2024 dates, 57 private versions and bounded ranking grids; Warsaw duplicate source-row ambiguity, independent raw audit and closed ordinary 2023 gate. |
 | [7 October six September event views](docs/historical-six-september-events-20261007.md) | Six observed 2024 dates, 169 private versions and bounded ranking grids; raw evidence audit and closed ordinary 2023 gate. |
 | [7 October Summer Static, Official Friday and OT Challenge views](docs/historical-summerstatic-friday-otchallenge-20261007.md) | Three observed 2024 dates, 46 private versions and bounded ranking grids; independent raw audit and closed ordinary 2023 gate. |
 | [7 October Almere, Manta and Taipei views](docs/historical-almere-manta-taipei-20261007.md) | Three observed 2024 dates, 43 private versions and bounded ranking grids; Almere title/type difference, independent raw audit and closed ordinary 2023 gate. |
