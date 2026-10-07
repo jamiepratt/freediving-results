@@ -32,6 +32,34 @@ in-scope lead has a disposition. A budget limit creates a resumable checkpoint,
 not completion. Inaccessible or unsupported evidence remains an explicit gap;
 finishing a discovery pass does not imply complete ingestion or global coverage.
 
+### Agent boundary for routine collection
+
+Run known-route discovery, acquisition, supported parsing, row accounting and
+checkpoints through reusable code over declared cohorts. Do not launch successive
+Codex tasks to collect or verify each ordinary event or row. If an unchanged
+procedure needs another similar agent batch, identify and implement the missing
+automation before continuing collection. Codex investigates new routes, access
+failures, unsupported layouts, parser/routing changes and exceptional audits;
+encode reusable handling after investigation.
+
+Preserve all existing private corpora, original bytes, citations, parser versions,
+commits, decisions and checkpoints. Changing workflow does not justify refetching,
+re-ingesting or rewriting verified evidence. Reuse it after checking its bindings;
+replay changed parser versions when required, retaining the previous outputs.
+
+Use existing discovery/frontier, acquisition/reuse, browser capture and historical
+staging contracts. Run existing private deterministic reconciliation and reuse
+retained decisions before code-built Jev requests for unresolved semantic
+judgments. A standalone selected-view staging command is not a cohort runner;
+the local runner's supported modes do not imply support for arbitrary historical
+stages. Historical cohort wiring is tracked in
+[issue #196](https://github.com/jamiepratt/freediving-results/issues/196) under
+[issue #195](https://github.com/jamiepratt/freediving-results/issues/195).
+
+Keep inaccessible sources, missing view context, parser ambiguity and unsupported
+decision families explicit. Private automatic reconciliation follows ADR 0003;
+genuine human review and public publication remain separate authority gates.
+
 Refresh discovery indexes on later discovery runs. Recheck archived result
 sources selectively: recent or provisional results more often, older results
 less often. Reuse verified evidence within a run, retain changed versions, and

@@ -9,6 +9,7 @@ Older references to an issue being open are historical, not current status.
 | Read when | Location | Status |
 | --- | --- | --- |
 | Understanding purpose, vocabulary and boundaries | [CONTEXT.md](CONTEXT.md) | Active brief |
+| Choosing scripts versus Codex for corpus collection | [Agent boundary](CONTEXT.md#agent-boundary-for-routine-collection), [issue #196](https://github.com/jamiepratt/freediving-results/issues/196) | Reusable cohort code for routine work; Codex investigates exceptions; preserve retained evidence |
 | Evaluating the LLM/deterministic ingestion boundary | [ADR 0001](docs/adr/0001-staged-evidence-ingestion.md) | Accepted direction; not a claim of implementation |
 | Running ingestion locally and presenting it remotely | [ADR 0002](docs/adr/0002-local-ingestion-remote-presentation.md), [local evidence run](docs/local-evidence-run.md), [issue #64](https://github.com/jamiepratt/freediving-results/issues/64) | Supported private handoff implemented and validated under #73; live VPN transition/restoration certification remains open in #64 |
 | Learning from prior collection passes | [2025-2026 ingestion lessons](docs/reference/ingestion-lessons-2025-2026.md) | Historical synthesis, reviewed 2026-10-02 |
