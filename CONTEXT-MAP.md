@@ -43,6 +43,7 @@ Older references to an issue being open are historical, not current status.
 
 | Document | Status and read trigger |
 | --- | --- |
+| [7 October Warsaw, Taichung and October Monthly views](docs/historical-warsaw-taichung-octmonthly-20261007.md) | Three observed 2024 dates, 52 private versions and bounded ranking grids; independent raw audit, immutable prior references and closed ordinary 2023 gate. |
 | [2025 onward inventory](docs/2025-onward-source-inventory-20260926.md) | September batch history, with later additions. Consult exact pass/date before claiming coverage. |
 | [7 October bounded 2024 discovery](docs/historical-2024-inventory-20261007.md) | Dated route/lead manifest, explicit access and unchecked gaps, existing 2020 format replay, and closed ordinary 2023 staging gate. Consult before claiming historical coverage. |
 | [7 October TrueNorth, Winter Cup and Taipei views](docs/historical-truenorth-wintercup-taipei-20261007.md) | Three observed 2024 dates, 81 private versions and complete bounded ranking filter grids; raw evidence, immutable prior references and closed ordinary 2023 gate. |
