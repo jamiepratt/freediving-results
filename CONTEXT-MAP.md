@@ -43,6 +43,7 @@ Older references to an issue being open are historical, not current status.
 
 | Document | Status and read trigger |
 | --- | --- |
+| [7 October six early-August event views](docs/historical-six-earlyaugust-events-20261007.md) | Six observed 2024 dates, 102 private versions and complete bounded ranking grids; raw audit and closed ordinary 2023 gate. |
 | [7 October six mid-August event views](docs/historical-six-midaugust-events-20261007.md) | Six observed 2024 dates, modern StartList Results support, 70 private version instances/63 unique IDs and bounded ranking grids; raw audit and closed ordinary 2023 gate. |
 | [7 October six August event views](docs/historical-six-august-events-20261007.md) | Six observed 2024 dates, 172 private versions and bounded ranking grids; literal NR/CR suffix omissions, independent raw audit and closed ordinary 2023 gate. |
 | [7 October six September and August event views](docs/historical-six-september-august-events-20261007.md) | Six observed 2024 dates, 57 private versions and bounded ranking grids; Warsaw duplicate source-row ambiguity, independent raw audit and closed ordinary 2023 gate. |
